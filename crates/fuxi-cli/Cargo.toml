@@ -15,6 +15,8 @@ fuxi-events.workspace = true
 fuxi-a2a.workspace = true
 fuxi-agent-cc.workspace = true
 fuxi-firehose.workspace = true
+fuxi-orchestrator.workspace = true
+fuxi-workspace.workspace = true
 tokio = { workspace = true, features = ["full"] }
 clap.workspace = true
 anyhow.workspace = true

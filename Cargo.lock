@@ -819,6 +819,8 @@ dependencies = [
  "fuxi-core",
  "fuxi-events",
  "fuxi-firehose",
+ "fuxi-orchestrator",
+ "fuxi-workspace",
  "ratatui",
  "serde_json",
  "tokio",

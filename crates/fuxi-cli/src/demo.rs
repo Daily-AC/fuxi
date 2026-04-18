@@ -1,19 +1,22 @@
 //! `fuxi demo` —— 锚点场景的最小切片。
 //!
-//! 流程：
+//! 流程（P2 版本：走 orchestrator）：
 //! 1. 本地起 `EventBus`（内存库）；
-//! 2. 构造 `AgentProfile` + `CcLaunchConfig`，`CcAgent::launch` 起子进程；
-//! 3. 让 bus 订阅一路打 stdout；若 `--tui` 再开一路驱动 `FirehoseApp`；
-//! 4. `agent.dispatch(task)` 拿到 `mpsc::Receiver<Event>`，起一个 pump 任务
-//!    把它的每条事件 republish 到 bus；
-//! 5. 主循环等终结事件（`TaskStateChanged -> Done` 或 `TaskBlocked`/超时）；
-//! 6. 优雅 shutdown。
+//! 2. 构造 `Fuxi` orchestrator（`allocate_worktree = false` 因为 demo 不假设
+//!    cwd 是 git repo）；
+//! 3. `fuxi.spawn_worker(profile, WorkerKind::Cc(cfg))` 拉一个 cc 门客——
+//!    这一步会发 `AgentSpawning` / `AgentReady` 到 bus，同时 orchestrator
+//!    维护生命周期；
+//! 4. `fuxi.dispatch(id, task)` 把任务丢给门客——orchestrator 内置的 pump
+//!    自动把门客 event 流 republish 到 bus；
+//! 5. 主循环订阅 bus，stdout 或 TUI 渲染直到终结事件；
+//! 6. `fuxi.shutdown()` 优雅关闭（发 AgentShuttingDown + AgentDead）。
 //!
 //! 公理体现：
-//! - #1 显式沟通：stdout 打印的每条都是 agent 通过 A2A/Event 显式发出的；
+//! - #1 显式沟通：stdout/TUI 看到的每条都是 agent 通过 A2A/Event 显式发出的；
+//!   orchestrator 保证 lifecycle 事件闭合（Spawning→Ready→…→ShuttingDown→Dead）。
 //! - #3 真实时：订阅是 push（broadcast），不是 poll；
-//! - #5 SQLite 真相源：内存库也是 WAL，事件可回放（demo 结束前用户未必查，但
-//!   基建在那里）。
+//! - #5 SQLite 真相源：内存库也是 WAL，事件可回放（基建在那里）。
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -23,12 +26,14 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
-use fuxi_agent_cc::{CcAgent, CcLaunchConfig};
-use fuxi_core::agent::{Agent, AgentProfile};
-use fuxi_core::event::{Event, EventKind, EventMeta};
+use fuxi_agent_cc::CcLaunchConfig;
+use fuxi_core::agent::AgentProfile;
+use fuxi_core::event::EventKind;
 use fuxi_core::task::{Task, TaskState};
 use fuxi_events::EventBus;
 use fuxi_firehose::FirehoseApp;
+use fuxi_orchestrator::{Fuxi, FuxiConfig, WorkerKind};
+use fuxi_workspace::GitWorktreeWorkspace;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
@@ -79,7 +84,21 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("创建 EventBus 失败")?;
 
-    // 2. 构造 agent。
+    // 2. 起 orchestrator（玄女）。demo 不假设 cwd 是 git repo，所以
+    //    `allocate_worktree: false`——workspace 的构造只是为了占位。
+    let cwd = std::env::current_dir().context("拿不到 cwd")?;
+    let workspace = Arc::new(GitWorktreeWorkspace::with_default_base(cwd));
+    let fuxi = Arc::new(Fuxi::with_config(
+        bus.clone(),
+        workspace,
+        FuxiConfig {
+            allocate_worktree: false,
+            ..Default::default()
+        },
+    ));
+    let _ = &args; // args 后面继续用。
+
+    // 3. 构造 profile + launch cfg 交给 orchestrator。
     let mut cfg = CcLaunchConfig::default();
     if let Some(m) = args.model {
         cfg.model = m;
@@ -92,72 +111,19 @@ pub async fn run(args: Args) -> Result<()> {
         tags: vec!["demo".to_string()],
         extra: Default::default(),
     };
-    let agent = CcAgent::launch(profile.clone(), cfg).context("启动 cc 子进程失败")?;
-    let agent_id = agent.card().id;
-    let agent = Arc::new(agent);
 
-    // 3. 发几条平台事件让视觉上"有头有尾"。
-    let spawning = Event {
-        meta: {
-            let mut m = EventMeta::now();
-            m.agent = Some(agent_id);
-            m
-        },
-        kind: EventKind::AgentSpawning {
-            role: profile.role.clone(),
-            cli: "claude-code".into(),
-        },
-    };
-    bus.publish(spawning).ok();
-
-    // 4. dispatch。
-    let task = Task::new("demo", &args.prompt);
-    let task_id = task.id;
-    tracing::info!(task = %task_id, prompt = %args.prompt, "dispatching to cc");
-
-    // 发 TaskCreated。
-    bus.publish(Event {
-        meta: {
-            let mut m = EventMeta::now();
-            m.agent = Some(agent_id);
-            m.task = Some(task_id);
-            m
-        },
-        kind: EventKind::TaskCreated {
-            title: task.title.clone(),
-            description: task.description.clone(),
-        },
-    })
-    .ok();
-    bus.publish(Event {
-        meta: {
-            let mut m = EventMeta::now();
-            m.agent = Some(agent_id);
-            m.task = Some(task_id);
-            m
-        },
-        kind: EventKind::TaskStateChanged {
-            from: TaskState::New,
-            to: TaskState::InProgress,
-        },
-    })
-    .ok();
-
-    // Dispatch 开始拿 event receiver。
-    let mut rx = agent
-        .dispatch(task)
+    // 4. 让玄女拉门客——AgentSpawning + AgentReady 由 orchestrator 发。
+    let agent_id = fuxi
+        .spawn_worker(profile, WorkerKind::Cc(cfg))
         .await
-        .map_err(|e| anyhow::anyhow!("cc dispatch 失败：{e}"))?;
+        .context("玄女 spawn cc 门客失败")?;
 
-    // 5. Pump：把 agent 的 events republish 到 bus。
-    let pump_bus = bus.clone();
-    let pump_task = tokio::spawn(async move {
-        while let Some(ev) = rx.recv().await {
-            if pump_bus.publish(ev).is_err() {
-                break;
-            }
-        }
-    });
+    // 5. dispatch——事件流 republish 由 orchestrator 内置 pump 完成。
+    let task = Task::new("demo", &args.prompt);
+    tracing::info!(agent = %agent_id, task = %task.id, prompt = %args.prompt, "dispatch via fuxi");
+    fuxi.dispatch(agent_id, task)
+        .await
+        .context("玄女 dispatch 失败")?;
 
     // 6. 输出回路——stdout stream 或 TUI 二选一。
     let outcome = if args.tui {
@@ -166,24 +132,10 @@ pub async fn run(args: Args) -> Result<()> {
         drive_stdout(bus.clone(), args.timeout, args.quiet).await
     };
 
-    // 7. 清理。
-    pump_task.abort();
-    if let Err(e) = agent.shutdown().await {
-        tracing::warn!(error = %e, "agent shutdown 异常（忽略）");
+    // 7. 清理——orchestrator.shutdown() 负责发 AgentShuttingDown + AgentDead。
+    if let Err(e) = fuxi.shutdown().await {
+        tracing::warn!(error = %e, "fuxi shutdown 异常（忽略）");
     }
-
-    // 8. 收尾事件。
-    bus.publish(Event {
-        meta: {
-            let mut m = EventMeta::now();
-            m.agent = Some(agent_id);
-            m
-        },
-        kind: EventKind::AgentShuttingDown {
-            reason: "demo-end".into(),
-        },
-    })
-    .ok();
 
     outcome
 }
@@ -265,7 +217,10 @@ async fn drive_tui(bus: EventBus, timeout_secs: u64, quiet: bool) -> Result<()> 
 }
 
 /// 判定一条事件是否意味着 demo 该退出。
-fn is_terminal(ev: &Event) -> bool {
+///
+/// Blocked 保留为终结信号，因为 demo 里"阻塞"就是等不下去的同义词——
+/// 和 orchestrator 内部"Blocked 可恢复"的语义是两个层次。
+fn is_terminal(ev: &fuxi_core::Event) -> bool {
     matches!(
         ev.kind,
         EventKind::TaskStateChanged {
