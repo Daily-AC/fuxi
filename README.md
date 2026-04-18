@@ -28,12 +28,22 @@ cargo run -p fuxi-cli -- --help
 
 | Crate | 目的 | 状态 |
 |---|---|---|
-| `fuxi-core` | 核心 trait 与类型（Agent/Runtime/Workspace/Task/Event） | ✅ 完工 |
-| `fuxi-events` | EventBus：tokio broadcast + SQLite WAL + replay | ✅ 完工（8/8 测试绿） |
-| `fuxi-a2a` | A2A v1.0 协议实现（types + axum server + reqwest client） | ✅ 完工（10/10 测试绿） |
-| `fuxi-agent-cc` | Claude Code 门客适配器（headless stream-json） | 🚧 开发中 |
-| `fuxi-firehose` | 实时观察器（WebSocket + SSE + ratatui TUI） | 🚧 开发中 |
-| `fuxi-cli` | 二进制 `fuxi`——指挥台 | 📋 待实装 |
+| `fuxi-core` | 核心 trait 与类型（Agent/Runtime/Workspace/Task/Event） | ✅ 完工（4/4） |
+| `fuxi-events` | EventBus：tokio broadcast + SQLite WAL + replay | ✅ 完工（8/8） |
+| `fuxi-a2a` | A2A v1.0 协议实现（types + axum server + reqwest client） | ✅ 完工（10/10） |
+| `fuxi-agent-cc` | Claude Code 门客适配器（headless stream-json） | ✅ 完工（40/40 + 1 gated E2E 跑通） |
+| `fuxi-firehose` | 实时观察器（WebSocket + SSE + REST + ratatui TUI） | ✅ 完工（30/30） |
+| `fuxi-cli` | 二进制 `fuxi`——`demo` / `up` / `watch` | ✅ 完工（2/2） |
+
+**工作区合计：94 passing tests + 1 ignored（E2E gated by `FUXI_RUN_CC_E2E=1`）。**
+
+P1 已跑通 "玄女 spawn cc 门客 → 用户看到事件流" 的锚点场景最小切片：
+
+```bash
+cargo run -p fuxi-cli -- demo "Reply with exactly: hi"
+# → AgentReady(pid:...) → ThinkingStarted → ThinkingFinished
+# → AgentResponded("hi") → TaskStateChanged(Delivering→Done) → exit 0
+```
 
 ## 架构一眼
 
