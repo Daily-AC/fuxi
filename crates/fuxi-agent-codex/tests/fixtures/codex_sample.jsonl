@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"019da1ea-7453-7462-8f54-3c6dfedc6230"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I'll run `ls` in the current directory now, then I'll report one filename from the output."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'ls -1'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'ls -1'","aggregated_output":"main.rs\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"hi"}}
+{"type":"turn.completed","usage":{"input_tokens":26303,"cached_input_tokens":23040,"output_tokens":187}}

@@ -1,0 +1,25 @@
+[package]
+name = "fuxi-agent-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 Codex CLI agent adapter (codex exec --json)"
+
+[features]
+# 开启后 `cargo test --features real_codex` 会真跑 codex，消耗 ChatGPT 账号额度。
+real_codex = []
+
+[dependencies]
+fuxi-core.workspace = true
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true }
