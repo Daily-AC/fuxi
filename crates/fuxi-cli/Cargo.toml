@@ -1,0 +1,22 @@
+[package]
+name = "fuxi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 CLI (binary entry `fuxi`)"
+
+[[bin]]
+name = "fuxi"
+path = "src/main.rs"
+
+[dependencies]
+fuxi-core.workspace = true
+fuxi-events.workspace = true
+fuxi-a2a.workspace = true
+fuxi-agent-cc.workspace = true
+fuxi-firehose.workspace = true
+tokio = { workspace = true, features = ["full"] }
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

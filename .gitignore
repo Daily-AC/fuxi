@@ -1,0 +1,20 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# local SQLite data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# env + secrets
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/

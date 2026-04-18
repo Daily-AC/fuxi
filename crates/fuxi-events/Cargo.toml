@@ -1,0 +1,20 @@
+[package]
+name = "fuxi-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 event bus: tokio broadcast + SQLite WAL persistence + replay"
+
+[dependencies]
+fuxi-core.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures-util.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
