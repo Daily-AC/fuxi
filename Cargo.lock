@@ -789,6 +789,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuxi-agent-codex"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fuxi-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "fuxi-cli"
 version = "0.1.0"
 dependencies = [
@@ -865,6 +881,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "fuxi-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "fuxi-agent-cc",
+ "fuxi-core",
+ "fuxi-events",
+ "fuxi-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
