@@ -1,0 +1,21 @@
+[package]
+name = "fuxi-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 worktree 隔离：每个门客独占一个 git worktree，互不踩脚"
+
+[dependencies]
+fuxi-core.workspace = true
+tokio = { workspace = true, features = ["full"] }
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
