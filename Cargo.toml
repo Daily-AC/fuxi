@@ -5,9 +5,11 @@ members = [
     "crates/fuxi-events",
     "crates/fuxi-a2a",
     "crates/fuxi-agent-cc",
+    "crates/fuxi-agent-codex",
     "crates/fuxi-firehose",
     "crates/fuxi-cli",
     "crates/fuxi-workspace",
+    "crates/fuxi-orchestrator",
 ]
 
 [workspace.package]
@@ -59,8 +61,10 @@ fuxi-core = { path = "crates/fuxi-core" }
 fuxi-events = { path = "crates/fuxi-events" }
 fuxi-a2a = { path = "crates/fuxi-a2a" }
 fuxi-agent-cc = { path = "crates/fuxi-agent-cc" }
+fuxi-agent-codex = { path = "crates/fuxi-agent-codex" }
 fuxi-firehose = { path = "crates/fuxi-firehose" }
 fuxi-workspace = { path = "crates/fuxi-workspace" }
+fuxi-orchestrator = { path = "crates/fuxi-orchestrator" }
 
 [profile.release]
 lto = "thin"
