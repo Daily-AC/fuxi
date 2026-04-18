@@ -6,7 +6,7 @@
 
 **P1 全部完工，锚点场景最小切片打通。P2 起手 `fuxi-workspace`（git worktree 隔离）也已就位。** 真调本机 `claude` CLI，真跑出完整 event 流，exit 0。代码 + 测试 + ADR + CI 三件套齐。
 
-**最终产出：7 个 crate / 106 passing tests / 6 个 commit / 全部门禁绿。**
+**最终产出（持续更新中）：8+ 个 crate / 111+ passing tests / 8+ 个 commit / 全部门禁绿。fuxi-orchestrator（玄女最小可用形）已落地，P2 核心前进中。**
 
 ---
 
@@ -23,6 +23,8 @@
 | `fuxi-firehose` | ✅ | 实时 WS/SSE/REST Hub + ratatui TUI `FirehoseApp` |
 | `fuxi-cli` | ✅ | 二进制 `fuxi` + `demo`/`up`/`watch` 三子命令（demo 新增 `--quiet` 过滤 cc hook 噪声） |
 | **`fuxi-workspace`** (P2) | ✅ | git worktree 隔离，`Workspace` trait 实装——每个门客独占 worktree+branch |
+| **`fuxi-orchestrator`** (P2) | ✅ | 玄女编排层：门客 shelf + spawn_worker + dispatch(+republish) + dispatch_to_any + shutdown |
+| **`fuxi-agent-codex`** (P2) | 🚧 | 背景 agent 进行中——Codex CLI 门客适配器 |
 
 ### 测试（ComposioHQ 对标）
 
