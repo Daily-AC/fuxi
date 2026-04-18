@@ -6,7 +6,7 @@
 
 **P1 全部完工，锚点场景最小切片打通。P2 起手 `fuxi-workspace`（git worktree 隔离）也已就位。** 真调本机 `claude` CLI，真跑出完整 event 流，exit 0。代码 + 测试 + ADR + CI 三件套齐。
 
-**最终产出（持续更新中）：8+ 个 crate / 111+ passing tests / 8+ 个 commit / 全部门禁绿。fuxi-orchestrator（玄女最小可用形）已落地，P2 核心前进中。**
+**最终产出（持续更新中）：8 个 crate / 159 passing tests / 11 个 commit / 全部门禁绿。P1 + P2 核心（orchestrator / workspace / codex 适配器）全部就位，且在 code review 之后修完 3 个 bug + 加了 6 条回归测试。**
 
 ---
 
@@ -24,11 +24,26 @@
 | `fuxi-cli` | ✅ | 二进制 `fuxi` + `demo`/`up`/`watch` 三子命令（demo 新增 `--quiet` 过滤 cc hook 噪声） |
 | **`fuxi-workspace`** (P2) | ✅ | git worktree 隔离，`Workspace` trait 实装——每个门客独占 worktree+branch |
 | **`fuxi-orchestrator`** (P2) | ✅ | 玄女编排层：门客 shelf + spawn_worker + dispatch(+republish) + dispatch_to_any + shutdown |
-| **`fuxi-agent-codex`** (P2) | 🚧 | 背景 agent 进行中——Codex CLI 门客适配器 |
+| **`fuxi-agent-codex`** (P2) | ✅ | Codex CLI 门客适配器（40 单元 + 2 fixture + 1 gated E2E 跑通）|
+
+### Code review 迭代（首次）
+
+派 `superpowers:code-reviewer` 审 `fuxi-orchestrator`，找出 3 个必修 bug + 一堆改进点，全部已修复：
+
+- **S1** · Agent id 双生（spawn 预生成 vs CcAgent 内部生成不一致，lifecycle 事件串不起）→ 加 `CcAgent::launch_with_id`，玄女做唯一 id 真相源。
+- **S2** · pump 在 channel 提前关时不清状态（门客永久锁 Busy）→ set_status(Idle) 挪到 while 外；顺便把 Blocked 从 terminal 集合摘除（Blocked→Ready 是可恢复）。
+- **S3** · dispatch_to_any TOCTOU race → Shelf 新增 `claim_idle_by_role`（write-lock 下原子 find+mark-busy）。
+- **I5** · insert_agent 补发 AgentSpawning（公理 #1 lifecycle 闭合）
+- **I6** · spawn_worker 的 worktree create 失败硬错，不静默 fallback（两 Dev 同文件隐患）
+- **I7** · 删未使用的 WorkerDeps（YAGNI）
+- **I2/Q3** · 抽 publish_with_agent + register_ready helper；shutdown 重排 AgentShuttingDown 在动作前 + 补 AgentDead
+- **Q1/Q2** · 删无意义 clone、WorkerKind::cli_tag() 统一字符串
+
+新加 6 个回归测试（tests/dispatch.rs 从 5 → 11 passing）——尤其是 `lifecycle_events_all_reach_bus` 作为**公理 #1 的硬证据**：断言 spawn→dispatch→shutdown 全流程每一条 lifecycle 事件（Spawning/Ready/StateChanged/ShuttingDown/Dead）都能在 bus 上抓到。
 
 ### 测试（ComposioHQ 对标）
 
-- **106 passing** + 1 ignored（E2E 需 env var 开启）
+- **159 passing** + 1 ignored E2E（FUXI_RUN_CC_E2E / FUXI_RUN_CODEX_E2E 都实跑过）
 - 测试/源码 LoC 比：~1.1×（ComposioHQ 是 1.41×，还差一点，可在 P2 补齐）
 - **真 E2E 验证** 在本机 `claude-haiku` 上跑通：
   ```
