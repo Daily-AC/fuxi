@@ -56,6 +56,21 @@ pub struct Args {
     /// 超时秒数——防止门客卡住时 demo 永不退出。
     #[arg(long, default_value = "120")]
     pub timeout: u64,
+    /// 安静模式：过滤 cc 的 hook 噪声事件（`Custom { label: "cc_system_*" }`）。
+    /// 默认 false（全火力输出），加了这个 flag 才眼睛友好。
+    #[arg(long)]
+    pub quiet: bool,
+}
+
+/// 是否应被 `--quiet` 过滤掉的"噪声"事件。
+///
+/// 当前只过 cc 的 hook/system 噪声；伏羲自身产生的平台事件 / agent 事件全保留。
+fn is_noise(ev: &fuxi_core::Event) -> bool {
+    matches!(
+        &ev.kind,
+        fuxi_core::EventKind::Custom { label, .. }
+            if label.starts_with("cc_system_") || label == "rate_limit"
+    )
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -146,9 +161,9 @@ pub async fn run(args: Args) -> Result<()> {
 
     // 6. 输出回路——stdout stream 或 TUI 二选一。
     let outcome = if args.tui {
-        drive_tui(bus.clone(), args.timeout).await
+        drive_tui(bus.clone(), args.timeout, args.quiet).await
     } else {
-        drive_stdout(bus.clone(), args.timeout).await
+        drive_stdout(bus.clone(), args.timeout, args.quiet).await
     };
 
     // 7. 清理。
@@ -174,7 +189,7 @@ pub async fn run(args: Args) -> Result<()> {
 }
 
 /// 纯 stdout 输出：每条事件打一行 JSON。
-async fn drive_stdout(bus: EventBus, timeout_secs: u64) -> Result<()> {
+async fn drive_stdout(bus: EventBus, timeout_secs: u64, quiet: bool) -> Result<()> {
     let mut stream = bus.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
@@ -184,7 +199,11 @@ async fn drive_stdout(bus: EventBus, timeout_secs: u64) -> Result<()> {
             }
             maybe = stream.next() => match maybe {
                 Some(Ok(ev)) => {
-                    println!("{}", serde_json::to_string(&ev)?);
+                    // 终结事件即使在 quiet 模式也打印——方便判断 exit 原因。
+                    let should_print = !quiet || !is_noise(&ev) || is_terminal(&ev);
+                    if should_print {
+                        println!("{}", serde_json::to_string(&ev)?);
+                    }
                     if is_terminal(&ev) { return Ok(()); }
                 }
                 Some(Err(e)) => tracing::warn!(error = %e, "事件流错误"),
@@ -195,7 +214,7 @@ async fn drive_stdout(bus: EventBus, timeout_secs: u64) -> Result<()> {
 }
 
 /// TUI 输出——和 `tui_smoke` 同一套骨架，但事件源是真 cc。
-async fn drive_tui(bus: EventBus, timeout_secs: u64) -> Result<()> {
+async fn drive_tui(bus: EventBus, timeout_secs: u64, quiet: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -216,7 +235,9 @@ async fn drive_tui(bus: EventBus, timeout_secs: u64) -> Result<()> {
                 maybe_ev = stream.next() => match maybe_ev {
                     Some(Ok(ev)) => {
                         if is_terminal(&ev) { terminal_reached = true; }
-                        app.ingest(&ev);
+                        if !quiet || !is_noise(&ev) || is_terminal(&ev) {
+                            app.ingest(&ev);
+                        }
                         if terminal_reached && app.should_quit() { return Ok(()); }
                     }
                     Some(Err(e)) => tracing::warn!(error = %e, "事件流错误"),
@@ -256,7 +277,7 @@ fn is_terminal(ev: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_terminal;
+    use super::{is_noise, is_terminal};
     use fuxi_core::event::{Event, EventKind, EventMeta};
     use fuxi_core::task::TaskState;
 
@@ -290,5 +311,32 @@ mod tests {
             from: TaskState::New,
             to: TaskState::Ready
         })));
+    }
+
+    #[test]
+    fn noise_identified() {
+        let noisy = EventKind::Custom {
+            label: "cc_system_other".into(),
+            payload: serde_json::json!({}),
+        };
+        assert!(is_noise(&ev(noisy)));
+        let rate = EventKind::Custom {
+            label: "rate_limit".into(),
+            payload: serde_json::json!({}),
+        };
+        assert!(is_noise(&ev(rate)));
+    }
+
+    #[test]
+    fn agent_events_are_not_noise() {
+        assert!(!is_noise(&ev(EventKind::AgentResponded {
+            text: "hi".into()
+        })));
+        assert!(!is_noise(&ev(EventKind::ThinkingStarted)));
+        let custom_non_system = EventKind::Custom {
+            label: "user_defined".into(),
+            payload: serde_json::json!({}),
+        };
+        assert!(!is_noise(&ev(custom_non_system)));
     }
 }
