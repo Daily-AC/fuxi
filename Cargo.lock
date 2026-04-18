@@ -793,15 +793,22 @@ name = "fuxi-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "chrono",
  "clap",
+ "crossterm",
+ "futures-util",
  "fuxi-a2a",
  "fuxi-agent-cc",
  "fuxi-core",
  "fuxi-events",
  "fuxi-firehose",
+ "ratatui",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -839,7 +846,9 @@ dependencies = [
 name = "fuxi-firehose"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "axum",
+ "bytes",
  "chrono",
  "crossterm",
  "futures-util",

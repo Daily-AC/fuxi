@@ -94,10 +94,7 @@ fn classify(v: Value) -> CcEvent {
         "assistant" => classify_assistant(v),
         "user" => classify_user(v),
         "rate_limit_event" => CcEvent::RateLimit {
-            info: v
-                .get("rate_limit_info")
-                .cloned()
-                .unwrap_or(Value::Null),
+            info: v.get("rate_limit_info").cloned().unwrap_or(Value::Null),
         },
         "result" => classify_result(v),
         _ => CcEvent::Unknown { raw: v },
@@ -263,11 +260,7 @@ pub fn translate(
     // 进入 thinking 逻辑：如果当前 cc 事件**不是** thinking，则关闭之前的块。
     let is_thinking = matches!(cc, CcEvent::AssistantThinking { .. });
     if state.in_thinking && !is_thinking {
-        out.push(mk_event(
-            agent_id,
-            task_id,
-            EventKind::ThinkingFinished,
-        ));
+        out.push(mk_event(agent_id, task_id, EventKind::ThinkingFinished));
         state.in_thinking = false;
     }
 
@@ -296,11 +289,7 @@ pub fn translate(
         }
         CcEvent::AssistantThinking { text } => {
             if !state.in_thinking {
-                out.push(mk_event(
-                    agent_id,
-                    task_id,
-                    EventKind::ThinkingStarted,
-                ));
+                out.push(mk_event(agent_id, task_id, EventKind::ThinkingStarted));
                 state.in_thinking = true;
             }
             // 累积文本作为 Custom 的 payload，方便 Firehose 复刻当时的思考内容；
@@ -425,7 +414,8 @@ mod tests {
 
     #[test]
     fn parse_system_init() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"abc","model":"haiku","cwd":"/tmp"}"#;
+        let line =
+            r#"{"type":"system","subtype":"init","session_id":"abc","model":"haiku","cwd":"/tmp"}"#;
         let ev = parse_line(line).expect("parse");
         match ev {
             CcEvent::SystemInit {
@@ -452,7 +442,8 @@ mod tests {
 
     #[test]
     fn parse_assistant_thinking() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         match parse_line(line).expect("parse") {
             CcEvent::AssistantThinking { text } => assert_eq!(text, "hmm"),
             other => panic!("expected AssistantThinking, got {other:?}"),
@@ -554,8 +545,7 @@ mod tests {
 
     #[test]
     fn parse_result_error() {
-        let line =
-            r#"{"type":"result","subtype":"error","result":"","terminal_reason":"timeout"}"#;
+        let line = r#"{"type":"result","subtype":"error","result":"","terminal_reason":"timeout"}"#;
         match parse_line(line).expect("parse") {
             CcEvent::ResultError { reason } => assert_eq!(reason, "timeout"),
             other => panic!("expected ResultError, got {other:?}"),
@@ -644,10 +634,7 @@ mod tests {
         );
         // 首次：Started + Delta；第二次：只 Delta。
         assert!(matches!(out1[0].kind, EventKind::ThinkingStarted));
-        assert!(matches!(
-            out1[1].kind,
-            EventKind::Custom { .. }
-        ));
+        assert!(matches!(out1[1].kind, EventKind::Custom { .. }));
         assert_eq!(out2.len(), 1);
         assert!(matches!(out2[0].kind, EventKind::Custom { .. }));
         assert!(st.in_thinking);
@@ -658,18 +645,14 @@ mod tests {
         let mut st = TranslateState::new();
         let agent = fresh_agent();
         translate(
-            CcEvent::AssistantThinking {
-                text: "t".into(),
-            },
+            CcEvent::AssistantThinking { text: "t".into() },
             agent,
             None,
             &mut st,
             None,
         );
         let out = translate(
-            CcEvent::AssistantText {
-                text: "hi".into(),
-            },
+            CcEvent::AssistantText { text: "hi".into() },
             agent,
             None,
             &mut st,
@@ -677,10 +660,7 @@ mod tests {
         );
         // 收尾的 ThinkingFinished 先走，AgentResponded 再走。
         assert!(matches!(out[0].kind, EventKind::ThinkingFinished));
-        assert!(matches!(
-            out[1].kind,
-            EventKind::AgentResponded { .. }
-        ));
+        assert!(matches!(out[1].kind, EventKind::AgentResponded { .. }));
         assert!(!st.in_thinking);
     }
 
@@ -723,9 +703,7 @@ mod tests {
         );
         match &out[0].kind {
             EventKind::ToolCallFinished {
-                ok,
-                output_preview,
-                ..
+                ok, output_preview, ..
             } => {
                 assert!(*ok);
                 assert_eq!(output_preview, "ok");
@@ -759,9 +737,7 @@ mod tests {
     fn translate_result_success_emits_state_change_and_response() {
         let mut st = TranslateState::new();
         let out = translate(
-            CcEvent::ResultSuccess {
-                text: "hi".into(),
-            },
+            CcEvent::ResultSuccess { text: "hi".into() },
             fresh_agent(),
             None,
             &mut st,
@@ -824,9 +800,7 @@ mod tests {
     fn translate_result_after_thinking_closes_block_first() {
         let mut st = TranslateState::new();
         translate(
-            CcEvent::AssistantThinking {
-                text: "t".into(),
-            },
+            CcEvent::AssistantThinking { text: "t".into() },
             fresh_agent(),
             None,
             &mut st,

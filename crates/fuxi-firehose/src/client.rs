@@ -157,15 +157,6 @@ fn extract_sse_data(frame: &str) -> Option<String> {
     if any { Some(out) } else { None }
 }
 
-// ── async_stream ──
-// 为什么直接用 async_stream 的 macro：手写 pin + poll 的 Stream 在 rustc 2024 edition 下
-// 会绊到 Send 边界——async-stream crate 已在 workspace 里（fuxi-a2a 用它）。
-// 通过 path 引入避免再改 workspace Cargo.toml。
-#[allow(dead_code)]
-mod async_stream {
-    pub use ::async_stream::stream;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

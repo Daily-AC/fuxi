@@ -51,7 +51,6 @@ impl CcLaunchConfig {
     /// 构建 `claude` 的 argv。不包括 `binary` 自身——调用方（spawn）单独传。
     ///
     /// 默认开启的稳定 flag 集：
-    /// - `--bare`：跳 hooks / plugin sync / CLAUDE.md discovery，否则噪音爆炸
     /// - `--print`：headless 模式，读 stdin、写 stdout 退出
     /// - `--input-format stream-json` / `--output-format stream-json`：
     ///   双向结构化协议，才是我们要的 wire format
@@ -60,9 +59,13 @@ impl CcLaunchConfig {
     /// - `--permission-mode bypassPermissions` + `--dangerously-skip-permissions`：
     ///   P1 跑不起来不如不跑。玄女层面再收拢风险。
     /// - `--no-session-persistence`：避免污染用户本机 `claude` 会话历史
+    ///
+    /// 特别说明：**不启用 `--bare`**。memo 里写「bare 几乎必须」是针对
+    /// 用户本机 hooks 噪音的优化，但实测 `--bare` 会跳过 keychain 读取、
+    /// 导致 cc 进入「Not logged in」状态——对 P1 的 E2E 验证是阻塞性问题。
+    /// 等 `use_bare` 开关需要时（noisy hooks + 独立 token 注入）再单独加。
     pub fn build_args(&self) -> Vec<String> {
         let mut args: Vec<String> = vec![
-            "--bare".to_string(),
             "--print".to_string(),
             "--input-format".to_string(),
             "stream-json".to_string(),
@@ -112,7 +115,6 @@ mod tests {
         };
         let args = cfg.build_args();
         for flag in [
-            "--bare",
             "--print",
             "--input-format",
             "stream-json",
@@ -130,6 +132,17 @@ mod tests {
                 "missing flag {flag:?} in {args:?}"
             );
         }
+    }
+
+    /// 默认 **不** 传 `--bare`：memo 里写「bare 几乎必须」但实测会断 keychain，
+    /// 导致 cc 认为未登录。回归兜底，避免改错方向。
+    #[test]
+    fn default_args_do_not_include_bare() {
+        let cfg = CcLaunchConfig {
+            model: "haiku".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.build_args().iter().any(|a| a == "--bare"));
     }
 
     #[test]

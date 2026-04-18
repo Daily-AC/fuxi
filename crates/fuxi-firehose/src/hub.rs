@@ -9,14 +9,14 @@
 
 use crate::error::{Error, Result};
 use axum::Router;
-use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use chrono::{DateTime, Utc};
-use futures_util::stream::{self, Stream, StreamExt};
+use futures_util::stream::{Stream, StreamExt};
 use fuxi_core::Event;
 use fuxi_events::{EventBus, EventStore, ReplayCursor};
 use serde::Deserialize;
@@ -189,10 +189,7 @@ async fn ws_loop(mut socket: WebSocket, hub: Arc<Hub>, cursor: Option<ReplayCurs
 
 /// SSE handler——契约与 WS 一致：每条事件就是一条 `data: <json>` 帧。
 #[tracing::instrument(skip(hub))]
-async fn sse_handler(
-    State(hub): State<Arc<Hub>>,
-    Query(q): Query<SubscribeQuery>,
-) -> Response {
+async fn sse_handler(State(hub): State<Arc<Hub>>, Query(q): Query<SubscribeQuery>) -> Response {
     let cursor = match cursor_from_params(q.from_id.as_deref(), q.from_time.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -218,15 +215,14 @@ async fn sse_handler(
         }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// REST 历史端点——仅返回一次性快照，**不 tail**。
 #[tracing::instrument(skip(hub))]
-async fn events_handler(
-    State(hub): State<Arc<Hub>>,
-    Query(q): Query<HistoryQuery>,
-) -> Response {
+async fn events_handler(State(hub): State<Arc<Hub>>, Query(q): Query<HistoryQuery>) -> Response {
     let cursor = match cursor_from_params(q.from_id.as_deref(), q.from_time.as_deref()) {
         Ok(c) => c.unwrap_or(ReplayCursor::Beginning),
         Err(e) => {
@@ -237,8 +233,7 @@ async fn events_handler(
     let limit = q
         .limit
         .unwrap_or(DEFAULT_HISTORY_LIMIT)
-        .min(MAX_HISTORY_LIMIT)
-        .max(1);
+        .clamp(1, MAX_HISTORY_LIMIT);
 
     let mut stream = hub.store.replay(cursor);
     let mut out: Vec<Event> = Vec::with_capacity(limit.min(1024));
@@ -280,14 +275,8 @@ fn build_event_stream(
     cursor: Option<ReplayCursor>,
 ) -> Pin<Box<dyn Stream<Item = std::result::Result<Event, Error>> + Send>> {
     match cursor {
-        Some(c) => Box::pin(
-            bus.replay(c, true)
-                .map(|r| r.map_err(Error::from)),
-        ),
-        None => Box::pin(
-            bus.subscribe()
-                .map(|r| r.map_err(Error::from)),
-        ),
+        Some(c) => Box::pin(bus.replay(c, true).map(|r| r.map_err(Error::from))),
+        None => Box::pin(bus.subscribe().map(|r| r.map_err(Error::from))),
     }
 }
 
@@ -321,17 +310,6 @@ pub(crate) fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         PlatformStopping => "platform_stopping",
         Custom { .. } => "custom",
     }
-}
-
-/// 一次性返回“游标之后立刻可见的全部历史”的便捷流——目前仅供单元测试使用。
-#[cfg(test)]
-pub(crate) fn history_stream(
-    store: &EventStore,
-    cursor: ReplayCursor,
-) -> Pin<Box<dyn Stream<Item = std::result::Result<Event, fuxi_events::Error>> + Send>> {
-    Box::pin(stream::unfold(store.replay(cursor), |mut s| async move {
-        s.next().await.map(|item| (item, s))
-    }))
 }
 
 #[cfg(test)]
@@ -388,14 +366,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_stream_collects_all() {
+    async fn store_replay_reflects_publishes() {
         let bus = EventBus::with_memory_store().await.expect("bus");
         bus.publish(mk("a")).expect("publish");
         bus.publish(mk("b")).expect("publish");
-        // 等 writer flush。
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 等 writer flush——无 polling 方法，只能退避。
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
-        let mut s = history_stream(bus.store(), ReplayCursor::Beginning);
+        let mut s = bus.store().replay(ReplayCursor::Beginning);
         let mut got = Vec::new();
         while let Some(item) = s.next().await {
             got.push(item.expect("ok"));
