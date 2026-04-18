@@ -9,6 +9,7 @@ description = "伏羲 firehose observer: WebSocket/TUI real-time event subscribe
 fuxi-core.workspace = true
 fuxi-events.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["sync"] }
 axum.workspace = true
 futures-util.workspace = true
 serde.workspace = true
@@ -17,3 +18,14 @@ thiserror.workspace = true
 tracing.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+tokio-tungstenite.workspace = true
+reqwest = { version = "0.12", features = ["stream"] }
+url = "2"
+chrono.workspace = true
+uuid.workspace = true
+async-stream = "0.3"
+bytes = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true
