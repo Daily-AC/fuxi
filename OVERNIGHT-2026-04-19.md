@@ -4,7 +4,9 @@
 
 ## TL;DR
 
-**P1 全部完工，锚点场景最小切片打通。** 真调本机 `claude` CLI，真跑出完整 event 流，exit 0。代码 + 测试 + ADR + CI 三件套齐。
+**P1 全部完工，锚点场景最小切片打通。P2 起手 `fuxi-workspace`（git worktree 隔离）也已就位。** 真调本机 `claude` CLI，真跑出完整 event 流，exit 0。代码 + 测试 + ADR + CI 三件套齐。
+
+**最终产出：7 个 crate / 106 passing tests / 6 个 commit / 全部门禁绿。**
 
 ---
 
@@ -19,11 +21,12 @@
 | `fuxi-a2a` | ✅ | A2A v1.0 核心子集：wire types + axum server + reqwest client + SSE |
 | `fuxi-agent-cc` | ✅ | Claude Code headless stream-json 适配器 |
 | `fuxi-firehose` | ✅ | 实时 WS/SSE/REST Hub + ratatui TUI `FirehoseApp` |
-| `fuxi-cli` | ✅ | 二进制 `fuxi` + `demo`/`up`/`watch` 三子命令 |
+| `fuxi-cli` | ✅ | 二进制 `fuxi` + `demo`/`up`/`watch` 三子命令（demo 新增 `--quiet` 过滤 cc hook 噪声） |
+| **`fuxi-workspace`** (P2) | ✅ | git worktree 隔离，`Workspace` trait 实装——每个门客独占 worktree+branch |
 
 ### 测试（ComposioHQ 对标）
 
-- **94 passing** + 1 ignored（E2E 需 env var 开启）
+- **106 passing** + 1 ignored（E2E 需 env var 开启）
 - 测试/源码 LoC 比：~1.1×（ComposioHQ 是 1.41×，还差一点，可在 P2 补齐）
 - **真 E2E 验证** 在本机 `claude-haiku` 上跑通：
   ```
@@ -57,6 +60,9 @@
 ### Git 提交历史
 
 ```
+? feat(p2): fuxi-workspace——git worktree 隔离的 Workspace trait 实装
+3b6fd29 feat(cli): demo 加 --quiet 过滤 cc hook 噪声
+6053ccb docs(p1): README 状态同步 + OVERNIGHT 夜间开发报告
 8163260 feat(p1): 伏羲 P1 打通端到端——cc 门客真跑出 "hi" 事件流
 09b2bf4 docs: 补齐 README + 架构决策记录（ADR-001~006）
 f1e0d73 feat(p1): 伏羲 Rust workspace 地基 + core/events/a2a 首批三个 crate
@@ -77,7 +83,7 @@ f1e0d73 feat(p1): 伏羲 Rust workspace 地基 + core/events/a2a 首批三个 cr
 下面是 P2 的自然下一步。无论你想先推哪一条，基础都已铺好：
 
 - **玄女编排层** (`fuxi-orchestrator`)——真的 "顶层 agent" 实体，收用户输入、路由到门客、召新门客。当前 demo 是"直连 cc"，无玄女层。
-- **多门客 + worktree 隔离** (`fuxi-workspace` 拓展 `Workspace` trait)——git worktree 管理 + 并行 Dev 门客。
+- ~~**多门客 + worktree 隔离**~~ ✅ 已完成 `fuxi-workspace`；还需把它接进玄女的门客 spawn 流程。
 - **抄送式介入** (`fuxi-cli` 的 intervention 子命令 + 玄女接收方)——用户绕过玄女直接对门客说话时，玄女收副本。
 - **主对话权转交** (`ConversationSwitch`)——玄女把"当前跟用户直连"的 agent 切到 PM 门客。
 - **codex / gemini / opencode 适配器**——参照 fuxi-agent-cc 各 1-3 天即可。
