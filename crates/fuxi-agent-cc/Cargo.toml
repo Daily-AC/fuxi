@@ -1,0 +1,26 @@
+[package]
+name = "fuxi-agent-cc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 Claude Code agent adapter (headless mode)"
+
+[features]
+# 开启后 `cargo test --features real_cc` 会跑 E2E；默认关闭避免消耗 API 额度。
+real_cc = []
+
+[dependencies]
+fuxi-core.workspace = true
+fuxi-a2a.workspace = true
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true }

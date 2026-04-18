@@ -1,0 +1,15 @@
+[package]
+name = "fuxi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 core traits: Agent, Runtime, Workspace, Event types"
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["sync"] }
