@@ -51,6 +51,18 @@ pub enum WorkerKind {
     Cc(CcLaunchConfig),
 }
 
+impl WorkerKind {
+    /// 对应到 `AgentProfile.cli` / `AgentSpawning.cli` 的文本标签。
+    ///
+    /// WHY 独立方法：P2 还会加 codex/gemini 的 variant；集中在此避免每个调用点
+    /// 都 match 一次 `to_string`。
+    pub fn cli_tag(&self) -> &'static str {
+        match self {
+            WorkerKind::Cc(_) => "claude-code",
+        }
+    }
+}
+
 /// 玄女主体。
 pub struct Fuxi {
     bus: EventBus,
@@ -84,40 +96,9 @@ impl Fuxi {
         self.shelf.len().await
     }
 
-    /// 把一个已经实例化的 `Agent` 直接塞进 shelf——主要给测试 / stub agent
-    /// 用（也是未来 adapter 外置时的扩展点）。
-    ///
-    /// WHY：`spawn_worker` 走的是"我们这边根据 WorkerKind 去 spawn 适配器"
-    /// 的路径；但有时调用方已经有一个现成的 `Arc<dyn Agent>`（比如外部 A2A
-    /// endpoint 包装、测试 stub），这时不再需要我们 spawn，只需要登记。
-    ///
-    /// 返回的 id 以 `agent.card().id` 为准。
-    pub async fn insert_agent(
-        &self,
-        agent: Arc<dyn Agent>,
-        worktree: Option<fuxi_core::workspace::WorkspaceHandle>,
-    ) -> AgentId {
-        let card = agent.card().clone();
-        let id = card.id;
-        let entry = ShelfEntry {
-            card,
-            agent,
-            status: ShelfStatus::Idle,
-            worktree,
-        };
-        self.shelf.insert(entry).await;
-
-        let mut meta = EventMeta::now();
-        meta.agent = Some(id);
-        self.bus
-            .publish(Event {
-                meta,
-                kind: EventKind::AgentReady {
-                    endpoint: "externally-managed".into(),
-                },
-            })
-            .ok();
-        id
+    /// 查一个门客当前的 shelf 状态（Idle/Busy/Dead）；不存在返回 None。
+    pub async fn status_of(&self, id: AgentId) -> Option<ShelfStatus> {
+        self.shelf.status_of(id).await
     }
 
     /// 列出所有已注册门客的 card。
@@ -125,108 +106,100 @@ impl Fuxi {
         self.shelf.list_cards().await
     }
 
+    /// 把一个已经实例化的 `Agent` 直接塞进 shelf——主要给测试 / stub agent
+    /// 用（也是未来 adapter 外置时的扩展点）。
+    ///
+    /// WHY：`spawn_worker` 走的是"我们这边根据 WorkerKind 去 spawn 适配器"
+    /// 的路径；但有时调用方已经有一个现成的 `Arc<dyn Agent>`（比如外部 A2A
+    /// endpoint 包装、测试 stub），这时不再需要我们 spawn，只需要登记。
+    ///
+    /// 返回的 id 以 `agent.card().id` 为准。生命周期事件（Spawning + Ready）
+    /// 都会打到 bus 上，**不得**跳过——公理 #1。
+    pub async fn insert_agent(
+        &self,
+        agent: Arc<dyn Agent>,
+        worktree: Option<fuxi_core::workspace::WorkspaceHandle>,
+    ) -> AgentId {
+        let id = agent.card().id;
+        // 补发 AgentSpawning 让生命周期事件闭合——外部托管不等于绕过公理。
+        self.publish_with_agent(
+            id,
+            EventKind::AgentSpawning {
+                role: agent.card().profile.role.clone(),
+                cli: agent.card().profile.cli.clone(),
+            },
+        );
+        self.register_ready(agent, worktree, "externally-managed".into())
+            .await;
+        id
+    }
+
     /// 拉起一个新门客。
     ///
     /// 流程：
-    /// 1. 发 `AgentSpawning` 事件到 bus；
-    /// 2. 若 cfg.allocate_worktree：向 workspace 申请一个 worktree；
-    /// 3. 调对应适配器的 `launch`；
-    /// 4. 把 entry 登记到 shelf；
-    /// 5. 发 `AgentReady` 事件（含 endpoint pid:...）。
+    /// 1. 发 `AgentSpawning`；
+    /// 2. cfg.allocate_worktree=true 时向 workspace 申请 worktree（失败即退出，
+    ///    不静默 fallback——公理层的"独立 worktree"是锚点场景的前置）；
+    /// 3. 调对应适配器的 `launch_with_id(agent_id, ...)`——让 id 唯一真相源是
+    ///    玄女本身；
+    /// 4. shelf 登记 + 发 `AgentReady`。
     ///
-    /// 失败时已经分配出去的 worktree 会尽量回滚；回滚本身失败只 log、不抛——
-    /// 此时 worktree 成"垃圾"，需要人工或 P3 的 GC 扫。
+    /// 失败时已分配的 worktree 会被回滚（destroy 失败只 warn，不让清理错误掩盖
+    /// 原始 launch 错误）；同时发 `AgentDead { cause: launch failed: ... }`。
     pub async fn spawn_worker(&self, profile: AgentProfile, kind: WorkerKind) -> Result<AgentId> {
         let agent_id = AgentId::new();
         info!(agent = %agent_id, role = %profile.role, "spawn worker");
 
-        // 1. 发 AgentSpawning。
-        let meta = {
-            let mut m = EventMeta::now();
-            m.agent = Some(agent_id);
-            m
-        };
-        let cli_tag = match &kind {
-            WorkerKind::Cc(_) => "claude-code".to_string(),
-        };
-        self.bus
-            .publish(Event {
-                meta: meta.clone(),
-                kind: EventKind::AgentSpawning {
-                    role: profile.role.clone(),
-                    cli: cli_tag.clone(),
-                },
-            })
-            .ok();
+        // 1. AgentSpawning。
+        self.publish_with_agent(
+            agent_id,
+            EventKind::AgentSpawning {
+                role: profile.role.clone(),
+                cli: kind.cli_tag().to_string(),
+            },
+        );
 
-        // 2. worktree（可选）。
+        // 2. worktree（可选，失败硬返）。
         let worktree = if self.cfg.allocate_worktree {
-            match self.workspace.create(agent_id, &self.cfg.base_branch).await {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    warn!(error = %e, "分配 worktree 失败，继续使用当前 cwd");
-                    None
-                }
-            }
+            Some(
+                self.workspace
+                    .create(agent_id, &self.cfg.base_branch)
+                    .await?,
+            )
         } else {
             None
         };
 
-        // 3. 构造 agent。launch 时若指定了 cwd，需要把 worktree_path 塞进去；
-        //    不覆写已显式设置的 cfg.cwd。
+        // 3. 适配器 launch。
         let launch_result = match kind {
             WorkerKind::Cc(mut cc_cfg) => {
                 if let (None, Some(h)) = (cc_cfg.cwd.as_ref(), worktree.as_ref()) {
                     cc_cfg.cwd = Some(h.worktree_path.clone());
                 }
-                CcAgent::launch(profile.clone(), cc_cfg)
+                CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg)
             }
         };
         match launch_result {
             Ok(a) => {
-                // 用 agent 自己生成的 id 覆盖我们的——保持一致性。
-                // （CcAgent::launch 内部会产生自己的 AgentId；这里 agent_id
-                // 应当以 agent.card().id 为准。）
-                let actual_id = a.card().id;
-                let pid_hint = a.card().endpoint.clone();
-
-                let entry = ShelfEntry {
-                    card: a.card().clone(),
-                    agent: Arc::new(a),
-                    status: ShelfStatus::Idle,
-                    worktree: worktree.clone(),
-                };
-                self.shelf.insert(entry).await;
-
-                // 发 AgentReady。
-                let mut ready_meta = EventMeta::now();
-                ready_meta.agent = Some(actual_id);
-                self.bus
-                    .publish(Event {
-                        meta: ready_meta,
-                        kind: EventKind::AgentReady { endpoint: pid_hint },
-                    })
-                    .ok();
-
-                Ok(actual_id)
+                let endpoint_hint = a.card().endpoint.clone();
+                let agent: Arc<dyn Agent> = Arc::new(a);
+                let id = self.register_ready(agent, worktree, endpoint_hint).await;
+                debug_assert_eq!(id, agent_id, "launch_with_id 应保证 id 一致");
+                Ok(agent_id)
             }
             Err(e) => {
-                // launch 失败——回滚 worktree。
+                // 回滚 worktree——destroy 失败只 warn，原始错误才是重点。
                 if let Some(h) = worktree.as_ref()
                     && let Err(cleanup) = self.workspace.destroy(h).await
                 {
                     warn!(error = %cleanup, "回滚 worktree 失败（留档）");
                 }
-                let mut dead_meta = EventMeta::now();
-                dead_meta.agent = Some(agent_id);
-                self.bus
-                    .publish(Event {
-                        meta: dead_meta,
-                        kind: EventKind::AgentDead {
-                            cause: format!("launch failed: {e}"),
-                        },
-                    })
-                    .ok();
+                self.publish_with_agent(
+                    agent_id,
+                    EventKind::AgentDead {
+                        cause: format!("launch failed: {e}"),
+                    },
+                );
                 Err(OrchestratorError::Core(e))
             }
         }
@@ -235,7 +208,11 @@ impl Fuxi {
     /// 给指定门客派一个 task，事件流自动 republish 到 EventBus。
     ///
     /// 返回时只保证 task 已经递交——完成与否靠订阅 EventBus 上的
-    /// `TaskStateChanged { to: Done | Blocked | Cancelled }` 判断。
+    /// `TaskStateChanged { to: Done | Cancelled }` 或 `AgentDead` 判断。
+    /// `Blocked` 是可恢复态（允许 Blocked → Ready），故**不**视为终结。
+    ///
+    /// 保证：**pump task 退出时无论何种原因**（见到终结事件 / channel 被 agent
+    /// 提前关闭 / bus 关闭），shelf 状态必然回到 Idle——避免门客被永久锁在 Busy。
     pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
         let agent = self
             .shelf
@@ -243,32 +220,37 @@ impl Fuxi {
             .await
             .ok_or(OrchestratorError::AgentNotFound(agent_id))?;
 
-        // 标记 busy。完成事件由 pump 任务观察到后标回 idle。
         self.shelf.set_status(agent_id, ShelfStatus::Busy).await;
 
         let mut rx = agent.dispatch(task).await?;
         let bus = self.bus.clone();
         let shelf = self.shelf.clone();
         tokio::spawn(async move {
+            let mut seen_terminal = false;
             while let Some(ev) = rx.recv().await {
+                // Blocked 是可恢复态（允许回 Ready），不列为 terminal。
                 let is_terminal = matches!(
-                    ev.kind,
+                    &ev.kind,
                     EventKind::TaskStateChanged {
                         to: fuxi_core::task::TaskState::Done
-                            | fuxi_core::task::TaskState::Cancelled
-                            | fuxi_core::task::TaskState::Blocked,
+                            | fuxi_core::task::TaskState::Cancelled,
                         ..
-                    }
+                    } | EventKind::TaskDelivered { .. }
+                        | EventKind::TaskCancelled { .. }
+                        | EventKind::AgentDead { .. }
                 );
                 if bus.publish(ev).is_err() {
+                    warn!(agent = %agent_id, "event bus 已关闭，pump 退出");
                     break;
                 }
                 if is_terminal {
-                    shelf.set_status(agent_id, ShelfStatus::Idle).await;
+                    seen_terminal = true;
                     break;
                 }
             }
-            debug!(agent = %agent_id, "dispatch pump 退出");
+            // 无论怎么退出都摊回 Idle——channel 被 agent 提前关也算"不忙"。
+            shelf.set_status(agent_id, ShelfStatus::Idle).await;
+            debug!(agent = %agent_id, seen_terminal, "dispatch pump 退出");
         });
 
         Ok(())
@@ -276,7 +258,8 @@ impl Fuxi {
 
     /// 按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
     ///
-    /// `kind_for_spawn` 决定 spawn 时用哪种适配器（cc/codex/...）。
+    /// 使用 `claim_idle_by_role` 原子地"找+占"，防止并发 `dispatch_to_any`
+    /// 把同一个空闲门客派两次（TOCTOU）。
     pub async fn dispatch_to_any(
         &self,
         role: &str,
@@ -284,8 +267,8 @@ impl Fuxi {
         profile_template: AgentProfile,
         kind_for_spawn: WorkerKind,
     ) -> Result<AgentId> {
-        let chosen = if let Some(id) = self.shelf.find_idle_by_role(role).await {
-            debug!(agent = %id, role, "复用空闲门客");
+        let chosen = if let Some(id) = self.shelf.claim_idle_by_role(role).await {
+            debug!(agent = %id, role, "原子复用空闲门客");
             id
         } else {
             debug!(role, "无空闲门客，spawn 新的");
@@ -297,32 +280,77 @@ impl Fuxi {
         Ok(chosen)
     }
 
-    /// 停掉所有门客 + 对应 worktree。
+    /// 停掉所有门客 + 对应 worktree。幂等——连续调多次等价于调一次。
+    ///
+    /// 事件顺序（每个门客）：`AgentShuttingDown`（动作前） → agent.shutdown +
+    /// worktree.destroy → `AgentDead`（动作后）。确保 Firehose 能把生命周期完整收尾。
     pub async fn shutdown(&self) -> Result<()> {
         let cards = self.shelf.list_cards().await;
         info!(count = cards.len(), "fuxi shutdown: 关闭所有门客");
         for card in cards {
-            if let Some(entry) = self.shelf.take(card.id).await {
-                if let Err(e) = entry.agent.shutdown().await {
-                    warn!(agent = %card.id, error = %e, "agent shutdown 出错");
-                }
-                if let Some(h) = entry.worktree.as_ref()
-                    && let Err(e) = self.workspace.destroy(h).await
-                {
-                    warn!(agent = %card.id, error = %e, "worktree destroy 出错");
-                }
-                let mut meta = EventMeta::now();
-                meta.agent = Some(card.id);
-                self.bus
-                    .publish(Event {
-                        meta,
-                        kind: EventKind::AgentShuttingDown {
-                            reason: "fuxi shutdown".into(),
-                        },
-                    })
-                    .ok();
+            let Some(entry) = self.shelf.take(card.id).await else {
+                continue;
+            };
+            self.publish_with_agent(
+                card.id,
+                EventKind::AgentShuttingDown {
+                    reason: "fuxi shutdown".into(),
+                },
+            );
+            if let Err(e) = entry.agent.shutdown().await {
+                warn!(agent = %card.id, error = %e, "agent shutdown 出错");
             }
+            if let Some(h) = entry.worktree.as_ref()
+                && let Err(e) = self.workspace.destroy(h).await
+            {
+                warn!(agent = %card.id, error = %e, "worktree destroy 出错");
+            }
+            self.publish_with_agent(
+                card.id,
+                EventKind::AgentDead {
+                    cause: "fuxi shutdown".into(),
+                },
+            );
         }
         Ok(())
+    }
+
+    // ───────── 内部 helper ─────────
+
+    /// 构造带 `agent` 字段的 `EventMeta` 并发到 bus——忽略 publish 的 `Err`
+    /// （bus 关闭时）；调用方已经没法对此做什么了。
+    fn publish_with_agent(&self, agent: AgentId, kind: EventKind) {
+        let mut meta = EventMeta::now();
+        meta.agent = Some(agent);
+        let _ = self.bus.publish(Event { meta, kind });
+    }
+
+    /// 把 agent 登记到 shelf 并发 `AgentReady`。返回 card id。
+    ///
+    /// `AgentSpawning` 由调用方单独发——spawn_worker 在 launch 前就发了，
+    /// insert_agent 也会在进来时补一条；这里只处理 "就绪后" 的部分。
+    async fn register_ready(
+        &self,
+        agent: Arc<dyn Agent>,
+        worktree: Option<fuxi_core::workspace::WorkspaceHandle>,
+        endpoint_hint: String,
+    ) -> AgentId {
+        let card = agent.card().clone();
+        let id = card.id;
+        self.shelf
+            .insert(ShelfEntry {
+                card,
+                agent,
+                status: ShelfStatus::Idle,
+                worktree,
+            })
+            .await;
+        self.publish_with_agent(
+            id,
+            EventKind::AgentReady {
+                endpoint: endpoint_hint,
+            },
+        );
+        id
     }
 }

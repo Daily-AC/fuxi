@@ -25,4 +25,4 @@ pub mod registry;
 
 pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
-pub use registry::{ShelfEntry, ShelfStatus};
+pub use registry::{Shelf, ShelfEntry, ShelfStatus};

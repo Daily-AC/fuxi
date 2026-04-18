@@ -82,6 +82,18 @@ impl CcAgent {
     /// 为什么 `launch` 同步：`tokio::process::Command::spawn` 本身非阻塞，
     /// 返回 `io::Result<Child>`；不 await 也不会阻塞 reactor。
     pub fn launch(profile: AgentProfile, cfg: CcLaunchConfig) -> Result<Self> {
+        Self::launch_with_id(AgentId::new(), profile, cfg)
+    }
+
+    /// 同 `launch`，但 id 由调用方指定——用于编排层（玄女）希望自己维护 id
+    /// 一致性的场景。
+    ///
+    /// WHY 需要这个入口：原本 `launch` 内部生成 id，编排层拿到后只能 "事后对齐"；
+    /// 这意味着 worktree 分配、`AgentSpawning` 事件等"先于 launch 成功"的动作
+    /// 用的是编排层预生成的 id，而 `AgentCard.id` 是 launch 里新生成的——
+    /// 两个 id 会让 Firehose 和世界模型 watcher 无法把同一个门客的生命周期
+    /// 事件串起来。暴露 `launch_with_id` 让编排层做唯一真相源。
+    pub fn launch_with_id(id: AgentId, profile: AgentProfile, cfg: CcLaunchConfig) -> Result<Self> {
         let SpawnedCc {
             child,
             stdin,
@@ -90,7 +102,7 @@ impl CcAgent {
         } = spawn_claude(&cfg).map_err(CcError::Io)?;
 
         let card = AgentCard {
-            id: AgentId::new(),
+            id,
             profile,
             endpoint: match pid {
                 Some(p) => format!("pid:{p}"),

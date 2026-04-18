@@ -6,7 +6,6 @@
 
 use fuxi_core::agent::{Agent, AgentCard};
 use fuxi_core::id::AgentId;
-use fuxi_workspace::GitWorktreeWorkspace;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -66,7 +65,32 @@ impl Shelf {
         }
     }
 
-    /// 按角色找一个**空闲**门客——用于 `dispatch_to_any`。
+    /// 查状态——不存在返回 None。
+    pub async fn status_of(&self, id: AgentId) -> Option<ShelfStatus> {
+        self.inner.read().await.get(&id).map(|e| e.status)
+    }
+
+    /// **原子地**按角色找一个 Idle 门客并置为 Busy——解决 `dispatch_to_any` 的
+    /// TOCTOU 窗口（find + set_status 分两步会让并发调用拿到同一个 id）。
+    ///
+    /// 返回 `Some(id)` 意味着调用方已独占该门客；外层再调 `dispatch` 的
+    /// `set_status(Busy)` 是幂等无害的。
+    pub async fn claim_idle_by_role(&self, role: &str) -> Option<AgentId> {
+        let mut guard = self.inner.write().await;
+        let pick = guard
+            .iter_mut()
+            .find(|(_, e)| e.status == ShelfStatus::Idle && e.card.profile.role == role);
+        if let Some((id, e)) = pick {
+            e.status = ShelfStatus::Busy;
+            Some(*id)
+        } else {
+            None
+        }
+    }
+
+    /// 按角色找一个**空闲**门客（**非原子**，仅供只读观察 / 调试）。
+    ///
+    /// 调度路径请用 `claim_idle_by_role`——否则会有 TOCTOU race。
     pub async fn find_idle_by_role(&self, role: &str) -> Option<AgentId> {
         self.inner
             .read()
@@ -99,13 +123,4 @@ impl Shelf {
     pub async fn is_empty(&self) -> bool {
         self.inner.read().await.is_empty()
     }
-}
-
-/// 一个薄封装，把 workspace 和 shelf 放在 `Fuxi` 里统一持有。
-///
-/// 为什么不直接在 `Fuxi` 里持两个字段：未来 `Workspace` 可能换成泛型
-/// `Arc<dyn Workspace>`，这里留一层便于演进。
-pub struct WorkerDeps {
-    pub workspace: Arc<GitWorktreeWorkspace>,
-    pub shelf: Arc<Shelf>,
 }
