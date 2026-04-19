@@ -1,0 +1,29 @@
+[package]
+name = "fuxi-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲策府：甲骨（玄女长期事实）+ 河图洛书（门客经验）记忆总库"
+
+[features]
+default = []
+
+[dependencies]
+fuxi-core.workspace = true
+fuxi-events.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures-util.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+# Gated E2E 需要实启 cc 门客；默认不用（不同 feature/配置下也不会触发）。
+fuxi-agent-cc.workspace = true
+tracing-subscriber = { workspace = true }

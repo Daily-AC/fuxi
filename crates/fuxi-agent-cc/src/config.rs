@@ -39,6 +39,12 @@ pub struct CcLaunchConfig {
     /// `--sdk-url ws://...`——v0.1 薄片 H：启用 WS 反连模式。`None` 时走
     /// 传统 stdio 模式（仅单测 fixtures 还会用到）；生产路径**必传**。
     pub sdk_url: Option<String>,
+    /// `--resume <id>`——续写之前那次 cc session（M1.1 策府：门客记忆走 cc 原生）。
+    /// 与 `session_id` **互斥**：同时 Some 时 `resume_session_id` 生效、`session_id` 被忽略。
+    pub resume_session_id: Option<String>,
+    /// `--session-id <uuid>`——新起 session 时指定 id（以便后续 `--resume` 精准续写）。
+    /// 和 `resume_session_id` 互斥。
+    pub session_id: Option<String>,
 }
 
 impl Default for CcLaunchConfig {
@@ -51,6 +57,8 @@ impl Default for CcLaunchConfig {
             extra_args: Vec::new(),
             binary: "claude".to_string(),
             sdk_url: None,
+            resume_session_id: None,
+            session_id: None,
         }
     }
 }
@@ -93,8 +101,16 @@ impl CcLaunchConfig {
             "--permission-mode".to_string(),
             "bypassPermissions".to_string(),
             "--dangerously-skip-permissions".to_string(),
-            "--no-session-persistence".to_string(),
         ]);
+
+        // `--no-session-persistence` 只在**不需要续写**时启用——它关掉的是 cc
+        // 把 session 落到 `~/.claude/projects/` 的行为。策府路径要持久化 session 才
+        // 能后续 `--resume`，所以只要 `session_id` 或 `resume_session_id` 任一被设，
+        // 就不加这个 flag。保持历史行为：默认 demo 场景（两者都 None）仍然不污染用户库。
+        let needs_persistence = self.session_id.is_some() || self.resume_session_id.is_some();
+        if !needs_persistence {
+            args.push("--no-session-persistence".to_string());
+        }
 
         if let Some(model) = &self.model {
             args.push("--model".to_string());
@@ -111,6 +127,16 @@ impl CcLaunchConfig {
         {
             args.push("--allowed-tools".to_string());
             args.push(tools.join(","));
+        }
+
+        // 策府 / cc --resume：续写老 session。resume_session_id 优先于 session_id
+        // （两者互斥；用户把两个都填上时我们不会失败，但只带一条语义到 CLI）。
+        if let Some(sid) = &self.resume_session_id {
+            args.push("--resume".to_string());
+            args.push(sid.clone());
+        } else if let Some(sid) = &self.session_id {
+            args.push("--session-id".to_string());
+            args.push(sid.clone());
         }
 
         args.extend(self.extra_args.iter().cloned());
@@ -265,6 +291,91 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--sdk-url"));
         // -p "" 只在 SDK 模式下追加；stdio 下 build_args 尾部不应是 "-p"
         assert_ne!(args.last().map(String::as_str), Some("-p"));
+    }
+
+    /// 策府：`resume_session_id` 透传 `--resume <id>`。
+    #[test]
+    fn resume_session_id_emits_resume_flag() {
+        let cfg = CcLaunchConfig {
+            model: Some("haiku".to_string()),
+            resume_session_id: Some("abc-123".into()),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        let idx = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume flag present");
+        assert_eq!(args[idx + 1], "abc-123");
+        // 默认不带 session_id；不该同时出现 --session-id
+        assert!(!args.iter().any(|a| a == "--session-id"));
+    }
+
+    /// 新开 session 指定 id 走 `--session-id`。
+    #[test]
+    fn session_id_emits_session_id_flag_when_no_resume() {
+        let cfg = CcLaunchConfig {
+            model: Some("haiku".to_string()),
+            session_id: Some("new-sess-1".into()),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        let idx = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .expect("--session-id flag present");
+        assert_eq!(args[idx + 1], "new-sess-1");
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+
+    /// 两者同时给——resume_session_id 优先。
+    #[test]
+    fn resume_overrides_session_id_when_both_set() {
+        let cfg = CcLaunchConfig {
+            model: Some("haiku".to_string()),
+            resume_session_id: Some("resume-1".into()),
+            session_id: Some("new-1".into()),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        assert!(args.iter().any(|a| a == "--resume"));
+        assert!(!args.iter().any(|a| a == "--session-id"));
+    }
+
+    /// `--no-session-persistence` 和 resume 互斥——cc 文档明写「sessions 未落盘
+    /// 时不能 resume」。策府路径要求两者之一被设时就别加这个 flag。
+    #[test]
+    fn no_session_persistence_dropped_when_resume_or_session_id_set() {
+        for cfg in [
+            CcLaunchConfig {
+                model: Some("haiku".into()),
+                resume_session_id: Some("r-1".into()),
+                ..Default::default()
+            },
+            CcLaunchConfig {
+                model: Some("haiku".into()),
+                session_id: Some("s-1".into()),
+                ..Default::default()
+            },
+        ] {
+            let args = cfg.build_args();
+            assert!(
+                !args.iter().any(|a| a == "--no-session-persistence"),
+                "期望不含 --no-session-persistence；实际 args: {args:?}"
+            );
+        }
+    }
+
+    /// 都没给时不插入任何 resume-related flag。
+    #[test]
+    fn no_resume_flags_when_both_unset() {
+        let cfg = CcLaunchConfig {
+            model: Some("haiku".to_string()),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        assert!(!args.iter().any(|a| a == "--resume"));
+        assert!(!args.iter().any(|a| a == "--session-id"));
     }
 
     /// 用户明确指示：默认走 cc 自身默认（目前 opus-4-7），未设 FUXI_CC_MODEL
