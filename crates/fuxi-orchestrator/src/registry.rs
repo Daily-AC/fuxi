@@ -7,6 +7,7 @@
 use fuxi_core::agent::{Agent, AgentCard};
 use fuxi_core::id::AgentId;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -98,6 +99,16 @@ impl Shelf {
             .values()
             .find(|e| e.status == ShelfStatus::Idle && e.card.profile.role == role)
             .map(|e| e.card.id)
+    }
+
+    /// 返回指定门客分配的 worktree 路径——用于 TUI 右栏元信息展示。
+    /// 没登记或没分配 worktree 都返回 None。
+    pub async fn worktree_of(&self, id: AgentId) -> Option<PathBuf> {
+        self.inner
+            .read()
+            .await
+            .get(&id)
+            .and_then(|e| e.worktree.as_ref().map(|h| h.worktree_path.clone()))
     }
 
     /// 列出所有 card（用于对外展示 / API 查询）。

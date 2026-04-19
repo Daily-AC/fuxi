@@ -738,3 +738,246 @@ async fn intervene_on_missing_agent_returns_not_found() {
         "期待 agent-not-found 类错误, got: {msg}"
     );
 }
+
+// ── M1.5 · orchestrator 补课 ──────────────────────────────────────
+
+#[tokio::test]
+async fn shelf_worktree_of_returns_path_when_allocated() {
+    use fuxi_core::workspace::WorkspaceHandle;
+    use fuxi_orchestrator::{Shelf, ShelfEntry, ShelfStatus};
+    use std::path::PathBuf;
+
+    let shelf = Shelf::new();
+    let stub = InterveneTrackingStub::new("dev");
+    let id = stub.card.id;
+    let wt = WorkspaceHandle {
+        agent: id,
+        repo_root: PathBuf::from("/tmp/fuxi-repo"),
+        worktree_path: PathBuf::from("/tmp/fuxi-wt/agent-1"),
+        branch: "main".into(),
+    };
+    shelf
+        .insert(ShelfEntry {
+            card: stub.card.clone(),
+            agent: stub.clone() as Arc<dyn Agent>,
+            status: ShelfStatus::Idle,
+            worktree: Some(wt.clone()),
+        })
+        .await;
+
+    let got = shelf.worktree_of(id).await;
+    assert_eq!(got, Some(wt.worktree_path.clone()));
+
+    // 未登记的 id 返回 None
+    let ghost = AgentId::new();
+    assert!(shelf.worktree_of(ghost).await.is_none());
+}
+
+#[tokio::test]
+async fn intervene_on_worker_publishes_cc_received_to_xuannv() {
+    // 抄送：用户对门客说话，玄女同时收到副本。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let xuannv = InterveneTrackingStub::new("xuannv");
+    let worker = InterveneTrackingStub::new("dev");
+    let xuannv_id = fuxi.insert_agent(xuannv, None).await;
+    let worker_id = fuxi.insert_agent(worker, None).await;
+    fuxi.set_xuannv(xuannv_id).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(worker_id, false, "加个注释")
+        .await
+        .expect("intervene worker");
+
+    // 收集事件
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        collected.push(ev);
+    }
+
+    // 应有一条 OrchestratorCcReceived，meta.agent = xuannv，text 匹配
+    let cc = collected.iter().find(|e| {
+        matches!(
+            &e.kind,
+            EventKind::OrchestratorCcReceived { from_user_to, text, .. }
+                if *from_user_to == worker_id && text == "加个注释"
+        )
+    });
+    assert!(
+        cc.is_some(),
+        "应发 OrchestratorCcReceived，collected: {collected:#?}"
+    );
+    assert_eq!(
+        cc.unwrap().meta.agent,
+        Some(xuannv_id),
+        "抄送事件 meta.agent 应为玄女"
+    );
+}
+
+#[tokio::test]
+async fn intervene_on_xuannv_herself_does_not_publish_cc_received() {
+    // 玄女收自己的不算抄送——这是噪音。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let xuannv = InterveneTrackingStub::new("xuannv");
+    let xuannv_id = fuxi.insert_agent(xuannv, None).await;
+    fuxi.set_xuannv(xuannv_id).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(xuannv_id, false, "hi")
+        .await
+        .expect("intervene xuannv");
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        collected.push(ev);
+    }
+
+    assert!(
+        !collected
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::OrchestratorCcReceived { .. })),
+        "对玄女自身的 intervene 不应产生抄送"
+    );
+}
+
+#[tokio::test]
+async fn intervene_without_xuannv_id_set_skips_cc_received() {
+    // 玄女 id 还没告知 Fuxi 时，抄送路径不该崩。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let worker = InterveneTrackingStub::new("dev");
+    let worker_id = fuxi.insert_agent(worker, None).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(worker_id, false, "hi")
+        .await
+        .expect("intervene");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        collected.push(ev);
+    }
+
+    assert!(
+        !collected
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::OrchestratorCcReceived { .. })),
+        "未设 xuannv 时不应产生抄送"
+    );
+}
+
+#[tokio::test]
+async fn agent_dead_event_flips_shelf_status_to_dead() {
+    // Fuxi 自订阅 bus：看到 AgentDead 即把对应 shelf 条目置 Dead。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = InterveneTrackingStub::new("dev");
+    let id = fuxi.insert_agent(stub, None).await;
+    assert_eq!(
+        fuxi.status_of(id).await,
+        Some(fuxi_orchestrator::ShelfStatus::Idle)
+    );
+
+    // 直接向 bus 发一条 AgentDead——模拟 CcAgent/外部侦测到死亡
+    let mut meta = fuxi_core::event::EventMeta::now();
+    meta.agent = Some(id);
+    bus.publish(Event {
+        meta,
+        kind: EventKind::AgentDead {
+            cause: "ws closed".into(),
+        },
+    })
+    .expect("publish");
+
+    // Fuxi 的自订阅 task 应在短时内翻状态
+    for _ in 0..20 {
+        if fuxi.status_of(id).await == Some(fuxi_orchestrator::ShelfStatus::Dead) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("AgentDead 后 shelf 未在 400ms 内翻 Dead");
+}
+
+#[tokio::test]
+async fn conversation_handoff_requested_event_serializes() {
+    // 让贤 wire format 基线——只测结构 + serde tag 存在。
+    let k = EventKind::ConversationHandoffRequested {
+        from: AgentId::new(),
+        to: AgentId::new(),
+        reason: "pm 接管需求澄清".into(),
+        brief: Some("用户需要更多上下文".into()),
+    };
+    let s = serde_json::to_string(&k).expect("serialize");
+    assert!(
+        s.contains("\"type\":\"conversation_handoff_requested\""),
+        "serde tag 错: {s}"
+    );
+    // roundtrip
+    let back: EventKind = serde_json::from_str(&s).expect("deserialize");
+    assert!(matches!(
+        back,
+        EventKind::ConversationHandoffRequested { .. }
+    ));
+}
+
+#[tokio::test]
+async fn orchestrator_cc_received_carries_original_intervention_id() {
+    // OrchestratorCcReceived 应携带 original_intervention_id 字段，方便 TUI 关联到源事件。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let xuannv = InterveneTrackingStub::new("xuannv");
+    let worker = InterveneTrackingStub::new("dev");
+    let xuannv_id = fuxi.insert_agent(xuannv, None).await;
+    let worker_id = fuxi.insert_agent(worker, None).await;
+    fuxi.set_xuannv(xuannv_id).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(worker_id, false, "ping").await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let mut sent_id: Option<uuid::Uuid> = None;
+    let mut cc_orig: Option<uuid::Uuid> = None;
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        match &ev.kind {
+            EventKind::UserInterventionSent { target, .. } if *target == worker_id => {
+                sent_id = Some(ev.meta.id);
+            }
+            EventKind::OrchestratorCcReceived {
+                original_intervention_id,
+                ..
+            } => {
+                cc_orig = Some(*original_intervention_id);
+            }
+            _ => {}
+        }
+    }
+    let sent = sent_id.expect("UserInterventionSent 缺失");
+    let orig = cc_orig.expect("OrchestratorCcReceived 缺失");
+    assert_eq!(
+        orig, sent,
+        "OrchestratorCcReceived.original_intervention_id 应等于 UserInterventionSent 的事件 id"
+    );
+}
