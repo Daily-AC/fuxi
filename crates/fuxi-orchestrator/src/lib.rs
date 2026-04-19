@@ -19,10 +19,12 @@
 //! - codex / gemini / opencode 适配器纳入（fuxi-agent-codex 完成后把它加到
 //!   `spawn_worker` 的 match 分支即可）。
 
+pub mod bridge;
 pub mod error;
 pub mod fuxi;
 pub mod registry;
 
+pub use bridge::{Intervener, SystemEventBridge};
 pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};
