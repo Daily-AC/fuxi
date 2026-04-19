@@ -9,6 +9,7 @@ pub mod event;
 pub mod id;
 pub mod runtime;
 pub mod task;
+pub mod trigger_lookup;
 pub mod workspace;
 
 pub use agent::{Agent, AgentCard, AgentProfile, AgentStatus};
@@ -16,6 +17,7 @@ pub use event::{Event, EventKind, EventMeta};
 pub use id::{AgentId, SessionId, TaskId};
 pub use runtime::{Runtime, RuntimeHandle};
 pub use task::{Task, TaskState};
+pub use trigger_lookup::TriggerLookup;
 pub use workspace::{Workspace, WorkspaceHandle};
 
 /// Crate-wide error type. Downstream crates wrap this in their own
