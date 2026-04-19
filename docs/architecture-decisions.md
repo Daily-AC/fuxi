@@ -61,7 +61,7 @@
 
 **Status:** Accepted
 
-**Context:** 伏羲的独创赌注 "真实时 Firehose" 要求所有事件能实时推 + 全量留存可重放。ComposioHQ 用 5 秒轮询（被我们明确抛弃）。
+**Context:** 伏羲的独创赌注 "真实时 Firehose" 要求所有事件能实时推 + 全量留存可重放。ComposioHQ 核心用 30 秒轮询（`lifecycle-manager.ts:1973`，web 前端另加 5s 刷新）——被我们明确抛弃。
 
 **Decision:**
 - 内核：`tokio::sync::broadcast` 做进程内 N-订阅 fan-out。

@@ -73,6 +73,13 @@ fuxi/
 - 事件类型 `EventKind` 是 `#[serde(tag = "type")]` 标签联合——加新变体**必须**更新 Firehose 的渲染和 EventStore 的持久化测试。
 - `tokio::sync::broadcast` 的 Receiver 从 `RecvError::Lagged` 中拿到的是"落掉了 N 条"，**不是错误终止**——继续接收还是 OK 的。订阅者处理不过来时别让它崩掉整个订阅链。
 - SQLite WAL 模式在 macOS 上有偶发 `BUSY`——retry 封装进 EventStore，不往外抛。
+- **macOS tempdir symlink**：`TempDir::new()` 返回 `/var/folders/...`，但 `git worktree list --porcelain` 返回 `/private/var/folders/...`。列表比对**两侧都要 `canonicalize()`**，否则匹配失败。
+- **Codex model fallback**：`DEFAULT_MODEL_FALLBACK = "gpt-5.1-mini"` 在 **ChatGPT-account auth** 下会被拒 `invalid_request_error`。E2E 测试用空串让 codex 自选；API key 用户需 `FUXI_CODEX_MODEL` 覆盖。
+- **Codex exec 不支持 follow-up**：`send_message` 直接返回 `CoreError::Other`。codex 门客是 spawn-per-dispatch 模式，不像 cc 那样支持同 session 续写。要多轮对话得换 codex `conversation` API（另一套）。
+- **新 agent 适配器三条铁律**（S1/S2/S3 教训，commit `360a31e` 修掉的）：
+  1. 必须提供 `launch_with_id(id, ...)`——不能自己 `AgentId::new()`，否则 `AgentSpawning`/`AgentReady` 属不同 id
+  2. 任何事件 pump 要保证"无论怎么退出都摊回 Idle"，否则 shelf 永久 Busy
+  3. "find then act" 类接口要原子（`claim_*_by_*` 命名），不能 find + set_status 两步，否则并发会双派
 
 ## 设计文档
 
