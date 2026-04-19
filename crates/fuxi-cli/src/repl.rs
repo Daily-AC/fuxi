@@ -25,7 +25,6 @@ use crossterm::terminal::{
 };
 use futures_util::StreamExt;
 use fuxi_agent_cc::CcLaunchConfig;
-use fuxi_core::agent::AgentProfile;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::AgentId;
 use fuxi_core::task::Task;
@@ -141,12 +140,11 @@ pub async fn run(args: Args) -> Result<()> {
         },
     });
 
-    // 5. 读玄女 skill 组 profile——v0.1 stdio 模式每次 dispatch 都 spawn 一个新 cc，
-    //    所以 profile/cfg 要在 closure 里 clone。多轮记忆 v0.2 用 --session-id/--resume 补。
+    // 5. spawn 玄女——从 skills/<role>/SKILL.md 读 profile
     let loaded = skill_loader::load(&args.xuannv_role)
         .with_context(|| format!("加载 skills/{}/SKILL.md", args.xuannv_role))?;
     let xuannv_profile = loaded.profile.clone();
-    let xuannv_cc_cfg = CcLaunchConfig {
+    let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
             None
         } else {
@@ -155,19 +153,23 @@ pub async fn run(args: Args) -> Result<()> {
         allowed_tools: loaded.allowed_tools,
         ..Default::default()
     };
+    let xuannv_id = fuxi
+        .spawn_worker(xuannv_profile, WorkerKind::Cc(cc_cfg))
+        .await
+        .context("玄女 spawn 失败")?;
+    tracing::info!(xuannv = %xuannv_id, "玄女已就绪");
 
-    // 6. 第一个 turn：greet——让玄女主动开口
+    // 6. 发 greet task 让玄女主动开口（cc headless 没 prompt 不说话）
     let greet = Task::new(
         "greet",
         "用户刚启动 fuxi REPL。请用一句话（十字以内）主动问好，邀请用户提需求。不要自我介绍。",
     );
-    match spawn_and_dispatch(&fuxi, xuannv_profile.clone(), xuannv_cc_cfg.clone(), greet).await {
-        Ok(id) => tracing::info!(xuannv = %id, "greet 玄女已派发"),
-        Err(e) => tracing::warn!(error = %e, "greet spawn/dispatch 失败，继续"),
+    if let Err(e) = fuxi.dispatch(xuannv_id, greet).await {
+        tracing::warn!(error = %e, "greet dispatch 失败，继续");
     }
 
     // 7. 进入 TUI 主循环
-    let outcome = drive_tui(bus, fuxi.clone(), xuannv_profile, xuannv_cc_cfg).await;
+    let outcome = drive_tui(bus, fuxi.clone(), xuannv_id).await;
 
     // 8. 收尾——无论 loop 怎么退都走 shutdown
     daemon_shutdown.notify_waiters();
@@ -191,11 +193,8 @@ enum DialogueLine {
 }
 
 /// REPL TUI 的核心状态。
-///
-/// v0.1 cc 走 stdio `--print`——每次 dispatch 一个新 cc 进程，单轮结束即 exit。
-/// 所以这里**不**记"玄女的 agent id"；直接把所有 AgentResponded 看作玄女的话
-/// （REPL 只 spawn xuannv-role 门客）。AgentDead 静默——是正常生命周期，不报错。
 struct ReplApp {
+    xuannv_id: AgentId,
     dialogue: VecDeque<DialogueLine>,
     /// 复用 FirehoseApp 的事件流视图——但我们接管 key handling，不让它吃键。
     events: FirehoseApp,
@@ -208,8 +207,9 @@ struct ReplApp {
 }
 
 impl ReplApp {
-    fn new() -> Self {
+    fn new(xuannv_id: AgentId) -> Self {
         Self {
+            xuannv_id,
             dialogue: VecDeque::with_capacity(64),
             events: FirehoseApp::new(),
             input: String::new(),
@@ -231,21 +231,26 @@ impl ReplApp {
         self.events.ingest(ev);
 
         // 对话区只吃玄女的话 + UserPrompted（用户的话）
-        // v0.1 REPL 只 spawn xuannv-role，所以任何 AgentResponded 都是玄女。
+        let is_xuannv = ev.meta.agent == Some(self.xuannv_id);
         match &ev.kind {
             EventKind::UserPrompted { text } => {
                 self.push_line(DialogueLine::User(text.clone()));
             }
-            EventKind::AgentResponded { text } => {
+            EventKind::AgentResponded { text } if is_xuannv => {
                 self.push_line(DialogueLine::Xuannv(text.clone()));
             }
-            EventKind::ThinkingStarted => {
+            EventKind::ThinkingStarted if is_xuannv => {
                 self.xuannv_thinking = true;
             }
-            EventKind::ThinkingFinished => {
+            EventKind::ThinkingFinished if is_xuannv => {
                 self.xuannv_thinking = false;
             }
-            // AgentDead 不报错——stdio 模式下 cc 每轮完就死，属正常
+            EventKind::AgentDead { cause } if is_xuannv => {
+                self.push_line(DialogueLine::System(format!(
+                    "⚠ 玄女下线：{cause}。按 Ctrl-C 退出。"
+                )));
+                self.xuannv_thinking = false;
+            }
             _ => {}
         }
     }
@@ -467,30 +472,7 @@ fn short_or_pad(s: &str, max: usize) -> String {
     }
 }
 
-/// 每个 user turn 的执行单元：spawn 一个新 xuannv 门客 + 派 task。返回门客 id。
-///
-/// 为什么每轮都新 spawn：v0.1 用 stdio `--print` 模式，cc 一轮对话后 exit。
-/// 想保留会话记忆要 `--session-id/--resume`——v0.2 补。现在接受无记忆。
-async fn spawn_and_dispatch(
-    fuxi: &Arc<Fuxi>,
-    profile: AgentProfile,
-    cfg: CcLaunchConfig,
-    task: Task,
-) -> Result<AgentId> {
-    let id = fuxi
-        .spawn_worker(profile, WorkerKind::Cc(cfg))
-        .await
-        .context("spawn xuannv")?;
-    fuxi.dispatch(id, task).await.context("dispatch")?;
-    Ok(id)
-}
-
-async fn drive_tui(
-    bus: EventBus,
-    fuxi: Arc<Fuxi>,
-    xuannv_profile: AgentProfile,
-    xuannv_cc_cfg: CcLaunchConfig,
-) -> Result<()> {
+async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result<()> {
     // 装 panic hook 先——raw mode 下 panic 会把终端搞死
     install_panic_hook();
 
@@ -499,7 +481,7 @@ async fn drive_tui(
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = ReplApp::new();
+    let mut app = ReplApp::new(xuannv_id);
     let mut stream = bus.subscribe();
 
     let loop_res: Result<()> = async {
@@ -531,19 +513,21 @@ async fn drive_tui(
                         continue;
                     }
                     if let Some(text) = app.handle_key(key.code, key.modifiers) {
-                        // 先发 UserPrompted——TUI 自己订阅时顺便渲染到对话区
+                        // 先发 UserPrompted——这条走事件流，TUI 自己订阅时顺便渲染到对话区
                         let _ = bus.publish(Event {
-                            meta: EventMeta::now(),
+                            meta: {
+                                let mut m = EventMeta::now();
+                                m.agent = Some(xuannv_id);
+                                m
+                            },
                             kind: EventKind::UserPrompted { text: text.clone() },
                         });
-                        // spawn 新玄女门客 + dispatch。每轮独立 cc 进程，不共享记忆
+                        // 再 dispatch：每个 user turn 都挂一次新 active_tx，事件链路不会掉
                         let fuxi_cl = fuxi.clone();
-                        let profile_cl = xuannv_profile.clone();
-                        let cfg_cl = xuannv_cc_cfg.clone();
                         let task = Task::new("user-turn", &text);
                         tokio::spawn(async move {
-                            if let Err(e) = spawn_and_dispatch(&fuxi_cl, profile_cl, cfg_cl, task).await {
-                                tracing::warn!(error = %e, "user turn 派发失败");
+                            if let Err(e) = fuxi_cl.dispatch(xuannv_id, task).await {
+                                tracing::warn!(error = %e, "repl dispatch 失败");
                             }
                         });
                     }
@@ -584,7 +568,7 @@ mod tests {
 
     #[test]
     fn typing_and_enter_returns_text() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         app.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
         let out = app.handle_key(KeyCode::Enter, KeyModifiers::empty());
@@ -594,7 +578,7 @@ mod tests {
 
     #[test]
     fn empty_enter_returns_none() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         assert!(
             app.handle_key(KeyCode::Enter, KeyModifiers::empty())
                 .is_none()
@@ -603,7 +587,7 @@ mod tests {
 
     #[test]
     fn backspace_deletes_last_char() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
         app.handle_key(KeyCode::Backspace, KeyModifiers::empty());
@@ -612,7 +596,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_requires_double_press_to_quit() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(!app.should_quit);
         assert!(app.confirm_quit);
@@ -626,10 +610,9 @@ mod tests {
     }
 
     #[test]
-    fn any_agent_responded_goes_to_dialogue() {
-        // v0.1: REPL 只 spawn xuannv-role 门客，任何 AgentResponded 都视作玄女
+    fn xuannv_responded_goes_to_dialogue() {
         let xid = AgentId::new();
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(xid);
         app.ingest(&mk_ev(
             Some(xid),
             EventKind::AgentResponded {
@@ -641,8 +624,22 @@ mod tests {
     }
 
     #[test]
+    fn other_agent_responded_stays_in_events_only() {
+        let xid = AgentId::new();
+        let other = AgentId::new();
+        let mut app = ReplApp::new(xid);
+        app.ingest(&mk_ev(
+            Some(other),
+            EventKind::AgentResponded {
+                text: "dev 门客在干活".into(),
+            },
+        ));
+        assert_eq!(app.dialogue.len(), 0);
+    }
+
+    #[test]
     fn user_prompted_event_adds_user_line() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         app.ingest(&mk_ev(
             None,
             EventKind::UserPrompted {
@@ -655,29 +652,31 @@ mod tests {
 
     #[test]
     fn thinking_toggles_flag() {
-        let mut app = ReplApp::new();
-        app.ingest(&mk_ev(None, EventKind::ThinkingStarted));
+        let xid = AgentId::new();
+        let mut app = ReplApp::new(xid);
+        app.ingest(&mk_ev(Some(xid), EventKind::ThinkingStarted));
         assert!(app.xuannv_thinking);
-        app.ingest(&mk_ev(None, EventKind::ThinkingFinished));
+        app.ingest(&mk_ev(Some(xid), EventKind::ThinkingFinished));
         assert!(!app.xuannv_thinking);
     }
 
     #[test]
-    fn agent_dead_is_silent_now_stdio_per_turn_cc_is_expected_to_exit() {
-        // 回归：v0.1 stdio 模式下 cc 每轮都死，AgentDead 不再升级为 System 提示
-        let mut app = ReplApp::new();
+    fn agent_dead_emits_system_line() {
+        let xid = AgentId::new();
+        let mut app = ReplApp::new(xid);
         app.ingest(&mk_ev(
-            Some(AgentId::new()),
+            Some(xid),
             EventKind::AgentDead {
                 cause: "cc exited".into(),
             },
         ));
-        assert_eq!(app.dialogue.len(), 0);
+        assert_eq!(app.dialogue.len(), 1);
+        assert!(matches!(app.dialogue[0], DialogueLine::System(_)));
     }
 
     #[test]
     fn dialogue_cap_evicts_oldest() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         for i in 0..(DIALOGUE_CAP + 10) {
             app.push_line(DialogueLine::System(format!("line-{i}")));
         }
@@ -686,7 +685,7 @@ mod tests {
 
     #[test]
     fn control_chars_in_input_are_ignored() {
-        let mut app = ReplApp::new();
+        let mut app = ReplApp::new(AgentId::new());
         app.handle_key(KeyCode::Char('\0'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('\t'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
