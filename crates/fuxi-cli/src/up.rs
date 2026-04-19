@@ -90,7 +90,7 @@ pub async fn run(args: Args) -> Result<()> {
         bus.clone(),
         Arc::new(SystemClock),
     ));
-    let keeper_task = Keeper::new(sched_store.clone(), bus.clone(), Arc::new(SystemClock)).spawn();
+    let keeper_task = Arc::clone(&keeper).spawn();
 
     // fs_watch triggers 启动时一次性挂上
     let fs_rig = FsWatcherRig::spawn(

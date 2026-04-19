@@ -75,7 +75,11 @@ impl Keeper {
     }
 
     /// 起后台 tick loop。`JoinHandle::abort()` 可以立即停。
-    pub fn spawn(self) -> JoinHandle<()> {
+    ///
+    /// 为什么消费 `Arc<Self>`：up.rs / repl.rs 需要同一个 Keeper instance
+    /// 既起 tick loop 又挂在 Daemon 上走手动 fire；用 Arc clone 共享，避免双 instance
+    /// 将来加内存状态（in-flight dedup set）时各自为政。
+    pub fn spawn(self: Arc<Self>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(self.cfg.tick_interval);
             // 跳第一次 tick——interval 首次立即 ready。
@@ -429,6 +433,70 @@ mod tests {
         let fires = store.list_fires(&row.id).await.expect("fires");
         assert_eq!(fires.len(), 1);
         assert_eq!(fires[0].cause, FireCause::Manual);
+    }
+
+    /// BUG-5 回归：up.rs / repl.rs 期望 Arc<Keeper> 单 instance
+    /// 同时承担 tick loop 和手动 fire 两职责。spawn 必须消费 Arc<Self>——
+    /// 若它还是消费 `self`，下面 `Arc::clone(&keeper).spawn()` 就根本编译不过。
+    #[tokio::test]
+    async fn keeper_shared_arc_tick_and_manual_fire() {
+        let (store, bus) = fresh().await;
+        let base = Utc.with_ymd_and_hms(2026, 4, 19, 9, 0, 0).unwrap();
+        let clock = Arc::new(FakeClock::new(base));
+        let new = NewTrigger {
+            id: new_trigger_id(),
+            spec: TriggerSpec::Cron {
+                expr: "*/1 * * * * *".into(),
+                tz: None,
+            },
+            intent: "heartbeat".into(),
+            session_id: None,
+            max_failures: None,
+        };
+        let row = store.insert(new).await.expect("insert");
+        // anchor created_at 到 base 之前——tick 第一次扫应见 cron 到期。
+        sqlx::query("UPDATE triggers SET created_at = ?1 WHERE id = ?2")
+            .bind((base - ChronoDuration::seconds(1)).to_rfc3339())
+            .bind(&row.id)
+            .execute(store_pool(&store))
+            .await
+            .expect("update created_at");
+
+        // 一个 Arc<Keeper>，clone 两份：一份 spawn tick loop，一份走手动 fire。
+        let keeper = Arc::new(
+            Keeper::new(store.clone(), bus.clone(), clock.clone()).with_config(KeeperConfig {
+                tick_interval: Duration::from_millis(10),
+            }),
+        );
+        // 把 FakeClock 推到 base+2s；tick_once 读到的 now 会让 cron 触发。
+        clock.set(base + ChronoDuration::seconds(2));
+        let tick_handle = Arc::clone(&keeper).spawn();
+
+        // 等 tick loop 跑几轮——interval=10ms，50ms 足够至少 1 次。
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        // 同一 Arc<Keeper> 另一份 clone 用来手动 fire。
+        keeper
+            .record_and_emit_fire(
+                &row.id,
+                base + ChronoDuration::seconds(2),
+                FireCause::Manual,
+                None,
+            )
+            .await
+            .expect("manual fire");
+
+        tick_handle.abort();
+
+        // DB 里应同时有 Scheduled 和 Manual 两种 fire——证明共享的是同一 store。
+        let fires = store.list_fires(&row.id).await.expect("fires");
+        let has_scheduled = fires.iter().any(|f| f.cause == FireCause::Scheduled);
+        let has_manual = fires.iter().any(|f| f.cause == FireCause::Manual);
+        assert!(
+            has_scheduled,
+            "tick loop 应产生 Scheduled fire，fires={fires:?}"
+        );
+        assert!(has_manual, "手动 fire 应入库，fires={fires:?}");
     }
 
     fn store_pool(store: &TriggerStore) -> &sqlx::SqlitePool {

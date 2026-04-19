@@ -186,7 +186,7 @@ pub async fn run(args: Args) -> Result<()> {
         bus.clone(),
         Arc::new(SystemClock),
     ));
-    let keeper_task = Keeper::new(sched_store.clone(), bus.clone(), Arc::new(SystemClock)).spawn();
+    let keeper_task = Arc::clone(&keeper).spawn();
     let daemon = Daemon::new(fuxi.clone(), bus.clone(), sched_store, keeper);
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
