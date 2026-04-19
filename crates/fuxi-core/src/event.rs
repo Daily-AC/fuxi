@@ -120,7 +120,19 @@ pub enum EventKind {
     // ── intervention / supervision (伏羲独创) ────────────────
     UserInterventionSent {
         target: AgentId,
+        /// `append` / `interrupt`——区分两种介入模式（v0.1 薄片 I）。
+        mode: String,
         text: String,
+    },
+    /// 门客因介入被打断当前 turn（`control_request/interrupt` 已送达）。
+    /// 仅在 `mode=interrupt` 的介入路径上发。
+    AgentInterrupted {
+        reason: String,
+    },
+    /// 介入已应用到任务——wire 层确认消息已发出/门客已打断。
+    /// 标志是 v0.1 scenario 断言点 19。
+    TaskInterventionApplied {
+        mode: String,
     },
     OrchestratorCcReceived {
         from_user_to: AgentId,
