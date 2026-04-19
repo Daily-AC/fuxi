@@ -51,7 +51,12 @@ async fn every_three_seconds_fires_at_least_twice_in_7s() {
         .expect("insert");
 
     let mut sub = bus.subscribe();
-    let keeper_task = Keeper::new(store.clone(), bus.clone(), Arc::new(SystemClock)).spawn();
+    let keeper_task = Arc::new(Keeper::new(
+        store.clone(),
+        bus.clone(),
+        Arc::new(SystemClock),
+    ))
+    .spawn();
 
     // 等 8 秒；收集 TriggerFired cause=scheduled 事件
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
