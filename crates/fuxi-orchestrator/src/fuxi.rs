@@ -176,7 +176,7 @@ impl Fuxi {
                 if let (None, Some(h)) = (cc_cfg.cwd.as_ref(), worktree.as_ref()) {
                     cc_cfg.cwd = Some(h.worktree_path.clone());
                 }
-                CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg)
+                CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg).await
             }
         };
         match launch_result {

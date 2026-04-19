@@ -32,6 +32,9 @@ pub struct CcLaunchConfig {
     /// alias 是 shell-only 的，我们 spawn 直接走 argv，显式传递所有 flag，
     /// 不要隐式依赖用户 shell 环境。
     pub binary: String,
+    /// `--sdk-url ws://...`——v0.1 薄片 H：启用 WS 反连模式。`None` 时走
+    /// 传统 stdio 模式（仅单测 fixtures 还会用到）；生产路径**必传**。
+    pub sdk_url: Option<String>,
 }
 
 impl Default for CcLaunchConfig {
@@ -43,6 +46,7 @@ impl Default for CcLaunchConfig {
             allowed_tools: None,
             extra_args: Vec::new(),
             binary: "claude".to_string(),
+            sdk_url: None,
         }
     }
 }
@@ -65,7 +69,17 @@ impl CcLaunchConfig {
     /// 导致 cc 进入「Not logged in」状态——对 P1 的 E2E 验证是阻塞性问题。
     /// 等 `use_bare` 开关需要时（noisy hooks + 独立 token 注入）再单独加。
     pub fn build_args(&self) -> Vec<String> {
-        let mut args: Vec<String> = vec![
+        let mut args: Vec<String> = Vec::new();
+
+        // WS 反连：`--sdk-url` 必须**最前面**（参照 anya claude-code-backend.ts:255）；
+        // claude CLI 看到它就进 SDK 模式，NDJSON 通过 WS 双向走，stdin/stdout 不再是
+        // wire 通道（stderr 仍是 verbose 日志）。
+        if let Some(url) = &self.sdk_url {
+            args.push("--sdk-url".to_string());
+            args.push(url.clone());
+        }
+
+        args.extend([
             "--print".to_string(),
             "--input-format".to_string(),
             "stream-json".to_string(),
@@ -78,7 +92,7 @@ impl CcLaunchConfig {
             "--no-session-persistence".to_string(),
             "--model".to_string(),
             self.model.clone(),
-        ];
+        ]);
 
         if let Some(prompt) = &self.append_system_prompt {
             args.push("--append-system-prompt".to_string());
@@ -93,6 +107,14 @@ impl CcLaunchConfig {
         }
 
         args.extend(self.extra_args.iter().cloned());
+
+        // SDK 模式下 claude 仍需要 `-p <prompt>` 才进 headless（空串占位，
+        // 真正的 prompt 走 WS `{type:"user",...}` 消息）。参照 anya:278。
+        if self.sdk_url.is_some() {
+            args.push("-p".to_string());
+            args.push(String::new());
+        }
+
         args
     }
 }
@@ -204,5 +226,35 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.binary, "claude");
+    }
+
+    /// WS 反连模式：`--sdk-url` 必须最前、末尾有 `-p ""`。
+    #[test]
+    fn sdk_url_is_first_and_adds_placeholder_prompt() {
+        let cfg = CcLaunchConfig {
+            model: "haiku".to_string(),
+            sdk_url: Some("ws://127.0.0.1:12345/ws/cli/abc".into()),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        assert_eq!(args[0], "--sdk-url");
+        assert_eq!(args[1], "ws://127.0.0.1:12345/ws/cli/abc");
+        let n = args.len();
+        assert_eq!(args[n - 2], "-p");
+        assert_eq!(args[n - 1], "");
+    }
+
+    /// 没启 WS 模式时不应插入 `--sdk-url` 或 `-p ""`。
+    #[test]
+    fn stdio_mode_omits_sdk_url_and_placeholder() {
+        let cfg = CcLaunchConfig {
+            model: "haiku".to_string(),
+            sdk_url: None,
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        assert!(!args.iter().any(|a| a == "--sdk-url"));
+        // -p "" 只在 SDK 模式下追加；stdio 下 build_args 尾部不应是 "-p"
+        assert_ne!(args.last().map(String::as_str), Some("-p"));
     }
 }

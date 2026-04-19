@@ -13,6 +13,10 @@ real_cc = []
 fuxi-core.workspace = true
 fuxi-a2a.workspace = true
 tokio = { workspace = true, features = ["full"] }
+# WS 反连模式（v0.1 薄片 H）· 替代原本的 stdio `--print` 路径。
+# axum 提供 `ws` extractor 做反连 server（CLI 是 client），已在 workspace。
+axum = { workspace = true, features = ["ws", "macros"] }
+futures-util = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -24,3 +28,5 @@ chrono = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }
+# WS bridge 单测用它当"假 CLI"连回 axum server。
+tokio-tungstenite = { workspace = true }

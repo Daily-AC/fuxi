@@ -13,6 +13,7 @@ pub mod agent;
 pub mod config;
 pub mod parser;
 pub mod spawn;
+pub mod ws_bridge;
 
 pub use agent::{CcAgent, CcError};
 pub use config::{
@@ -20,3 +21,4 @@ pub use config::{
 };
 pub use parser::{CcEvent, TranslateState, parse_line, translate};
 pub use spawn::{SpawnedCc, spawn_claude};
+pub use ws_bridge::{WsChannel, WsError};
