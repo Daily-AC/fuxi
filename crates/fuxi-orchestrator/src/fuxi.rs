@@ -256,6 +256,42 @@ impl Fuxi {
         Ok(())
     }
 
+    /// 介入——向某个门客发话。
+    ///
+    /// - `append`：追加一条 user message，门客下一 turn 看到（stdio/WS 都能做）
+    /// - `interrupt`：打断当前 turn 再追加（依赖 WS 模式的 control_request/interrupt）
+    ///
+    /// v0.1 下 task_id 是"最近一次 dispatch"的——cc 适配器当前忽略这个参数，
+    /// 直接用它内部跟踪的 `current_task`。
+    ///
+    /// 薄片 I 将在此基础上加：玄女事件发布（UserInterventionSent）、状态机
+    /// (task_intervention_applied)、以及辨识"用户说'停/换方向'"的 NLU 层。
+    /// 这里只做 wire 层的"把话送到"。
+    pub async fn intervene(
+        &self,
+        agent_id: AgentId,
+        interrupt_first: bool,
+        text: &str,
+    ) -> Result<()> {
+        let agent = self
+            .shelf
+            .get_agent(agent_id)
+            .await
+            .ok_or(OrchestratorError::AgentNotFound(agent_id))?;
+
+        // cc 忽略 task_id，这里传随机 id 兼容 trait 签名
+        let dummy_task = fuxi_core::id::TaskId::new();
+
+        if interrupt_first {
+            info!(agent = %agent_id, "intervene: 打断式");
+            agent.cancel(dummy_task).await?;
+        } else {
+            info!(agent = %agent_id, "intervene: 追加式");
+        }
+        agent.send_message(dummy_task, text).await?;
+        Ok(())
+    }
+
     /// 按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
     ///
     /// 使用 `claim_idle_by_role` 原子地"找+占"，防止并发 `dispatch_to_any`

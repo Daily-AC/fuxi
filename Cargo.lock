@@ -825,11 +825,14 @@ dependencies = [
  "fuxi-orchestrator",
  "fuxi-workspace",
  "ratatui",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
