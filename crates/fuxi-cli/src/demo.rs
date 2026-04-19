@@ -50,7 +50,7 @@ pub struct Args {
     #[arg(long)]
     pub model: Option<String>,
     /// 门客角色标签（写进 AgentProfile.role）。
-    #[arg(long, default_value = "dev")]
+    #[arg(long, default_value = "luban")]
     pub role: String,
     /// 门客名字（写进 AgentProfile.name）。
     #[arg(long, default_value = "cc-demo")]

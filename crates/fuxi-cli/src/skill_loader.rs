@@ -212,4 +212,76 @@ mod tests {
         let tools = loaded.allowed_tools.unwrap();
         assert_eq!(tools, vec!["Read", "Edit", "Bash"]);
     }
+
+    /// 验证新 soul-first SKILL.md 结构（带嵌套 metadata 块 + 多段中文 soul body）
+    /// 仍能被正确 load——name/description/allowed-tools 走 frontmatter，soul 进
+    /// `append_system_prompt`。极简 KV parser 对 `metadata:` 嵌套行 best-effort
+    /// 平铺解析，不应 panic 也不应丢顶层字段。
+    #[test]
+    fn loads_soul_first_skill_with_nested_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("xuannv");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        let content = "---\n\
+name: xuannv\n\
+description: 顶层调度玄女\n\
+allowed-tools: Bash(fuxi:*) Read\n\
+metadata:\n  role: xuannv\n  tier: orchestrator\n\
+---\n\
+\n\
+# 玄女\n\
+\n\
+我乃九天玄女，伏羲所立，专司点将派兵之责。\n\
+\n\
+我为何存在：让用户只需说出意图，门客自有人去当。\n\
+\n\
+我的价值观：知情但不专断，抄送不绕过，以人为主。\n";
+        std::fs::write(&path, content).unwrap();
+
+        let loaded = load_from_file(&path, "xuannv").expect("load");
+        assert_eq!(loaded.profile.name, "xuannv");
+        assert_eq!(loaded.profile.role, "xuannv");
+        // 顶层 frontmatter key 不被嵌套块覆盖
+        assert!(
+            loaded.append_system_prompt.contains("九天玄女"),
+            "soul body 必须保留：{}",
+            loaded.append_system_prompt
+        );
+        assert!(loaded.append_system_prompt.contains("我的价值观"));
+        let tools = loaded.allowed_tools.expect("allowed-tools 必须解析到");
+        assert_eq!(tools, vec!["Bash(fuxi:*)", "Read"]);
+        let desc = loaded
+            .profile
+            .extra
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(desc, "顶层调度玄女");
+    }
+
+    #[test]
+    fn loads_luban_soul_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("luban");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let path = skill_dir.join("SKILL.md");
+        let content = "---\n\
+name: luban\n\
+description: 工匠门客\n\
+allowed-tools: Read Edit Write Bash Grep Glob\n\
+---\n\
+\n\
+# 鲁班\n\
+\n\
+我是鲁班，公输班之后，匠人鼻祖。\n";
+        std::fs::write(&path, content).unwrap();
+        let loaded = load_from_file(&path, "luban").expect("load");
+        assert_eq!(loaded.profile.name, "luban");
+        assert!(loaded.append_system_prompt.contains("公输班"));
+        assert_eq!(
+            loaded.allowed_tools.unwrap(),
+            vec!["Read", "Edit", "Write", "Bash", "Grep", "Glob"]
+        );
+    }
 }

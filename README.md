@@ -8,10 +8,23 @@
 
 ---
 
-## 开发者怎么上手
+## 怎么上手
 
 ```bash
-# 安装 toolchain（rust-toolchain.toml 固定 stable edition 2024）
+# 一次性把 fuxi 装到 ~/.cargo/bin/——玄女的 Bash 工具调 `fuxi ...` 必须 PATH 通
+./scripts/install.sh
+
+# 启动玄女 REPL
+fuxi
+```
+
+`fuxi` 启动时会**先探测自身在 PATH**——不在就直接报错指向 `scripts/install.sh`，
+不让 TUI 起来后才发现玄女工具瘫痪。
+
+### 开发者门禁
+
+```bash
+# rust-toolchain.toml 固定 stable edition 2024
 rustup show
 
 # 全工程门禁
