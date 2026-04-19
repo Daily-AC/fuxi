@@ -184,6 +184,128 @@ pub async fn run_kill(args: KillArgs) -> Result<()> {
     print_response(resp)
 }
 
+// ── 更漏（cron / triggers） ──
+
+#[derive(Debug, ClapArgs)]
+pub struct CronAddArgs {
+    /// cron 表达式。支持 5 字段（分时日月周）或 6 字段（含秒）。
+    pub expr: String,
+    /// 触发意图（自然语言，玄女收到后读）。
+    #[arg(long)]
+    pub intent: String,
+    /// 时区（例 `Asia/Shanghai`）。默认 UTC。
+    #[arg(long)]
+    pub tz: Option<String>,
+    /// 绑定的玄女 session_id；省略 = 触发时新起一个 session。
+    #[arg(long)]
+    pub session: Option<String>,
+}
+
+pub async fn run_cron_add(args: CronAddArgs) -> Result<()> {
+    let resp = client::send(Command::CronAdd {
+        expr: args.expr,
+        intent: args.intent,
+        tz: args.tz,
+        session_id: args.session,
+    })
+    .await?;
+    print_response(resp)
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CronOnceArgs {
+    /// 绝对时间（RFC3339，例 `2026-04-19T21:00:00+08:00`）。
+    pub at: String,
+    #[arg(long)]
+    pub intent: String,
+    #[arg(long)]
+    pub session: Option<String>,
+}
+
+pub async fn run_cron_once(args: CronOnceArgs) -> Result<()> {
+    let resp = client::send(Command::CronOnce {
+        at: args.at,
+        intent: args.intent,
+        session_id: args.session,
+    })
+    .await?;
+    print_response(resp)
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CronWatchArgs {
+    /// 要监视的目录或文件路径。
+    pub path: String,
+    #[arg(long)]
+    pub intent: String,
+    /// 只关心的事件类型白名单（`create`/`modify`/`remove`/`access`）；空 = 全部。
+    #[arg(long, value_delimiter = ',')]
+    pub events: Vec<String>,
+    #[arg(long)]
+    pub session: Option<String>,
+}
+
+pub async fn run_cron_watch(args: CronWatchArgs) -> Result<()> {
+    let resp = client::send(Command::CronWatch {
+        path: args.path,
+        intent: args.intent,
+        events: args.events,
+        session_id: args.session,
+    })
+    .await?;
+    print_response(resp)
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CronWebhookArgs {
+    #[arg(long)]
+    pub intent: String,
+    /// 可选共享密钥——命中时要求 header `x-fuxi-secret` 或 body `secret` 匹配。
+    #[arg(long)]
+    pub secret: Option<String>,
+    #[arg(long)]
+    pub session: Option<String>,
+}
+
+pub async fn run_cron_webhook(args: CronWebhookArgs) -> Result<()> {
+    let resp = client::send(Command::CronWebhook {
+        intent: args.intent,
+        secret: args.secret,
+        session_id: args.session,
+    })
+    .await?;
+    print_response(resp)
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CronListArgs {}
+
+pub async fn run_cron_list(_args: CronListArgs) -> Result<()> {
+    let resp = client::send(Command::CronList).await?;
+    print_response(resp)
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CronFireArgs {
+    /// trigger_id（例 `trg_<uuid>`）。
+    pub id: String,
+}
+
+pub async fn run_cron_fire(args: CronFireArgs) -> Result<()> {
+    let resp = client::send(Command::CronFire { id: args.id }).await?;
+    print_response(resp)
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CronRemoveArgs {
+    pub id: String,
+}
+
+pub async fn run_cron_remove(args: CronRemoveArgs) -> Result<()> {
+    let resp = client::send(Command::CronRemove { id: args.id }).await?;
+    print_response(resp)
+}
+
 // ── 共用渲染 ──
 
 /// 把 Response 打印到 stdout；Err 转成 anyhow 让 exit code 非零。

@@ -59,6 +59,27 @@ enum Command {
     Skill(skill::SkillArgs),
     /// 【玄女工具】策府记忆存取（甲骨 + 河图洛书）。
     Memory(memory_cmd::MemoryArgs),
+    /// 【玄女工具】更漏——trigger 管理（cron / once / fs / webhook）。
+    #[command(subcommand)]
+    Cron(CronCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum CronCmd {
+    /// 登记 cron trigger。
+    Add(subcommands::CronAddArgs),
+    /// 登记一次性 trigger。
+    Once(subcommands::CronOnceArgs),
+    /// 登记 fs_watch trigger。
+    Watch(subcommands::CronWatchArgs),
+    /// 登记 webhook trigger。
+    Webhook(subcommands::CronWebhookArgs),
+    /// 列所有 triggers。
+    List(subcommands::CronListArgs),
+    /// 手动 fire。
+    Fire(subcommands::CronFireArgs),
+    /// 删 trigger。
+    Remove(subcommands::CronRemoveArgs),
 }
 
 #[tokio::main]
@@ -80,6 +101,15 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Resume(args)) => subcommands::run_resume(args).await,
         Some(Command::Skill(args)) => skill::run(args).await,
         Some(Command::Memory(args)) => memory_cmd::run(args).await,
+        Some(Command::Cron(c)) => match c {
+            CronCmd::Add(args) => subcommands::run_cron_add(args).await,
+            CronCmd::Once(args) => subcommands::run_cron_once(args).await,
+            CronCmd::Watch(args) => subcommands::run_cron_watch(args).await,
+            CronCmd::Webhook(args) => subcommands::run_cron_webhook(args).await,
+            CronCmd::List(args) => subcommands::run_cron_list(args).await,
+            CronCmd::Fire(args) => subcommands::run_cron_fire(args).await,
+            CronCmd::Remove(args) => subcommands::run_cron_remove(args).await,
+        },
     }
 }
 

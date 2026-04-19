@@ -259,6 +259,11 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         ConversationTransferred { .. } => "conversation_transferred",
         ConversationHandoffRequested { .. } => "conversation_handoff_requested",
         ConversationReturned { .. } => "conversation_returned",
+        TriggerRegistered { .. } => "trigger_registered",
+        TriggerFired { .. } => "trigger_fired",
+        TriggerDispatched { .. } => "trigger_dispatched",
+        TriggerSkipped { .. } => "trigger_skipped",
+        TriggerFailed { .. } => "trigger_failed",
         PlatformStarted { .. } => "platform_started",
         PlatformStopping => "platform_stopping",
         SkillStaged { .. } => "skill_staged",
@@ -466,5 +471,70 @@ mod tests {
         let task_str: String = row.try_get("task").expect("task");
         assert_eq!(agent_str, agent.to_string());
         assert_eq!(task_str, task.to_string());
+    }
+
+    /// 更漏五个变体的 kind_tag + SQLite roundtrip。
+    /// 加 EventKind 变体时必须同步更 kind_tag；此测试做门禁（公理 #M1.3）。
+    #[tokio::test]
+    async fn persists_trigger_lifecycle_variants() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let tid = "trg_test_1".to_string();
+        let registered = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::TriggerRegistered {
+                id: tid.clone(),
+                kind: "cron".into(),
+                spec: serde_json::json!({"expr":"*/5 * * * *"}),
+            },
+        };
+        let fired = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::TriggerFired {
+                id: tid.clone(),
+                fired_at: Utc::now(),
+                cause: "scheduled".into(),
+            },
+        };
+        let dispatched = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::TriggerDispatched {
+                id: tid.clone(),
+                to_agent: AgentId::new(),
+            },
+        };
+        let skipped = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::TriggerSkipped {
+                id: tid.clone(),
+                reason: "overlap".into(),
+            },
+        };
+        let failed = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::TriggerFailed {
+                id: tid.clone(),
+                error: "spawn failed".into(),
+            },
+        };
+        for ev in [&registered, &fired, &dispatched, &skipped, &failed] {
+            store.append(ev).await.expect("append");
+        }
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "trigger_registered",
+                "trigger_fired",
+                "trigger_dispatched",
+                "trigger_skipped",
+                "trigger_failed",
+            ]
+        );
     }
 }
