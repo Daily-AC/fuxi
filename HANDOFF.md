@@ -4,9 +4,17 @@
 
 ---
 
+## ⚠️ 优先读这 3 份（本 HANDOFF 之外）
+
+1. **`docs/superpowers/specs/2026-04-19-v0.1-scenario.md`** — v0.1 验收场景（北极星）。所有工作围绕这个锚
+2. **`docs/session-review-2026-04-19.md`** — 昨晚过程性记录（被否决的路径 / composio 借鉴具体文件行号 / 没写进 CLAUDE.md 的坑）
+3. **`docs/references.md`** — 外部项目清单 + composio↔fuxi 精确映射
+
+---
+
 ## 1. 你即将接手的是什么
 
-**伏羲**：Rust 实现的个人 AI agent 编排平台。毕业设计项目。
+**伏羲**：Rust 实现的个人 AI agent 编排平台。**毕设不是 ddl**，最终蓝图才是（用户 2026-04-19 下午明示）。
 
 - 用户只跟**玄女**（顶层 agent）对话
 - 玄女调度**门客**（cc / codex / gemini-cli 实例）干活
@@ -14,6 +22,28 @@
 - 真实目录：`/Users/e0_7/fuxi` （legacy 软链接：`/Users/e0_7/xihe`）
 
 **一页设计文档**（必读）：`docs/superpowers/specs/2026-04-19-伏羲-design.md`
+
+## 当前开工分支：`feat/fuxi-v0.1`
+
+v0.1 的 9 块薄片（A-I）**7 块已完成**（commits on `feat/fuxi-v0.1`）：
+
+| 薄片 | 状态 | commit |
+|---|---|---|
+| A · 玄女 SKILL.md | ✅ | `07a3c65` |
+| E · dev SKILL.md | ✅ | `07a3c65` |
+| H · cc WS `--sdk-url` 反连 | ✅ | `07a3c65` |
+| B · CLI 子命令（spawn/dispatch/intervene/status/list/kill） | ✅ | `8b994b9` |
+| C · daemon Unix socket IPC | ✅ | `8b994b9` |
+| I · 介入事件三联 | ✅ | `2175bfc` |
+| F · task_blocked / task_resumed | ✅ | `37fa91a` |
+| **D · REPL TUI**（`fuxi` 无参入口） | ⏳ 未做 | |
+| **G · 集成测试 · 真跑一次 story** | ⏳ 未做（依赖 D） | |
+
+门禁：fmt / clippy -D warnings / test --workspace 26 个 test block 全绿 0 failed。
+
+**下一块开工**：薄片 D（REPL TUI）。它是用户唯一入口——做完之后用户才能真打开 `fuxi` 用。
+  
+见 v0.1-scenario.md §2.2 薄片 D 的设计要点 + §7 依赖关系图。
 
 ---
 
