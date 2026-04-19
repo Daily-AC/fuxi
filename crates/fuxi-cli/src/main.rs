@@ -18,7 +18,7 @@ mod daemon;
 mod demo;
 mod ipc;
 mod repl;
-mod skill_loader;
+mod skill;
 mod subcommands;
 mod up;
 mod watch;
@@ -54,6 +54,8 @@ enum Command {
     Block(subcommands::BlockArgs),
     /// 【玄女工具】用户授权通过后解锁任务。
     Resume(subcommands::ResumeArgs),
+    /// 点将台管理：list / stage / approve / reject / activate。
+    Skill(skill::SkillArgs),
 }
 
 #[tokio::main]
@@ -73,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Kill(args)) => subcommands::run_kill(args).await,
         Some(Command::Block(args)) => subcommands::run_block(args).await,
         Some(Command::Resume(args)) => subcommands::run_resume(args).await,
+        Some(Command::Skill(args)) => skill::run(args).await,
     }
 }
 

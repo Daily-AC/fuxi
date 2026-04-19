@@ -12,12 +12,12 @@
 //!   个 socket 塞 `FUXI_SOCK` 给她）
 
 use crate::ipc::{Command, InterveneMode, Response};
-use crate::skill_loader;
 use anyhow::{Context, Result, anyhow};
 use fuxi_agent_cc::CcLaunchConfig;
 use fuxi_core::id::AgentId;
 use fuxi_core::task::Task;
 use fuxi_orchestrator::{Fuxi, WorkerKind};
+use fuxi_skills as skill_loader;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -214,6 +214,18 @@ async fn dispatch_command(fuxi: Arc<Fuxi>, cmd: Command, shutdown_hook: Arc<Noti
                 Err(e) => Response::err(e.to_string()),
             },
         },
+
+        Command::EmitEvent { kind } => {
+            use fuxi_core::{Event, EventMeta};
+            let ev = Event {
+                meta: EventMeta::now(),
+                kind: kind.into_event_kind(),
+            };
+            match fuxi.bus().publish(ev) {
+                Ok(_) => Response::ok(serde_json::json!({"emitted": true})),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
 
         Command::Shutdown => {
             // 先触发 Fuxi 的门客收尾，再通知 serve 循环退出

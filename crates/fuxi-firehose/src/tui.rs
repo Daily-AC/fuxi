@@ -427,6 +427,11 @@ fn summarize(k: &EventKind) -> String {
         ),
         PlatformStarted { version } => format!("fuxi {version}"),
         PlatformStopping => "platform stopping".to_string(),
+        SkillStaged { role, template, .. } => format!("role={role} template={template}"),
+        SkillApproved { role } => format!("role={role}"),
+        SkillRejected { role, reason } => format!("role={role} reason={}", one_line(reason, 40)),
+        SkillActivated { role } => format!("role={role}"),
+        NoRoleMatched { need } => format!("need={}", one_line(need, 50)),
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -475,6 +480,13 @@ fn color_for(k: &EventKind) -> Color {
         | OrchestratorCcReceived { .. }
         | ConversationTransferred { .. }
         | ConversationReturned { .. } => Color::Yellow,
+
+        // 招贤一族 —— 醒目的红，因为是"生新 role"的高权限动作。
+        SkillStaged { .. }
+        | SkillApproved { .. }
+        | SkillRejected { .. }
+        | SkillActivated { .. }
+        | NoRoleMatched { .. } => Color::Red,
 
         Custom { .. } => Color::DarkGray,
     }

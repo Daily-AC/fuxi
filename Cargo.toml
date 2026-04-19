@@ -10,6 +10,7 @@ members = [
     "crates/fuxi-cli",
     "crates/fuxi-workspace",
     "crates/fuxi-orchestrator",
+    "crates/fuxi-skills",
 ]
 
 [workspace.package]
@@ -65,6 +66,7 @@ fuxi-agent-codex = { path = "crates/fuxi-agent-codex" }
 fuxi-firehose = { path = "crates/fuxi-firehose" }
 fuxi-workspace = { path = "crates/fuxi-workspace" }
 fuxi-orchestrator = { path = "crates/fuxi-orchestrator" }
+fuxi-skills = { path = "crates/fuxi-skills" }
 
 [profile.release]
 lto = "thin"

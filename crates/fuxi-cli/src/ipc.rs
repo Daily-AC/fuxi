@@ -60,10 +60,63 @@ pub enum Command {
         task_id: String,
         input: Option<String>,
     },
+    /// 让 daemon 往 EventBus 推一条事件。当前只接招贤流水线需要的几种变体，
+    /// 避免把整个 EventKind 暴露成 wire 协议（那会把内部型号锁死到 IPC 合约里）。
+    EmitEvent { kind: EventKindPayload },
     /// 关 daemon 本身。所有门客随之下线。
     Shutdown,
     /// 健康探活——daemon 回一条 `Pong`。
     Ping,
+}
+
+/// 客户端可以请求 daemon 推的事件负载——故意受限的白名单。
+///
+/// 为什么不直接重用 `fuxi_core::EventKind`：
+/// 1. 避免把 event 变体通过 IPC 暴露出去的向前兼容负担
+/// 2. 招贤事件的 meta（agent/task）天然为 None，换一层轻型结构更清晰
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventKindPayload {
+    SkillStaged {
+        role: String,
+        template: String,
+        path: String,
+    },
+    SkillApproved {
+        role: String,
+    },
+    SkillRejected {
+        role: String,
+        reason: String,
+    },
+    SkillActivated {
+        role: String,
+    },
+    NoRoleMatched {
+        need: String,
+    },
+}
+
+impl EventKindPayload {
+    /// 转成 `fuxi_core::EventKind`——daemon 拿到后用这个 publish。
+    pub fn into_event_kind(self) -> fuxi_core::EventKind {
+        use fuxi_core::EventKind;
+        match self {
+            Self::SkillStaged {
+                role,
+                template,
+                path,
+            } => EventKind::SkillStaged {
+                role,
+                template,
+                path,
+            },
+            Self::SkillApproved { role } => EventKind::SkillApproved { role },
+            Self::SkillRejected { role, reason } => EventKind::SkillRejected { role, reason },
+            Self::SkillActivated { role } => EventKind::SkillActivated { role },
+            Self::NoRoleMatched { need } => EventKind::NoRoleMatched { need },
+        }
+    }
 }
 
 /// 介入模式。

@@ -260,6 +260,11 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         ConversationReturned { .. } => "conversation_returned",
         PlatformStarted { .. } => "platform_started",
         PlatformStopping => "platform_stopping",
+        SkillStaged { .. } => "skill_staged",
+        SkillApproved { .. } => "skill_approved",
+        SkillRejected { .. } => "skill_rejected",
+        SkillActivated { .. } => "skill_activated",
+        NoRoleMatched { .. } => "no_role_matched",
         Custom { .. } => "custom",
     }
 }
@@ -373,6 +378,74 @@ mod tests {
             .expect("replay from time");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].meta.id, b.meta.id);
+    }
+
+    #[tokio::test]
+    async fn persists_skill_lifecycle_kind_tags() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let events = [
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::NoRoleMatched {
+                    need: "画图门客".into(),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::SkillStaged {
+                    role: "painter".into(),
+                    template: "dev".into(),
+                    path: "/tmp/painter.staging/SKILL.md".into(),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::SkillApproved {
+                    role: "painter".into(),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::SkillRejected {
+                    role: "liar".into(),
+                    reason: "frontmatter 不合法".into(),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::SkillActivated {
+                    role: "painter".into(),
+                },
+            },
+        ];
+        for ev in &events {
+            store.append(ev).await.expect("append");
+        }
+
+        let rows = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch");
+        let tags: Vec<String> = rows
+            .iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("tag"))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "no_role_matched",
+                "skill_staged",
+                "skill_approved",
+                "skill_rejected",
+                "skill_activated",
+            ]
+        );
+
+        // 回放往返：payload 能 deser 成原 enum。
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        assert_eq!(got.len(), 5);
     }
 
     #[tokio::test]

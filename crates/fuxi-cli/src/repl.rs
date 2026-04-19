@@ -15,7 +15,6 @@
 
 use crate::daemon::Daemon;
 use crate::ipc;
-use crate::skill_loader;
 use anyhow::{Context, Result, anyhow};
 use clap::Args as ClapArgs;
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
@@ -31,6 +30,7 @@ use fuxi_core::task::Task;
 use fuxi_events::EventBus;
 use fuxi_firehose::{FirehoseApp, Hub};
 use fuxi_orchestrator::{Fuxi, FuxiConfig, WorkerKind};
+use fuxi_skills as skill_loader;
 use fuxi_workspace::GitWorktreeWorkspace;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
