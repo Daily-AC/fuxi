@@ -18,6 +18,7 @@ fuxi-firehose.workspace = true
 fuxi-orchestrator.workspace = true
 fuxi-workspace.workspace = true
 fuxi-skills.workspace = true
+fuxi-memory.workspace = true
 tokio = { workspace = true, features = ["full"] }
 clap.workspace = true
 anyhow.workspace = true

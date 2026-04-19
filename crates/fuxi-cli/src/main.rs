@@ -17,6 +17,7 @@ mod client;
 mod daemon;
 mod demo;
 mod ipc;
+mod memory_cmd;
 mod repl;
 mod skill;
 mod subcommands;
@@ -56,6 +57,8 @@ enum Command {
     Resume(subcommands::ResumeArgs),
     /// 点将台管理：list / stage / approve / reject / activate。
     Skill(skill::SkillArgs),
+    /// 【玄女工具】策府记忆存取（甲骨 + 河图洛书）。
+    Memory(memory_cmd::MemoryArgs),
 }
 
 #[tokio::main]
@@ -76,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Block(args)) => subcommands::run_block(args).await,
         Some(Command::Resume(args)) => subcommands::run_resume(args).await,
         Some(Command::Skill(args)) => skill::run(args).await,
+        Some(Command::Memory(args)) => memory_cmd::run(args).await,
     }
 }
 
