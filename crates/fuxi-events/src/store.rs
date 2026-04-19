@@ -257,6 +257,7 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         TaskInterventionApplied { .. } => "task_intervention_applied",
         OrchestratorCcReceived { .. } => "orchestrator_cc_received",
         ConversationTransferred { .. } => "conversation_transferred",
+        ConversationHandoffRequested { .. } => "conversation_handoff_requested",
         ConversationReturned { .. } => "conversation_returned",
         PlatformStarted { .. } => "platform_started",
         PlatformStopping => "platform_stopping",

@@ -139,14 +139,28 @@ pub enum EventKind {
     TaskInterventionApplied {
         mode: String,
     },
+    /// 呈报（抄送）：用户直接对门客说话时，玄女同步收到副本。
+    /// meta.agent 置为玄女 id（说明"这是给玄女的信"）。
+    /// `original_intervention_id` 关联到用户原 `UserInterventionSent` 的 event id，
+    /// 方便 TUI/审计把两条消息串成一条链。
     OrchestratorCcReceived {
         from_user_to: AgentId,
         text: String,
+        original_intervention_id: Uuid,
     },
     ConversationTransferred {
         from: AgentId,
         to: AgentId,
         reason: String,
+    },
+    /// 让贤（主对话权移交请求）：from 请求把主对话切到 to。
+    /// 参照 langgraph `Command(goto, payload)`。TUI 订阅到此事件后把
+    /// active target 切到 to；不阻塞 from。`brief` 是可选简报/交接上下文。
+    ConversationHandoffRequested {
+        from: AgentId,
+        to: AgentId,
+        reason: String,
+        brief: Option<String>,
     },
     ConversationReturned {
         from: AgentId,
