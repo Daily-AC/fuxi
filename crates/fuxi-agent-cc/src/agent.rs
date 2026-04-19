@@ -81,12 +81,20 @@ struct Inner {
     /// 当前活跃任务 id——写进事件 meta。
     current_task: Option<TaskId>,
     translate_state: TranslateState,
+    /// 死亡信号发送端。
+    /// pump_loop 退出（WS channel 关闭）时发一条"ws closed"；shutdown 主动清空。
+    /// why `Option`: 一旦发过一次就置 None，避免重复发。
+    death_tx: Option<mpsc::UnboundedSender<String>>,
 }
 
 /// Claude Code 门客——WS 反连承载。
 pub struct CcAgent {
     card: AgentCard,
     inner: Arc<Mutex<Inner>>,
+    /// 死亡信号接收端——被 `take_death_watch` 拿走后就是 None。
+    /// why 用 `std::sync::Mutex` 而非 tokio：take_death_watch 是同步 API，
+    /// 锁内只 std::mem::take 一瞬，不需要 async。
+    death_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<String>>>,
     /// 保活 pump task 句柄。drop 不取消（channel drop 自会带停）。
     _pump: tokio::task::JoinHandle<()>,
 }
@@ -164,6 +172,9 @@ impl CcAgent {
             status: AgentStatus::Idle,
         };
 
+        // death signal wiring
+        let (death_tx, death_rx) = mpsc::unbounded_channel::<String>();
+
         let inner = Arc::new(Mutex::new(Inner {
             channel: channel.clone(),
             child: Some(child),
@@ -171,6 +182,7 @@ impl CcAgent {
             active_tx: None,
             current_task: None,
             translate_state: TranslateState::new(),
+            death_tx: Some(death_tx),
         }));
 
         // 4. pump task——长跑，直到 channel 关闭
@@ -179,8 +191,22 @@ impl CcAgent {
         Ok(Self {
             card,
             inner,
+            death_rx: std::sync::Mutex::new(Some(death_rx)),
             _pump: pump,
         })
+    }
+
+    /// 让编排层接管死亡信号的接收端。
+    ///
+    /// 设计理由：`CcAgent` 不直接依赖 EventBus——保持 adapter 层与事件层解耦；
+    /// Fuxi 从这里拿到 rx 后，spawn 一个 task 监听 → publish `AgentDead`。
+    ///
+    /// 返回 `None` 表示已被取走（每个 CcAgent 一生只能 take 一次）。
+    pub fn take_death_watch(&self) -> Option<mpsc::UnboundedReceiver<String>> {
+        self.death_rx
+            .lock()
+            .ok()
+            .and_then(|mut g| std::mem::take(&mut *g))
     }
 
     /// 组装 `{type:"user", ...}` JSON。
@@ -268,6 +294,9 @@ impl Agent for CcAgent {
         let mut inner = self.inner.lock().await;
         inner.status = AgentStatus::Stopping;
         inner.active_tx = None;
+        // 主动 shutdown：拿走 death_tx，抑制 pump 退出时重复发信号——
+        // Fuxi::shutdown 自己会显式发 AgentDead，这里不重。
+        inner.death_tx = None;
 
         // WS channel 跟着 inner 一起 drop 会触发 server 停；这里显式清子进程。
         if let Some(mut child) = inner.child.take() {
@@ -398,6 +427,16 @@ async fn pump_loop(
         }
     }
     tracing::info!("ws_pump: channel closed, pump exiting");
+    // 死亡信号：pump 退出意味着 cc 侧 WS 断了——正常 shutdown 会先把 death_tx 拿走，
+    // 所以此时 death_tx 还在就代表意外死亡。发一条，Fuxi 侧转发 AgentDead。
+    // why take：确保单发，避免重复 publish。
+    let death_tx = {
+        let mut guard = inner.lock().await;
+        guard.death_tx.take()
+    };
+    if let Some(tx) = death_tx {
+        let _ = tx.send("ws channel closed".to_string());
+    }
 }
 
 /// 处理 CLI 发来的 control_request。

@@ -246,6 +246,23 @@ impl Fuxi {
         match launch_result {
             Ok(a) => {
                 let endpoint_hint = a.card().endpoint.clone();
+                // 取出死亡信号接收端 → spawn 转发任务 → 死亡时 publish AgentDead。
+                // 放在 Arc::new 之前——take_death_watch 是 `&CcAgent` 方法，
+                // 装进 Arc<dyn Agent> 后就拿不动了。
+                let death_rx = a.take_death_watch();
+                if let Some(mut rx) = death_rx {
+                    let bus = self.bus.clone();
+                    tokio::spawn(async move {
+                        if let Some(reason) = rx.recv().await {
+                            let mut meta = EventMeta::now();
+                            meta.agent = Some(agent_id);
+                            let _ = bus.publish(Event {
+                                meta,
+                                kind: EventKind::AgentDead { cause: reason },
+                            });
+                        }
+                    });
+                }
                 let agent: Arc<dyn Agent> = Arc::new(a);
                 let id = self.register_ready(agent, worktree, endpoint_hint).await;
                 debug_assert_eq!(id, agent_id, "launch_with_id 应保证 id 一致");
