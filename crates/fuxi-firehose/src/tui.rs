@@ -391,9 +391,16 @@ fn summarize(k: &EventKind) -> String {
             let status = if *ok { "ok" } else { "err" };
             format!("tool={tool} {status}: {}", one_line(output_preview, 40))
         }
-        UserInterventionSent { target, text } => {
-            format!("→{}: {}", short_id(&target.to_string()), one_line(text, 40))
+        UserInterventionSent { target, mode, text } => {
+            format!(
+                "→{} [{}]: {}",
+                short_id(&target.to_string()),
+                mode,
+                one_line(text, 40)
+            )
         }
+        AgentInterrupted { reason } => format!("interrupted: {reason}"),
+        TaskInterventionApplied { mode } => format!("intervention applied [{mode}]"),
         OrchestratorCcReceived { from_user_to, text } => format!(
             "cc {} {}",
             short_id(&from_user_to.to_string()),
@@ -455,6 +462,8 @@ fn color_for(k: &EventKind) -> Color {
         ToolCallStarted { .. } | ToolCallFinished { .. } => Color::Blue,
 
         UserInterventionSent { .. }
+        | AgentInterrupted { .. }
+        | TaskInterventionApplied { .. }
         | OrchestratorCcReceived { .. }
         | ConversationTransferred { .. }
         | ConversationReturned { .. } => Color::Yellow,

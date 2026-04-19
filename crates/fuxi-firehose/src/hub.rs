@@ -303,6 +303,8 @@ pub(crate) fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         ToolCallStarted { .. } => "tool_call_started",
         ToolCallFinished { .. } => "tool_call_finished",
         UserInterventionSent { .. } => "user_intervention_sent",
+        AgentInterrupted { .. } => "agent_interrupted",
+        TaskInterventionApplied { .. } => "task_intervention_applied",
         OrchestratorCcReceived { .. } => "orchestrator_cc_received",
         ConversationTransferred { .. } => "conversation_transferred",
         ConversationReturned { .. } => "conversation_returned",

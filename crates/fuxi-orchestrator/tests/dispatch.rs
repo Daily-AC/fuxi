@@ -521,3 +521,180 @@ async fn lifecycle_events_all_reach_bus() {
         "AgentDead 必须在 bus 上"
     );
 }
+
+// ── 薄片 I · 介入事件三联 ──────────────────────────────────────
+
+/// 支持 send_message / cancel 的 stub——用来验 intervene 事件发出。
+struct InterveneTrackingStub {
+    card: AgentCard,
+    sends: std::sync::atomic::AtomicUsize,
+    cancels: std::sync::atomic::AtomicUsize,
+}
+
+impl InterveneTrackingStub {
+    fn new(role: &str) -> Arc<Self> {
+        let card = AgentCard {
+            id: AgentId::new(),
+            profile: AgentProfile {
+                name: format!("intv-{role}"),
+                role: role.to_string(),
+                cli: "stub".to_string(),
+                system_prompt: String::new(),
+                tags: vec!["test".to_string()],
+                extra: Default::default(),
+            },
+            endpoint: "stub://intv".into(),
+            status: AgentStatus::Idle,
+        };
+        Arc::new(Self {
+            card,
+            sends: AtomicUsize::new(0),
+            cancels: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl Agent for InterveneTrackingStub {
+    fn card(&self) -> &AgentCard {
+        &self.card
+    }
+    async fn dispatch(&self, _task: Task) -> Result<mpsc::Receiver<Event>> {
+        let (_tx, rx) = mpsc::channel(1);
+        Ok(rx)
+    }
+    async fn send_message(&self, _task: TaskId, _text: &str) -> Result<()> {
+        self.sends.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    async fn cancel(&self, _task: TaskId) -> Result<()> {
+        self.cancels.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn intervene_append_emits_user_intervention_and_applied() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = InterveneTrackingStub::new("dev");
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(id, false, "hello mid-task")
+        .await
+        .expect("intervene");
+
+    // 事件顺序：UserInterventionSent(append) + TaskInterventionApplied(append)
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        if ev.meta.agent == Some(id) {
+            collected.push(ev);
+        }
+    }
+
+    let has_user_sent_append = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::UserInterventionSent { mode, .. } if mode == "append"
+        )
+    });
+    assert!(has_user_sent_append, "append 模式应发 UserInterventionSent");
+
+    let has_applied = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskInterventionApplied { mode } if mode == "append"
+        )
+    });
+    assert!(
+        has_applied,
+        "应发 TaskInterventionApplied {{ mode=append }}"
+    );
+
+    assert!(
+        !collected
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::AgentInterrupted { .. })),
+        "append 模式**不应**发 AgentInterrupted"
+    );
+
+    // wire 层确实调了 send_message；没调 cancel
+    assert_eq!(stub.sends.load(Ordering::Relaxed), 1);
+    assert_eq!(stub.cancels.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = InterveneTrackingStub::new("dev");
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(id, true, "stop and rework")
+        .await
+        .expect("intervene");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        if ev.meta.agent == Some(id) {
+            collected.push(ev);
+        }
+    }
+
+    // 三联事件——v0.1 断言点 17 / 18 / 19
+    let has_sent = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::UserInterventionSent { mode, .. } if mode == "interrupt"
+        )
+    });
+    let has_interrupted = collected
+        .iter()
+        .any(|e| matches!(&e.kind, EventKind::AgentInterrupted { .. }));
+    let has_applied = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskInterventionApplied { mode } if mode == "interrupt"
+        )
+    });
+    assert!(has_sent, "缺 UserInterventionSent [interrupt]");
+    assert!(has_interrupted, "缺 AgentInterrupted");
+    assert!(has_applied, "缺 TaskInterventionApplied [interrupt]");
+
+    // wire 层：cancel 先发，send_message 后发
+    assert_eq!(stub.cancels.load(Ordering::Relaxed), 1);
+    assert_eq!(stub.sends.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn intervene_on_missing_agent_returns_not_found() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let bogus = AgentId::new();
+    let err = fuxi
+        .intervene(bogus, false, "ghost")
+        .await
+        .expect_err("should fail on missing agent");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not registered") || msg.contains("not found") || msg.contains("agent"),
+        "期待 agent-not-found 类错误, got: {msg}"
+    );
+}

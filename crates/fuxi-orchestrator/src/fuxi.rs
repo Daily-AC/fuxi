@@ -261,12 +261,14 @@ impl Fuxi {
     /// - `append`：追加一条 user message，门客下一 turn 看到（stdio/WS 都能做）
     /// - `interrupt`：打断当前 turn 再追加（依赖 WS 模式的 control_request/interrupt）
     ///
-    /// v0.1 下 task_id 是"最近一次 dispatch"的——cc 适配器当前忽略这个参数，
-    /// 直接用它内部跟踪的 `current_task`。
+    /// v0.1 薄片 I 承诺的三个事件：
+    /// - `UserInterventionSent { target, mode, text }`  （入口）
+    /// - `AgentInterrupted { reason }`   仅在 interrupt 模式下发
+    /// - `TaskInterventionApplied { mode }`  wire 层确认
     ///
-    /// 薄片 I 将在此基础上加：玄女事件发布（UserInterventionSent）、状态机
-    /// (task_intervention_applied)、以及辨识"用户说'停/换方向'"的 NLU 层。
-    /// 这里只做 wire 层的"把话送到"。
+    /// cc 适配器忽略 task_id，这里传随机 id 兼容 trait 签名；事件上不挂
+    /// task 维度（没有从 dispatch 回流最近 task 的路径）——v0.2 补上"最近
+    /// dispatch 的 task 记忆"后再加。
     pub async fn intervene(
         &self,
         agent_id: AgentId,
@@ -279,16 +281,49 @@ impl Fuxi {
             .await
             .ok_or(OrchestratorError::AgentNotFound(agent_id))?;
 
-        // cc 忽略 task_id，这里传随机 id 兼容 trait 签名
+        let mode_str = if interrupt_first {
+            "interrupt"
+        } else {
+            "append"
+        };
+
+        // 1. UserInterventionSent —— 入口事件，意图进入事件流
+        self.publish_with_agent(
+            agent_id,
+            EventKind::UserInterventionSent {
+                target: agent_id,
+                mode: mode_str.to_string(),
+                text: text.to_string(),
+            },
+        );
+
+        // cc 忽略 task_id，随机 id 兼容 trait 签名
         let dummy_task = fuxi_core::id::TaskId::new();
 
+        // 2. 若 interrupt：发 cancel；门客停 turn 后发 AgentInterrupted
         if interrupt_first {
             info!(agent = %agent_id, "intervene: 打断式");
             agent.cancel(dummy_task).await?;
+            self.publish_with_agent(
+                agent_id,
+                EventKind::AgentInterrupted {
+                    reason: "user_intervention".to_string(),
+                },
+            );
         } else {
             info!(agent = %agent_id, "intervene: 追加式");
         }
+
+        // 3. 追加 user message（both modes 都走这步）
         agent.send_message(dummy_task, text).await?;
+
+        // 4. TaskInterventionApplied —— wire 层确认
+        self.publish_with_agent(
+            agent_id,
+            EventKind::TaskInterventionApplied {
+                mode: mode_str.to_string(),
+            },
+        );
         Ok(())
     }
 
