@@ -1,37 +1,49 @@
 //! `CcAgent`——实现 `fuxi_core::Agent` 的 Claude Code 门客。
 //!
+//! **v0.1 薄片 H 开始走 WS 反连**（`--sdk-url ws://127.0.0.1:<port>/ws/cli/<sid>`）。
+//! 老的 stdio `--print` 路径被替换——但 `parser::parse_line` + `translate` 仍
+//! 复用（NDJSON wire 格式没变，只是传输层从 stdin/stdout 换到 WS）。
+//!
 //! 生命周期：
-//! 1. `CcAgent::launch()` 起进程，拿到 stdin/stdout；不立即 read——read 循环
-//!    在 `dispatch` 里启动，方便把 Task 上下文塞进事件 meta。
-//! 2. `dispatch(task)` 发一条 `type:"user"` 消息到 stdin，立即起一个 reader
-//!    task 把 stdout 的 stream-json 翻译成 `Event` 推到 mpsc::Sender；并返回
-//!    对应的 Receiver 给调用方。读到 `result` 事件即关闭 channel。
-//! 3. `send_message` 追加写入——但因为 `--print` 模式 cc 在处理完一条就发
-//!    result 退出，follow-up 只在 dispatch **之前** 有意义；对已经看到 result
-//!    的进程写会 EPIPE。P1 不做持续会话，返回错误即可。
-//! 4. `cancel` 发 SIGINT（Unix）让 cc 主动停手；非 Unix 退化成 kill。
-//! 5. `shutdown` 优雅关闭——drop stdin 让 cc 看到 EOF 自然退出，超时则 kill。
+//!
+//! 1. `launch_with_id` 并发起：
+//!    - `WsChannel::bind(sid)` 起本地 axum server → 拿到 port；
+//!    - `spawn_claude(cfg with --sdk-url)` 启动 CLI，CLI 反连回来；
+//!    - `wait_connect(30s)` 等 CLI 到达；
+//!    - 起 "message pump" task 不断 `channel.recv()` → parse + translate → 派发事件。
+//! 2. `dispatch(task)` 取 `cli_session_id`（可能刚收到的 `system/init`）、
+//!    注册新的 event_tx、通过 WS 发 `{type:"user",...}`，返回 Receiver。
+//! 3. `send_message` 复用同一个 WS channel 发 user message——**追加式介入**
+//!    （门客下一 turn 看见）。
+//! 4. `cancel` 走 WS `control_request { subtype: "interrupt" }` 打断当前 turn
+//!    ——**打断式介入**（不再像 stdio 时代靠 SIGINT）。
+//! 5. `shutdown` drop WsChannel（server 停）+ SIGTERM → 5s → SIGKILL。
 
 use crate::config::CcLaunchConfig;
 use crate::parser::{self, TranslateState, parse_line, translate};
 use crate::spawn::{SpawnedCc, spawn_claude};
+use crate::ws_bridge::WsChannel;
 use async_trait::async_trait;
 use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
-use fuxi_core::event::{Event, EventKind, EventMeta};
+use fuxi_core::event::Event;
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::Task;
 use fuxi_core::{CoreError, Result};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use std::time::Duration;
+use tokio::process::Child;
 use tokio::sync::{Mutex, mpsc};
 
 /// Agent 事件 channel 的默认缓冲——Firehose 应当快速消费；
 /// 32 足以吸收 cc 的爆发帧。
 const EVENT_CHANNEL_BUFFER: usize = 32;
 
-/// `fuxi-agent-cc` 的错误类型——聚合 io / serde / core。
+/// 默认等待 CLI 反连的超时——anya 实测 3-10 秒够用，留 30s 给首次启动
+/// （keychain 拉取 / 模型预热）。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `fuxi-agent-cc` 的错误类型——聚合 io / serde / core / ws。
 #[derive(Debug, thiserror::Error)]
 pub enum CcError {
     #[error("io: {0}")]
@@ -40,8 +52,10 @@ pub enum CcError {
     Serde(#[from] serde_json::Error),
     #[error("core: {0}")]
     Core(#[from] CoreError),
-    #[error("cc process already exited")]
-    Exited,
+    #[error("ws: {0}")]
+    Ws(#[from] crate::ws_bridge::WsError),
+    #[error("cc process exited before WS connected")]
+    EarlyExit,
     #[error("{0}")]
     Other(String),
 }
@@ -57,28 +71,28 @@ impl From<CcError> for CoreError {
     }
 }
 
-/// cc 子进程的可变内部状态——reader task / cancel / shutdown 都要碰。
+/// cc 子进程和 WS 通道的共享内部状态。
 struct Inner {
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
+    channel: Arc<WsChannel>,
     child: Option<Child>,
     status: AgentStatus,
+    /// 当前 dispatch 的事件管道。dispatch 设置，shutdown / drop 时清空。
+    active_tx: Option<mpsc::Sender<Event>>,
+    /// 当前活跃任务 id——写进事件 meta。
+    current_task: Option<TaskId>,
+    translate_state: TranslateState,
 }
 
-/// Claude Code 门客。
-///
-/// - `card`：对外能力声明；`dispatch` 时 id 会填进每条 Event meta。
-/// - `pid`：spawn 拿到的 PID，用作 `AgentReady.endpoint` 提示。
-/// - `inner`：stdin/stdout/child 的可变共享。
+/// Claude Code 门客——WS 反连承载。
 pub struct CcAgent {
     card: AgentCard,
-    pid: Option<u32>,
     inner: Arc<Mutex<Inner>>,
+    /// 保活 pump task 句柄。drop 不取消（channel drop 自会带停）。
+    _pump: tokio::task::JoinHandle<()>,
 }
 
 impl CcAgent {
-    /// 起一个 `claude` 子进程并返回包装好的 agent。async 签名保留给未来 WS
-    /// 升级路径——目前只是同步 spawn 的薄壳。
+    /// WS 反连模式下 launch 必须 async（要 await WS 反连）。
     pub async fn launch(profile: AgentProfile, cfg: CcLaunchConfig) -> Result<Self> {
         Self::launch_with_id(AgentId::new(), profile, cfg).await
     }
@@ -87,18 +101,58 @@ impl CcAgent {
     pub async fn launch_with_id(
         id: AgentId,
         profile: AgentProfile,
-        cfg: CcLaunchConfig,
+        mut cfg: CcLaunchConfig,
     ) -> Result<Self> {
-        // **为什么清 CLAUDECODE / CLAUDE_CODE_* env**：我们自己如果在 Claude Code
-        // 会话里运行，继承的 env 会让子 cc 触发嵌套检测而静默卡住（我本地
-        // 30s timeout 就是踩这个坑）。子进程继承 env 的场景无法预测，保底在
-        // spawn 前清掉。
+        // 1. WS server 先起来拿到 port
+        let sid = uuid::Uuid::new_v4().to_string();
+        let channel = Arc::new(WsChannel::bind(&sid).await.map_err(CcError::from)?);
+        cfg.sdk_url = Some(channel.url());
+
+        // 2. 起 claude——加 `--sdk-url` 的 argv 已由 config 处理
         let SpawnedCc {
-            child,
-            stdin,
-            stdout,
+            mut child,
+            stdin: _,  // SDK 模式下不用（`-p ""` 已占位）——但要 drop 防 FD 泄漏
+            stdout: _, // 同上
             pid,
         } = spawn_claude(&cfg).map_err(CcError::Io)?;
+
+        // 3. 等 CLI 反连；early-exit 时尽早失败
+        //
+        // 用 block 限制 future 的 borrow 作用域——select 之后我们还要把 child 塞进
+        // Inner。如果不 scope 住 `child.wait()` 这个 future，它会持续借走 child
+        // 到函数末尾。
+        enum ConnectOutcome {
+            Connected,
+            Exited(std::io::Result<std::process::ExitStatus>),
+            Failed(crate::ws_bridge::WsError),
+        }
+        let outcome = {
+            let connect_fut = channel.wait_connect(CONNECT_TIMEOUT);
+            let exit_fut = child.wait();
+            tokio::pin!(connect_fut);
+            tokio::pin!(exit_fut);
+            tokio::select! {
+                biased;
+                r = &mut connect_fut => match r {
+                    Ok(()) => ConnectOutcome::Connected,
+                    Err(e) => ConnectOutcome::Failed(e),
+                },
+                r = &mut exit_fut => ConnectOutcome::Exited(r),
+            }
+        };
+        match outcome {
+            ConnectOutcome::Connected => {}
+            ConnectOutcome::Failed(e) => return Err(CcError::from(e).into()),
+            ConnectOutcome::Exited(r) => {
+                match r {
+                    Ok(status) => tracing::error!(?status, "cc exited before WS connected"),
+                    Err(e) => tracing::error!(error = %e, "cc wait() errored before WS connected"),
+                }
+                return Err(CcError::EarlyExit.into());
+            }
+        }
+
+        tracing::info!(%id, port = channel.port, "cc agent connected via WS");
 
         let card = AgentCard {
             id,
@@ -111,29 +165,35 @@ impl CcAgent {
         };
 
         let inner = Arc::new(Mutex::new(Inner {
-            stdin: Some(stdin),
-            stdout: Some(stdout),
+            channel: channel.clone(),
             child: Some(child),
             status: AgentStatus::Idle,
+            active_tx: None,
+            current_task: None,
+            translate_state: TranslateState::new(),
         }));
 
-        Ok(Self { card, pid, inner })
+        // 4. pump task——长跑，直到 channel 关闭
+        let pump = tokio::spawn(pump_loop(channel.clone(), id, pid, inner.clone()));
+
+        Ok(Self {
+            card,
+            inner,
+            _pump: pump,
+        })
     }
 
-    /// 组装一条 cc 能吃的 user 消息 JSON 行（带换行）。
-    ///
-    /// wire 格式：`{type:"user", message:{role:"user", content:[{type:"text", text}]}}\n`。
-    fn user_message_line(text: &str) -> std::result::Result<Vec<u8>, serde_json::Error> {
-        let payload = json!({
+    /// 组装 `{type:"user", ...}` JSON。
+    fn user_message_value(text: &str, session_id: &str) -> Value {
+        json!({
             "type": "user",
             "message": {
                 "role": "user",
-                "content": [{"type": "text", "text": text}]
-            }
-        });
-        let mut s = serde_json::to_vec(&payload)?;
-        s.push(b'\n');
-        Ok(s)
+                "content": [{"type":"text", "text": text}]
+            },
+            "parent_tool_use_id": Value::Null,
+            "session_id": session_id,
+        })
     }
 }
 
@@ -145,74 +205,78 @@ impl Agent for CcAgent {
 
     async fn dispatch(&self, task: Task) -> Result<mpsc::Receiver<Event>> {
         let (tx, rx) = mpsc::channel::<Event>(EVENT_CHANNEL_BUFFER);
-        let agent_id = self.card.id;
-        let task_id = Some(task.id);
-        let pid_hint = self.pid;
 
         let body = if task.description.is_empty() {
             task.title.clone()
         } else {
             format!("{}\n\n{}", task.title, task.description)
         };
-        let line = Self::user_message_line(&body).map_err(CcError::Serde)?;
 
-        // 先 take stdout——只有首个 dispatch 能起 reader（P1 够用：一次对话一次 cc）。
-        let stdout = {
-            let mut inner = self.inner.lock().await;
-            inner.status = AgentStatus::Busy;
-            inner.stdout.take().ok_or_else(|| {
-                CoreError::Other(
-                    "cc stdout already consumed; launch a new CcAgent per dispatch".into(),
-                )
-            })?
-        };
+        // 拿 cli_session_id（可能 None——用空串，cc 会在 init 后关联起来）
+        let cli_sid = self
+            .inner
+            .lock()
+            .await
+            .channel
+            .cli_session_id()
+            .await
+            .unwrap_or_default();
+        let msg = Self::user_message_value(&body, &cli_sid);
 
-        // 写 user message。
+        // 注册 active_tx / current_task / 重置翻译状态
         {
             let mut inner = self.inner.lock().await;
-            let stdin = inner
-                .stdin
-                .as_mut()
-                .ok_or_else(|| CoreError::Other("cc stdin missing".into()))?;
-            stdin.write_all(&line).await.map_err(CcError::Io)?;
-            stdin.flush().await.map_err(CcError::Io)?;
+            inner.status = AgentStatus::Busy;
+            inner.active_tx = Some(tx);
+            inner.current_task = Some(task.id);
+            inner.translate_state = TranslateState::new();
+            // 发送必须在锁外——channel.send 本身不会 block，但保守点
+            inner.channel.send(msg).map_err(CcError::from)?;
         }
-
-        let inner_weak = Arc::downgrade(&self.inner);
-        tokio::spawn(async move {
-            reader_loop(stdout, tx, agent_id, task_id, pid_hint).await;
-            if let Some(inner) = inner_weak.upgrade() {
-                let mut guard = inner.lock().await;
-                guard.status = AgentStatus::Idle;
-            }
-        });
 
         Ok(rx)
     }
 
     async fn send_message(&self, _task_id: TaskId, text: &str) -> Result<()> {
-        let line = Self::user_message_line(text).map_err(CcError::Serde)?;
-        let mut inner = self.inner.lock().await;
-        let stdin = inner
-            .stdin
-            .as_mut()
-            .ok_or_else(|| CoreError::Other("cc stdin missing".into()))?;
-        stdin.write_all(&line).await.map_err(CcError::Io)?;
-        stdin.flush().await.map_err(CcError::Io)?;
-        tracing::debug!(agent = %self.card.id, "sent follow-up message to cc");
+        // 追加式介入：保持 active_tx 不换，直接发第二条 user message。
+        // 门客下一 turn 开始时看见这条新输入（cc 会在当前 turn 结束后 poll）。
+        let inner = self.inner.lock().await;
+        let cli_sid = inner.channel.cli_session_id().await.unwrap_or_default();
+        let msg = Self::user_message_value(text, &cli_sid);
+        inner.channel.send(msg).map_err(CcError::from)?;
+        tracing::info!(agent = %self.card.id, "追加介入：sent follow-up user message");
         Ok(())
     }
 
     async fn cancel(&self, _task_id: TaskId) -> Result<()> {
+        // 打断式介入：WS `control_request { subtype: "interrupt" }`。
+        // 参照 anya claude-code-backend.ts:470-485。
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let msg = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "interrupt"},
+        });
         let mut inner = self.inner.lock().await;
-        if let Some(child) = inner.child.as_mut() {
+        inner.channel.send(msg).map_err(CcError::from)?;
+        inner.status = AgentStatus::Stopping;
+        tracing::info!(agent = %self.card.id, request_id, "打断介入：sent control_request interrupt");
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        inner.status = AgentStatus::Stopping;
+        inner.active_tx = None;
+
+        // WS channel 跟着 inner 一起 drop 会触发 server 停；这里显式清子进程。
+        if let Some(mut child) = inner.child.take() {
             #[cfg(unix)]
             {
                 if let Some(pid) = child.id() {
-                    // SAFETY: `kill(2)` 接收原始 pid + 信号值，对已退出进程返回 ESRCH；
-                    // 我们只要 best-effort 通知。
+                    // SAFETY: `kill(2)` 对已退出进程返回 ESRCH；best-effort。
                     unsafe {
-                        libc_kill(pid as i32, SIGINT);
+                        libc_kill(pid as i32, SIGTERM);
                     }
                 }
             }
@@ -220,20 +284,9 @@ impl Agent for CcAgent {
             {
                 let _ = child.start_kill();
             }
-        }
-        inner.status = AgentStatus::Stopping;
-        tracing::info!(agent = %self.card.id, "sent cancel to cc");
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<()> {
-        let mut inner = self.inner.lock().await;
-        inner.status = AgentStatus::Stopping;
-        // drop stdin → cc 看到 EOF 自退。
-        inner.stdin.take();
-        if let Some(mut child) = inner.child.take() {
-            let wait = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+            let wait = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
             if wait.is_err() {
+                tracing::warn!(agent = %self.card.id, "cc SIGTERM 超时 5s，升级到 SIGKILL");
                 let _ = child.start_kill();
                 let _ = child.wait().await;
             }
@@ -244,67 +297,152 @@ impl Agent for CcAgent {
     }
 }
 
-/// stdout 按行读 → parse → translate → tx。result 事件到达即返回。
-async fn reader_loop(
-    stdout: ChildStdout,
-    tx: mpsc::Sender<Event>,
+/// 长跑 pump：拉 WS 消息 → 路由。
+///
+/// 路由规则：
+/// - `control_request/can_use_tool` → v0.1 全 `allow`（策略层 v0.2 再加）
+/// - `control_request/interrupt` 的 **ack** 来自 claude 的 `control_response`，只日志
+/// - `keep_alive` / `rate_limit_event` → 日志或 Custom 事件（目前走 parse_line 兜底）
+/// - 其它 → parse_line + translate → 发到当前 active_tx
+async fn pump_loop(
+    channel: Arc<WsChannel>,
     agent_id: AgentId,
-    task_id: Option<TaskId>,
     pid_hint: Option<u32>,
+    inner: Arc<Mutex<Inner>>,
 ) {
-    let mut state = TranslateState::new();
-    let mut reader = BufReader::new(stdout).lines();
-    loop {
-        let line = match reader.next_line().await {
-            Ok(Some(l)) => l,
-            Ok(None) => break,
-            Err(e) => {
-                tracing::error!(error = %e, "cc stdout read failed");
-                break;
-            }
-        };
-        if line.trim().is_empty() {
+    while let Some(msg) = channel.recv().await {
+        // control_request：最高优先级，立即回复
+        if msg.get("type").and_then(Value::as_str) == Some("control_request") {
+            handle_control_request(&channel, &msg).await;
             continue;
         }
-        let cc_ev = match parse_line(&line) {
-            Ok(ev) => ev,
+        // control_response：我方发 interrupt 的 ack，v0.1 仅日志
+        if msg.get("type").and_then(Value::as_str) == Some("control_response") {
+            tracing::debug!(msg = ?msg, "control_response acked");
+            continue;
+        }
+
+        // 其它（system / assistant / user tool_result / result / rate_limit / ...）
+        // 序列化回 NDJSON line 喂给 parse_line——复用既有翻译规则表。
+        let line = match serde_json::to_string(&msg) {
+            Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error = %e, line = %line, "cc line parse failed");
+                tracing::warn!(error = %e, "ws_pump: serialize-for-parse failed");
                 continue;
             }
         };
+        let cc_ev = match parse_line(&line) {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!(error = %e, line_preview = %line.chars().take(200).collect::<String>(), "ws_pump: parse failed");
+                continue;
+            }
+        };
+
         let is_terminal = matches!(
             cc_ev,
             parser::CcEvent::ResultSuccess { .. } | parser::CcEvent::ResultError { .. }
         );
-        let events = translate(cc_ev, agent_id, task_id, &mut state, pid_hint);
-        for ev in events {
-            if tx.send(ev).await.is_err() {
-                tracing::debug!("cc agent event channel closed by subscriber");
-                return;
-            }
-        }
-        if is_terminal {
-            if state.finish() {
-                let mut meta = EventMeta::now();
+
+        // 拿锁产出 events，拿完锁立刻释放，避免 send 时占锁
+        let events_to_send = {
+            let mut guard = inner.lock().await;
+            let task_id = guard.current_task;
+            let mut new_state = std::mem::take(&mut guard.translate_state);
+            let events = translate(cc_ev, agent_id, task_id, &mut new_state, pid_hint);
+            if is_terminal && new_state.finish() {
+                // 推一条 ThinkingFinished 兜底
+                let mut meta = fuxi_core::event::EventMeta::now();
                 meta.agent = Some(agent_id);
                 meta.task = task_id;
-                let _ = tx
-                    .send(Event {
-                        meta,
-                        kind: EventKind::ThinkingFinished,
-                    })
-                    .await;
+                let extra = Event {
+                    meta,
+                    kind: fuxi_core::event::EventKind::ThinkingFinished,
+                };
+                let mut combined = events;
+                combined.push(extra);
+                guard.translate_state = new_state;
+                combined
+            } else {
+                guard.translate_state = new_state;
+                events
             }
-            return;
+        };
+
+        // 发到 active_tx——clone sender 再释锁
+        let tx_opt = {
+            let guard = inner.lock().await;
+            guard.active_tx.clone()
+        };
+        if let Some(tx) = tx_opt {
+            for ev in events_to_send {
+                if tx.send(ev).await.is_err() {
+                    tracing::debug!(
+                        "ws_pump: active_tx closed; future events will be dropped until next dispatch"
+                    );
+                    // 清掉 active_tx——但只清那一个
+                    let mut guard = inner.lock().await;
+                    guard.active_tx = None;
+                    break;
+                }
+            }
+        } else {
+            tracing::trace!("ws_pump: no active_tx; event dropped (no dispatch in flight)");
+        }
+
+        if is_terminal {
+            // terminal 后，不再 auto-drop active_tx——调用方可能要留着用 send_message 追加
+            // 任务完成的认定由 orchestrator 层看到 TaskStateChanged → Done 来决
+            let mut guard = inner.lock().await;
+            guard.status = AgentStatus::Idle;
+        }
+    }
+    tracing::info!("ws_pump: channel closed, pump exiting");
+}
+
+/// 处理 CLI 发来的 control_request。
+async fn handle_control_request(channel: &WsChannel, msg: &Value) {
+    let subtype = msg
+        .get("request")
+        .and_then(|r| r.get("subtype"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match subtype {
+        "can_use_tool" => {
+            // v0.1 全 allow（策略层 v0.2）
+            let request_id = msg
+                .get("request_id")
+                .cloned()
+                .unwrap_or(Value::String(uuid::Uuid::new_v4().to_string()));
+            let input = msg
+                .get("request")
+                .and_then(|r| r.get("input"))
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
+            let reply = json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "allow",
+                        "updatedInput": input,
+                    }
+                }
+            });
+            if let Err(e) = channel.send(reply) {
+                tracing::warn!(error = %e, "can_use_tool allow reply send failed");
+            }
+        }
+        other => {
+            tracing::debug!(subtype = other, "unhandled control_request subtype");
         }
     }
 }
 
-// ── Unix signal helper ──────────────────────────────────────────
-// 用 libc 的 `kill(2)` 而不是引入整个 libc crate——只需要一个 FFI 声明。
+// ── Unix signal helper ──
 #[cfg(unix)]
-const SIGINT: i32 = 2;
+const SIGTERM: i32 = 15;
 #[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
@@ -323,15 +461,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_message_line_is_wellformed() {
-        let bytes = CcAgent::user_message_line("hello").expect("serialize");
-        let s = std::str::from_utf8(&bytes).expect("utf8");
-        assert!(s.ends_with('\n'));
-        let v: serde_json::Value = serde_json::from_str(s.trim_end()).expect("parse back");
+    fn user_message_value_is_wellformed() {
+        let v = CcAgent::user_message_value("hello", "sess-1");
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["type"], "text");
         assert_eq!(v["message"]["content"][0]["text"], "hello");
+        assert_eq!(v["session_id"], "sess-1");
     }
 
     #[test]
@@ -340,25 +476,9 @@ mod tests {
         assert!(matches!(e, CoreError::Other(_)));
     }
 
-    #[tokio::test]
-    async fn reader_loop_handles_init_then_result() {
-        // 想用内存 pipe 喂 reader_loop 但 DuplexStream 不等同于 ChildStdout——
-        // 改走 parse_line + translate 的手工驱动，验证终局语义。
-        let mut state = TranslateState::new();
-        let agent = AgentId::new();
-        let init = parse_line(
-            r#"{"type":"system","subtype":"init","session_id":"s","model":"haiku","cwd":"/tmp"}"#,
-        )
-        .expect("parse");
-        let res =
-            parse_line(r#"{"type":"result","subtype":"success","result":"hi"}"#).expect("parse");
-
-        let mut all = Vec::new();
-        all.extend(translate(init, agent, None, &mut state, Some(7)));
-        all.extend(translate(res, agent, None, &mut state, Some(7)));
-
-        assert!(matches!(all[0].kind, EventKind::AgentReady { .. }));
-        let last = all.last().expect("events present");
-        assert!(matches!(last.kind, EventKind::AgentResponded { .. }));
+    #[test]
+    fn early_exit_error_maps_to_core_other() {
+        let e: CoreError = CcError::EarlyExit.into();
+        assert!(matches!(e, CoreError::Other(_)));
     }
 }
