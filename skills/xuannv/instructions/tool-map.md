@@ -25,8 +25,67 @@
 - `fuxi block --to <id> --reason <text>` — 标记任务为 Blocked，等待用户授权。
 - `fuxi resume --to <id>` — 用户授权通过后解锁任务。
 
+## 策府（长期记忆 · 甲骨 + 河图洛书）
+
+记忆是跨会话的：关机重开还记得。用法约束——**门客级别偏好、用户身份、决策约定**都该入甲骨；不要把事件流当记忆用（那是简册，append-only 自动记的）。
+
+- `fuxi memory query --subject <s> [--predicate <p>]` — 查甲骨 facts（"用户爱喝什么？"= subject=user predicate=prefers_beverage）。
+- `fuxi memory record --subject <s> --predicate <p> --object <v> --source <who>` — 入一条甲骨。**只 ADD**，不覆盖；要更正用 `supersede`。
+- `fuxi memory supersede --old-id <uuid> --subject <s> --predicate <p> --object <v>` — 把旧 fact 标记 valid_until=now，再 insert 新 fact（事务性）。
+- `fuxi memory search <query>` — FTS5 模糊搜（中文 / 英文都支持）。
+- `fuxi memory list [--subject <s>]` — 列 facts（可选按 subject 过滤）。
+- `fuxi memory learn --role <r> --task-type <t> --pattern <p> --outcome <o>` — 记一条河图洛书 pattern（某门客干某类活的经验）。
+- `fuxi memory promote <pattern-id>` — 标记该 pattern 可晋升成 skill examples/。
+
+### 什么时候主动 record
+
+1. 用户首次说「我叫/我是 XX」「我在 XX 公司」——`subject=user predicate=name object=XX`
+2. 用户说「我们用 `<技术栈>`」——`subject=project_<name> predicate=stack object=XX`
+3. 用户纠正我「不是那样，应该 Y」——把 Y 作为 supersede
+4. 一个门客连续两次漂亮地完成某类任务 → `memory learn` 记 pattern
+5. **不要**对话里随口的玩笑 / 情绪类信息 record（噪音）
+
+## 点将台（招贤 · 动态生成 role）
+
+遇到现有 role 无法胜任的任务时，先**启用招贤**：
+
+- `fuxi skill list` — 列现有玉牒 + 榜文（staging）状态。
+- `fuxi skill stage --template <dev|pm|research> --role <name> --brief "<desc>"` — 调**铸牒司**门客生成一份榜文。注意 `role` 用拼音 / 英文 lowercase。
+- `fuxi skill approve <role>` — 榜文 → 玉牒（正式入册）。**用户同意才调**。
+- `fuxi skill reject <role> --reason "..."` — 驳回榜文。
+- `fuxi skill activate <role>` — 发 SkillActivated 事件告知订阅者（实装时自动）。
+
+### 招贤流程
+
+1. 用户需求里出现陌生能力（"我想让你帮我做品牌设计" — `luban` 是码工，不太行）
+2. 先**问用户**：「我现有 role 里没有设计师。要起一个 `sheji`（设计师）门客吗？」
+3. 用户同意 → `fuxi skill stage --template pm --role sheji --brief "品牌视觉设计，会 Figma 和色彩理论"`
+4. 铸牒司生成榜文 → 用户审 → 你调 `approve`
+5. `fuxi spawn --role sheji` 起新门客开工
+
+## 更漏（定时 / 响应式触发）
+
+定时任务让伏羲在你不在时也按你意图工作。**自然语言存 intent，不用 JSON**。
+
+- `fuxi cron add "<cron-expr>" --intent "<自然语言>"` — 登记定时（如 `"0 9 * * 1"` 周一 9 点）。
+- `fuxi cron once <at> --intent "..."` — 一次性（`<at>` 是 ISO8601，例 `2026-05-01T09:00:00+08:00`）。
+- `fuxi cron watch <path> --intent "..."` — 文件变更触发（fs event）。
+- `fuxi cron webhook --intent "..."` — 生成 webhook URL（`http://127.0.0.1:4100/hook/<id>`）用户可配第三方推送。
+- `fuxi cron list` — 列所有 trigger + 下次 fire 时间。
+- `fuxi cron fire <id>` — 手动触发（调试用）。
+- `fuxi cron remove <id>`
+
+### 什么时候主动 add
+
+1. 用户说「每周X我要...」/「每天 XX 点...」/「多少分钟后提醒我...」 → cron 或 once
+2. 用户说「git push 到 main 时跑 CI 对接」 → webhook 或 fs_watch（具体看集成点）
+3. 触发后，伏羲会自动把三段式 prompt 注入给你。你判断"当前环境是否适合执行"—— 比如用户正在对话中，你应**先告知**「更漏响了（cron id=X）：intent=Y，现在合适做吗？」再动手
+
 ## 反模式
 
 - **不要** `fuxi dispatch` 不带单引号——双引号在 zsh 下对 `$()` 仍展开。
 - **不要**轮询 `fuxi status` 当 sleep 用——事件流已实时渲染，看就是了。
 - **不要**手写 echo / printf 长段落假装在汇报——用一句中文写给用户。
+- **不要**对话过程里每句话都 `fuxi memory record`——噪音会淹没信号。判断"这是会跨会话的事实"才记。
+- **不要** `fuxi skill approve` 未经用户明确同意的榜文——招贤是高权限动作，必须用户点头。
+- **不要**在 trigger 触发后立刻执行而不先告知用户——更漏的意图可能已过时（用户改主意了）。
