@@ -26,6 +26,7 @@ pub struct LoadedSkill {
 /// 1. `FUXI_SKILLS_DIR` 环境变量
 /// 2. 当前 git root 下的 `skills/`（开发中常用）
 /// 3. 仓库内的 `./skills/`（cwd）
+/// 4. `$HOME/.fuxi/skills/`（用户全局安装位）
 pub fn skills_root() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("FUXI_SKILLS_DIR") {
         let path = PathBuf::from(p);
@@ -49,6 +50,13 @@ pub fn skills_root() -> Option<PathBuf> {
     let cwd_skills = PathBuf::from("skills");
     if cwd_skills.exists() {
         return Some(cwd_skills);
+    }
+    // $HOME/.fuxi/skills —— 用户跑出 fuxi 仓外时必须有这个兜底
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = PathBuf::from(home).join(".fuxi").join("skills");
+        if p.exists() {
+            return Some(p);
+        }
     }
     None
 }
