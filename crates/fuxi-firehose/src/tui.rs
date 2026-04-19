@@ -408,7 +408,9 @@ fn summarize(k: &EventKind) -> String {
         }
         AgentInterrupted { reason } => format!("interrupted: {reason}"),
         TaskInterventionApplied { mode } => format!("intervention applied [{mode}]"),
-        OrchestratorCcReceived { from_user_to, text } => format!(
+        OrchestratorCcReceived {
+            from_user_to, text, ..
+        } => format!(
             "cc {} {}",
             short_id(&from_user_to.to_string()),
             one_line(text, 40)
@@ -418,6 +420,21 @@ fn summarize(k: &EventKind) -> String {
             short_id(&from.to_string()),
             short_id(&to.to_string()),
             reason
+        ),
+        ConversationHandoffRequested {
+            from,
+            to,
+            reason,
+            brief,
+        } => format!(
+            "让贤 {}→{} reason={} {}",
+            short_id(&from.to_string()),
+            short_id(&to.to_string()),
+            reason,
+            brief
+                .as_deref()
+                .map(|s| one_line(s, 30))
+                .unwrap_or_default()
         ),
         ConversationReturned { from, to, brief } => format!(
             "{}→{} {}",
@@ -479,6 +496,7 @@ fn color_for(k: &EventKind) -> Color {
         | TaskInterventionApplied { .. }
         | OrchestratorCcReceived { .. }
         | ConversationTransferred { .. }
+        | ConversationHandoffRequested { .. }
         | ConversationReturned { .. } => Color::Yellow,
 
         // 招贤一族 —— 醒目的红，因为是"生新 role"的高权限动作。
