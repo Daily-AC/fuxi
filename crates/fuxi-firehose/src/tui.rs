@@ -366,6 +366,13 @@ fn summarize(k: &EventKind) -> String {
             artifact.to_string().chars().take(60).collect::<String>()
         ),
         TaskBlocked { reason } => format!("reason={reason}"),
+        TaskResumed { input } => format!(
+            "input={}",
+            input
+                .as_deref()
+                .map(|s| one_line(s, 40))
+                .unwrap_or_default()
+        ),
         TaskCancelled { reason } => format!("reason={reason}"),
         MessageSent { from, to, text } => format!(
             "{} → {}: {}",
@@ -450,6 +457,7 @@ fn color_for(k: &EventKind) -> Color {
         | TaskStateChanged { .. }
         | TaskDelivered { .. }
         | TaskBlocked { .. }
+        | TaskResumed { .. }
         | TaskCancelled { .. } => Color::Green,
 
         MessageSent { .. }

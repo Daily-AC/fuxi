@@ -327,6 +327,34 @@ impl Fuxi {
         Ok(())
     }
 
+    /// 把 task 置为 Blocked——玄女请示用户前发。v0.1 只发事件，**不动**
+    /// orchestrator 的 shelf/运行时状态（cc 门客自己停在等待 user input 状态）。
+    /// 事件是玄女和 Firehose 之间的"请示已就位"信号。
+    ///
+    /// 薄片 F 的 wire 层。v0.1 scenario spec 断言点 13。
+    pub fn block_task(&self, task_id: fuxi_core::id::TaskId, reason: String) -> Result<()> {
+        let mut meta = EventMeta::now();
+        meta.task = Some(task_id);
+        let _ = self.bus.publish(Event {
+            meta,
+            kind: EventKind::TaskBlocked { reason },
+        });
+        Ok(())
+    }
+
+    /// 解除 Blocked——玄女拿到授权后发。`input` 可选（"同意"/"同意，但改 X"/空 等）。
+    ///
+    /// v0.1 scenario spec 断言点 24。配合 `block_task` 完成"请示-授权"小循环。
+    pub fn resume_task(&self, task_id: fuxi_core::id::TaskId, input: Option<String>) -> Result<()> {
+        let mut meta = EventMeta::now();
+        meta.task = Some(task_id);
+        let _ = self.bus.publish(Event {
+            meta,
+            kind: EventKind::TaskResumed { input },
+        });
+        Ok(())
+    }
+
     /// 按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
     ///
     /// 使用 `claim_idle_by_role` 原子地"找+占"，防止并发 `dispatch_to_any`

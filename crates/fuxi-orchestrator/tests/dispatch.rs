@@ -682,6 +682,46 @@ async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
 }
 
 #[tokio::test]
+async fn block_and_resume_task_emit_events() {
+    // 薄片 F · v0.1 scenario 断言点 13 + 24。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let mut sub = bus.subscribe();
+    let tid = TaskId::new();
+
+    fuxi.block_task(tid, "awaiting_commit_approval".into())
+        .expect("block");
+    fuxi.resume_task(tid, Some("同意".into())).expect("resume");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        if ev.meta.task == Some(tid) {
+            collected.push(ev);
+        }
+    }
+
+    let has_blocked = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskBlocked { reason } if reason == "awaiting_commit_approval"
+        )
+    });
+    let has_resumed = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskResumed { input: Some(s) } if s == "同意"
+        )
+    });
+    assert!(has_blocked, "缺 TaskBlocked");
+    assert!(has_resumed, "缺 TaskResumed with input=同意");
+}
+
+#[tokio::test]
 async fn intervene_on_missing_agent_returns_not_found() {
     let bus = EventBus::with_memory_store().await.unwrap();
     let (_dir, ws) = make_workspace().await;

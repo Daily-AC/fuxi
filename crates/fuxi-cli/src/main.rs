@@ -49,6 +49,10 @@ enum Command {
     List(subcommands::ListArgs),
     /// 【玄女工具】关停指定门客。
     Kill(subcommands::KillArgs),
+    /// 【玄女工具】请示用户前标记任务 Blocked。
+    Block(subcommands::BlockArgs),
+    /// 【玄女工具】用户授权通过后解锁任务。
+    Resume(subcommands::ResumeArgs),
 }
 
 #[tokio::main]
@@ -65,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Status(args) => subcommands::run_status(args).await,
         Command::List(args) => subcommands::run_list(args).await,
         Command::Kill(args) => subcommands::run_kill(args).await,
+        Command::Block(args) => subcommands::run_block(args).await,
+        Command::Resume(args) => subcommands::run_resume(args).await,
     }
 }
 

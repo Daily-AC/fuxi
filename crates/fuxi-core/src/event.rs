@@ -83,6 +83,11 @@ pub enum EventKind {
     TaskBlocked {
         reason: String,
     },
+    /// task 从 Blocked 回到 Ready——玄女拿到授权（或其它外部信号）后发。
+    /// `input` 可选：用户授权时附带的话（"同意"/"同意，但改成 X"/空 等）。
+    TaskResumed {
+        input: Option<String>,
+    },
     TaskCancelled {
         reason: String,
     },

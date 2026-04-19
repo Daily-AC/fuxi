@@ -126,6 +126,48 @@ pub async fn run_list(_args: ListArgs) -> Result<()> {
     print_response(resp)
 }
 
+// ── block ──
+
+#[derive(Debug, ClapArgs)]
+pub struct BlockArgs {
+    /// 要 block 的 task id。
+    #[arg(long)]
+    pub task: String,
+    /// 原因（例如 "awaiting_commit_approval"）。
+    #[arg(long, default_value = "awaiting_user_approval")]
+    pub reason: String,
+}
+
+pub async fn run_block(args: BlockArgs) -> Result<()> {
+    let resp = client::send(Command::BlockTask {
+        task_id: args.task,
+        reason: args.reason,
+    })
+    .await?;
+    print_response(resp)
+}
+
+// ── resume ──
+
+#[derive(Debug, ClapArgs)]
+pub struct ResumeArgs {
+    /// 要 resume 的 task id。
+    #[arg(long)]
+    pub task: String,
+    /// 用户的授权话（"同意" / "同意，但改 X"）。留空也行。
+    #[arg(long)]
+    pub input: Option<String>,
+}
+
+pub async fn run_resume(args: ResumeArgs) -> Result<()> {
+    let resp = client::send(Command::ResumeTask {
+        task_id: args.task,
+        input: args.input,
+    })
+    .await?;
+    print_response(resp)
+}
+
 // ── kill ──
 
 #[derive(Debug, ClapArgs)]
