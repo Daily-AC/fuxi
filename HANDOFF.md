@@ -4,11 +4,19 @@
 
 ---
 
-## ⚠️ 优先读这 3 份（本 HANDOFF 之外）
+## ⚠️ 优先读这 4 份（本 HANDOFF 之外）——**按顺序读**
 
 1. **`docs/superpowers/specs/2026-04-19-v0.1-scenario.md`** — v0.1 验收场景（北极星）。所有工作围绕这个锚
-2. **`docs/session-review-2026-04-19.md`** — 昨晚过程性记录（被否决的路径 / composio 借鉴具体文件行号 / 没写进 CLAUDE.md 的坑）
-3. **`docs/references.md`** — 外部项目清单 + composio↔fuxi 精确映射
+2. **`docs/session-review-2026-04-19-afternoon.md`** ← **今天下午执行过程**：
+   - 7 块薄片各自的设计决策链 / 踩过的坑 / 未验证的假设
+   - 给 D/G 接手人的开局 checklist 和 D 架构提示
+   - 第 §5 "开 D 前必检清单" 和 §7 "给 D 接手人的开局 Checklist" **是直接行动指引**
+3. **`docs/session-review-2026-04-19.md`** — 昨晚凌晨过程性（composio 借鉴文件行号 / 被否决的替代方案 / 没写进 CLAUDE.md 的坑）
+4. **`docs/references.md`** — 外部项目清单 + composio↔fuxi 精确映射表
+
+**读完这 4 份 + CLAUDE.md 常见陷阱，你应该能直接接 D。**
+
+别直接动手——先按 §5 checklist 验 baseline（跑 `cargo test --workspace` 和手动 `fuxi up` + `fuxi ping`）。
 
 ---
 
