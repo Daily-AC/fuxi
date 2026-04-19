@@ -421,7 +421,7 @@ impl ReplApp {
     }
 
     fn draw_status(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
-        let hint = " Enter 发送 | Backspace 删除 | Ctrl-C 退出 ";
+        let hint = " Enter 发送 | Backspace 删除 | Ctrl-C 退出 | 日志 /tmp/fuxi.log ";
         let para = Paragraph::new(hint).style(Style::default().fg(Color::Black).bg(Color::Gray));
         f.render_widget(para, area);
     }
@@ -473,6 +473,14 @@ fn short_or_pad(s: &str, max: usize) -> String {
 }
 
 async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result<()> {
+    // **关键**：把 stderr 重定向到文件，否则 tracing / claude inherited stderr /
+    // panic 会直接砸到 ratatui 的 alt-screen 上污染对话区。
+    // dup2 后 fd 2 指向 /tmp/fuxi.log；tracing subscriber 已绑在 Stderr::new，
+    // 它写 fd 2 就自动进文件。
+    if let Err(e) = redirect_stderr_to_log("/tmp/fuxi.log") {
+        eprintln!("⚠ 无法重定向 stderr 到日志文件: {e}。TUI 可能被日志污染");
+    }
+
     // 装 panic hook 先——raw mode 下 panic 会把终端搞死
     install_panic_hook();
 
@@ -552,6 +560,39 @@ fn install_panic_hook() {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         prev(info);
     }));
+}
+
+/// 把当前进程的 stderr（fd 2）重定向到指定日志文件——Unix 下用 `dup2(2)`.
+///
+/// 为什么必须：tracing subscriber 写 fd 2；claude 子进程继承 fd 2；ratatui
+/// 进 raw + alt-screen 模式时二者直接覆盖画面。重定向后一切都进文件，TUI 画面
+/// 干净。
+///
+/// 非 Unix 直接返回 Err——v0.1 只保障 macOS/Linux。
+#[cfg(unix)]
+fn redirect_stderr_to_log(path: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // SAFETY: dup2 对 valid fd 是安全调用；file 在作用域内有效。dup2 之后 fd 2
+    // 独立引用 file 的底层 inode，file 被 drop 不影响 fd 2。
+    let ret = unsafe { dup2(file.as_raw_fd(), 2) };
+    if ret == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn redirect_stderr_to_log(_path: &str) -> std::io::Result<()> {
+    Err(std::io::Error::other("stderr redirect only on unix"))
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn dup2(oldfd: i32, newfd: i32) -> i32;
 }
 
 #[cfg(test)]
