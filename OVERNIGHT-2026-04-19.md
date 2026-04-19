@@ -89,7 +89,7 @@ f1e0d73 feat(p1): 伏羲 Rust workspace 地基 + core/events/a2a 首批三个 cr
 
 ## 相比 ComposioHQ 的三个独家交付（毕设 contribution）
 
-1. **真实时 Firehose**——WebSocket push，替代 ComposioHQ 的 5 秒轮询。
+1. **真实时 Firehose**——WebSocket push，替代 ComposioHQ 的 30 秒轮询（`lifecycle-manager.ts:1973`，默认 intervalMs=30_000；web 前端另加 5s 刷新）。
 2. **EventBus 是核心组件**而非事后补的 notifier——从 day 1 就支持 replay + 游标。
 3. **Keychain-aware 的 cc 启动参数**——`--bare` 陷阱已规避，伏羲调用真 claude 可直接拿用户订阅。
 
