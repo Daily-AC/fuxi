@@ -69,6 +69,10 @@ async fn real_cc_echo_roundtrip() {
                 }
                 EventKind::TaskStateChanged { from, to } => {
                     eprintln!("TaskStateChanged: {from:?} -> {to:?}");
+                    // WS 模式下 agent 长跑，rx 不会自动关——看到 Done 就显式退
+                    if matches!(to, fuxi_core::task::TaskState::Done) {
+                        break;
+                    }
                 }
                 EventKind::TaskBlocked { reason } => {
                     panic!("task blocked by cc: {reason}");

@@ -33,6 +33,29 @@ pub fn spawn_claude(cfg: &CcLaunchConfig) -> std::io::Result<SpawnedCc> {
         // kill_on_drop 防止测试进程退出后 cc 变孤儿进程。
         .kill_on_drop(true);
 
+    // ── 环境变量处理 —— 两坑都要避 ──
+    // 坑 1：嵌套检测。我们自己若在 Claude Code 会话里运行，子 cc 继承 env 会触发
+    //        嵌套检测进入卡住状态。参照 sia/src/core/cc-process.ts:cleanEnv 和
+    //        anya/apps/server/src/broker/backends/claude-code-backend.ts:307-326。
+    cmd.env_remove("CLAUDECODE");
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CLAUDE_CODE_")
+            && !matches!(
+                k.as_str(),
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+                    | "CLAUDE_CODE_USE_BEDROCK"
+                    | "CLAUDE_CODE_USE_VERTEX"
+            )
+        {
+            cmd.env_remove(&k);
+        }
+    }
+    // 坑 2：Clash/Surge TUN 代理可能把 127.0.0.1 也代理走，导致 cc 反连 WS 时
+    //        TCP SYN 被拦。**实测本机不设 NO_PROXY → --sdk-url 30s 永远 timeout**。
+    //        参照 sia/src/core/cc-process.ts:666-667（它就是踩过这个坑）。
+    cmd.env("NO_PROXY", "127.0.0.1,localhost");
+    cmd.env("no_proxy", "127.0.0.1,localhost");
+
     if let Some(cwd) = &cfg.cwd {
         cmd.current_dir(cwd);
     }
