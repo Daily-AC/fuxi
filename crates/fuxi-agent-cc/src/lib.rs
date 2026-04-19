@@ -16,9 +16,7 @@ pub mod spawn;
 pub mod ws_bridge;
 
 pub use agent::{CcAgent, CcError};
-pub use config::{
-    CcLaunchConfig, DEFAULT_MODEL_ENV, DEFAULT_MODEL_FALLBACK, resolve_default_model,
-};
+pub use config::{CcLaunchConfig, DEFAULT_MODEL_ENV, resolve_default_model};
 pub use parser::{CcEvent, TranslateState, parse_line, translate};
 pub use spawn::{SpawnedCc, spawn_claude};
 pub use ws_bridge::{WsChannel, WsError};

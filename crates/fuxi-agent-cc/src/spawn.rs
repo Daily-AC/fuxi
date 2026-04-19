@@ -62,7 +62,7 @@ pub fn spawn_claude(cfg: &CcLaunchConfig) -> std::io::Result<SpawnedCc> {
 
     tracing::info!(
         binary = %cfg.binary,
-        model = %cfg.model,
+        model = ?cfg.model,
         "spawning claude headless subprocess"
     );
 

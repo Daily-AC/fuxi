@@ -101,7 +101,7 @@ pub async fn run(args: Args) -> Result<()> {
     // 3. 构造 profile + launch cfg 交给 orchestrator。
     let mut cfg = CcLaunchConfig::default();
     if let Some(m) = args.model {
-        cfg.model = m;
+        cfg.model = Some(m);
     }
     let profile = AgentProfile {
         name: args.name.clone(),
