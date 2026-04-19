@@ -30,9 +30,10 @@ use fuxi_core::agent::AgentCard;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
+use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
 use fuxi_firehose::{FirehoseApp, Hub};
-use fuxi_orchestrator::{Fuxi, FuxiConfig, ShelfStatus, WorkerKind};
+use fuxi_orchestrator::{Fuxi, FuxiConfig, ShelfStatus, SystemEventBridge, WorkerKind};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::{Keeper, TriggerStore};
 use fuxi_skills as skill_loader;
@@ -187,7 +188,7 @@ pub async fn run(args: Args) -> Result<()> {
         Arc::new(SystemClock),
     ));
     let keeper_task = Arc::clone(&keeper).spawn();
-    let daemon = Daemon::new(fuxi.clone(), bus.clone(), sched_store, keeper);
+    let daemon = Daemon::new(fuxi.clone(), bus.clone(), sched_store.clone(), keeper);
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
     let daemon_task = tokio::spawn(async move {
@@ -224,6 +225,12 @@ pub async fn run(args: Args) -> Result<()> {
     fuxi.set_xuannv(xuannv_id).await;
     tracing::info!(xuannv = %xuannv_id, "玄女已就绪");
 
+    // 系统事件 → 玄女唤醒桥：TriggerFired / AgentDead 转三段式/一句话 prompt 追加给玄女。
+    // 公理 #1 显式沟通 + #2 玄女永远有知情权。
+    let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
+    let bridge_task =
+        SystemEventBridge::spawn(fuxi.clone(), bus.clone(), xuannv_id, trigger_lookup);
+
     // 6. 发 greet task 让玄女主动开口（cc headless 没 prompt 不说话）
     let greet = Task::new(
         "greet",
@@ -245,6 +252,7 @@ pub async fn run(args: Args) -> Result<()> {
     hub_task.abort();
     daemon_task.abort();
     keeper_task.abort();
+    bridge_task.abort();
 
     outcome
 }

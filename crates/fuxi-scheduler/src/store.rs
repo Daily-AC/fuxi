@@ -7,7 +7,9 @@
 
 use crate::spec::TriggerSpec;
 use crate::{Error, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use fuxi_core::trigger_lookup::TriggerLookup;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -346,6 +348,25 @@ impl TriggerStore {
     }
 }
 
+/// 实装 [`fuxi_core::TriggerLookup`] —— 让 fuxi-orchestrator 的 SystemEventBridge
+/// 能通过 trait object 读 intent，不用反向依赖本 crate。
+///
+/// 内部错误（DB 不可达/解析失败）在此路径下视为"找不到"：桥只是想给玄女一个提示，
+/// 宁可静默跳过也不要把底层错误传染到事件消费者。
+#[async_trait]
+impl TriggerLookup for TriggerStore {
+    async fn intent(&self, id: &str) -> Option<String> {
+        match self.get(id).await {
+            Ok(Some(row)) => Some(row.intent),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, trigger = id, "TriggerStore::intent 读取失败");
+                None
+            }
+        }
+    }
+}
+
 fn row_to_trigger(row: sqlx::sqlite::SqliteRow) -> Result<TriggerRow> {
     let id: String = row.try_get("id")?;
     let spec_json: String = row.try_get("spec")?;
@@ -613,5 +634,20 @@ mod tests {
         // 再失败一次：已经 disabled，不会再 "刚刚熔断"
         let tripped = store.mark_failure(&id).await.expect("6th");
         assert!(!tripped, "已 disabled 的 trigger 不再报新熔断");
+    }
+
+    #[tokio::test]
+    async fn trigger_lookup_returns_intent_for_known_id() {
+        let store = TriggerStore::connect_memory().await.expect("connect");
+        let row = store.insert(mk_cron_new()).await.expect("insert");
+        let got = <TriggerStore as TriggerLookup>::intent(&store, &row.id).await;
+        assert_eq!(got.as_deref(), Some("每 5 分钟做一次深呼吸"));
+    }
+
+    #[tokio::test]
+    async fn trigger_lookup_returns_none_for_unknown_id() {
+        let store = TriggerStore::connect_memory().await.expect("connect");
+        let got = <TriggerStore as TriggerLookup>::intent(&store, "trg_nope").await;
+        assert!(got.is_none());
     }
 }
