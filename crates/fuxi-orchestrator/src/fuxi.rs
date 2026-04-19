@@ -13,6 +13,7 @@
 
 use crate::error::{OrchestratorError, Result};
 use crate::registry::{Shelf, ShelfEntry, ShelfStatus};
+use futures_util::StreamExt;
 use fuxi_agent_cc::{CcAgent, CcLaunchConfig};
 use fuxi_core::agent::{Agent, AgentProfile};
 use fuxi_core::event::{Event, EventKind, EventMeta};
@@ -21,7 +22,9 @@ use fuxi_core::task::Task;
 use fuxi_core::workspace::Workspace;
 use fuxi_events::EventBus;
 use fuxi_workspace::GitWorktreeWorkspace;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// `Fuxi` 的可调参数。
@@ -69,6 +72,10 @@ pub struct Fuxi {
     workspace: Arc<GitWorktreeWorkspace>,
     shelf: Arc<Shelf>,
     cfg: FuxiConfig,
+    /// 顶层玄女 agent id——repl 启动 spawn 后通过 `set_xuannv` 告知。
+    /// Why `Option`：`Fuxi::new` 零门客启动，早于任何 spawn；抄送路径
+    /// 遇到 `None` 时 graceful skip，不强求设置。
+    xuannv_id: Arc<RwLock<Option<AgentId>>>,
 }
 
 impl Fuxi {
@@ -83,12 +90,19 @@ impl Fuxi {
         workspace: Arc<GitWorktreeWorkspace>,
         cfg: FuxiConfig,
     ) -> Self {
-        Self {
-            bus,
+        let shelf = Arc::new(Shelf::new());
+        let me = Self {
+            bus: bus.clone(),
             workspace,
-            shelf: Arc::new(Shelf::new()),
+            shelf: shelf.clone(),
             cfg,
-        }
+            xuannv_id: Arc::new(RwLock::new(None)),
+        };
+        // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
+        // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
+        // Fuxi::shutdown 主动发、外部 publish）全部汇入这一条路径。
+        spawn_death_watcher(bus, shelf);
+        me
     }
 
     /// 拿到 EventBus 的引用——给需要直接推事件的外部 caller 用
@@ -100,6 +114,50 @@ impl Fuxi {
     /// 已注册门客数。
     pub async fn worker_count(&self) -> usize {
         self.shelf.len().await
+    }
+
+    /// 告知 Fuxi 哪个 agent 是玄女——抄送路径用这个判定 target≠xuannv。
+    /// 幂等：再次调用以最新值为准。
+    pub async fn set_xuannv(&self, id: AgentId) {
+        *self.xuannv_id.write().await = Some(id);
+    }
+
+    /// 读玄女 id——未设置返回 None。
+    pub async fn xuannv_id(&self) -> Option<AgentId> {
+        *self.xuannv_id.read().await
+    }
+
+    /// 读某门客分配的 worktree 路径——纯转发 shelf，供 TUI/CLI 用。
+    pub async fn worktree_of(&self, id: AgentId) -> Option<PathBuf> {
+        self.shelf.worktree_of(id).await
+    }
+
+    /// 克隆 shelf Arc——给 TUI 订阅者（只读观察 roster / worktree / 状态）。
+    /// WHY 只暴露只读意图：shelf 的修改权掌握在 Fuxi 手里，TUI 不能直接 set_status。
+    pub fn clone_shelf(&self) -> Arc<Shelf> {
+        self.shelf.clone()
+    }
+
+    /// 发一条让贤（主对话权转交）请求——TUI 订阅后自动切 active。
+    /// 不走门客 agent.send_message；只是事件广播，FIRE-AND-FORGET。
+    pub fn request_handoff(
+        &self,
+        from: AgentId,
+        to: AgentId,
+        reason: String,
+        brief: Option<String>,
+    ) {
+        let mut meta = EventMeta::now();
+        meta.agent = Some(from);
+        let _ = self.bus.publish(Event {
+            meta,
+            kind: EventKind::ConversationHandoffRequested {
+                from,
+                to,
+                reason,
+                brief,
+            },
+        });
     }
 
     /// 查一个门客当前的 shelf 状态（Idle/Busy/Dead）；不存在返回 None。
@@ -294,14 +352,21 @@ impl Fuxi {
         };
 
         // 1. UserInterventionSent —— 入口事件，意图进入事件流
-        self.publish_with_agent(
-            agent_id,
-            EventKind::UserInterventionSent {
-                target: agent_id,
-                mode: mode_str.to_string(),
-                text: text.to_string(),
-            },
-        );
+        // why 显式给 meta id：下面抄送事件需要引用它作为 original_intervention_id
+        let intervention_ev_id = {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent_id);
+            let id = meta.id;
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::UserInterventionSent {
+                    target: agent_id,
+                    mode: mode_str.to_string(),
+                    text: text.to_string(),
+                },
+            });
+            id
+        };
 
         // cc 忽略 task_id，随机 id 兼容 trait 签名
         let dummy_task = fuxi_core::id::TaskId::new();
@@ -330,6 +395,25 @@ impl Fuxi {
                 mode: mode_str.to_string(),
             },
         );
+
+        // 5. 抄送（呈报）——target 非玄女且玄女 id 已设时，把副本发给玄女。
+        // meta.agent 置为玄女，让订阅者知道"这条信归她知情"。
+        // 公理 #2：玄女有知情权无否决权，不阻塞当前 intervene。
+        let xuannv = self.xuannv_id().await;
+        if let Some(xn) = xuannv
+            && xn != agent_id
+        {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(xn);
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::OrchestratorCcReceived {
+                    from_user_to: agent_id,
+                    text: text.to_string(),
+                    original_intervention_id: intervention_ev_id,
+                },
+            });
+        }
         Ok(())
     }
 
@@ -458,4 +542,26 @@ impl Fuxi {
         );
         id
     }
+}
+
+/// 后台任务：订阅 bus 中的 `AgentDead` 事件，把对应 shelf 条目翻 Dead。
+///
+/// WHY 单独拆：让 Fuxi::with_config 构造期即可启动——构造函数不能 .await，所以这里
+/// 仅做同步 `bus.subscribe()`（拿 broadcast Receiver 是同步操作）+ `tokio::spawn`。
+/// shelf 被 Arc 共享：watcher 只持弱所有权也行，但 Arc 足够简单、无循环依赖。
+fn spawn_death_watcher(bus: EventBus, shelf: Arc<Shelf>) {
+    let mut sub = bus.subscribe();
+    tokio::spawn(async move {
+        while let Some(item) = sub.next().await {
+            let Ok(ev) = item else {
+                continue;
+            };
+            if let EventKind::AgentDead { .. } = ev.kind
+                && let Some(id) = ev.meta.agent
+            {
+                shelf.set_status(id, ShelfStatus::Dead).await;
+            }
+        }
+        debug!("death_watcher: bus 订阅流结束，退出");
+    });
 }
