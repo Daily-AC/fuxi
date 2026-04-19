@@ -39,6 +39,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -79,7 +80,53 @@ impl Default for Args {
     }
 }
 
+/// 在 PATH 中找指定 binary。`path_env` 抽出来是为了单测可以注入合成 PATH，
+/// 不污染全进程环境变量（`std::env::set_var` 在多线程并发跑测试时不安全）。
+pub fn find_in_path(name: &str, path_env: Option<&OsStr>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    for dir in std::env::split_paths(path_env) {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        // Unix 下要可执行才算数；非 Unix 见到文件就当数。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&candidate)
+                && meta.permissions().mode() & 0o111 != 0
+            {
+                return Some(candidate);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// 入装预检：`fuxi` binary 必须在 PATH 中，否则玄女的 Bash 工具调 `fuxi ...` 会
+/// `command not found`，整个 platform 失语。失败时 error message 必须明确指向
+/// `scripts/install.sh`，不许让用户自己猜要装什么。
+pub fn require_fuxi_in_path(name: &str, path_env: Option<&OsStr>) -> Result<PathBuf> {
+    if let Some(p) = find_in_path(name, path_env) {
+        return Ok(p);
+    }
+    Err(anyhow!(
+        "找不到 `{name}` 二进制（玄女的工具底座）。请先安装：\n\
+         \n    ./scripts/install.sh\n\n\
+         它会跑 `cargo install --path crates/fuxi-cli --force`，把 `fuxi` 装到 \
+         `~/.cargo/bin/`。装完后 `which fuxi` 应返回路径，再重启 fuxi。"
+    ))
+}
+
 pub async fn run(args: Args) -> Result<()> {
+    // 入装预检——玄女的 Bash 工具会调 `fuxi spawn/dispatch ...`，shell 找不到 fuxi
+    // 就全盘瘫痪。所以在 TUI 起来之前先 fail-fast，让用户先跑 install.sh。
+    require_fuxi_in_path("fuxi", std::env::var_os("PATH").as_deref())?;
+
     // skills 预检——找不到直接报错提示，不要进 TUI 再卡死
     if skill_loader::skills_root().is_none() {
         return Err(anyhow!(
@@ -731,5 +778,51 @@ mod tests {
         app.handle_key(KeyCode::Char('\t'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
         assert_eq!(app.input, "a");
+    }
+
+    // ───────── PATH 探测：保证 `fuxi` binary 在玄女能调到的位置 ─────────
+
+    #[test]
+    fn require_fuxi_in_path_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_env = dir.path().as_os_str();
+        let res = require_fuxi_in_path("fuxi", Some(path_env));
+        assert!(res.is_err(), "空 PATH 应当失败");
+        let msg = res.unwrap_err().to_string();
+        // error message 必须指向 install.sh，不让用户自己猜
+        assert!(
+            msg.contains("scripts/install.sh"),
+            "error 必须指向 scripts/install.sh；实际：{msg}"
+        );
+    }
+
+    #[test]
+    fn require_fuxi_in_path_errors_when_path_env_unset() {
+        let res = require_fuxi_in_path("fuxi", None);
+        assert!(res.is_err(), "无 PATH env 也应当失败");
+        assert!(res.unwrap_err().to_string().contains("scripts/install.sh"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_fuxi_in_path_finds_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("fuxi");
+        std::fs::write(&bin_path, "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let res = require_fuxi_in_path("fuxi", Some(dir.path().as_os_str()));
+        assert!(res.is_ok(), "应找到 binary；实际：{res:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_fuxi_in_path_skips_non_executable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_path = dir.path().join("fuxi");
+        // 写入但不给可执行位——chmod 默认 644
+        std::fs::write(&bin_path, b"not exe").unwrap();
+        let res = require_fuxi_in_path("fuxi", Some(dir.path().as_os_str()));
+        assert!(res.is_err(), "无 +x 的文件不应被接受");
     }
 }
