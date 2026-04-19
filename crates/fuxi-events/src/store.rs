@@ -242,6 +242,7 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         TaskStateChanged { .. } => "task_state_changed",
         TaskDelivered { .. } => "task_delivered",
         TaskBlocked { .. } => "task_blocked",
+        TaskResumed { .. } => "task_resumed",
         TaskCancelled { .. } => "task_cancelled",
         MessageSent { .. } => "message_sent",
         MessageReceived { .. } => "message_received",

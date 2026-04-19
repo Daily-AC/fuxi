@@ -53,6 +53,13 @@ pub enum Command {
     List,
     /// 杀指定门客（shutdown 它的 cc 进程）。
     Kill { agent_id: String },
+    /// 玄女请示用户前标记任务 Blocked——发 `task_blocked` 事件。
+    BlockTask { task_id: String, reason: String },
+    /// 用户授权通过后解锁任务——发 `task_resumed` 事件，input 可选附带用户的话。
+    ResumeTask {
+        task_id: String,
+        input: Option<String>,
+    },
     /// 关 daemon 本身。所有门客随之下线。
     Shutdown,
     /// 健康探活——daemon 回一条 `Pong`。

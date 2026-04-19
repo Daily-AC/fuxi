@@ -199,6 +199,22 @@ async fn dispatch_command(fuxi: Arc<Fuxi>, cmd: Command, shutdown_hook: Arc<Noti
             }
         },
 
+        Command::BlockTask { task_id, reason } => match parse_task_id(&task_id) {
+            Err(e) => Response::err(e),
+            Ok(tid) => match fuxi.block_task(tid, reason) {
+                Ok(()) => Response::ok(serde_json::json!({"blocked": true})),
+                Err(e) => Response::err(e.to_string()),
+            },
+        },
+
+        Command::ResumeTask { task_id, input } => match parse_task_id(&task_id) {
+            Err(e) => Response::err(e),
+            Ok(tid) => match fuxi.resume_task(tid, input) {
+                Ok(()) => Response::ok(serde_json::json!({"resumed": true})),
+                Err(e) => Response::err(e.to_string()),
+            },
+        },
+
         Command::Shutdown => {
             // 先触发 Fuxi 的门客收尾，再通知 serve 循环退出
             if let Err(e) = fuxi.shutdown().await {
@@ -216,6 +232,13 @@ fn parse_agent_id(s: &str) -> std::result::Result<AgentId, String> {
     Uuid::parse_str(uuid_part)
         .map(AgentId::from)
         .map_err(|e| format!("无效 agent_id {s:?}: {e}"))
+}
+
+fn parse_task_id(s: &str) -> std::result::Result<fuxi_core::id::TaskId, String> {
+    let uuid_part = s.strip_prefix("task-").unwrap_or(s);
+    Uuid::parse_str(uuid_part)
+        .map(fuxi_core::id::TaskId::from)
+        .map_err(|e| format!("无效 task_id {s:?}: {e}"))
 }
 
 /// 根据 role 读 Skill → 构造 AgentProfile + CcLaunchConfig → 丢给 Fuxi.spawn_worker
