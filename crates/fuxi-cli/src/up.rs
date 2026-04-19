@@ -17,6 +17,10 @@ use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_events::{EventBus, EventStore};
 use fuxi_firehose::Hub;
 use fuxi_orchestrator::{Fuxi, FuxiConfig};
+use fuxi_scheduler::keeper::SystemClock;
+use fuxi_scheduler::watcher::{FsWatcherConfig, FsWatcherRig};
+use fuxi_scheduler::webhook::WebhookState;
+use fuxi_scheduler::{Keeper, TriggerStore};
 use fuxi_workspace::GitWorktreeWorkspace;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -30,6 +34,9 @@ pub struct Args {
     /// 可选 SQLite 文件；不给则使用内存库（进程退出即丢）。
     #[arg(long)]
     pub db: Option<PathBuf>,
+    /// 可选 scheduler SQLite 文件——默认跟 `--db` 同位（若无则 `:memory:`）。
+    #[arg(long = "sched-db")]
+    pub sched_db: Option<PathBuf>,
     /// Unix socket 路径覆盖。默认走 `$FUXI_SOCK` 或 `/tmp/fuxi.sock`。
     #[arg(long = "sock")]
     pub sock_path: Option<PathBuf>,
@@ -65,13 +72,52 @@ pub async fn run(args: Args) -> Result<()> {
     };
     let fuxi = Arc::new(Fuxi::with_config(bus.clone(), ws, fuxi_cfg));
 
-    // 3. Firehose Hub + router
-    let hub = Arc::new(Hub::new(bus.clone()));
-    let app = fuxi_firehose::hub::router(hub);
+    // 3. Scheduler（更漏）—— candidate 落库 + Keeper tick loop
+    let sched_store = match args.sched_db.as_ref().or(args.db.as_ref()) {
+        Some(path) => {
+            // 为什么用独立文件 suffix：scheduler 和 events 共存同一文件没错，但分离后
+            // 各自的 PRAGMA 设置不会相互踩到；若用户只给 --db，那就同一文件也能跑。
+            TriggerStore::connect_file(path)
+                .await
+                .with_context(|| format!("打开 scheduler SQLite {}", path.display()))?
+        }
+        None => TriggerStore::connect_memory()
+            .await
+            .context("创建 scheduler 内存库")?,
+    };
+    let keeper = Arc::new(Keeper::new(
+        sched_store.clone(),
+        bus.clone(),
+        Arc::new(SystemClock),
+    ));
+    let keeper_task = Keeper::new(sched_store.clone(), bus.clone(), Arc::new(SystemClock)).spawn();
 
-    // 4. Daemon socket
+    // fs_watch triggers 启动时一次性挂上
+    let fs_rig = FsWatcherRig::spawn(
+        sched_store.clone(),
+        keeper.clone(),
+        FsWatcherConfig::default(),
+    )
+    .await
+    .context("启动 fs watcher")?;
+
+    // 4. Firehose Hub + webhook router，合并成同一 app
+    let hub = Arc::new(Hub::new(bus.clone()));
+    let firehose_router = fuxi_firehose::hub::router(hub);
+    let webhook_router = fuxi_scheduler::webhook::router(WebhookState {
+        store: sched_store.clone(),
+        keeper: keeper.clone(),
+    });
+    let app = firehose_router.merge(webhook_router);
+
+    // 5. Daemon socket
     let sock_path = args.sock_path.clone().unwrap_or_else(ipc::socket_path);
-    let daemon = Daemon::new(fuxi.clone());
+    let daemon = Daemon::new(
+        fuxi.clone(),
+        bus.clone(),
+        sched_store.clone(),
+        keeper.clone(),
+    );
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
     let daemon_task = tokio::spawn(async move {
@@ -114,6 +160,9 @@ pub async fn run(args: Args) -> Result<()> {
     // 7. 通知 daemon 停（如果不是它先触发的）
     daemon_shutdown.notify_waiters();
     let _ = daemon_task.await;
+    keeper_task.abort();
+    fs_rig.join.abort();
+    drop(fs_rig); // 确保 watchers 的生命周期结束
 
     // 8. PlatformStopping
     bus.publish(Event {

@@ -13,14 +13,17 @@
 
 use crate::ipc::{Command, InterveneMode, Response};
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use fuxi_agent_cc::CcLaunchConfig;
+use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::AgentId;
 use fuxi_core::task::Task;
+use fuxi_events::EventBus;
 use fuxi_orchestrator::{Fuxi, WorkerKind};
+use fuxi_scheduler::store::{FireCause, NewTrigger};
+use fuxi_scheduler::{Keeper, TriggerSpec, TriggerStore, new_trigger_id};
 use fuxi_skills as skill_loader;
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -30,14 +33,23 @@ use uuid::Uuid;
 /// daemon 运行所需的所有状态。
 pub struct Daemon {
     pub fuxi: Arc<Fuxi>,
+    /// EventBus——给 `TriggerRegistered` 广播用（daemon 不经 Fuxi 直发）。
+    pub bus: EventBus,
+    /// 更漏候簿——trigger CRUD 直接落库。Keeper 下一 tick 自动可见。
+    pub store: TriggerStore,
+    /// Keeper 句柄——给"手动 fire"路径用，和 cron tick 共用 `record_and_emit_fire`。
+    pub keeper: Arc<Keeper>,
     /// 发信号给 serve 循环的 abort——Command::Shutdown 触发。
     shutdown_signal: Arc<Notify>,
 }
 
 impl Daemon {
-    pub fn new(fuxi: Arc<Fuxi>) -> Self {
+    pub fn new(fuxi: Arc<Fuxi>, bus: EventBus, store: TriggerStore, keeper: Arc<Keeper>) -> Self {
         Self {
             fuxi,
+            bus,
+            store,
+            keeper,
             shutdown_signal: Arc::new(Notify::new()),
         }
     }
@@ -60,6 +72,9 @@ impl Daemon {
         let notify = self.shutdown_signal.clone();
         let fuxi = self.fuxi.clone();
         let shutdown_hook = self.shutdown_signal.clone();
+        let store = self.store.clone();
+        let keeper = self.keeper.clone();
+        let bus = self.bus.clone();
 
         loop {
             tokio::select! {
@@ -70,9 +85,12 @@ impl Daemon {
                 res = listener.accept() => {
                     let (stream, _) = res.context("accept")?;
                     let fuxi = fuxi.clone();
+                    let store = store.clone();
+                    let keeper = keeper.clone();
+                    let bus = bus.clone();
                     let shutdown_hook = shutdown_hook.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, fuxi, shutdown_hook).await {
+                        if let Err(e) = handle_conn(stream, fuxi, bus, store, keeper, shutdown_hook).await {
                             tracing::warn!(error = %e, "connection handler errored");
                         }
                     });
@@ -94,6 +112,9 @@ impl Daemon {
 async fn handle_conn(
     stream: UnixStream,
     fuxi: Arc<Fuxi>,
+    bus: EventBus,
+    store: TriggerStore,
+    keeper: Arc<Keeper>,
     shutdown_hook: Arc<Notify>,
 ) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
@@ -109,7 +130,7 @@ async fn handle_conn(
     }
 
     let resp = match serde_json::from_str::<Command>(trimmed) {
-        Ok(cmd) => dispatch_command(fuxi, cmd, shutdown_hook).await,
+        Ok(cmd) => dispatch_command(fuxi, bus, store, keeper, cmd, shutdown_hook).await,
         Err(e) => Response::err(format!("解析命令失败: {e}")),
     };
     let out = serde_json::to_string(&resp)? + "\n";
@@ -118,7 +139,14 @@ async fn handle_conn(
     Ok(())
 }
 
-async fn dispatch_command(fuxi: Arc<Fuxi>, cmd: Command, shutdown_hook: Arc<Notify>) -> Response {
+async fn dispatch_command(
+    fuxi: Arc<Fuxi>,
+    bus: EventBus,
+    store: TriggerStore,
+    keeper: Arc<Keeper>,
+    cmd: Command,
+    shutdown_hook: Arc<Notify>,
+) -> Response {
     match cmd {
         Command::Ping => Response::Pong,
 
@@ -235,7 +263,180 @@ async fn dispatch_command(fuxi: Arc<Fuxi>, cmd: Command, shutdown_hook: Arc<Noti
             shutdown_hook.notify_waiters();
             Response::ok(serde_json::json!({"shutdown": true}))
         }
+
+        // ── 更漏 ──
+        Command::CronAdd {
+            expr,
+            intent,
+            tz,
+            session_id,
+        } => {
+            let id = new_trigger_id();
+            let spec = TriggerSpec::Cron { expr, tz };
+            match store
+                .insert(NewTrigger {
+                    id: id.clone(),
+                    spec: spec.clone(),
+                    intent,
+                    session_id,
+                    max_failures: None,
+                })
+                .await
+            {
+                Ok(row) => {
+                    emit_trigger_registered(&bus, &row.id, &row.spec);
+                    Response::ok(serde_json::json!({"trigger_id": row.id, "kind": "cron"}))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        Command::CronOnce {
+            at,
+            intent,
+            session_id,
+        } => match DateTime::parse_from_rfc3339(&at) {
+            Err(e) => Response::err(format!("at 需 RFC3339: {e}")),
+            Ok(at) => {
+                let id = new_trigger_id();
+                let spec = TriggerSpec::Once {
+                    at: at.with_timezone(&Utc),
+                };
+                match store
+                    .insert(NewTrigger {
+                        id: id.clone(),
+                        spec: spec.clone(),
+                        intent,
+                        session_id,
+                        max_failures: None,
+                    })
+                    .await
+                {
+                    Ok(row) => {
+                        emit_trigger_registered(&bus, &row.id, &row.spec);
+                        Response::ok(serde_json::json!({"trigger_id": row.id, "kind": "once"}))
+                    }
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
+        },
+        Command::CronWatch {
+            path,
+            intent,
+            events,
+            session_id,
+        } => {
+            let spec = TriggerSpec::FsWatch {
+                path: PathBuf::from(path),
+                events,
+            };
+            let id = new_trigger_id();
+            match store
+                .insert(NewTrigger {
+                    id: id.clone(),
+                    spec: spec.clone(),
+                    intent,
+                    session_id,
+                    max_failures: None,
+                })
+                .await
+            {
+                Ok(row) => {
+                    emit_trigger_registered(&bus, &row.id, &row.spec);
+                    // v1：fs_watch 只在 fuxi up 启动时批量挂载。运行时新增暂留提示。
+                    Response::ok(serde_json::json!({
+                        "trigger_id": row.id,
+                        "kind": "fs_watch",
+                        "note": "fs 监视在下次 fuxi up 启动时生效",
+                    }))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        Command::CronWebhook {
+            intent,
+            secret,
+            session_id,
+        } => {
+            let spec = TriggerSpec::Webhook { secret };
+            let id = new_trigger_id();
+            match store
+                .insert(NewTrigger {
+                    id: id.clone(),
+                    spec: spec.clone(),
+                    intent,
+                    session_id,
+                    max_failures: None,
+                })
+                .await
+            {
+                Ok(row) => {
+                    emit_trigger_registered(&bus, &row.id, &row.spec);
+                    Response::ok(serde_json::json!({
+                        "trigger_id": row.id,
+                        "kind": "webhook",
+                        "endpoint": format!("POST /hook/{}", row.id),
+                    }))
+                }
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
+        Command::CronList => match store.list_all().await {
+            Ok(rows) => {
+                let items: Vec<_> = rows
+                    .into_iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "id": r.id,
+                            "kind": r.spec.kind_str(),
+                            "intent": r.intent,
+                            "enabled": r.enabled,
+                            "consecutive_failures": r.consecutive_failures,
+                            "last_fired_at": r.last_fired_at.map(|d| d.to_rfc3339()),
+                            "spec": r.spec,
+                        })
+                    })
+                    .collect();
+                Response::ok(serde_json::json!({"triggers": items}))
+            }
+            Err(e) => Response::err(e.to_string()),
+        },
+        Command::CronFire { id } => match store.get(&id).await {
+            Ok(Some(row)) => {
+                if !row.enabled {
+                    Response::err(format!("trigger {id} 已 disabled"))
+                } else {
+                    match keeper
+                        .record_and_emit_fire(&id, Utc::now(), FireCause::Manual, None)
+                        .await
+                    {
+                        Ok(_) => Response::ok(serde_json::json!({"fired": true, "trigger_id": id})),
+                        Err(e) => Response::err(e.to_string()),
+                    }
+                }
+            }
+            Ok(None) => Response::err(format!("trigger {id} 不存在")),
+            Err(e) => Response::err(e.to_string()),
+        },
+        Command::CronRemove { id } => match store.remove(&id).await {
+            Ok(true) => Response::ok(serde_json::json!({"removed": true})),
+            Ok(false) => Response::err(format!("trigger {id} 不存在")),
+            Err(e) => Response::err(e.to_string()),
+        },
     }
+}
+
+/// 登记成功后发一条 `TriggerRegistered` 事件——Firehose 能看到候簿变化。
+fn emit_trigger_registered(bus: &EventBus, id: &str, spec: &TriggerSpec) {
+    let spec_json = serde_json::to_value(spec).unwrap_or(serde_json::Value::Null);
+    let ev = Event {
+        meta: EventMeta::now(),
+        kind: EventKind::TriggerRegistered {
+            id: id.to_string(),
+            kind: spec.kind_str().to_string(),
+            spec: spec_json,
+        },
+    };
+    let _ = bus.publish(ev);
 }
 
 fn parse_agent_id(s: &str) -> std::result::Result<AgentId, String> {
@@ -291,9 +492,9 @@ mod tests {
     use crate::ipc::Command;
 
     /// 不起真 Fuxi——用空壳子验 wire 行为（ping/invalid cmd）。
-    async fn mock_fuxi() -> Arc<Fuxi> {
-        use fuxi_events::EventBus;
+    async fn mock_daemon_parts() -> (Arc<Fuxi>, EventBus, TriggerStore, Arc<Keeper>) {
         use fuxi_orchestrator::FuxiConfig;
+        use fuxi_scheduler::keeper::SystemClock;
         use fuxi_workspace::GitWorktreeWorkspace;
         let bus = EventBus::with_memory_store().await.unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -304,13 +505,20 @@ mod tests {
             allocate_worktree: false,
             ..Default::default()
         };
-        Arc::new(Fuxi::with_config(bus, ws, cfg))
+        let fuxi = Arc::new(Fuxi::with_config(bus.clone(), ws, cfg));
+        let store = TriggerStore::connect_memory().await.unwrap();
+        let keeper = Arc::new(Keeper::new(
+            store.clone(),
+            bus.clone(),
+            Arc::new(SystemClock),
+        ));
+        (fuxi, bus, store, keeper)
     }
 
     #[tokio::test]
     async fn ping_pong_roundtrip() {
-        let fuxi = mock_fuxi().await;
-        let daemon = Daemon::new(fuxi);
+        let (fuxi, bus, store, keeper) = mock_daemon_parts().await;
+        let daemon = Daemon::new(fuxi, bus, store, keeper);
         let sock = temp_sock_path();
 
         let sock_for_server = sock.clone();
@@ -348,8 +556,8 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_returns_parse_error() {
-        let fuxi = mock_fuxi().await;
-        let daemon = Daemon::new(fuxi);
+        let (fuxi, bus, store, keeper) = mock_daemon_parts().await;
+        let daemon = Daemon::new(fuxi, bus, store, keeper);
         let sock = temp_sock_path();
         let shutdown = daemon.shutdown_handle();
 

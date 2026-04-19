@@ -1,0 +1,31 @@
+[package]
+name = "fuxi-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲更漏：cron + 响应式 trigger 调度（croner + SQLite + EventBus）"
+
+[dependencies]
+fuxi-core.workspace = true
+fuxi-events.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+axum = { workspace = true, features = ["macros"] }
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+async-trait.workspace = true
+croner = "2"
+notify = "6"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = "3"
+tracing-subscriber.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+tower = { workspace = true, features = ["util"] }

@@ -33,6 +33,8 @@ use fuxi_core::task::{Task, TaskState};
 use fuxi_events::EventBus;
 use fuxi_firehose::{FirehoseApp, Hub};
 use fuxi_orchestrator::{Fuxi, FuxiConfig, ShelfStatus, WorkerKind};
+use fuxi_scheduler::keeper::SystemClock;
+use fuxi_scheduler::{Keeper, TriggerStore};
 use fuxi_skills as skill_loader;
 use fuxi_workspace::GitWorktreeWorkspace;
 use ratatui::Terminal;
@@ -175,7 +177,17 @@ pub async fn run(args: Args) -> Result<()> {
     unsafe {
         std::env::set_var("FUXI_SOCK", &sock_path);
     }
-    let daemon = Daemon::new(fuxi.clone());
+    // REPL 场景的 scheduler：用内存库，退出即丢；足够测试 `fuxi cron fire` 等命令。
+    let sched_store = TriggerStore::connect_memory()
+        .await
+        .context("创建 scheduler 内存库")?;
+    let keeper = Arc::new(Keeper::new(
+        sched_store.clone(),
+        bus.clone(),
+        Arc::new(SystemClock),
+    ));
+    let keeper_task = Keeper::new(sched_store.clone(), bus.clone(), Arc::new(SystemClock)).spawn();
+    let daemon = Daemon::new(fuxi.clone(), bus.clone(), sched_store, keeper);
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
     let daemon_task = tokio::spawn(async move {
@@ -232,6 +244,7 @@ pub async fn run(args: Args) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(80)).await;
     hub_task.abort();
     daemon_task.abort();
+    keeper_task.abort();
 
     outcome
 }

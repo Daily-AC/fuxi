@@ -12,6 +12,7 @@ members = [
     "crates/fuxi-orchestrator",
     "crates/fuxi-skills",
     "crates/fuxi-memory",
+    "crates/fuxi-scheduler",
 ]
 
 [workspace.package]
@@ -69,6 +70,7 @@ fuxi-workspace = { path = "crates/fuxi-workspace" }
 fuxi-orchestrator = { path = "crates/fuxi-orchestrator" }
 fuxi-skills = { path = "crates/fuxi-skills" }
 fuxi-memory = { path = "crates/fuxi-memory" }
+fuxi-scheduler = { path = "crates/fuxi-scheduler" }
 
 [profile.release]
 lto = "thin"

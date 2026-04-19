@@ -442,6 +442,13 @@ fn summarize(k: &EventKind) -> String {
             short_id(&to.to_string()),
             brief.clone().unwrap_or_default()
         ),
+        TriggerRegistered { id, kind, .. } => format!("trigger+ {kind}:{id}"),
+        TriggerFired { id, cause, .. } => format!("trigger! {id} [{cause}]"),
+        TriggerDispatched { id, to_agent } => {
+            format!("trigger→{} {id}", short_id(&to_agent.to_string()))
+        }
+        TriggerSkipped { id, reason } => format!("trigger~ {id}: {reason}"),
+        TriggerFailed { id, error } => format!("trigger✗ {id}: {}", one_line(error, 40)),
         PlatformStarted { version } => format!("fuxi {version}"),
         PlatformStopping => "platform stopping".to_string(),
         SkillStaged { role, template, .. } => format!("role={role} template={template}"),
@@ -505,6 +512,13 @@ fn color_for(k: &EventKind) -> Color {
         | SkillRejected { .. }
         | SkillActivated { .. }
         | NoRoleMatched { .. } => Color::Red,
+
+        // 更漏一族 —— 同样醒目的红，都是时机性高权限事件。
+        TriggerRegistered { .. }
+        | TriggerFired { .. }
+        | TriggerDispatched { .. }
+        | TriggerSkipped { .. }
+        | TriggerFailed { .. } => Color::Red,
 
         Custom { .. } => Color::DarkGray,
     }

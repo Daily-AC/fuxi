@@ -168,6 +168,37 @@ pub enum EventKind {
         brief: Option<String>,
     },
 
+    // ── scheduling / triggers（更漏 M1.3）──────────────────
+    /// 新 trigger 入库——候簿上登记了一条新条目。
+    TriggerRegistered {
+        id: String,
+        kind: String,
+        spec: serde_json::Value,
+    },
+    /// Trigger 到期/被外部事件命中——统一入口，`cause` 区分来源。
+    ///
+    /// `cause` ∈ `"scheduled" | "manual" | "webhook" | "fs"`，见 `fuxi-scheduler::FireCause`。
+    TriggerFired {
+        id: String,
+        fired_at: DateTime<Utc>,
+        cause: String,
+    },
+    /// Trigger 已派给某个 agent（通常是玄女），进入执行路径。
+    TriggerDispatched {
+        id: String,
+        to_agent: AgentId,
+    },
+    /// 本次 fire 被跳过——去重 / 熔断 / 无人接单。`reason` 必填。
+    TriggerSkipped {
+        id: String,
+        reason: String,
+    },
+    /// Trigger 执行失败——consecutive_failures 会 +1；连续到上限 trigger 被 pause。
+    TriggerFailed {
+        id: String,
+        error: String,
+    },
+
     // ── platform ────────────────────────────────────────────
     PlatformStarted {
         version: String,

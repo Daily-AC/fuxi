@@ -67,6 +67,40 @@ pub enum Command {
     Shutdown,
     /// 健康探活——daemon 回一条 `Pong`。
     Ping,
+
+    // ── 更漏（scheduler / triggers） ──
+    /// 登记 cron trigger。
+    CronAdd {
+        expr: String,
+        intent: String,
+        tz: Option<String>,
+        session_id: Option<String>,
+    },
+    /// 登记一次性 trigger（RFC3339 绝对时间）。
+    CronOnce {
+        at: String,
+        intent: String,
+        session_id: Option<String>,
+    },
+    /// 登记 fs_watch trigger。
+    CronWatch {
+        path: String,
+        intent: String,
+        events: Vec<String>,
+        session_id: Option<String>,
+    },
+    /// 登记 webhook trigger——返回 trigger_id 以便用户拼 URL。
+    CronWebhook {
+        intent: String,
+        secret: Option<String>,
+        session_id: Option<String>,
+    },
+    /// 列出所有 triggers。
+    CronList,
+    /// 手动 fire 一条 trigger。
+    CronFire { id: String },
+    /// 删 trigger。
+    CronRemove { id: String },
 }
 
 /// 客户端可以请求 daemon 推的事件负载——故意受限的白名单。
