@@ -44,7 +44,7 @@ async fn real_cc_echo_roundtrip() {
         ..Default::default()
     };
 
-    let agent = CcAgent::launch(profile, cfg).expect("launch claude");
+    let agent = CcAgent::launch(profile, cfg).await.expect("launch claude");
     let task = Task::new("echo hi", "Reply with exactly: hi");
     let mut rx = agent.dispatch(task).await.expect("dispatch");
 
