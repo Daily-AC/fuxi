@@ -39,10 +39,8 @@ async fn real_cc_echo_roundtrip() {
         tags: vec!["smoke".into()],
         extra: Default::default(),
     };
-    let cfg = CcLaunchConfig {
-        model: "haiku".into(),
-        ..Default::default()
-    };
+    // smoke 想省成本可手动 set FUXI_CC_MODEL=haiku，否则走 cc 默认（opus-4-7）
+    let cfg = CcLaunchConfig::default();
 
     let agent = CcAgent::launch(profile, cfg).await.expect("launch claude");
     let task = Task::new("echo hi", "Reply with exactly: hi");

@@ -8,17 +8,21 @@
 
 use std::path::PathBuf;
 
-/// 默认回落模型——P1 阶段全部用 haiku 压成本。通过环境变量
-/// `FUXI_CC_MODEL` 覆盖，不写死在代码里。
+/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置**不传**
+/// `--model`，让 `claude` 用它自身的默认（当前 2.1.114 默认 opus-4-7）。
+///
+/// 为什么不再硬编码 fallback：P1 写 "haiku" 是为省 API 成本——但这伤产品体
+/// 验（玄女是规划层，重思考，haiku 明显不够）。用户明确指示："默认就 cc 的
+/// 默认 opus-4-7"。如果测试要降档，set `FUXI_CC_MODEL=haiku` 即可。
 pub const DEFAULT_MODEL_ENV: &str = "FUXI_CC_MODEL";
-pub const DEFAULT_MODEL_FALLBACK: &str = "haiku";
 
 /// `claude` headless 启动参数。任何字段都可以不填——`Default` 给出最
 /// 稳定的一套（见 `reference_cc_stream_json.md`）。
 #[derive(Debug, Clone)]
 pub struct CcLaunchConfig {
-    /// `--model <name>`，如 `"haiku"` / `"sonnet"` / `"opus"`.
-    pub model: String,
+    /// `--model <name>`——`None` 时**不传** `--model`，走 cc 默认。
+    /// 如 `Some("haiku")` / `Some("sonnet")` / `Some("opus")`。
+    pub model: Option<String>,
     /// 启动时 `cwd`。`None` = 继承父进程。门客真正跑起来后应指向其 worktree。
     pub cwd: Option<PathBuf>,
     /// `--append-system-prompt`：给角色 profile 留的接口。
@@ -90,9 +94,12 @@ impl CcLaunchConfig {
             "bypassPermissions".to_string(),
             "--dangerously-skip-permissions".to_string(),
             "--no-session-persistence".to_string(),
-            "--model".to_string(),
-            self.model.clone(),
         ]);
+
+        if let Some(model) = &self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
 
         if let Some(prompt) = &self.append_system_prompt {
             args.push("--append-system-prompt".to_string());
@@ -119,9 +126,11 @@ impl CcLaunchConfig {
     }
 }
 
-/// 读 `FUXI_CC_MODEL`，否则退回 `DEFAULT_MODEL_FALLBACK`。
-pub fn resolve_default_model() -> String {
-    std::env::var(DEFAULT_MODEL_ENV).unwrap_or_else(|_| DEFAULT_MODEL_FALLBACK.to_string())
+/// 读 `FUXI_CC_MODEL`；未设返回 `None`——caller 要据此不传 `--model` flag。
+pub fn resolve_default_model() -> Option<String> {
+    std::env::var(DEFAULT_MODEL_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -132,7 +141,7 @@ mod tests {
     fn default_args_contain_stable_flags() {
         let cfg = CcLaunchConfig {
             // 手动指定，避免 env 干扰单测。
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             ..Default::default()
         };
         let args = cfg.build_args();
@@ -161,7 +170,7 @@ mod tests {
     #[test]
     fn default_args_do_not_include_bare() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             ..Default::default()
         };
         assert!(!cfg.build_args().iter().any(|a| a == "--bare"));
@@ -170,7 +179,7 @@ mod tests {
     #[test]
     fn append_system_prompt_flows_through() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             append_system_prompt: Some("role: pm".to_string()),
             ..Default::default()
         };
@@ -185,7 +194,7 @@ mod tests {
     #[test]
     fn allowed_tools_joined_with_comma() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             allowed_tools: Some(vec!["Read".into(), "Edit".into()]),
             ..Default::default()
         };
@@ -200,7 +209,7 @@ mod tests {
     #[test]
     fn empty_allowed_tools_is_skipped() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             allowed_tools: Some(vec![]),
             ..Default::default()
         };
@@ -211,7 +220,7 @@ mod tests {
     #[test]
     fn extra_args_are_appended() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             extra_args: vec!["--include-partial-messages".into()],
             ..Default::default()
         };
@@ -222,7 +231,7 @@ mod tests {
     #[test]
     fn default_binary_is_claude() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             ..Default::default()
         };
         assert_eq!(cfg.binary, "claude");
@@ -232,7 +241,7 @@ mod tests {
     #[test]
     fn sdk_url_is_first_and_adds_placeholder_prompt() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             sdk_url: Some("ws://127.0.0.1:12345/ws/cli/abc".into()),
             ..Default::default()
         };
@@ -248,7 +257,7 @@ mod tests {
     #[test]
     fn stdio_mode_omits_sdk_url_and_placeholder() {
         let cfg = CcLaunchConfig {
-            model: "haiku".to_string(),
+            model: Some("haiku".to_string()),
             sdk_url: None,
             ..Default::default()
         };
@@ -256,5 +265,22 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--sdk-url"));
         // -p "" 只在 SDK 模式下追加；stdio 下 build_args 尾部不应是 "-p"
         assert_ne!(args.last().map(String::as_str), Some("-p"));
+    }
+
+    /// 用户明确指示：默认走 cc 自身默认（目前 opus-4-7），未设 FUXI_CC_MODEL
+    /// 时**不传** `--model` flag。
+    #[test]
+    fn default_omits_model_flag_when_none() {
+        // 保守清掉 env 避免干扰
+        unsafe {
+            std::env::remove_var(DEFAULT_MODEL_ENV);
+        }
+        let cfg = CcLaunchConfig::default();
+        assert!(cfg.model.is_none());
+        let args = cfg.build_args();
+        assert!(
+            !args.iter().any(|a| a == "--model"),
+            "expected no --model, got: {args:?}"
+        );
     }
 }
