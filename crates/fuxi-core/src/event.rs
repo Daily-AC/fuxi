@@ -160,6 +160,31 @@ pub enum EventKind {
     },
     PlatformStopping,
 
+    // ── skills / 招贤 ────────────────────────────────────────
+    /// 铸牒司产出的榜文已落到 `skills/<role>.staging/`。
+    SkillStaged {
+        role: String,
+        template: String,
+        path: String,
+    },
+    /// 玉牒审过 —— rename staging → active 完成。
+    SkillApproved {
+        role: String,
+    },
+    /// 榜文被驳回 —— staging 已清理。
+    SkillRejected {
+        role: String,
+        reason: String,
+    },
+    /// 玉牒激活——订阅者可据此刷新 roster 或预热 runtime。
+    SkillActivated {
+        role: String,
+    },
+    /// 玄女发 —— 现有 role 不足，需要招贤。触发铸牒司。
+    NoRoleMatched {
+        need: String,
+    },
+
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
     /// minimum—prefer adding a typed variant.
@@ -167,4 +192,78 @@ pub enum EventKind {
         label: String,
         payload: serde_json::Value,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_staged_roundtrip() {
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::SkillStaged {
+                role: "painter".into(),
+                template: "dev".into(),
+                path: "/tmp/skills/painter.staging/SKILL.md".into(),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("skill_staged"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        match back.kind {
+            EventKind::SkillStaged { role, template, .. } => {
+                assert_eq!(role, "painter");
+                assert_eq!(template, "dev");
+            }
+            other => panic!("不是 SkillStaged: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_role_matched_roundtrip() {
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::NoRoleMatched {
+                need: "画图门客".into(),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("no_role_matched"));
+        assert!(json.contains("画图门客"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        matches!(back.kind, EventKind::NoRoleMatched { .. });
+    }
+
+    #[test]
+    fn skill_lifecycle_tags_match_snake_case() {
+        for (kind, expect) in [
+            (
+                EventKind::SkillStaged {
+                    role: "x".into(),
+                    template: "t".into(),
+                    path: "p".into(),
+                },
+                "skill_staged",
+            ),
+            (
+                EventKind::SkillApproved { role: "x".into() },
+                "skill_approved",
+            ),
+            (
+                EventKind::SkillRejected {
+                    role: "x".into(),
+                    reason: "bad".into(),
+                },
+                "skill_rejected",
+            ),
+            (
+                EventKind::SkillActivated { role: "x".into() },
+                "skill_activated",
+            ),
+        ] {
+            let v = serde_json::to_value(&kind).expect("ser");
+            assert_eq!(v.get("type").and_then(|x| x.as_str()), Some(expect));
+        }
+    }
 }

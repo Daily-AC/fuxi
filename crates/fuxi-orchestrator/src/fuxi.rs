@@ -91,6 +91,12 @@ impl Fuxi {
         }
     }
 
+    /// 拿到 EventBus 的引用——给需要直接推事件的外部 caller 用
+    /// （例如 daemon 处理 `Command::EmitEvent`）。
+    pub fn bus(&self) -> &EventBus {
+        &self.bus
+    }
+
     /// 已注册门客数。
     pub async fn worker_count(&self) -> usize {
         self.shelf.len().await

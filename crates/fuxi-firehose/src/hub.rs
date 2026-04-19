@@ -311,6 +311,11 @@ pub(crate) fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         ConversationReturned { .. } => "conversation_returned",
         PlatformStarted { .. } => "platform_started",
         PlatformStopping => "platform_stopping",
+        SkillStaged { .. } => "skill_staged",
+        SkillApproved { .. } => "skill_approved",
+        SkillRejected { .. } => "skill_rejected",
+        SkillActivated { .. } => "skill_activated",
+        NoRoleMatched { .. } => "no_role_matched",
         Custom { .. } => "custom",
     }
 }

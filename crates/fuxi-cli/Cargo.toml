@@ -17,6 +17,7 @@ fuxi-agent-cc.workspace = true
 fuxi-firehose.workspace = true
 fuxi-orchestrator.workspace = true
 fuxi-workspace.workspace = true
+fuxi-skills.workspace = true
 tokio = { workspace = true, features = ["full"] }
 clap.workspace = true
 anyhow.workspace = true
@@ -35,3 +36,4 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = "3"
+fuxi-skills.workspace = true
