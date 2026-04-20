@@ -1051,3 +1051,48 @@ async fn orchestrator_cc_received_carries_original_intervention_id() {
         "OrchestratorCcReceived.original_intervention_id 应等于 UserInterventionSent 的事件 id"
     );
 }
+
+/// Bug 修复（2026-04-20 用户复测）：`Fuxi::dispatch` 必须在开头发
+/// `TaskCreated` + `TaskDispatched` 两条事件，否则 TUI 左栏的"空闲门客"
+/// 桶永远不会把被派活的门客移走——`upsert_task` 没收到事件就不会触发。
+#[tokio::test]
+async fn dispatch_publishes_task_created_and_dispatched_at_start() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = StubAgent::new("dev", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.dispatch(id, Task::new("scout", "调研一下仓库"))
+        .await
+        .unwrap();
+
+    // 读前几条事件，至少看到 TaskCreated + TaskDispatched 各一次。
+    let mut saw_created = false;
+    let mut saw_dispatched = false;
+    for _ in 0..10 {
+        let maybe = tokio::time::timeout(std::time::Duration::from_millis(500), sub.next()).await;
+        let Ok(Some(Ok(ev))) = maybe else { break };
+        match &ev.kind {
+            EventKind::TaskCreated { title, .. } if title == "scout" => {
+                assert_eq!(ev.meta.agent, Some(id), "TaskCreated 应挂 agent meta");
+                assert!(ev.meta.task.is_some(), "TaskCreated 应挂 task meta");
+                saw_created = true;
+            }
+            EventKind::TaskDispatched { to } => {
+                assert_eq!(*to, id, "TaskDispatched.to 应等于派活目标");
+                assert_eq!(ev.meta.agent, Some(id));
+                assert!(ev.meta.task.is_some());
+                saw_dispatched = true;
+            }
+            _ => {}
+        }
+        if saw_created && saw_dispatched {
+            break;
+        }
+    }
+    assert!(saw_created, "dispatch 开头应发 TaskCreated");
+    assert!(saw_dispatched, "dispatch 开头应发 TaskDispatched");
+}

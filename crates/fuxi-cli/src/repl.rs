@@ -246,11 +246,21 @@ pub async fn run(args: Args) -> Result<()> {
     let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(&oracle)
         .await
         .context("解析玄女 session_id")?;
-    match (&resume_session_id, &session_id) {
-        (Some(id), _) => tracing::info!(session = %id, "玄女 cc 续写策府已有 session"),
-        (_, Some(id)) => tracing::info!(session = %id, "玄女 cc 首次启动，新 session_id 已落盘"),
+    // 构造启动横幅——resume 时让用户看到"续上次对话"；首次则什么都不说
+    let resume_banner: Option<String> = match (&resume_session_id, &session_id) {
+        (Some(id), _) => {
+            tracing::info!(session = %id, "玄女 cc 续写策府已有 session");
+            let short = &id[..id.len().min(8)];
+            Some(format!(
+                "已续写玄女上次 session（{short}…）——上下文保留在 cc 端，TUI 对话历史不回放。直接开口接着聊。"
+            ))
+        }
+        (_, Some(id)) => {
+            tracing::info!(session = %id, "玄女 cc 首次启动，新 session_id 已落盘");
+            None
+        }
         _ => unreachable!("resolve_xuannv_session 至少返回一个 Some"),
-    }
+    };
 
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
@@ -282,7 +292,7 @@ pub async fn run(args: Args) -> Result<()> {
         tracing::warn!(error = %e, "greet dispatch 失败，继续");
     }
 
-    let outcome = drive_tui(bus, fuxi.clone(), xuannv_id).await;
+    let outcome = drive_tui(bus, fuxi.clone(), xuannv_id, resume_banner).await;
 
     daemon_shutdown.notify_waiters();
     if let Err(e) = fuxi.shutdown().await {
@@ -315,8 +325,11 @@ pub(crate) enum ActiveTarget {
 #[derive(Debug, Clone)]
 pub(crate) enum DialogueLine {
     User(String),
-    /// agent 自称——玄女 / 门客都用这种。name 用来画前缀。
+    /// agent 自称——玄女 / 门客都用这种。`name` v1 渲染不再用（每个
+    /// `ActiveTarget` 独立 bucket，身份靠输入框标题明示），但保留以备 v2
+    /// 把事件流嵌入对话时做 per-msg 标签。
     Agent {
+        #[allow(dead_code)]
         name: String,
         text: String,
     },
@@ -365,6 +378,9 @@ pub(crate) enum PaneRow {
 pub(crate) enum Submit {
     Xuannv(String),
     Worker(AgentId, String),
+    /// F3：toggle 鼠标捕获。关闭后终端回归 native select/copy；再按恢复。
+    /// app 记状态，execute! 在 drive_tui 里执行（需要 terminal backend）。
+    ToggleMouse,
 }
 
 /// REPL TUI 的核心状态。纯逻辑，不 own terminal——便于单测。
@@ -401,6 +417,11 @@ pub(crate) struct ReplApp {
     /// 鼠标点击区注册表。每帧 `draw()` 开头 `clear()`，各 draw_*
     /// 末尾 `register(area, ClickAction::Xxx)`。mouse 事件 hit_test 分派。
     pub(crate) click: ClickRegistry<ClickAction>,
+
+    /// 鼠标捕获当前开关状态（默认 true）。F3 切；关闭后终端回 native select
+    /// 复制——ratatui mouse capture 会吞 terminal 自带的选择行为，用户要
+    /// 复制会话时按一下 F3 切 off，选中用 Cmd/Ctrl+C 复制后再按 F3 恢复。
+    pub(crate) mouse_enabled: bool,
 }
 
 fn new_textarea() -> TextArea<'static> {
@@ -433,6 +454,7 @@ impl ReplApp {
             confirm_quit: false,
             prune_delay: TASK_PRUNE_DELAY,
             click: ClickRegistry::new(),
+            mouse_enabled: true,
         };
         app.roster_state.select(Some(0));
         app
@@ -894,6 +916,10 @@ impl ReplApp {
                 self.events_visible = !self.events_visible;
                 return None;
             }
+            KeyCode::F(3) => {
+                self.mouse_enabled = !self.mouse_enabled;
+                return Some(Submit::ToggleMouse);
+            }
             KeyCode::PageUp => {
                 self.scroll_up_page();
                 return None;
@@ -1275,8 +1301,14 @@ impl ReplApp {
         let bucket = self.dialogues.get(&self.active).unwrap_or(&empty);
         let lines: Vec<Line> = render_dialogue_collapsed(bucket.iter());
 
+        let inner_w = area.width.saturating_sub(2);
         let inner_h = area.height.saturating_sub(2);
-        let total = lines.len() as u16;
+        // 屏幕行（wrap 后）总数——用于 scroll 算底部对齐。
+        let total: u16 = lines
+            .iter()
+            .map(|l| count_wrapped_rows(l, inner_w))
+            .sum::<u16>()
+            .max(1);
         self.last_dialogue_total = total;
         self.last_dialogue_view = inner_h;
         if self.dialogue_auto_scroll {
@@ -1316,7 +1348,7 @@ impl ReplApp {
     }
 
     fn draw_status(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
-        let hint = " Tab 循环 | Esc 回玄女 | F2 事件流 | PgUp/PgDn 翻阅 | ⇧/⌥-Enter / ⌃-J 换行 | Enter 发送 | Ctrl-C 退出 ";
+        let hint = " Tab 循环 | Esc 回玄女 | F2 事件流 | F3 鼠标开关(复制用) | PgUp/PgDn 翻阅 | ⇧/⌥-Enter / ⌃-J 换行 | Enter 发送 | Ctrl-C 退出 ";
         let para = Paragraph::new(hint).style(Style::default().fg(Color::Black).bg(Color::Gray));
         f.render_widget(para, area);
     }
@@ -1410,19 +1442,21 @@ impl ReplApp {
 
 /// 对话渲染。
 ///
-/// 前缀策略（原来的 `你>` / `玄女>` 字面前缀已取消——输入框已经告诉用户
-/// "你→玄女"，对话区再重复是废话，参考 Claude Code / Codex 的视觉）：
-/// - **User**：每行左挂 `▍ ` teal 竖条，让多行消息视觉上成一块"气泡"
-/// - **Agent**：首条首行 `● 名字 `，圆点 mauve + 名字 dim；同 speaker 相邻
-///   消息或多行消息 subsequent 行只缩进对齐，不重复名字——对话视觉更紧凑
-/// - **System**：`· ` 前缀 + italic，弱存在感
+/// 2026-04-20 用户反馈：`● 玄女 ` 前缀 + 换行大缩进"左边空一大片"别扭；
+/// 输入框 "你 → 玄女" 已明示身份，对话区不必再重复名字。新策略：
+/// - **User**：每行左挂 `▍ ` teal 竖条
+/// - **Agent**：每行左挂 `▍ ` mauve 竖条（和 user 冷暖对照）——不显示名字，
+///   不缩进，多行消息自然左对齐
+/// - **System**：`· ` muted + italic，弱存在感
+///
+/// 只要对话区跟"你 → X"输入框相邻，X 是谁一目了然；同一 bucket 内不会混
+/// 多个 agent（每个 ActiveTarget 独立桶）。
 fn render_dialogue_collapsed<'a, I>(iter: I) -> Vec<Line<'a>>
 where
     I: IntoIterator<Item = &'a DialogueLine>,
 {
     let th = theme();
     let mut out = Vec::new();
-    let mut prev_speaker: Option<String> = None;
     for line in iter {
         match line {
             DialogueLine::User(t) => {
@@ -1432,34 +1466,19 @@ where
                         Span::raw(ln.to_string()),
                     ]));
                 }
-                prev_speaker = Some("user".into());
             }
-            DialogueLine::Agent { name, text } => {
-                let speaker = format!("agent:{name}");
-                let same_speaker = prev_speaker.as_deref() == Some(speaker.as_str());
-                let name_tag = format!("● {name} ");
-                let indent_width = UnicodeWidthStr::width(name_tag.as_str());
-                let indent = " ".repeat(indent_width);
-                for (i, ln) in text.lines().enumerate() {
-                    if i == 0 && !same_speaker {
-                        out.push(Line::from(vec![
-                            Span::styled(
-                                "● ",
-                                Style::default()
-                                    .fg(th.agent_message())
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(format!("{name} "), Style::default().fg(th.muted())),
-                            Span::raw(ln.to_string()),
-                        ]));
-                    } else {
-                        out.push(Line::from(vec![
-                            Span::raw(indent.clone()),
-                            Span::raw(ln.to_string()),
-                        ]));
-                    }
+            DialogueLine::Agent { name: _, text } => {
+                for ln in text.lines() {
+                    out.push(Line::from(vec![
+                        Span::styled(
+                            "▍ ",
+                            Style::default()
+                                .fg(th.agent_message())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(ln.to_string()),
+                    ]));
                 }
-                prev_speaker = Some(speaker);
             }
             DialogueLine::System(t) => {
                 for ln in t.lines() {
@@ -1473,11 +1492,29 @@ where
                         ),
                     ]));
                 }
-                prev_speaker = Some("system".into());
             }
         }
     }
     out
+}
+
+/// 估算一条逻辑 `Line` 在 `width` 宽度下被 `Paragraph.wrap` 后占用的屏幕行数。
+///
+/// 修 Bug 8（2026-04-20 用户测）：`Paragraph::scroll((y, 0))` + `.wrap()`
+/// 下 `y` 按**屏幕行**算，但我们之前直接 `dialogue_scroll = lines.len() - inner_h`
+/// 用逻辑行算，CJK/长消息被 wrap 后屏幕行>逻辑行 → 底部被切，用户看不见最新。
+/// 按 unicode-width 算总宽再 ceil-div 屏宽，空行算 1（ratatui 不吃 0 行）。
+fn count_wrapped_rows(line: &Line, width: u16) -> u16 {
+    let total_width: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if total_width == 0 {
+        return 1;
+    }
+    let w = width.max(1) as usize;
+    total_width.div_ceil(w) as u16
 }
 
 /// 事件叙事化——把 raw `kind_tag` 翻译成人话图标 + 中文短语。
@@ -1636,7 +1673,12 @@ fn humanize_elapsed(d: Duration) -> String {
     }
 }
 
-async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result<()> {
+async fn drive_tui(
+    bus: EventBus,
+    fuxi: Arc<Fuxi>,
+    xuannv_id: AgentId,
+    resume_banner: Option<String>,
+) -> Result<()> {
     if let Err(e) = redirect_stderr_to_log("/tmp/fuxi.log") {
         eprintln!("⚠ 无法重定向 stderr 到日志文件: {e}。TUI 可能被日志污染");
     }
@@ -1663,6 +1705,11 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = ReplApp::new(xuannv_id);
+    if let Some(banner) = resume_banner {
+        // resume 时的横幅：push 一条 System 消息到玄女 bucket，让用户立刻看到
+        // "已续上"，不用自己去翻策府文件确认
+        app.push_line(ActiveTarget::Xuannv, DialogueLine::System(banner));
+    }
     let mut stream = bus.subscribe();
 
     let shelf = fuxi.clone_shelf();
@@ -1715,6 +1762,30 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
                                             tracing::warn!(error = %e, "worker intervene 失败");
                                         }
                                     });
+                                }
+                                Some(Submit::ToggleMouse) => {
+                                    // app.mouse_enabled 已在 handle_key 里被 toggle
+                                    if app.mouse_enabled {
+                                        let _ = execute!(
+                                            terminal.backend_mut(),
+                                            EnableMouseCapture
+                                        );
+                                    } else {
+                                        let _ = execute!(
+                                            terminal.backend_mut(),
+                                            DisableMouseCapture
+                                        );
+                                    }
+                                    // push 一条 system 提示用户当前模式
+                                    let msg = if app.mouse_enabled {
+                                        "鼠标捕获：开（滚轮/点击可用）"
+                                    } else {
+                                        "鼠标捕获：关（终端原生选中复制可用，F3 再切回）"
+                                    };
+                                    app.push_line(
+                                        app.active,
+                                        DialogueLine::System(msg.to_string()),
+                                    );
                                 }
                                 None => {}
                             }
@@ -1873,6 +1944,44 @@ mod tests {
     }
 
     #[test]
+    fn count_wrapped_rows_empty_line_is_one() {
+        let line = Line::from(Span::raw(""));
+        assert_eq!(count_wrapped_rows(&line, 10), 1);
+    }
+
+    #[test]
+    fn count_wrapped_rows_short_line_is_one() {
+        let line = Line::from(Span::raw("hi"));
+        assert_eq!(count_wrapped_rows(&line, 10), 1);
+    }
+
+    #[test]
+    fn count_wrapped_rows_long_ascii_wraps_by_width() {
+        let line = Line::from(Span::raw("a".repeat(25)));
+        // 25 / 10 = 3（ceil）
+        assert_eq!(count_wrapped_rows(&line, 10), 3);
+    }
+
+    /// 关键防线：CJK 字符是 2 宽的，算错会导致对话滚动吞最新。
+    #[test]
+    fn count_wrapped_rows_cjk_counts_double_width() {
+        // 5 个中文 = 10 显示宽度；屏宽 10 刚好 1 行
+        let line = Line::from(Span::raw("玄女派门客去"));
+        // "玄女派门客去" = 6 字符 × 2 宽 = 12 宽
+        assert_eq!(count_wrapped_rows(&line, 10), 2, "12 宽/10 屏宽 应 ceil=2");
+    }
+
+    #[test]
+    fn count_wrapped_rows_multi_span_sums_widths() {
+        let line = Line::from(vec![
+            Span::raw("▍ "),  // 2 宽（▍ + 空格）
+            Span::raw("hello world"), // 11 宽
+        ]);
+        // 总 13 宽 / 10 = 2 行
+        assert_eq!(count_wrapped_rows(&line, 10), 2);
+    }
+
+    #[test]
     fn narrate_event_covers_handoff_and_cc() {
         assert!(
             narrate_event(&mk_row("conversation_handoff_requested", "a→b"))
@@ -1935,6 +2044,18 @@ mod tests {
         app.handle_mouse(mk_mouse(MouseEventKind::ScrollUp, 0, 0));
         assert!(!app.dialogue_auto_scroll, "滚轮上应解除 auto-scroll");
         assert!(app.dialogue_scroll < 90, "应真往上翻一页");
+    }
+
+    #[test]
+    fn f3_toggles_mouse_enabled_and_emits_submit() {
+        let mut app = ReplApp::stub();
+        assert!(app.mouse_enabled, "默认 true");
+        let out = app.handle_key(KeyCode::F(3), KeyModifiers::empty());
+        assert_eq!(out, Some(Submit::ToggleMouse));
+        assert!(!app.mouse_enabled, "按一次 F3 应关闭");
+        let out = app.handle_key(KeyCode::F(3), KeyModifiers::empty());
+        assert_eq!(out, Some(Submit::ToggleMouse));
+        assert!(app.mouse_enabled, "再按 F3 应恢复");
     }
 
     #[test]
@@ -2235,19 +2356,21 @@ mod tests {
                 text: "line2".into(),
             },
         ];
+        // 2026-04-20 改：Agent 前缀不再带名字，统一 `▍ ` mauve 竖条。
         let rendered = render_dialogue_collapsed(lines.iter());
         assert_eq!(rendered.len(), 2, "应生成两行");
-        let first = line_to_plain(&rendered[0]);
-        let second = line_to_plain(&rendered[1]);
-        assert!(
-            first.starts_with("● 玄女 "),
-            "第一行应带名字前缀: {first:?}"
-        );
-        assert!(!second.starts_with("● "), "第二行应去前缀缩进: {second:?}");
-        assert!(second.contains("line2"));
+        for (i, ln) in rendered.iter().enumerate() {
+            let plain = line_to_plain(ln);
+            assert!(
+                plain.starts_with("▍ "),
+                "第 {i} 行应 `▍ ` 竖条开头: {plain:?}"
+            );
+        }
+        assert!(line_to_plain(&rendered[0]).contains("line1"));
+        assert!(line_to_plain(&rendered[1]).contains("line2"));
     }
 
-    /// 换 speaker 时名字前缀应重新出现。
+    /// 不同 agent 的消息每行也只有 `▍ `——名字从对话区彻底移除（靠输入框标题明示身份）。
     #[test]
     fn different_speakers_keep_prefix() {
         let lines = [
@@ -2261,8 +2384,10 @@ mod tests {
             },
         ];
         let rendered = render_dialogue_collapsed(lines.iter());
-        assert!(line_to_plain(&rendered[0]).starts_with("● 玄女 "));
-        assert!(line_to_plain(&rendered[1]).starts_with("● 鲁班 "));
+        assert!(line_to_plain(&rendered[0]).starts_with("▍ "));
+        assert!(line_to_plain(&rendered[1]).starts_with("▍ "));
+        assert!(!line_to_plain(&rendered[0]).contains("玄女"));
+        assert!(!line_to_plain(&rendered[1]).contains("鲁班"));
     }
 
     fn line_to_plain(line: &Line) -> String {

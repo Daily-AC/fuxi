@@ -301,6 +301,33 @@ impl Fuxi {
             .await
             .ok_or(OrchestratorError::AgentNotFound(agent_id))?;
 
+        // 派活开场事件：TaskCreated + TaskDispatched。
+        // 历史 bug（2026-04-20 用户复测）：cc/codex adapter 都不主动发这两条，
+        // 只有 agent 运行中的增量事件走 rx。结果 TUI 里门客永远卡在"空闲门客"
+        // 桶——`upsert_task` 不会被触发。这里补上让 TUI / 观察器知道
+        // 「task X 派给了 agent Y」。
+        let task_id = task.id;
+        let title = task.title.clone();
+        let description = task.description.clone();
+        {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent_id);
+            meta.task = Some(task_id);
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::TaskCreated { title, description },
+            });
+        }
+        {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent_id);
+            meta.task = Some(task_id);
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::TaskDispatched { to: agent_id },
+            });
+        }
+
         self.shelf.set_status(agent_id, ShelfStatus::Busy).await;
 
         let mut rx = agent.dispatch(task).await?;
