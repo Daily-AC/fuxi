@@ -10,7 +10,7 @@
 use crate::error::{Error, Result};
 use crate::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, method};
 use crate::sse::ServerSentEvent;
-use crate::types::{AgentCard, SendTaskRequest, Task};
+use crate::wire::{AgentCard, SendTaskRequest, Task};
 use async_trait::async_trait;
 use axum::Router;
 use axum::extract::State;

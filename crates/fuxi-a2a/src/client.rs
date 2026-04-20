@@ -7,7 +7,7 @@
 use crate::error::{Error, Result};
 use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse, method};
 use crate::sse::{EVENT_ARTIFACT, EVENT_STATUS, ServerSentEventPayload};
-use crate::types::{
+use crate::wire::{
     AgentCard, SendTaskRequest, SendTaskResponse, Task, TaskArtifactUpdateEvent,
     TaskStatusUpdateEvent,
 };
