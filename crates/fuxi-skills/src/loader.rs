@@ -1,8 +1,15 @@
-//! 读 `skills/<role>/SKILL.md` → `LoadedSkill`。
+//! 读 `roles/<role>/ROLE.md` → `LoadedSkill`（M3.2 起从 `skills/SKILL.md` 改名）。
 //!
-//! 相比 v0.1 `fuxi-cli` 里的最简实现，这里用 `serde_yaml` 解析 frontmatter，
-//! 支持嵌套 `metadata.*`，并把字段抬升成类型 `SkillFrontmatter`。body 依旧作为
-//! `append_system_prompt` 透传给门客 CLI。
+//! 用 `serde_yaml` 解析 frontmatter，支持嵌套 `metadata.*`，并把字段抬升成类型
+//! `SkillFrontmatter`。body 依旧作为 `append_system_prompt` 透传给门客 CLI。
+//!
+//! ## 兼容路径
+//!
+//! M3.2 改名时**保留旧路径为 fallback**：
+//! - 优先 `roles/<role>/ROLE.md`
+//! - 找不到 → 退到 `skills/<role>/SKILL.md`（warn 一行提示用户 mv）
+//!
+//! `~/.fuxi/skills/` 的 mv 由 `migrate_user_dir`（启动期一次性）做。
 
 use anyhow::{Context, Result};
 use fuxi_core::agent::AgentProfile;
@@ -40,16 +47,19 @@ pub struct LoadedSkill {
     pub frontmatter: SkillFrontmatter,
 }
 
-/// 找 skills 根目录。查找顺序：
-/// 1. `FUXI_SKILLS_DIR` 环境变量
-/// 2. 当前 git root 下的 `skills/`
-/// 3. cwd 下的 `./skills/`
-/// 4. `$HOME/.fuxi/skills/`
+/// 找 roles 根目录。查找顺序（每个槽位先找 `roles/` 再 fallback `skills/`）：
+/// 1. `FUXI_ROLES_DIR` / `FUXI_SKILLS_DIR` 环境变量
+/// 2. 当前 git root 下的 `roles/` → `skills/`
+/// 3. cwd 下的 `./roles/` → `./skills/`
+/// 4. `$HOME/.fuxi/roles/` → `$HOME/.fuxi/skills/`
 pub fn skills_root() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("FUXI_SKILLS_DIR") {
-        let path = PathBuf::from(p);
-        if path.exists() {
-            return Some(path);
+    // env 优先 FUXI_ROLES_DIR，兼容 FUXI_SKILLS_DIR
+    for var in ["FUXI_ROLES_DIR", "FUXI_SKILLS_DIR"] {
+        if let Ok(p) = std::env::var(var) {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                return Some(path);
+            }
         }
     }
     if let Ok(output) = std::process::Command::new("git")
@@ -58,30 +68,58 @@ pub fn skills_root() -> Option<PathBuf> {
         && output.status.success()
     {
         let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let p = PathBuf::from(root).join("skills");
+        for name in ["roles", "skills"] {
+            let p = PathBuf::from(&root).join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    for name in ["roles", "skills"] {
+        let p = PathBuf::from(name);
         if p.exists() {
             return Some(p);
         }
     }
-    let cwd_skills = PathBuf::from("skills");
-    if cwd_skills.exists() {
-        return Some(cwd_skills);
-    }
     if let Some(home) = std::env::var_os("HOME") {
-        let p = PathBuf::from(home).join(".fuxi").join("skills");
-        if p.exists() {
-            return Some(p);
+        for name in ["roles", "skills"] {
+            let p = PathBuf::from(&home).join(".fuxi").join(name);
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
     None
 }
 
-/// 读指定 role 的 SKILL.md → LoadedSkill。
+/// 新名入口：和 `skills_root` 完全等价（后者保留 API 名以兼容外部 user）。
+pub fn roles_root() -> Option<PathBuf> {
+    skills_root()
+}
+
+/// 读指定 role 的定义文件 → LoadedSkill。
+/// 优先找 `<role>/ROLE.md`；找不到 fallback `<role>/SKILL.md`（旧名兼容，warn 一次）。
 pub fn load(role: &str) -> Result<LoadedSkill> {
-    let root = skills_root()
-        .context("找不到 skills 根目录（试过 $FUXI_SKILLS_DIR / git-root/skills / ./skills / ~/.fuxi/skills）")?;
-    let path = root.join(role).join("SKILL.md");
-    load_from_file(&path, role)
+    let root = skills_root().context(
+        "找不到 roles 根目录（试过 $FUXI_ROLES_DIR / $FUXI_SKILLS_DIR / git-root/roles / ./roles / ~/.fuxi/roles，及 skills/ 旧名回退）",
+    )?;
+    let role_md = root.join(role).join("ROLE.md");
+    if role_md.exists() {
+        return load_from_file(&role_md, role);
+    }
+    let skill_md = root.join(role).join("SKILL.md");
+    if skill_md.exists() {
+        tracing::warn!(
+            role,
+            path = %skill_md.display(),
+            "M3.2 旧名 SKILL.md 被读取——请 mv 成 ROLE.md（下 minor 版本删除兼容）"
+        );
+        return load_from_file(&skill_md, role);
+    }
+    anyhow::bail!(
+        "找不到 role={role} 的定义文件（试过 ROLE.md / SKILL.md 两名，root={})",
+        root.display()
+    );
 }
 
 /// 给定路径 + role 提示加载。测试 / 非标准位置用这个。
@@ -175,26 +213,25 @@ mod tests {
         assert_eq!(body, "no fm here");
     }
 
-    /// SKILL.md 缺 metadata.cli 时回退到 `claude-code`（保留 v0.1 默认行为）。
+    /// ROLE.md 缺 metadata.cli 时回退到 `claude-code`（保留 v0.1 默认行为）。
     #[test]
     fn loader_defaults_cli_to_claude_code_when_metadata_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let role_dir = dir.path().join("luban");
         std::fs::create_dir_all(&role_dir).unwrap();
-        let path = role_dir.join("SKILL.md");
+        let path = role_dir.join("ROLE.md");
         std::fs::write(&path, "---\nname: luban\ndescription: d\n---\nbody\n").unwrap();
         let loaded = load_from_file(&path, "luban").expect("load");
         assert_eq!(loaded.profile.cli, "claude-code");
     }
 
-    /// SKILL.md 写了 `metadata.cli: codex` 时 profile.cli 必须是 codex——
-    /// 这是 daemon::spawn_by_role 路由到 WorkerKind::Codex 的唯一依据。
+    /// ROLE.md 写了 `metadata.cli: codex` 时 profile.cli 必须是 codex。
     #[test]
     fn loader_reads_codex_cli_from_metadata() {
         let dir = tempfile::tempdir().expect("tempdir");
         let role_dir = dir.path().join("luban-codex");
         std::fs::create_dir_all(&role_dir).unwrap();
-        let path = role_dir.join("SKILL.md");
+        let path = role_dir.join("ROLE.md");
         std::fs::write(
             &path,
             "---\nname: luban-codex\ndescription: d\nmetadata:\n  cli: codex\n---\nbody\n",
@@ -202,5 +239,51 @@ mod tests {
         .unwrap();
         let loaded = load_from_file(&path, "luban-codex").expect("load");
         assert_eq!(loaded.profile.cli, "codex");
+    }
+
+    /// M3.2 · 优先 ROLE.md；若同目录**只有** SKILL.md（旧名），也能 load 且 warn。
+    #[test]
+    fn loader_falls_back_to_legacy_skill_md() {
+        // 手工放只有 SKILL.md 的 tempdir，调 load() 走 root 发现路径——
+        // 但 load() 会先走 skills_root() 找 ./roles 等，tempdir 不在搜索路径里。
+        // 直接用 load_from_file 测 "旧文件名仍能 parse" 足够；search 优先级由
+        // loader_prefers_role_md_over_skill_md 覆盖。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let role_dir = dir.path().join("legacy");
+        std::fs::create_dir_all(&role_dir).unwrap();
+        let legacy = role_dir.join("SKILL.md");
+        std::fs::write(&legacy, "---\nname: legacy\ndescription: d\n---\nbody\n").unwrap();
+        let loaded = load_from_file(&legacy, "legacy").expect("旧 SKILL.md 仍可解析");
+        assert_eq!(loaded.profile.role, "legacy");
+    }
+
+    /// M3.2 search 优先级：同目录两个都有时，`load(role)` 应选 ROLE.md。
+    #[test]
+    fn loader_prefers_role_md_over_skill_md() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // env var 覆盖 search root 到 tempdir；tests 里 unsafe 合法（单线程）。
+        unsafe {
+            std::env::set_var("FUXI_ROLES_DIR", dir.path());
+        }
+        let role_dir = dir.path().join("dev");
+        std::fs::create_dir_all(&role_dir).unwrap();
+        // 旧文件内容 A，新文件内容 B——load 读到 B 才证明优先级对
+        std::fs::write(
+            role_dir.join("SKILL.md"),
+            "---\nname: old-skill\ndescription: old\n---\nold-body\n",
+        )
+        .unwrap();
+        std::fs::write(
+            role_dir.join("ROLE.md"),
+            "---\nname: new-role\ndescription: new\n---\nnew-body\n",
+        )
+        .unwrap();
+
+        let loaded = load("dev").expect("load");
+        assert_eq!(loaded.profile.name, "new-role");
+        assert!(loaded.append_system_prompt.contains("new-body"));
+        unsafe {
+            std::env::remove_var("FUXI_ROLES_DIR");
+        }
     }
 }

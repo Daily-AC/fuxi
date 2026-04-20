@@ -124,12 +124,12 @@ impl FactExtractorSpawner for FuxiExtractorSpawner {
     }
 }
 
-/// 从 `skills/extractor/` 加载 profile + 构造 `CcLaunchConfig`。
+/// 从 `roles/extractor/ROLE.md` 加载 profile + 构造 `CcLaunchConfig`（旧 `skills/.../SKILL.md` 仍兼容）。
 ///
 /// 如果 skill 加载失败（未安装、frontmatter 损坏），返 Err——caller
 /// 决定是否关闭 extractor 能力（比如 warn 后跳过）。
 pub fn load_extractor_launch() -> anyhow::Result<(AgentProfile, CcLaunchConfig)> {
-    let loaded = fuxi_skills::load("extractor").context("加载 skills/extractor/SKILL.md")?;
+    let loaded = fuxi_skills::load("extractor").context("加载 roles/extractor/ROLE.md")?;
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
             None

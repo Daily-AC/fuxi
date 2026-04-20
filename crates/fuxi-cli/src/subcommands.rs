@@ -18,7 +18,7 @@ use clap::Args as ClapArgs;
 
 #[derive(Debug, ClapArgs)]
 pub struct SpawnArgs {
-    /// 门客角色。必须存在 `skills/<role>/SKILL.md`。
+    /// 门客角色。必须存在 `roles/<role>/ROLE.md`（旧 `skills/<role>/SKILL.md` 仍兼容）。
     #[arg(long)]
     pub role: String,
     /// 可选名字（默认 role-N）。

@@ -112,7 +112,7 @@ pub struct Args {
     /// 门客是否分配 worktree。REPL 默认关掉——玄女当前只下发 Bash 命令，不写代码。
     #[arg(long, default_value_t = false)]
     pub allocate_worktree: bool,
-    /// 玄女的 role（skills/<role>/SKILL.md）。默认 `xuannv`。
+    /// 玄女的 role（roles/<role>/ROLE.md，兼容旧 skills/.../SKILL.md）。默认 `xuannv`。
     #[arg(long, default_value = "xuannv")]
     pub xuannv_role: String,
 }
@@ -175,10 +175,15 @@ pub fn require_fuxi_in_path(name: &str, path_env: Option<&OsStr>) -> Result<Path
 pub async fn run(args: Args) -> Result<()> {
     require_fuxi_in_path("fuxi", std::env::var_os("PATH").as_deref())?;
 
+    // M3.2 · ~/.fuxi/skills → ~/.fuxi/roles 一次性迁移（幂等；失败只 warn）
+    if let Err(e) = fuxi_skills::migrate_user_dir() {
+        tracing::warn!(error = %e, "M3.2 用户目录迁移出错，忽略继续");
+    }
+
     if skill_loader::skills_root().is_none() {
         return Err(anyhow!(
-            "找不到 skills 目录：试过 $FUXI_SKILLS_DIR / git-root/skills / ./skills / $HOME/.fuxi/skills 都不在。\n\
-             建议：export FUXI_SKILLS_DIR=/Users/e0_7/fuxi/skills  （或把 fuxi/skills 软链到 ~/.fuxi/skills）"
+            "找不到 roles 目录：试过 $FUXI_ROLES_DIR / $FUXI_SKILLS_DIR / git-root/roles / ./roles / $HOME/.fuxi/roles（及 skills/ 旧名 fallback）都不在。\n\
+             建议：export FUXI_ROLES_DIR=/Users/e0_7/fuxi/roles（或把 fuxi/roles 软链到 ~/.fuxi/roles）"
         ));
     }
 
@@ -277,7 +282,7 @@ pub async fn run(args: Args) -> Result<()> {
     });
 
     let loaded = skill_loader::load(&args.xuannv_role)
-        .with_context(|| format!("加载 skills/{}/SKILL.md", args.xuannv_role))?;
+        .with_context(|| format!("加载 roles/{}/ROLE.md", args.xuannv_role))?;
     let xuannv_profile = loaded.profile.clone();
     let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(&oracle)
         .await

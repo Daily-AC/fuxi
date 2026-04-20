@@ -509,8 +509,7 @@ async fn spawn_by_role(
     name_override: Option<String>,
     recall: RecallHandle,
 ) -> Result<AgentId> {
-    let loaded =
-        skill_loader::load(role).with_context(|| format!("加载 skills/{role}/SKILL.md"))?;
+    let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let mut profile = loaded.profile;
     if let Some(n) = name_override {
         profile.name = n;
@@ -555,7 +554,7 @@ async fn spawn_by_role(
         }
         other => {
             return Err(anyhow!(
-                "未知 CLI 标签 '{other}'（来自 skills/{role}/SKILL.md 的 metadata.cli）；\
+                "未知 CLI 标签 '{other}'（来自 roles/{role}/ROLE.md 的 metadata.cli）；\
                  当前支持：claude-code | codex"
             ));
         }

@@ -50,6 +50,11 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    // 0. M3.2 迁移：~/.fuxi/skills → ~/.fuxi/roles（幂等）。失败只 warn，不阻止启动。
+    if let Err(e) = fuxi_skills::migrate_user_dir() {
+        tracing::warn!(error = %e, "M3.2 用户目录迁移出错，忽略继续");
+    }
+
     // 1. EventBus
     let bus = match args.db.as_ref() {
         Some(path) => {

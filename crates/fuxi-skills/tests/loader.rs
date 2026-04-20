@@ -7,7 +7,7 @@ fn loads_nested_metadata_via_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let role_dir = dir.path().join("dev");
     std::fs::create_dir_all(&role_dir).unwrap();
-    let path = role_dir.join("SKILL.md");
+    let path = role_dir.join("ROLE.md");
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(
         f,
@@ -58,7 +58,7 @@ fn missing_frontmatter_still_returns_body() {
     let dir = tempfile::tempdir().unwrap();
     let role_dir = dir.path().join("plain");
     std::fs::create_dir_all(&role_dir).unwrap();
-    let path = role_dir.join("SKILL.md");
+    let path = role_dir.join("ROLE.md");
     std::fs::write(&path, "just plain body without yaml\n").unwrap();
 
     let loaded = fuxi_skills::load_from_file(&path, "plain").expect("load");
