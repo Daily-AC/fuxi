@@ -181,6 +181,11 @@ impl Theme {
         self.overlay1
     }
 
+    /// 通用"信息"色（蓝）——trigger / 消息类事件、非警示非成功的中性信号。
+    pub fn info(&self) -> Color {
+        self.blue
+    }
+
     /// 整窗背景色（Block 不设 bg 时终端默认——但有 bg 需求时调此）。
     pub fn background(&self) -> Color {
         self.base
