@@ -31,7 +31,7 @@ fn fixture_translates_to_expected_event_sequence() {
         events.extend(produced.into_iter().map(|e| e.kind));
     }
 
-    // 预期顺序：
+    // 预期顺序（2026-04-20 修双发后 result 不再重发 AgentResponded）：
     //   AgentReady                      (system.init)
     //   ThinkingStarted                 (first thinking)
     //   Custom(cc_thinking_delta)
@@ -40,7 +40,7 @@ fn fixture_translates_to_expected_event_sequence() {
     //   AgentResponded                  (assistant.text)
     //   Custom(rate_limit)
     //   TaskStateChanged                (result.success)
-    //   AgentResponded                  (final result text)
+    //   —— 原来这里还会多一条 AgentResponded 重复文本，已去除
     let labels: Vec<String> = events
         .iter()
         .map(|k| match k {
@@ -70,7 +70,6 @@ fn fixture_translates_to_expected_event_sequence() {
         "AgentResponded",
         "RateLimit",
         "TaskStateChanged",
-        "AgentResponded",
     ]
     .into_iter()
     .map(String::from)
@@ -86,18 +85,20 @@ fn fixture_translates_to_expected_event_sequence() {
     };
     assert_eq!(endpoint, "pid:99");
 
-    // 最终 AgentResponded 文本是 "hi"。
-    let EventKind::AgentResponded { text } = events.last().expect("final event") else {
-        panic!(
-            "last event should be AgentResponded, got {:?}",
-            events.last()
-        );
-    };
-    assert_eq!(text.trim(), "hi");
+    // 最后一条 AgentResponded 文本是 "hi"（来自 assistant.text，非 result 重发）。
+    let responded = events
+        .iter()
+        .rev()
+        .find_map(|k| match k {
+            EventKind::AgentResponded { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("应有一条 AgentResponded");
+    assert_eq!(responded.trim(), "hi");
 
-    // TaskStateChanged 是 Delivering → Done。
-    let EventKind::TaskStateChanged { from, to } = &events[events.len() - 2] else {
-        panic!("penultimate should be TaskStateChanged");
+    // TaskStateChanged 是 Delivering → Done（现在是最后一条）。
+    let EventKind::TaskStateChanged { from, to } = events.last().expect("last event") else {
+        panic!("last should be TaskStateChanged");
     };
     assert_eq!(*from, TaskState::Delivering);
     assert_eq!(*to, TaskState::Done);
