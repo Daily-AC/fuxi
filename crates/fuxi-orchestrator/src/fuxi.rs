@@ -616,7 +616,21 @@ impl Fuxi {
     /// warn 不传播，避免单只门客回收失败阻塞整个 GC tick。
     ///
     /// 幂等：id 找不到（已被清走）返回 Ok(())；`fuxi kill --id` 留给 M3.7。
+    ///
+    /// **玄女豁免**：shutdown_agent 拒绝杀玄女本人——她是用户对话唯一入口，
+    /// 被 kill 整个 TUI 崩。只有 `Fuxi::shutdown()`（平台整体下线）能碰她。
+    /// GC / 将来的 `fuxi kill --id` 都走这个豁免。
     pub async fn shutdown_agent(&self, id: AgentId, reason: String) -> Result<()> {
+        if let Some(xn) = self.xuannv_id().await
+            && xn == id
+        {
+            warn!(
+                agent = %id,
+                reason = %reason,
+                "shutdown_agent: 拒绝杀玄女（豁免）——平台整体 shutdown 才能关玄女"
+            );
+            return Ok(());
+        }
         let Some(entry) = self.shelf.take(id).await else {
             // 已被清走（并发 GC / 手动 shutdown）——noop，外层不用特判。
             debug!(agent = %id, "shutdown_agent: 门客不在 shelf，跳过");
