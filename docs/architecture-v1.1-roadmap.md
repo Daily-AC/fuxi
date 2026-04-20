@@ -1,5 +1,9 @@
 # v1.1 重构路线图
 
+> **进度 · 2026-04-20**：M2 地基批 ✅ 完成 5/5（commit 至 `1e6db4e`，371 tests 绿）。
+> 下一步：P2 召回（task_id + role 双入口），设计已拍板见 `docs/handoff/v1-session3.md §3-4`。
+> M3 / M4 / M5 未开。
+>
 > 基于 `docs/architecture-audit-v1.md` 的 D1-D18 debt 列表，分 4 个 milestone 推进到 v1.1 ship。
 >
 > **原则**：
@@ -16,7 +20,7 @@
 
 | # | 名字 | debt | 时间 | 前置 | 产出 |
 |---|---|---|---|---|---|
-| **M2** | 地基修复 | D1-D5 | 1.5-2 session | 无 | 消息不丢 / codex 能起 / 玄女订阅事件 / 门客 GC / 策府自动抽 fact |
+| **M2** ✅ | 地基修复（已完成） | D1-D5 | 1.5 session（实际 1.5） | 无 | 消息不丢 / codex 能起 / 玄女订阅事件 / 门客 GC / 策府自动抽 fact |
 | **M3** | 命名规整 + CLI charter | D6-D12 | 1 session | 可与 M2 并行局部 | 破坏性 rename 合一次、孤儿事件清零、kill/events 补洞 |
 | **M4** | 体验升级 | D13-D14, D16, U1 | 1 session | M2 完（命令面板 要正确事件订阅） | slash 命令、/help、让贤决策、intervention 视觉差异、U1 视觉方案 A |
 | **M5** | v1.2 大改 | D15, D17, D18 | 2-3 session | M2-M4 稳 | 单栏 TUI（cc 风格）+ ASCII art + Resume 真回放 |

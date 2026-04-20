@@ -74,7 +74,7 @@ fuxi/
 - `tokio::sync::broadcast` 的 Receiver 从 `RecvError::Lagged` 中拿到的是"落掉了 N 条"，**不是错误终止**——继续接收还是 OK 的。订阅者处理不过来时别让它崩掉整个订阅链。
 - SQLite WAL 模式在 macOS 上有偶发 `BUSY`——retry 封装进 EventStore，不往外抛。
 - **macOS tempdir symlink**：`TempDir::new()` 返回 `/var/folders/...`，但 `git worktree list --porcelain` 返回 `/private/var/folders/...`。列表比对**两侧都要 `canonicalize()`**，否则匹配失败。
-- **Codex model fallback**：`DEFAULT_MODEL_FALLBACK = "gpt-5.1-mini"` 在 **ChatGPT-account auth** 下会被拒 `invalid_request_error`。E2E 测试用空串让 codex 自选；API key 用户需 `FUXI_CODEX_MODEL` 覆盖。
+- **Codex model fallback 已改空串**（2026-04-20 `08358fa`）：`DEFAULT_MODEL_FALLBACK = ""` 不传 `-m`，让 codex 按登录账号自选。硬编任何具体模型都会在某种 auth 下被拒。API key 用户须 `export FUXI_CODEX_MODEL=<model>` 覆盖。
 - **Codex exec 不支持 follow-up**：`send_message` 直接返回 `CoreError::Other`。codex 门客是 spawn-per-dispatch 模式，不像 cc 那样支持同 session 续写。要多轮对话得换 codex `conversation` API（另一套）。
 - **新 agent 适配器三条铁律**（S1/S2/S3 教训，commit `360a31e` 修掉的）：
   1. 必须提供 `launch_with_id(id, ...)`——不能自己 `AgentId::new()`，否则 `AgentSpawning`/`AgentReady` 属不同 id
@@ -86,11 +86,21 @@ fuxi/
 - **`intervene` Idle 自动退化 dispatch**（2026-04-20 玄女自诊断）：cc Idle 状态下 `active_tx=None`，`send_message` 发 WS 消息响应被 drop。`Fuxi::intervene` 入口检 shelf status，Idle → `dispatch(Task::new("intervention", text))`。见 `docs/decisions/04`。
 - **加 EventKind 新变体**必同步 5 处（再强调一次）：`events/store.rs::kind_tag` + `firehose/hub.rs::kind_tag` + `firehose/tui.rs::summarize + color_for` + 持久化测试。clippy `-D warnings` 会一次性报三处。
 - **Cargo.lock cherry-pick 后常坏**：多 teammate 改 Cargo.toml 时 lock 自动合并失败。直接 `rm Cargo.lock && cargo build` 重生，比 manual 解快且稳。
+- **parser 双发 bug**（2026-04-20 `074ab2e`）：cc stream-json 里 assistant 的文本在 `AssistantText` 和末尾 `ResultSuccess` 会被发两次，老 parser 两处都翻 `AgentResponded` 让 TUI 重复显示。现已加 `TranslateState.responded_this_turn` 去重。**下次改 parser 或加新 EventKind 时留意"同一信息被翻译两次"**。
+- **TUI Submit::Xuannv 必须走 `intervene` 不走 `dispatch`**（2026-04-20 `860c377`）：每次 Enter 直接 `Fuxi::dispatch(xuannv, Task::new("user-turn"))` 会堆僵尸 task（idle 无 degrade，busy 无 queue）。正解：`Fuxi::intervene(xuannv, false, text)`——idle 自动 degrade 单 dispatch（Decision 04），busy 入 pending queue（M2.1）。Decision 04 的 degrade title 现在统一为 `"user-turn"`。
+- **dispatch pump terminal 不能立即 break**（2026-04-20 `860c377`）：M2.1 drain 在 terminal 事件后把 pending queue 塞 cc 触发新 turn，旧 pump 看到 terminal 立即 break 让 rx drop → 新响应无 receiver 被丢。fix：`Fuxi::dispatch` pump 看 terminal 后**不**break，用 500ms timeout 等；新事件来重置 `saw_terminal`；超时才退。
+- **shutdown_agent 必须豁免玄女**（2026-04-20 `1e6db4e`）：`IdleGcTask` 10 分钟 idle 会误杀 xuannv（她对 GC 是普通 agent）。治本：`Fuxi::shutdown_agent` 开头比对 `xuannv_id()`，命中 warn + 返 Ok 静默 noop。**任何新 shutdown 路径（`fuxi kill --id` / 将来的 worker pool rebalance）都从这个方法走，不绕旁路**。只有 `Fuxi::shutdown()`（整体下线）能关玄女。
+- **spawn 语义是"新建"，去重不塞在 spawn_worker**（2026-04-20 `fbba2ec`）：用户"起三个鲁班"就真起三个。复用职责在 `dispatch_to_any(role)`（`claim_idle_by_role` 原子），GC 负责回收。
+- **fuxi-memory 不能依赖 fuxi-orchestrator**（循环依赖风险）。需要调 orchestrator 的 pattern：trait 定义在 memory，impl adapter 放 **fuxi-cli**（顶层依赖全部 crate）。参考 `fuxi-cli/src/extractor_hook.rs::FuxiExtractorSpawner`。
 
 ## 决策 + 过程文档
 
 - `docs/architecture-v1.md` — v1 蓝图（**改方向先改这份**）
+- `docs/architecture-audit-v1.md` — v1.1 审查：架构现状 + Gap 矩阵 + Debt D1-D18
+- `docs/architecture-v1.1-roadmap.md` — M2-M5 路线图（M2 已完，M3-M5 待推）
+- `docs/audit/cratewise-inventory.md` + `docs/audit/event-flow.md` — 审查基础材料
 - `docs/decisions/` — 6 份独立决策（01 并行 cc / 02 soul-first skill / 03 任务树 UI / 04 intervene 退化 / 05 让贤保留 / 06 文化命名）
-- `docs/handoff/v1-session2.md` — 下个 session 开工指引
+- `docs/handoff/v1-session3.md` — **最新** 开工指引（P2 召回设计已拍板未实装）
+- `docs/handoff/v1-session2.md` — 上一份（保留）
 - `docs/session-review-2026-04-*.md` — 过程性记录（为什么这么做 / 踩坑 / 否决方案）
 - `docs/superpowers/specs/2026-04-19-伏羲-design.md` — 最早的宏观设计
