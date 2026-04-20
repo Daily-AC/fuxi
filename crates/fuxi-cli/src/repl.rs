@@ -120,7 +120,10 @@ pub struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            bind: "127.0.0.1:4100".parse().expect("static socket addr"),
+            // SAFETY: 字面量常量，IPv4 socket addr 文法保证可解析；Default trait 无法返 Result
+            bind: "127.0.0.1:4100"
+                .parse()
+                .expect("hardcoded 127.0.0.1:4100 必能解析"),
             sock_path: None,
             workspace_root: PathBuf::from("."),
             allocate_worktree: false,
@@ -292,7 +295,11 @@ pub async fn run(args: Args) -> Result<()> {
             tracing::info!(session = %id, "玄女 cc 首次启动，新 session_id 已落盘");
             None
         }
-        _ => unreachable!("resolve_xuannv_session 至少返回一个 Some"),
+        // 上游契约：resolve_xuannv_session 总返回至少一个 Some。若两者皆 None，
+        // 说明策府读写出了 invariant 异常——返 Err 而非 panic，让顶层错误边界打印。
+        (None, None) => anyhow::bail!(
+            "策府返回 (None, None)：玄女 session_id 既未命中也未生成，请检查 oracle_facts 表"
+        ),
     };
 
     let cc_cfg = CcLaunchConfig {
@@ -660,14 +667,9 @@ impl ReplApp {
                     }
                 }
             }
-            EventKind::TaskDelivered { .. } | EventKind::TaskCancelled { .. } => {
-                if let Some(tid) = ev.meta.task {
-                    let delay = self.prune_delay;
-                    if let Some(t) = self.tasks.iter_mut().find(|t| t.task_id == tid) {
-                        t.prune_after = Some(Instant::now() + delay);
-                    }
-                }
-            }
+            // WHY 删除 TaskDelivered/TaskCancelled 分支（M3.6）：
+            // 这俩孤儿变体已从 EventKind 移除——终态走上面 TaskStateChanged 分支
+            // 中的 Done|Cancelled 已经处理了 prune_after。
             EventKind::ToolCallStarted { tool, args } => {
                 if let Some(id) = who.filter(|i| *i != xuannv) {
                     let summary = tool_arg_preview(tool, args);
@@ -2760,5 +2762,19 @@ mod tests {
         std::fs::write(&bin_path, b"not exe").unwrap();
         let res = require_fuxi_in_path("fuxi", Some(dir.path().as_os_str()));
         assert!(res.is_err());
+    }
+
+    /// M3.5 回归：`Args::default()` 里 `"127.0.0.1:4100".parse().expect(...)`
+    /// 是仅有的 production-code expect。这条测试钉死它的 SAFETY 不变式，
+    /// 防止未来有人改字面量没改 expect 把 Default 弄崩。
+    #[test]
+    fn args_default_does_not_panic_and_binds_to_loopback() {
+        let args = Args::default();
+        assert_eq!(args.bind.port(), 4100);
+        assert!(
+            args.bind.ip().is_loopback(),
+            "默认必须 loopback，避免误暴露"
+        );
+        assert_eq!(args.xuannv_role, "xuannv");
     }
 }

@@ -476,15 +476,15 @@ impl Fuxi {
                     .await;
                 }
 
+                // WHY：终态只看 TaskStateChanged{Done|Cancelled} + AgentDead；
+                // M3.6 删掉 TaskDelivered/TaskCancelled 孤儿后不再兜底。
                 let is_terminal = matches!(
                     &ev.kind,
                     EventKind::TaskStateChanged {
                         to: fuxi_core::task::TaskState::Done
                             | fuxi_core::task::TaskState::Cancelled,
                         ..
-                    } | EventKind::TaskDelivered { .. }
-                        | EventKind::TaskCancelled { .. }
-                        | EventKind::AgentDead { .. }
+                    } | EventKind::AgentDead { .. }
                 );
                 if bus.publish(ev).is_err() {
                     warn!(agent = %agent_id, "event bus 已关闭，pump 退出");

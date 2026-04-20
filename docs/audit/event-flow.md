@@ -1,48 +1,48 @@
 # v1.1 事件流 · 发布者/订阅者矩阵审计
 
-## 1 · EventKind 变体全表 (39 个)
+> **2026-04-20 M3.6 更新**：删除 4 个真孤儿（TaskDelivered / TaskCancelled / MessageSent / MessageReceived），
+> 现总变体数 **35**（原 39）。`AgentSpawning`/`AgentShuttingDown` 经实测确为有发布点，
+> 不是孤儿（旧审计结论过时）。AgentInterrupted 颜色独立成 LightRed 警告色。
+
+## 1 · EventKind 变体全表 (35 个)
 
 | # | 变体 | 发布者 crate/module | 订阅者位置 | meta.agent | meta.task | kind_tag | summarize | color_for |
 |---|---|---|---|---|---|---|---|---|
-| 1 | AgentSpawning | - | - | - | - | ✓ | ✓ | ✓ |
+| 1 | AgentSpawning | fuxi-orchestrator::fuxi (spawn_worker / spawn_worker_in_worktree / register_managed_agent) | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
 | 2 | AgentReady | fuxi-agent-cc::agent | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 3 | AgentShuttingDown | - | - | - | - | ✓ | ✓ | ✓ |
+| 3 | AgentShuttingDown | fuxi-orchestrator::idle_gc / fuxi (shutdown_agent / shutdown) | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
 | 4 | AgentDead | fuxi-orchestrator::fuxi/bridge | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
 | 5 | TaskCreated | fuxi-orchestrator::fuxi | repl/ingest | - | ✓ | ✓ | ✓ | ✓ |
 | 6 | TaskDispatched | fuxi-orchestrator::fuxi | repl/ingest | - | ✓ | ✓ | ✓ | ✓ |
 | 7 | TaskStateChanged | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 8 | TaskDelivered | - | - | - | - | ✓ | ✓ | ✓ |
-| 9 | TaskBlocked | fuxi-agent-cc/codex::parser / orchestrator | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 10 | TaskResumed | fuxi-orchestrator::fuxi | repl/ingest | - | ✓ | ✓ | ✓ | ✓ |
-| 11 | TaskCancelled | - | - | - | - | ✓ | ✓ | ✓ |
-| 12 | MessageSent | - | - | - | - | ✓ | ✓ | ✓ |
-| 13 | MessageReceived | - | - | - | - | ✓ | ✓ | ✓ |
-| 14 | UserPrompted | fuxi-orchestrator::bridge / repl::ingest | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
-| 15 | AgentResponded | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 16 | ThinkingStarted | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 17 | ThinkingFinished | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 18 | ToolCallStarted | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 19 | ToolCallFinished | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 20 | UserInterventionSent | fuxi-orchestrator::fuxi | dispatch.rs test | ✓ | - | ✓ | ✓ | ✓ |
-| 21 | AgentInterrupted | - | - | ✓ | - | ✓ | ✓ | ✓ |
-| 22 | TaskInterventionApplied | - | - | - | ✓ | ✓ | ✓ | ✓ |
-| 23 | OrchestratorCcReceived | fuxi-orchestrator::fuxi/bridge | - | ✓ | - | ✓ | ✓ | ✓ |
-| 24 | ConversationTransferred | - | - | - | - | ✓ | ✓ | ✓ |
-| 25 | ConversationHandoffRequested | fuxi-orchestrator::fuxi | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
-| 26 | ConversationReturned | - | - | - | - | ✓ | ✓ | ✓ |
-| 27 | TriggerRegistered | fuxi-cli::daemon | - | - | - | ✓ | ✓ | ✓ |
-| 28 | TriggerFired | fuxi-scheduler::keeper | - | - | - | ✓ | ✓ | ✓ |
-| 29 | TriggerDispatched | - | - | - | - | ✓ | ✓ | ✓ |
-| 30 | TriggerSkipped | - | - | - | - | ✓ | ✓ | ✓ |
-| 31 | TriggerFailed | - | - | - | - | ✓ | ✓ | ✓ |
-| 32 | PlatformStarted | fuxi-cli::up/repl/daemon | repl/ingest | - | - | ✓ | ✓ | ✓ |
-| 33 | PlatformStopping | fuxi-cli::up | - | - | - | ✓ | ✓ | ✓ |
-| 34 | SkillStaged | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
-| 35 | SkillApproved | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
-| 36 | SkillRejected | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
-| 37 | SkillActivated | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
-| 38 | NoRoleMatched | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
-| 39 | Custom | fuxi-agent-*/parser (fallback) | - | - | - | ✓ | ✓ | ✓ |
+| 8 | TaskBlocked | fuxi-agent-cc/codex::parser / orchestrator | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 9 | TaskResumed | fuxi-orchestrator::fuxi | repl/ingest | - | ✓ | ✓ | ✓ | ✓ |
+| 10 | UserPrompted | fuxi-orchestrator::bridge / repl::ingest | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
+| 11 | AgentResponded | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 12 | ThinkingStarted | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 13 | ThinkingFinished | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 14 | ToolCallStarted | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 15 | ToolCallFinished | fuxi-agent-cc/codex::parser | repl/ingest | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 16 | UserInterventionSent | fuxi-orchestrator::fuxi | dispatch.rs test | ✓ | - | ✓ | ✓ | ✓ |
+| 17 | AgentInterrupted | - | firehose/tui (LightRed 警告色) | ✓ | - | ✓ | ✓ | ✓ |
+| 18 | TaskInterventionApplied | - | firehose/tui (兜底渲染) | - | ✓ | ✓ | ✓ | ✓ |
+| 19 | OrchestratorCcReceived | fuxi-orchestrator::fuxi/bridge | firehose/tui (兜底渲染) | ✓ | - | ✓ | ✓ | ✓ |
+| 20 | ConversationTransferred | - (M4.3 决定 D14) | - | - | - | ✓ | ✓ | ✓ |
+| 21 | ConversationHandoffRequested | fuxi-orchestrator::fuxi | repl/ingest | ✓ | - | ✓ | ✓ | ✓ |
+| 22 | ConversationReturned | - (M4.3 决定 D14) | - | - | - | ✓ | ✓ | ✓ |
+| 23 | TriggerRegistered | fuxi-cli::daemon | firehose/tui | - | - | ✓ | ✓ | ✓ |
+| 24 | TriggerFired | fuxi-scheduler::keeper | firehose/tui | - | - | ✓ | ✓ | ✓ |
+| 25 | TriggerDispatched | fuxi-scheduler | firehose/tui (兜底渲染) | - | - | ✓ | ✓ | ✓ |
+| 26 | TriggerSkipped | fuxi-scheduler | firehose/tui (兜底渲染) | - | - | ✓ | ✓ | ✓ |
+| 27 | TriggerFailed | fuxi-scheduler | firehose/tui (兜底渲染) | - | - | ✓ | ✓ | ✓ |
+| 28 | PlatformStarted | fuxi-cli::up/repl/daemon | repl/ingest | - | - | ✓ | ✓ | ✓ |
+| 29 | PlatformStopping | fuxi-cli::up | firehose/tui (兜底渲染) | - | - | ✓ | ✓ | ✓ |
+| 30 | SkillStaged | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
+| 31 | SkillApproved | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
+| 32 | SkillRejected | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
+| 33 | SkillActivated | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
+| 34 | NoRoleMatched | fuxi-cli::ipc (from lark-mcp) | - | - | - | ✓ | ✓ | ✓ |
+| 35 | Custom | fuxi-agent-*/parser (fallback) | - | - | - | ✓ | ✓ | ✓ |
 
 ## 2 · 对齐 Gap
 
@@ -64,24 +64,30 @@
 
 ## 3 · 孤儿事件
 
-### Publisher-Orphan (定义但无人发)
-1. **AgentSpawning** — 定义在 event.rs，但无发布点（可能在 agent spawn 层外部处理）
-2. **AgentShuttingDown** — 同上，可能是预留位
-3. **TaskDelivered** — 预留；当前用 TaskStateChanged (Done) 替代
-4. **TaskCancelled** — 预留；无发布侧
-5. **MessageSent** — 定义但未使用（A2A 消息可能走了别的通道）
-6. **MessageReceived** — 同上
+### Publisher-Orphan (定义但无人发) —— 2026-04-20 M3.6 清理后
 
-### Subscriber-Orphan (发布但无人订阅处理)
-1. **TriggerDispatched** — 发布但未见 match 处理
-2. **TriggerSkipped** — 同上
-3. **TriggerFailed** — 同上（scheduler 发，无订阅方处理）
-4. **AgentInterrupted** — 发布但无 match 处理
-5. **TaskInterventionApplied** — 同上
-6. **OrchestratorCcReceived** — 发布但无业务逻辑 match（仅作信息记录）
-7. **ConversationTransferred** — 预留，未发布亦无订阅
-8. **ConversationReturned** — 同上
-9. **PlatformStopping** — 发布但无特殊订阅处理
+**已删（4 个，无回滚——bus payload 词汇表瘦身）**：
+1. ~~**TaskDelivered**~~ — 真孤儿，删；终态走 `TaskStateChanged{to: Done}`
+2. ~~**TaskCancelled**~~ — 真孤儿，删；终态走 `TaskStateChanged{to: Cancelled}`
+3. ~~**MessageSent**~~ — 设计早期占位，A2A 通信不走 EventKind
+4. ~~**MessageReceived**~~ — 同上
+
+**实测后撤回的"假孤儿"（旧审计文档过时）**：
+- **AgentSpawning** — `fuxi-orchestrator::fuxi` 三处发布（spawn_worker / spawn_worker_in_worktree / register_managed_agent）
+- **AgentShuttingDown** — `fuxi-orchestrator::idle_gc` + `fuxi.rs::shutdown_agent` + `fuxi.rs::shutdown` 都发
+
+### Subscriber-Orphan (发布但无人订阅业务处理) —— M3.6 决议
+
+**保留不动，TUI 兜底渲染足矣**：
+1. **TriggerDispatched / TriggerSkipped / TriggerFailed** — scheduler 发，TUI/audit 流式渲染兜底，无需新 match handler
+2. **OrchestratorCcReceived** — 仅信息记录，TUI 已能渲染
+3. **PlatformStopping** — fuxi-cli::up 关机标记，TUI 已能渲染
+4. **AgentInterrupted** — TUI 升级为 LightRed 警告色（color_for 单独抽出）
+5. **TaskInterventionApplied** — TUI summarize 已清晰
+
+**等 M4.3 决定 D14 再处理**：
+6. **ConversationTransferred** — 让贤场景，先冻结
+7. **ConversationReturned** — 同上
 
 ## 4 · 重点发现
 
@@ -89,7 +95,7 @@
 
 2. **Scheduler 事件岛** — TriggerRegistered/TriggerFired/TriggerDispatched/TriggerSkipped/TriggerFailed 五个变体已在 kind_tag/summarize/color_for 中完整定义，但上游 scheduler 的发布与下游 orchestrator 的订阅之间无明确 wire，可能导致任务派发延迟或无声失败。
 
-3. **MessageSent/MessageReceived 冷冻** — 这两个变体在 event 词汇表中但从未被触发或订阅，是设计债——可能原计划用于 A2A 通信审计但后来废弃，未清理。
+3. ~~**MessageSent/MessageReceived 冷冻**~~ — **M3.6 已删**。设计债清零。
 
 ---
 

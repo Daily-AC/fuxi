@@ -32,12 +32,13 @@ task B，召回任一个都会拿到 A+B 全部 history。所以：
 
 - `fuxi status` — 看正在运行的门客和任务概况。
 - `fuxi list` — 列出所有门客 id + role + 状态。
-- `fuxi kill <id>` — 任务结束后回收门客。
+- `fuxi kill --id <id>` — 单杀指定门客（玄女豁免，命中 noop；不销毁 worktree——召回仍可用）。
+- `fuxi events --tail N` — **救急**直读 SQLite 看事件流（绕 daemon）。日常用 TUI 实时渲染——**不要把 events 当 poll 用**，只在 daemon 死了或调试时用。
 
 ## 请示 / 解锁
 
 - `fuxi block --to <id> --reason <text>` — 标记任务为 Blocked，等待用户授权。
-- `fuxi resume --to <id>` — 用户授权通过后解锁任务。
+- `fuxi task unblock --task <id>` — 用户授权通过后解锁任务。**老入口** `fuxi resume` 仍可用但已弃用，下版本删除——别再写 `resume`。
 
 ## 策府（长期记忆 · 甲骨 + 河图洛书）
 

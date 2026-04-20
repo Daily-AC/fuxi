@@ -361,10 +361,6 @@ fn summarize(k: &EventKind) -> String {
         TaskCreated { title, .. } => format!("title={title}"),
         TaskDispatched { to } => format!("to={to}"),
         TaskStateChanged { from, to } => format!("{from:?} → {to:?}"),
-        TaskDelivered { artifact } => format!(
-            "artifact={}",
-            artifact.to_string().chars().take(60).collect::<String>()
-        ),
         TaskBlocked { reason } => format!("reason={reason}"),
         TaskResumed { input } => format!(
             "input={}",
@@ -372,18 +368,6 @@ fn summarize(k: &EventKind) -> String {
                 .as_deref()
                 .map(|s| one_line(s, 40))
                 .unwrap_or_default()
-        ),
-        TaskCancelled { reason } => format!("reason={reason}"),
-        MessageSent { from, to, text } => format!(
-            "{} → {}: {}",
-            short_id(&from.to_string()),
-            short_id(&to.to_string()),
-            one_line(text, 60)
-        ),
-        MessageReceived { from, text } => format!(
-            "from={}: {}",
-            short_id(&from.to_string()),
-            one_line(text, 60)
         ),
         UserPrompted { text } => format!("user> {}", one_line(text, 60)),
         AgentResponded { text } => format!("agent> {}", one_line(text, 60)),
@@ -484,22 +468,20 @@ fn color_for(k: &EventKind) -> Color {
         TaskCreated { .. }
         | TaskDispatched { .. }
         | TaskStateChanged { .. }
-        | TaskDelivered { .. }
         | TaskBlocked { .. }
-        | TaskResumed { .. }
-        | TaskCancelled { .. } => Color::Green,
+        | TaskResumed { .. } => Color::Green,
 
-        MessageSent { .. }
-        | MessageReceived { .. }
-        | UserPrompted { .. }
-        | AgentResponded { .. }
-        | ThinkingStarted
-        | ThinkingFinished => Color::Cyan,
+        UserPrompted { .. } | AgentResponded { .. } | ThinkingStarted | ThinkingFinished => {
+            Color::Cyan
+        }
 
         ToolCallStarted { .. } | ToolCallFinished { .. } => Color::Blue,
 
+        // WHY 单独抽出 AgentInterrupted 走 LightRed：
+        // 打断是少见但极其重要的状态变更（M3.6 决定），用警告色和"调度家族"区分。
+        AgentInterrupted { .. } => Color::LightRed,
+
         UserInterventionSent { .. }
-        | AgentInterrupted { .. }
         | TaskInterventionApplied { .. }
         | OrchestratorCcReceived { .. }
         | ConversationTransferred { .. }
@@ -747,5 +729,15 @@ mod tests {
         let s = "hello\nworld";
         assert_eq!(one_line(s, 20), "hello world");
         assert!(one_line(s, 4).ends_with('…'));
+    }
+
+    /// M3.6：AgentInterrupted 是少见但极重要的状态变更，必须是 LightRed
+    /// 警告色，不能再混在调度家族（Yellow）里被淹没。
+    #[test]
+    fn color_for_agent_interrupted_is_warning_red() {
+        let kind = EventKind::AgentInterrupted {
+            reason: "user".into(),
+        };
+        assert_eq!(color_for(&kind), Color::LightRed);
     }
 }

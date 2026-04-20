@@ -77,9 +77,8 @@ pub enum EventKind {
         from: TaskState,
         to: TaskState,
     },
-    TaskDelivered {
-        artifact: serde_json::Value,
-    },
+    // WHY 删除 TaskDelivered/TaskCancelled（M3.6 孤儿清理）：
+    // 没有发布点；终态走 TaskStateChanged{to: Done|Cancelled} 一条线。
     TaskBlocked {
         reason: String,
     },
@@ -88,20 +87,10 @@ pub enum EventKind {
     TaskResumed {
         input: Option<String>,
     },
-    TaskCancelled {
-        reason: String,
-    },
 
     // ── conversation / A2A messages ─────────────────────────
-    MessageSent {
-        from: AgentId,
-        to: AgentId,
-        text: String,
-    },
-    MessageReceived {
-        from: AgentId,
-        text: String,
-    },
+    // WHY 删除 MessageSent/MessageReceived（M3.6 孤儿清理）：
+    // 设计早期占位，从未发布也未订阅；A2A 通信不走 EventKind。
     UserPrompted {
         text: String,
     },

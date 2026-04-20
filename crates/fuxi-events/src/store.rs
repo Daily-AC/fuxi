@@ -168,6 +168,26 @@ impl EventStore {
         Ok(out)
     }
 
+    /// 取最近 `limit` 条事件，按 `rowid` 倒序（最新在前）。
+    ///
+    /// 给 `fuxi events`（M3.7）救急 CLI 用——绕开 daemon 直读 SQLite 看尾巴。
+    /// WHY 倒序而非升序：救急场景关心"刚发生了什么"，按 rowid DESC 取头 N 条
+    /// 即可，避免先 count 再 offset 的两步 query。调用方需要时间正序展示
+    /// 自行 reverse vec。
+    pub async fn recent(&self, limit: i64) -> Result<Vec<Event>> {
+        let rows = sqlx::query("SELECT payload FROM events ORDER BY rowid DESC LIMIT ?1")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload: String = row.try_get("payload")?;
+            let ev: Event = serde_json::from_str(&payload)?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
+
     /// 同 crate 内暴露 pool 给 bus/测试使用。
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
@@ -259,12 +279,8 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         TaskCreated { .. } => "task_created",
         TaskDispatched { .. } => "task_dispatched",
         TaskStateChanged { .. } => "task_state_changed",
-        TaskDelivered { .. } => "task_delivered",
         TaskBlocked { .. } => "task_blocked",
         TaskResumed { .. } => "task_resumed",
-        TaskCancelled { .. } => "task_cancelled",
-        MessageSent { .. } => "message_sent",
-        MessageReceived { .. } => "message_received",
         UserPrompted { .. } => "user_prompted",
         AgentResponded { .. } => "agent_responded",
         ThinkingStarted => "thinking_started",
@@ -473,6 +489,31 @@ mod tests {
         assert_eq!(got.len(), 5);
     }
 
+    /// `recent(N)` 取尾 N 条按 rowid 倒序——最新在前；超过总数返回全部不报错。
+    /// `fuxi events --tail N`（M3.7）的查询路径。
+    #[tokio::test]
+    async fn events_recent_returns_chronological_desc() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let a = mk_event("a");
+        let b = mk_event("b");
+        let c = mk_event("c");
+        store.append(&a).await.unwrap();
+        store.append(&b).await.unwrap();
+        store.append(&c).await.unwrap();
+
+        // tail 2 → 最新两条 c, b（DESC）
+        let got = store.recent(2).await.expect("recent");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].meta.id, c.meta.id, "最新在前");
+        assert_eq!(got[1].meta.id, b.meta.id);
+
+        // 超出总数：返回全部，不报错
+        let all = store.recent(100).await.expect("recent");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].meta.id, c.meta.id);
+        assert_eq!(all[2].meta.id, a.meta.id);
+    }
+
     #[tokio::test]
     async fn history_for_task_returns_only_matching_task_in_order() {
         // WHY：Extractor（M2.5）要按 task_id 拉该任务的完整事件序列拼 transcript。
@@ -588,5 +629,57 @@ mod tests {
                 "trigger_failed",
             ]
         );
+    }
+
+    /// M3.6 回归保护：删掉 TaskDelivered/TaskCancelled 变体后，task 终态
+    /// **必须**仍能通过 TaskStateChanged{Done|Cancelled} 落盘+回放并保留字段。
+    /// 这是替代两个孤儿变体的**唯一通道**，丢失这条线 = M3.6 走偏。
+    #[tokio::test]
+    async fn task_terminal_roundtrip_via_state_changed_only() {
+        use fuxi_core::task::TaskState;
+
+        let store = EventStore::connect_memory().await.expect("connect");
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        let done = Event {
+            meta: meta.clone(),
+            kind: EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Done,
+            },
+        };
+        let mut meta2 = EventMeta::now();
+        meta2.task = Some(task);
+        let cancelled = Event {
+            meta: meta2,
+            kind: EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Cancelled,
+            },
+        };
+        store.append(&done).await.expect("append done");
+        store.append(&cancelled).await.expect("append cancelled");
+
+        let hist = store.history_for_task(task).await.expect("history");
+        assert_eq!(hist.len(), 2);
+        match &hist[0].kind {
+            EventKind::TaskStateChanged { to, .. } => assert_eq!(*to, TaskState::Done),
+            other => panic!("expect TaskStateChanged Done，得到 {other:?}"),
+        }
+        match &hist[1].kind {
+            EventKind::TaskStateChanged { to, .. } => assert_eq!(*to, TaskState::Cancelled),
+            other => panic!("expect TaskStateChanged Cancelled，得到 {other:?}"),
+        }
+
+        // kind_tag 必须只有 task_state_changed——不再有 task_delivered/task_cancelled。
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(tags, vec!["task_state_changed", "task_state_changed"]);
     }
 }
