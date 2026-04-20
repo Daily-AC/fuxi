@@ -13,6 +13,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod click_registry;
 mod client;
 mod daemon;
 mod demo;
@@ -22,6 +23,7 @@ mod repl;
 mod session;
 mod skill;
 mod subcommands;
+mod theme;
 mod up;
 mod watch;
 

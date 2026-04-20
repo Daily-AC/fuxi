@@ -19,7 +19,8 @@ use anyhow::{Context, Result, anyhow};
 use clap::Args as ClapArgs;
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers,
+    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -34,7 +35,7 @@ use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
 use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
-use fuxi_firehose::{FirehoseApp, Hub};
+use fuxi_firehose::{EventRow, FirehoseApp, Hub};
 use fuxi_orchestrator::{Fuxi, FuxiConfig, ShelfStatus, SystemEventBridge, WorkerKind};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::{Keeper, TriggerStore};
@@ -372,7 +373,7 @@ pub(crate) struct ReplApp {
 fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
-    ta.set_placeholder_text("输入（Shift+Enter 换行；Enter 发送）");
+    ta.set_placeholder_text("输入（Shift+Enter / Alt+Enter / Ctrl+J 换行；Enter 发送）");
     ta
 }
 
@@ -906,8 +907,24 @@ impl ReplApp {
         }
 
         // Focus::Input —— tui-textarea 路由
+        //
+        // 换行键三路兜底：Shift+Enter / Alt+Enter / Ctrl+J。理由：
+        // - Shift+Enter 仅在终端开了 Kitty keyboard protocol（iTerm2/Ghostty/
+        //   Kitty/Alacritty）时才带 SHIFT modifier；macOS 自带 Terminal.app 等
+        //   老终端把它发成裸 Enter，handler 区分不出，只能以 Alt+Enter / Ctrl+J 兜底
+        // - Ctrl+J 物理上就是 `\n`（0x0A），任何终端都认
         match code {
-            KeyCode::Enter if !mods.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Enter
+                if mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT) =>
+            {
+                self.input.insert_newline();
+                None
+            }
+            KeyCode::Char('j') if mods == KeyModifiers::CONTROL => {
+                self.input.insert_newline();
+                None
+            }
+            KeyCode::Enter => {
                 let text = self.take_input();
                 let trimmed = text.trim();
                 if trimmed.is_empty() {
@@ -917,10 +934,6 @@ impl ReplApp {
                     ActiveTarget::Xuannv => Some(Submit::Xuannv(trimmed.to_string())),
                     ActiveTarget::Worker(id) => Some(Submit::Worker(id, trimmed.to_string())),
                 }
-            }
-            KeyCode::Enter => {
-                self.input.insert_newline();
-                None
             }
             KeyCode::Char(c) if c.is_control() || c == '\t' => None,
             _ => {
@@ -1133,20 +1146,22 @@ impl ReplApp {
         let lines: Vec<Line> = filtered[start..]
             .iter()
             .map(|r| {
+                let (icon, color, narrative) = narrate_event(r);
+                // 时间 (8) + icon (2) + who (6) + 3 空格 = 19 预留给头部
+                let reserved = 20u16;
+                let narrative_width =
+                    inner.width.saturating_sub(reserved).max(10) as usize;
                 Line::from(vec![
                     Span::styled(r.time.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::raw(" "),
                     Span::styled(short_str(&r.who, 6), Style::default().fg(Color::Blue)),
                     Span::raw(" "),
                     Span::styled(
-                        short_str(r.kind_tag, 16),
-                        Style::default().fg(r.color).add_modifier(Modifier::BOLD),
+                        truncate_by_width(&narrative, narrative_width),
+                        Style::default().fg(color),
                     ),
-                    Span::raw(" "),
-                    Span::raw(truncate_by_width(
-                        &r.summary,
-                        inner.width.saturating_sub(32) as usize,
-                    )),
                 ])
             })
             .collect();
@@ -1222,7 +1237,7 @@ impl ReplApp {
     }
 
     fn draw_status(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
-        let hint = " Tab 循环 | Esc 回玄女 | F2 事件流 | PgUp/PgDn 翻阅 | Shift-Enter 换行 | Enter 发送 | Ctrl-C 退出 ";
+        let hint = " Tab 循环 | Esc 回玄女 | F2 事件流 | PgUp/PgDn 翻阅 | ⇧/⌥-Enter / ⌃-J 换行 | Enter 发送 | Ctrl-C 退出 ";
         let para = Paragraph::new(hint).style(Style::default().fg(Color::Black).bg(Color::Gray));
         f.render_widget(para, area);
     }
@@ -1314,7 +1329,14 @@ impl ReplApp {
     }
 }
 
-/// 连续同 speaker 的消息，后续行去前缀改缩进。
+/// 对话渲染。
+///
+/// 前缀策略（原来的 `你>` / `玄女>` 字面前缀已取消——输入框已经告诉用户
+/// "你→玄女"，对话区再重复是废话，参考 Claude Code / Codex 的视觉）：
+/// - **User**：每行左挂 `▍ ` teal 竖条，让多行消息视觉上成一块"气泡"
+/// - **Agent**：首条首行 `● 名字 `，圆点 mauve + 名字 dim；同 speaker 相邻
+///   消息或多行消息 subsequent 行只缩进对齐，不重复名字——对话视觉更紧凑
+/// - **System**：`· ` 前缀 + italic，弱存在感
 fn render_dialogue_collapsed<'a, I>(iter: I) -> Vec<Line<'a>>
 where
     I: IntoIterator<Item = &'a DialogueLine>,
@@ -1324,52 +1346,109 @@ where
     for line in iter {
         match line {
             DialogueLine::User(t) => {
-                let speaker = "user".to_string();
-                let first_prefix_shown = prev_speaker.as_deref() != Some("user");
-                for (i, ln) in t.lines().enumerate() {
-                    let head = if i == 0 && first_prefix_shown {
-                        Span::styled("你> ", Style::default().fg(Color::Green))
-                    } else {
-                        Span::raw("    ")
-                    };
-                    out.push(Line::from(vec![head, Span::raw(ln.to_string())]));
+                for ln in t.lines() {
+                    out.push(Line::from(vec![
+                        Span::styled("▍ ", Style::default().fg(Color::Cyan)),
+                        Span::raw(ln.to_string()),
+                    ]));
                 }
-                prev_speaker = Some(speaker);
+                prev_speaker = Some("user".into());
             }
             DialogueLine::Agent { name, text } => {
                 let speaker = format!("agent:{name}");
                 let same_speaker = prev_speaker.as_deref() == Some(speaker.as_str());
-                let prefix_str = format!("{name}> ");
-                let prefix_width = UnicodeWidthStr::width(prefix_str.as_str()).max(4);
+                let name_tag = format!("● {name} ");
+                let indent_width = UnicodeWidthStr::width(name_tag.as_str());
+                let indent = " ".repeat(indent_width);
                 for (i, ln) in text.lines().enumerate() {
-                    let head = if i == 0 && !same_speaker {
-                        Span::styled(
-                            prefix_str.clone(),
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        )
+                    if i == 0 && !same_speaker {
+                        out.push(Line::from(vec![
+                            Span::styled(
+                                "● ",
+                                Style::default()
+                                    .fg(Color::Magenta)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("{name} "),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::raw(ln.to_string()),
+                        ]));
                     } else {
-                        Span::raw(" ".repeat(prefix_width))
-                    };
-                    out.push(Line::from(vec![head, Span::raw(ln.to_string())]));
+                        out.push(Line::from(vec![
+                            Span::raw(indent.clone()),
+                            Span::raw(ln.to_string()),
+                        ]));
+                    }
                 }
                 prev_speaker = Some(speaker);
             }
             DialogueLine::System(t) => {
                 for ln in t.lines() {
-                    out.push(Line::from(Span::styled(
-                        ln.to_string(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::ITALIC),
-                    )));
+                    out.push(Line::from(vec![
+                        Span::styled("· ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            ln.to_string(),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
                 }
                 prev_speaker = Some("system".into());
             }
         }
     }
     out
+}
+
+/// 事件叙事化——把 raw `kind_tag` 翻译成人话图标 + 中文短语。
+///
+/// 返回 `(icon, color, narrative_text)`。调用方拼 `time  icon  who  narrative`。
+///
+/// 未知 kind 回退用 `row.summary` 原文，至少不会丢信息。设计参考
+/// `docs/research/tui-v2-aesthetics.md` §4 Claude Code transcript 翻译表。
+fn narrate_event(r: &EventRow) -> (&'static str, Color, String) {
+    let summary = r.summary.as_str();
+    match r.kind_tag {
+        "platform_started" => ("★", Color::Green, "平台启动".to_string()),
+        "platform_stopping" => ("☾", Color::DarkGray, "平台关闭".to_string()),
+        "agent_spawning" => ("·", Color::DarkGray, "招募中…".to_string()),
+        "agent_ready" => ("●", Color::Green, format!("上线 · {summary}")),
+        "agent_shutting_down" => ("·", Color::DarkGray, "准备下线".to_string()),
+        "agent_dead" => ("✗", Color::Red, format!("下线 · {summary}")),
+        "task_created" => ("◇", Color::Cyan, format!("新任务 · {summary}")),
+        "task_dispatched" => ("→", Color::Cyan, format!("接单 · {summary}")),
+        "task_state_changed" => ("↻", Color::Yellow, summary.to_string()),
+        "task_delivered" => ("✓", Color::Green, format!("完成 · {summary}")),
+        "task_blocked" => ("!", Color::Yellow, format!("阻塞 · {summary}")),
+        "task_resumed" => ("▶", Color::Green, format!("续上 · {summary}")),
+        "task_cancelled" => ("×", Color::DarkGray, format!("取消 · {summary}")),
+        "user_prompted" => ("▍", Color::Cyan, format!("用户 · {summary}")),
+        "agent_responded" => ("●", Color::Magenta, format!("回话 · {summary}")),
+        "user_intervention_sent" => ("✋", Color::Yellow, format!("指令 · {summary}")),
+        "agent_interrupted" => ("⎋", Color::Yellow, format!("打断 · {summary}")),
+        "task_intervention_applied" => ("✎", Color::Yellow, format!("追加 · {summary}")),
+        "orchestrator_cc_received" => ("📣", Color::Blue, format!("抄送 · {summary}")),
+        "conversation_handoff_requested" => ("⇄", Color::Magenta, format!("让贤 · {summary}")),
+        "conversation_transferred" => ("⇄", Color::Magenta, format!("已让贤 · {summary}")),
+        "conversation_returned" => ("↩", Color::Magenta, format!("回席 · {summary}")),
+        "trigger_registered" => ("⏰", Color::Blue, format!("更漏登记 · {summary}")),
+        "trigger_fired" => ("⏰", Color::Blue, format!("更漏响 · {summary}")),
+        "trigger_dispatched" => ("→", Color::Blue, format!("更漏派活 · {summary}")),
+        "trigger_skipped" => ("·", Color::DarkGray, format!("更漏跳过 · {summary}")),
+        "trigger_failed" => ("!", Color::Red, format!("更漏失败 · {summary}")),
+        "tool_call_started" => ("◈", Color::Yellow, format!("工具 · {summary}")),
+        "tool_call_finished" => ("✓", Color::DarkGray, format!("工具完 · {summary}")),
+        "message_sent" => ("→", Color::Blue, format!("消息 · {summary}")),
+        "message_received" => ("←", Color::Blue, format!("收信 · {summary}")),
+        "skill_staged" | "skill_approved" | "skill_rejected" | "skill_activated" => {
+            ("◆", Color::Magenta, format!("点将台 · {summary}"))
+        }
+        "no_role_matched" => ("?", Color::Yellow, format!("无匹配 · {summary}")),
+        _ => ("·", r.color, summary.to_string()),
+    }
 }
 
 fn is_noise_event(kind_tag: &str, summary: &str) -> bool {
@@ -1490,6 +1569,14 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
     let mut stdout = io::stdout();
     // bracketed paste：让 IME / 剪贴板整块内容一次进入，不被 KEY_POLL 拆分成逐键序列
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    // Kitty keyboard protocol：让现代终端（iTerm2 ≥ 3.5 / Ghostty / Kitty / Alacritty）
+    // 把 Shift+Enter 真的送成 `Enter + SHIFT`。不支持的终端（macOS Terminal.app、
+    // tmux 未开 passthrough 等）会返回错误——我们吞掉，由 Alt+Enter / Ctrl+J 兜底。
+    let kitty_on = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .is_ok();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = ReplApp::new(xuannv_id);
@@ -1561,6 +1648,9 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
     .await;
 
     let _ = disable_raw_mode();
+    if kitty_on {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
@@ -1639,6 +1729,61 @@ mod tests {
         let mut meta = EventMeta::now();
         meta.agent = agent;
         Event { meta, kind }
+    }
+
+    fn mk_row(kind_tag: &'static str, summary: &str) -> EventRow {
+        EventRow {
+            time: "12:00:00".into(),
+            who: "test".into(),
+            kind_tag,
+            summary: summary.into(),
+            color: Color::Reset,
+            ingested_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn narrate_event_translates_agent_lifecycle() {
+        let ready = mk_row("agent_ready", "endpoint=session:abc");
+        let (icon, _, text) = narrate_event(&ready);
+        assert_eq!(icon, "●");
+        assert!(text.contains("上线"), "实际={text:?}");
+
+        let dead = mk_row("agent_dead", "EOF");
+        let (icon, _, text) = narrate_event(&dead);
+        assert_eq!(icon, "✗");
+        assert!(text.contains("下线"));
+    }
+
+    #[test]
+    fn narrate_event_translates_task_lifecycle() {
+        let created = mk_row("task_created", "scout");
+        assert!(narrate_event(&created).2.contains("新任务"));
+
+        let dispatched = mk_row("task_dispatched", "luban → scout");
+        assert!(narrate_event(&dispatched).2.contains("接单"));
+
+        let delivered = mk_row("task_delivered", "scout");
+        let (icon, _, _) = narrate_event(&delivered);
+        assert_eq!(icon, "✓");
+
+        let blocked = mk_row("task_blocked", "等待用户确认");
+        let (icon, _, text) = narrate_event(&blocked);
+        assert_eq!(icon, "!");
+        assert!(text.contains("阻塞"));
+    }
+
+    #[test]
+    fn narrate_event_unknown_kind_falls_back_to_summary() {
+        let raw = mk_row("some_future_kind_i_dont_know", "payload stuff");
+        let (_, _, text) = narrate_event(&raw);
+        assert_eq!(text, "payload stuff", "未知 kind 至少保真 summary");
+    }
+
+    #[test]
+    fn narrate_event_covers_handoff_and_cc() {
+        assert!(narrate_event(&mk_row("conversation_handoff_requested", "a→b")).2.contains("让贤"));
+        assert!(narrate_event(&mk_row("orchestrator_cc_received", "luban")).2.contains("抄送"));
     }
 
     fn mk_task_ev(agent: Option<AgentId>, task: TaskId, kind: EventKind) -> Event {
@@ -1868,6 +2013,28 @@ mod tests {
         assert!(app.input_text().is_empty());
     }
 
+    /// 终端不送 Shift+Enter 时的兜底：Alt+Enter 作为换行同义。
+    /// 理由见 `docs/research/tui-v2-aesthetics.md` §6——大多数终端默认
+    /// 把 Shift+Enter 发成裸 Enter 不带 modifier，Alt+Enter 跨终端兼容性最好。
+    #[test]
+    fn alt_enter_also_newlines() {
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Enter, KeyModifiers::ALT);
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
+        assert_eq!(app.input_text(), "a\nb");
+    }
+
+    /// Ctrl+J 物理上 = `\n`，最古老最稳的换行兜底，任何终端都认。
+    #[test]
+    fn ctrl_j_also_newlines() {
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
+        assert_eq!(app.input_text(), "a\nb");
+    }
+
     #[test]
     fn bracketed_paste_fills_input() {
         let mut app = ReplApp::stub();
@@ -1911,12 +2078,12 @@ mod tests {
         assert_eq!(rendered.len(), 2, "应生成两行");
         let first = line_to_plain(&rendered[0]);
         let second = line_to_plain(&rendered[1]);
-        assert!(first.starts_with("玄女>"), "第一行应带前缀: {first:?}");
-        assert!(!second.starts_with("玄女>"), "第二行应去前缀: {second:?}");
+        assert!(first.starts_with("● 玄女 "), "第一行应带名字前缀: {first:?}");
+        assert!(!second.starts_with("● "), "第二行应去前缀缩进: {second:?}");
         assert!(second.contains("line2"));
     }
 
-    /// 换 speaker 时前缀应重新出现。
+    /// 换 speaker 时名字前缀应重新出现。
     #[test]
     fn different_speakers_keep_prefix() {
         let lines = [
@@ -1930,8 +2097,8 @@ mod tests {
             },
         ];
         let rendered = render_dialogue_collapsed(lines.iter());
-        assert!(line_to_plain(&rendered[0]).starts_with("玄女>"));
-        assert!(line_to_plain(&rendered[1]).starts_with("鲁班>"));
+        assert!(line_to_plain(&rendered[0]).starts_with("● 玄女 "));
+        assert!(line_to_plain(&rendered[1]).starts_with("● 鲁班 "));
     }
 
     fn line_to_plain(line: &Line) -> String {
