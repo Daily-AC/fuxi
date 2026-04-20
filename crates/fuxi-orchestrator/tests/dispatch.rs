@@ -1073,6 +1073,43 @@ async fn orchestrator_cc_received_carries_original_intervention_id() {
     );
 }
 
+/// 玄女豁免（2026-04-20 用户质疑）：`shutdown_agent` 不能杀玄女本人——
+/// 她是用户对话唯一入口，被 kill 整个 TUI 崩。GC / 将来的 `fuxi kill --id`
+/// 都走这个豁免，只有 `Fuxi::shutdown()` 能关玄女。
+#[tokio::test]
+async fn shutdown_agent_refuses_to_kill_xuannv() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus, ws);
+
+    let xuannv = StubAgent::new("xuannv", happy_script());
+    let xuannv_id = fuxi.insert_agent(xuannv, None).await;
+    fuxi.set_xuannv(xuannv_id).await;
+
+    // 走 shutdown_agent 试杀——应静默 noop（Ok），玄女仍在 shelf
+    fuxi.shutdown_agent(xuannv_id, "idle_ttl".into())
+        .await
+        .expect("shutdown_agent 对玄女应返 Ok 不报错");
+    let cards = fuxi.list_workers().await;
+    assert!(
+        cards.iter().any(|c| c.id == xuannv_id),
+        "shutdown_agent 被豁免后玄女应仍在 shelf"
+    );
+
+    // 普通门客照常能被 shutdown
+    let worker = StubAgent::new("dev", happy_script());
+    let worker_id = fuxi.insert_agent(worker, None).await;
+    fuxi.shutdown_agent(worker_id, "idle_ttl".into())
+        .await
+        .expect("普通门客可以被 shutdown");
+    let cards = fuxi.list_workers().await;
+    assert!(
+        !cards.iter().any(|c| c.id == worker_id),
+        "普通门客被 shutdown_agent 清走"
+    );
+    assert!(cards.iter().any(|c| c.id == xuannv_id), "玄女仍在");
+}
+
 /// Bug 修复（2026-04-20 用户复测）：`Fuxi::dispatch` 必须在开头发
 /// `TaskCreated` + `TaskDispatched` 两条事件，否则 TUI 左栏的"空闲门客"
 /// 桶永远不会把被派活的门客移走——`upsert_task` 没收到事件就不会触发。
