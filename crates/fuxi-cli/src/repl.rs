@@ -28,6 +28,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use fuxi_agent_cc::CcLaunchConfig;
 use fuxi_core::agent::AgentCard;
+use fuxi_memory::OracleStore;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
@@ -205,6 +206,22 @@ pub async fn run(args: Args) -> Result<()> {
     let loaded = skill_loader::load(&args.xuannv_role)
         .with_context(|| format!("加载 skills/{}/SKILL.md", args.xuannv_role))?;
     let xuannv_profile = loaded.profile.clone();
+
+    // 玄女 cc session 续写：策府存哪一个 session_id 就 `--resume` 它，没有则
+    // 首次新生成并回写。这样关了 fuxi 再开，玄女上下文不丢。见 `session.rs`。
+    let memory_db = crate::memory_cmd::resolve_db_path(None).context("解析策府 DB 路径")?;
+    let oracle = OracleStore::connect_file(&memory_db)
+        .await
+        .with_context(|| format!("连接策府 DB {}", memory_db.display()))?;
+    let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(&oracle)
+        .await
+        .context("解析玄女 session_id")?;
+    match (&resume_session_id, &session_id) {
+        (Some(id), _) => tracing::info!(session = %id, "玄女 cc 续写策府已有 session"),
+        (_, Some(id)) => tracing::info!(session = %id, "玄女 cc 首次启动，新 session_id 已落盘"),
+        _ => unreachable!("resolve_xuannv_session 至少返回一个 Some"),
+    }
+
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
             None
@@ -212,6 +229,8 @@ pub async fn run(args: Args) -> Result<()> {
             Some(loaded.append_system_prompt)
         },
         allowed_tools: loaded.allowed_tools,
+        resume_session_id,
+        session_id,
         ..Default::default()
     };
     let xuannv_id = fuxi

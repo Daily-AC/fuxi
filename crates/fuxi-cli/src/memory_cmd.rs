@@ -133,7 +133,7 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
 }
 
 /// `--db` > `$FUXI_DB` > `~/.fuxi/memory.db`，父目录不存在则创建。
-fn resolve_db_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn resolve_db_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         return Ok(p);
     }
