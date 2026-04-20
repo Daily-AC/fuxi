@@ -247,10 +247,18 @@ async fn dispatch_command(
 
         Command::Kill { agent_id } => match parse_agent_id(&agent_id) {
             Err(e) => Response::err(e),
-            Ok(_id) => {
-                // v0.1 简化：整个 shutdown 不够精细，但没有"只 kill 一个门客"的
-                // 现成 API。薄片 I/D 会补 `Fuxi::kill_worker`。当前返回提示。
-                Response::err("Kill-one 暂未实装；用 Shutdown 关全部".to_string())
+            Ok(id) => {
+                // M3.7 实装：路由到 `Fuxi::shutdown_agent`——它已自带玄女豁免（命中
+                // 时 warn + Ok 静默 noop）+ 不销毁 worktree（Decision 07 召回 stash）。
+                // 任何新 shutdown 路径（含 `fuxi kill --id`、未来 worker pool rebalance）
+                // 都必须从这条入口走，不能旁路 shelf.take。
+                match fuxi
+                    .shutdown_agent(id, "manual kill via fuxi kill".into())
+                    .await
+                {
+                    Ok(()) => Response::ok(serde_json::json!({"killed": true})),
+                    Err(e) => Response::err(e.to_string()),
+                }
             }
         },
 
@@ -837,6 +845,154 @@ mod tests {
             .expect_err("应返 Err");
         match err {
             Response::Err { error } => assert!(error.contains("无召回记录"), "got: {error}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    // ── M3.7 · `Command::Kill` 实装 ──
+    //
+    // WHY 直接走 dispatch_command 而非 socket：socket roundtrip 已被 ping_pong 验过，
+    // kill 的语义重点在「Command::Kill → Fuxi::shutdown_agent → shelf 真把人拿走」
+    // 这条线，避开 socket noise 让失败定位更直接。
+
+    /// 最小 stub agent —— 不跑事件，不跑 dispatch，只占 shelf 槽位用于
+    /// 验 `Command::Kill` 让 shutdown_agent 走完一遍。
+    struct KillStubAgent {
+        card: fuxi_core::agent::AgentCard,
+    }
+
+    impl KillStubAgent {
+        fn new(role: &str) -> Arc<Self> {
+            let card = fuxi_core::agent::AgentCard {
+                id: AgentId::new(),
+                profile: fuxi_core::agent::AgentProfile {
+                    name: format!("kill-stub-{role}"),
+                    role: role.to_string(),
+                    cli: "stub".into(),
+                    system_prompt: String::new(),
+                    tags: vec![],
+                    extra: Default::default(),
+                },
+                endpoint: "stub://kill".into(),
+                status: fuxi_core::agent::AgentStatus::Idle,
+            };
+            Arc::new(Self { card })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl fuxi_core::agent::Agent for KillStubAgent {
+        fn card(&self) -> &fuxi_core::agent::AgentCard {
+            &self.card
+        }
+        async fn dispatch(
+            &self,
+            _task: fuxi_core::task::Task,
+        ) -> fuxi_core::Result<tokio::sync::mpsc::Receiver<fuxi_core::Event>> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+        async fn send_message(
+            &self,
+            _task: fuxi_core::id::TaskId,
+            _text: &str,
+        ) -> fuxi_core::Result<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _task: fuxi_core::id::TaskId) -> fuxi_core::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> fuxi_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `Command::Kill` 把指定门客从 shelf 摘走。daemon 不再返「暂未实装」错误。
+    #[tokio::test]
+    async fn kill_via_command_calls_shutdown_agent() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let stub = KillStubAgent::new("dev");
+        let id = fuxi.insert_agent(stub, None).await;
+        assert_eq!(fuxi.worker_count().await, 1);
+
+        let resp = dispatch_command(
+            fuxi.clone(),
+            bus,
+            store,
+            keeper,
+            oracle,
+            Command::Kill {
+                agent_id: id.to_string(),
+            },
+            Arc::new(Notify::new()),
+        )
+        .await;
+
+        match &resp {
+            Response::Ok { data } => assert_eq!(data["killed"], serde_json::Value::Bool(true)),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        assert_eq!(
+            fuxi.worker_count().await,
+            0,
+            "kill 后 shelf 应被清空——shutdown_agent 走过 take()"
+        );
+    }
+
+    /// 玄女豁免——`shutdown_agent` 命中 xuannv_id 后 noop 但返 Ok。
+    /// daemon kill 必须延续这条豁免（不能让 `fuxi kill --id <xuannv>` 真把她杀掉）。
+    #[tokio::test]
+    async fn kill_xuannv_returns_ok_but_noop() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let xuannv = KillStubAgent::new("xuannv");
+        let xuannv_id = fuxi.insert_agent(xuannv, None).await;
+        fuxi.set_xuannv(xuannv_id).await;
+        assert_eq!(fuxi.worker_count().await, 1);
+
+        let resp = dispatch_command(
+            fuxi.clone(),
+            bus,
+            store,
+            keeper,
+            oracle,
+            Command::Kill {
+                agent_id: xuannv_id.to_string(),
+            },
+            Arc::new(Notify::new()),
+        )
+        .await;
+
+        // 豁免路径走静默 Ok（shutdown_agent 早 return Ok(())），daemon 仍返 killed:true
+        // 是允许的——重要的是玄女仍在 shelf 上。
+        assert!(
+            matches!(resp, Response::Ok { .. }),
+            "豁免后 daemon 应返 Ok（即便 shutdown_agent 是 noop）；got: {resp:?}"
+        );
+        assert_eq!(
+            fuxi.worker_count().await,
+            1,
+            "玄女豁免：kill 应 noop，shelf 不动"
+        );
+    }
+
+    /// 无效 agent_id 字符串走 parse_agent_id 失败路径返 Err。
+    #[tokio::test]
+    async fn kill_with_invalid_agent_id_returns_err() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let resp = dispatch_command(
+            fuxi,
+            bus,
+            store,
+            keeper,
+            oracle,
+            Command::Kill {
+                agent_id: "not-a-uuid".into(),
+            },
+            Arc::new(Notify::new()),
+        )
+        .await;
+        match resp {
+            Response::Err { error } => assert!(error.contains("无效 agent_id"), "got: {error}"),
             other => panic!("expected Err, got {other:?}"),
         }
     }

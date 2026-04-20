@@ -56,9 +56,14 @@ enum Command {
     List(subcommands::ListArgs),
     /// 【玄女工具】关停指定门客。
     Kill(subcommands::KillArgs),
+    /// 【救急】直读 SQLite 看事件流（不走 daemon）。
+    Events(subcommands::EventsArgs),
     /// 【玄女工具】请示用户前标记任务 Blocked。
     Block(subcommands::BlockArgs),
-    /// 【玄女工具】用户授权通过后解锁任务。
+    /// 【玄女工具】task 资源动作（unblock 等）。
+    #[command(subcommand)]
+    Task(TaskCmd),
+    /// 【已弃用】用 `fuxi task unblock` 代替；下个版本删除。
     Resume(subcommands::ResumeArgs),
     /// 点将台管理：list / stage / approve / reject / activate。
     Skill(skill::SkillArgs),
@@ -67,6 +72,12 @@ enum Command {
     /// 【玄女工具】更漏——trigger 管理（cron / once / fs / webhook）。
     #[command(subcommand)]
     Cron(CronCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum TaskCmd {
+    /// 用户授权通过后解锁任务。
+    Unblock(subcommands::TaskUnblockArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -112,7 +123,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Status(args)) => subcommands::run_status(args).await,
         Some(Command::List(args)) => subcommands::run_list(args).await,
         Some(Command::Kill(args)) => subcommands::run_kill(args).await,
+        Some(Command::Events(args)) => subcommands::run_events(args).await,
         Some(Command::Block(args)) => subcommands::run_block(args).await,
+        Some(Command::Task(t)) => match t {
+            TaskCmd::Unblock(args) => subcommands::run_task_unblock(args).await,
+        },
         Some(Command::Resume(args)) => subcommands::run_resume(args).await,
         Some(Command::Skill(args)) => skill::run(args).await,
         Some(Command::Memory(args)) => memory_cmd::run(args).await,
