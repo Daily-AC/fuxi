@@ -9,10 +9,13 @@
 //! - #2 玄女永远有知情权 —— 门客下线必须让玄女知道，由她判断是否续派。
 //! - #3 真实时不轮询 —— 桥通过 bus.subscribe() 被动接收推送。
 //!
-//! ## 为什么不接 `OrchestratorCcReceived`
+//! ## 为什么接 `OrchestratorCcReceived`（2026-04-20 修 Bug 7）
 //!
-//! 抄送事件本身已经是玄女的"知情"路径（TUI 抄送订阅 + 玄女的 A2A
-//! inbox），桥再 intervene 一次就是双写。忽略。
+//! 历史设计注释说"TUI 已订阅就够了"——**对人类坐在屏幕前成立，对 headless
+//! 玄女不成立**。公理 #1「不显式沟通 = 没做」意味着：TUI 只是给用户看的
+//! presentation，玄女 cc 实例的 stdin 没收到就是没收到。必须经过 intervene
+//! 把抄送文本注入她下一轮对话。不会自环——`from_user_to` 这个事件字段已经
+//! 说明 from 是 user、不是 xuannv，玄女对门客的 intervene 不触发此事件。
 //!
 //! ## 为什么不用 `Arc<Fuxi>` 做测试依赖
 //!
@@ -78,6 +81,12 @@ fn build_task_done_prompt(agent_id: AgentId, role: &str, done: bool) -> String {
     let verb = if done { "完成" } else { "被取消" };
     format!(
         "门客 {agent_id}（role={role}）任务已{verb}。请汇报用户或派新活。可用 `fuxi status` 查当前情况。"
+    )
+}
+
+fn build_cc_prompt(to_worker: AgentId, role: &str, text: &str) -> String {
+    format!(
+        "[CC] 用户直接对门客 {to_worker}（role={role}）说：「{text}」。\n\n你未被点名，仅为抄送留痕（公理 #2：你永远有知情权）。无需主动回话，除非判断需介入。"
     )
 }
 
@@ -193,8 +202,33 @@ async fn handle_event(
                 warn!(error = %e, "bridge: intervene(TaskDone) 失败");
             }
         }
-        // OrchestratorCcReceived 是玄女自身的抄送路径，TUI 已订阅；桥不重复 intervene。
-        // 其它事件暂时不关心——若将来加新系统事件需要唤醒玄女，在此加 arm。
+        EventKind::OrchestratorCcReceived {
+            from_user_to,
+            text,
+            ..
+        } => {
+            // 过滤条件：抄送的目标（meta.agent）必须就是玄女；否则这不是发给她的抄送。
+            let Some(target) = ev.meta.agent else {
+                return;
+            };
+            if target != xuannv_id {
+                debug!("OrchestratorCcReceived meta.agent != xuannv，跳过");
+                return;
+            }
+            // 安全网：若某种代码路径把 xuannv 自己塞进 from_user_to（不该发生）就跳过，
+            // 避免"玄女抄送给玄女"的回响。
+            if from_user_to == xuannv_id {
+                return;
+            }
+            let role = intervener
+                .role_of(from_user_to)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let prompt = build_cc_prompt(from_user_to, &role, &text);
+            if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
+                warn!(error = %e, "bridge: intervene(OrchestratorCcReceived) 失败");
+            }
+        }
         _ => {}
     }
 }
@@ -409,13 +443,14 @@ mod tests {
         assert!(mock.snapshot().await.is_empty(), "找不到 intent 应静默跳过");
     }
 
-    /// OrchestratorCcReceived → 桥不 intervene（抄送本身是知情路径，桥不重复）。
+    /// OrchestratorCcReceived 目标=玄女 → 桥必 intervene 玄女一次（公理 #1 显式沟通）。
     #[tokio::test]
-    async fn orchestrator_cc_received_is_ignored() {
+    async fn orchestrator_cc_received_wakes_xuannv() {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let xuannv = AgentId::new();
         let worker = AgentId::new();
         let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
 
         let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -426,14 +461,52 @@ mod tests {
             meta,
             kind: EventKind::OrchestratorCcReceived {
                 from_user_to: worker,
-                text: "用户对门客说的话".into(),
+                text: "你好门客".into(),
+                original_intervention_id: uuid::Uuid::new_v4(),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "抄送应 intervene 玄女一次");
+        let (target, interrupt_first, text) = &calls[0];
+        assert_eq!(*target, xuannv);
+        assert!(!*interrupt_first, "抄送是追加式，不打断当前 turn");
+        assert!(text.contains("[CC]"), "prompt 应含 [CC] 标识: {text}");
+        assert!(text.contains("luban"), "prompt 应含 role: {text}");
+        assert!(text.contains("你好门客"), "prompt 应含原文: {text}");
+    }
+
+    /// 抄送目标 meta.agent 不是玄女 → 跳过（避免误触）。
+    #[tokio::test]
+    async fn orchestrator_cc_received_for_other_agent_is_ignored() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let other = AgentId::new();
+        let worker = AgentId::new();
+        let mock = MockIntervener::new();
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(other); // 抄送对象不是玄女
+        bus.publish(Event {
+            meta,
+            kind: EventKind::OrchestratorCcReceived {
+                from_user_to: worker,
+                text: "别人的抄送".into(),
                 original_intervention_id: uuid::Uuid::new_v4(),
             },
         })
         .expect("publish");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(mock.snapshot().await.is_empty(), "抄送不应再 intervene");
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "非玄女的抄送不应触发 intervene"
+        );
     }
 
     /// broadcast Lagged 不打断桥——丢几条后续事件仍要被处理。
