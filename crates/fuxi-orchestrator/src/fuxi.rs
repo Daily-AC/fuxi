@@ -362,6 +362,51 @@ impl Fuxi {
             .await
             .ok_or(OrchestratorError::AgentNotFound(agent_id))?;
 
+        // 空闲门客自动退化成 dispatch（玄女 2026-04-20 诊断出的 bug）：
+        // cc idle 状态下 active_tx=None，`send_message` 发进 WS 的响应没 receiver，
+        // cc 的回复事件会被 drop —— 用户看起来"门客不理我"。
+        // 正确处理是把这次 intervene 当作一次新 dispatch，cc 有 active_tx 接响应。
+        // 语义上仍发一条 UserInterventionSent 事件（mode=append_via_dispatch）+ 抄送，
+        // 让用户视角一致：他"对空闲门客说话"本就等同于派新活。
+        let shelf_status = self.shelf.status_of(agent_id).await;
+        if matches!(shelf_status, Some(ShelfStatus::Idle)) {
+            info!(agent = %agent_id, "intervene on idle → auto-degrade to dispatch");
+            let intervention_ev_id = {
+                let mut meta = EventMeta::now();
+                meta.agent = Some(agent_id);
+                let id = meta.id;
+                let _ = self.bus.publish(Event {
+                    meta,
+                    kind: EventKind::UserInterventionSent {
+                        target: agent_id,
+                        mode: "append_via_dispatch".to_string(),
+                        text: text.to_string(),
+                    },
+                });
+                id
+            };
+            let _ = agent; // 不再直接操作 agent，下面 dispatch 内部会再拿一次
+            let task = Task::new("intervention", text);
+            self.dispatch(agent_id, task).await?;
+            // 抄送玄女
+            let xuannv = self.xuannv_id().await;
+            if let Some(xn) = xuannv
+                && xn != agent_id
+            {
+                let mut meta = EventMeta::now();
+                meta.agent = Some(xn);
+                let _ = self.bus.publish(Event {
+                    meta,
+                    kind: EventKind::OrchestratorCcReceived {
+                        from_user_to: agent_id,
+                        text: text.to_string(),
+                        original_intervention_id: intervention_ev_id,
+                    },
+                });
+            }
+            return Ok(());
+        }
+
         let mode_str = if interrupt_first {
             "interrupt"
         } else {

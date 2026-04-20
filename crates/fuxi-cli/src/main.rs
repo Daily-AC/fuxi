@@ -84,8 +84,18 @@ enum CronCmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
     let cli = Cli::parse();
+
+    // TUI 模式必须**在 init_tracing 之前**把 stderr 重定向到文件——否则
+    // fuxi 启动期（hub/daemon/spawn 玄女）的 tracing 会污染用户 shell，
+    // 退 TUI 后 alt screen 撤掉时一把全冒出来。踩过，见 docs/session-review-2026-04-20.md。
+    if is_tui_mode(&cli.cmd)
+        && let Err(e) = redirect_stderr_to_log("/tmp/fuxi.log")
+    {
+        eprintln!("⚠ 无法把 stderr 重定向到 /tmp/fuxi.log: {e}（TUI 下日志可能污染画面）");
+    }
+
+    init_tracing();
     match cli.cmd {
         None => repl::run(Default::default()).await,
         Some(Command::Demo(args)) => demo::run(args).await,
@@ -122,4 +132,44 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+/// 是否是进 alt-screen TUI 的子命令。
+fn is_tui_mode(cmd: &Option<Command>) -> bool {
+    match cmd {
+        None => true, // 无参 → repl
+        Some(Command::Watch(_)) => true,
+        Some(Command::Demo(a)) if a.tui => true,
+        _ => false,
+    }
+}
+
+/// 把进程的 stderr（fd 2）重定向到日志文件。Unix `dup2(2)`.
+///
+/// **时机**：**必须** init_tracing 之前调——tracing subscriber 用 `std::io::stderr()`
+/// 底层写 fd 2。dup2 之后 fd 2 指向文件，后续所有 stderr 写入都进文件。
+#[cfg(unix)]
+fn redirect_stderr_to_log(path: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    // SAFETY: dup2 对 valid fd 是安全调用；file 在作用域内有效。
+    let ret = unsafe { libc_dup2(file.as_raw_fd(), 2) };
+    if ret == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn redirect_stderr_to_log(_path: &str) -> std::io::Result<()> {
+    Err(std::io::Error::other("stderr redirect only on unix"))
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "dup2"]
+    fn libc_dup2(oldfd: i32, newfd: i32) -> i32;
 }
