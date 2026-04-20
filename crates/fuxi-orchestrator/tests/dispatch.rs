@@ -529,6 +529,7 @@ struct InterveneTrackingStub {
     card: AgentCard,
     sends: std::sync::atomic::AtomicUsize,
     cancels: std::sync::atomic::AtomicUsize,
+    dispatches: std::sync::atomic::AtomicUsize,
 }
 
 impl InterveneTrackingStub {
@@ -550,6 +551,7 @@ impl InterveneTrackingStub {
             card,
             sends: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
+            dispatches: AtomicUsize::new(0),
         })
     }
 }
@@ -560,6 +562,7 @@ impl Agent for InterveneTrackingStub {
         &self.card
     }
     async fn dispatch(&self, _task: Task) -> Result<mpsc::Receiver<Event>> {
+        self.dispatches.fetch_add(1, Ordering::Relaxed);
         let (_tx, rx) = mpsc::channel(1);
         Ok(rx)
     }
@@ -584,6 +587,10 @@ async fn intervene_append_emits_user_intervention_and_applied() {
 
     let stub = InterveneTrackingStub::new("dev");
     let id = fuxi.insert_agent(stub.clone(), None).await;
+    // 2026-04-20 bug 修复后 intervene 对 Idle 门客自动退化 dispatch；
+    // 本用例检的是 Busy 下 append 行为，显式先把 shelf status 置 Busy。
+    use fuxi_orchestrator::ShelfStatus;
+    fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
     fuxi.intervene(id, false, "hello mid-task")
@@ -640,6 +647,9 @@ async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
 
     let stub = InterveneTrackingStub::new("dev");
     let id = fuxi.insert_agent(stub.clone(), None).await;
+    // 打断语义只对 Busy 门客有意义——显式置 Busy。
+    use fuxi_orchestrator::ShelfStatus;
+    fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
     fuxi.intervene(id, true, "stop and rework")
@@ -679,6 +689,66 @@ async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
     // wire 层：cancel 先发，send_message 后发
     assert_eq!(stub.cancels.load(Ordering::Relaxed), 1);
     assert_eq!(stub.sends.load(Ordering::Relaxed), 1);
+}
+
+/// 2026-04-20 用户 + 玄女实测发现：spawn 门客后 intervene 不走 dispatch →
+/// cc active_tx=None → 响应被 drop。修复：intervene 对 Idle 门客自动退化 dispatch。
+#[tokio::test]
+async fn intervene_on_idle_auto_degrades_to_dispatch() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = InterveneTrackingStub::new("dev");
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+    // shelf 新 insert 的 agent 默认 Idle —— 正是我们要验证的场景。
+    use fuxi_orchestrator::ShelfStatus;
+    assert_eq!(
+        fuxi.clone_shelf().status_of(id).await,
+        Some(ShelfStatus::Idle)
+    );
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(id, false, "你好，鲁班")
+        .await
+        .expect("intervene");
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut collected = vec![];
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        if ev.meta.agent == Some(id) {
+            collected.push(ev);
+        }
+    }
+
+    // 应发 UserInterventionSent 且 mode="append_via_dispatch"（退化标记）
+    let has_via_dispatch = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::UserInterventionSent { mode, .. } if mode == "append_via_dispatch"
+        )
+    });
+    assert!(
+        has_via_dispatch,
+        "Idle intervene 应发 UserInterventionSent {{ mode=append_via_dispatch }}"
+    );
+
+    // wire 层：走 dispatch 路径 —— stub.dispatches 应为 1，send_message 为 0
+    assert_eq!(
+        stub.dispatches.load(Ordering::Relaxed),
+        1,
+        "应走 dispatch 路径"
+    );
+    assert_eq!(
+        stub.sends.load(Ordering::Relaxed),
+        0,
+        "不应再走 send_message（会被 drop）"
+    );
+
+    // shelf 被 dispatch 置 Busy（dispatch pump 还没看到 terminal 所以不会反弹回 Idle）
+    // 这里只验退化语义，不验状态转回
 }
 
 #[tokio::test]

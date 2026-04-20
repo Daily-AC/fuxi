@@ -74,6 +74,13 @@ fn build_death_prompt(agent_id: AgentId, role: &str, cause: &str) -> String {
     format!("门客 {agent_id}（role={role}）已下线，原因：{cause}。请判断是否续派或告知用户。")
 }
 
+fn build_task_done_prompt(agent_id: AgentId, role: &str, done: bool) -> String {
+    let verb = if done { "完成" } else { "被取消" };
+    format!(
+        "门客 {agent_id}（role={role}）任务已{verb}。请汇报用户或派新活。可用 `fuxi status` 查当前情况。"
+    )
+}
+
 /// 系统事件 → 玄女唤醒桥。
 pub struct SystemEventBridge;
 
@@ -152,6 +159,38 @@ async fn handle_event(
             let prompt = build_death_prompt(agent_id, &role, &cause);
             if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
                 warn!(error = %e, "bridge: intervene(AgentDead) 失败");
+            }
+        }
+        EventKind::TaskStateChanged {
+            to: fuxi_core::task::TaskState::Done,
+            ..
+        }
+        | EventKind::TaskStateChanged {
+            to: fuxi_core::task::TaskState::Cancelled,
+            ..
+        } => {
+            // 2026-04-20 用户实测发现：鲁班完活不通知玄女（公理 #2 漏洞）。
+            // 桥在这里补上——但只处理非玄女门客的任务完成事件。
+            let Some(agent_id) = ev.meta.agent else {
+                return;
+            };
+            if agent_id == xuannv_id {
+                return; // 玄女自己的 task done 不触发（会回响）
+            }
+            let done = matches!(
+                ev.kind,
+                EventKind::TaskStateChanged {
+                    to: fuxi_core::task::TaskState::Done,
+                    ..
+                }
+            );
+            let role = intervener
+                .role_of(agent_id)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let prompt = build_task_done_prompt(agent_id, &role, done);
+            if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
+                warn!(error = %e, "bridge: intervene(TaskDone) 失败");
             }
         }
         // OrchestratorCcReceived 是玄女自身的抄送路径，TUI 已订阅；桥不重复 intervene。
