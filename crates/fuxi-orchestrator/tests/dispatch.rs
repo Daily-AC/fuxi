@@ -735,6 +735,26 @@ async fn intervene_on_idle_auto_degrades_to_dispatch() {
         "Idle intervene 应发 UserInterventionSent {{ mode=append_via_dispatch }}"
     );
 
+    // 2026-04-20 改：degrade 出来的 task title 应为 "user-turn"——语义和 TUI
+    // Submit::Xuannv 的 user 对话 task 统一，避免 TUI 同时看到两种名字的 task。
+    let has_user_turn_title = collected.iter().any(|e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskCreated { title, .. } if title == "user-turn"
+        )
+    });
+    assert!(
+        has_user_turn_title,
+        "Idle intervene degrade 的 task title 应为 user-turn，collected={:?}",
+        collected
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::TaskCreated { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
+
     // wire 层：走 dispatch 路径 —— stub.dispatches 应为 1，send_message 为 0
     assert_eq!(
         stub.dispatches.load(Ordering::Relaxed),

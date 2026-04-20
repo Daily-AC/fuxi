@@ -354,9 +354,32 @@ impl Fuxi {
         let bus = self.bus.clone();
         let shelf = self.shelf.clone();
         tokio::spawn(async move {
-            let mut seen_terminal = false;
-            while let Some(ev) = rx.recv().await {
-                // Blocked 是可恢复态（允许回 Ready），不列为 terminal。
+            // M2.1+ 修 pending drain 漏洞（2026-04-20 用户复测发现）：
+            // 旧逻辑看到 terminal 事件立即 break，但 agent pump 的 pending queue
+            // drain 发生在 terminal 之**后**——drain 后 cc 会起新 turn 响应，
+            // 那些事件需要继续走 rx→bus。break 早了 rx drop，pending drain 的
+            // 新响应无 receiver。
+            //
+            // 新逻辑：terminal 后不立即 break，用 500ms timeout 等新事件；
+            // 超时仍无 → 真 idle 退。这给 agent pump drain 一个窗口触发新 turn。
+            let mut saw_terminal = false;
+            loop {
+                let ev_opt = if saw_terminal {
+                    match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                        .await
+                    {
+                        Ok(Some(ev)) => Some(ev),
+                        Ok(None) => None, // rx 被 agent 关闭
+                        Err(_) => {
+                            // terminal 后 500ms 无新事件——agent 真 idle
+                            break;
+                        }
+                    }
+                } else {
+                    rx.recv().await
+                };
+                let Some(ev) = ev_opt else { break };
+
                 let is_terminal = matches!(
                     &ev.kind,
                     EventKind::TaskStateChanged {
@@ -372,13 +395,15 @@ impl Fuxi {
                     break;
                 }
                 if is_terminal {
-                    seen_terminal = true;
-                    break;
+                    saw_terminal = true;
+                } else if saw_terminal {
+                    // terminal 后收到新事件 = drain 的新 turn 启动了；重置等再次 terminal
+                    saw_terminal = false;
                 }
             }
             // 无论怎么退出都摊回 Idle——channel 被 agent 提前关也算"不忙"。
             shelf.set_status(agent_id, ShelfStatus::Idle).await;
-            debug!(agent = %agent_id, seen_terminal, "dispatch pump 退出");
+            debug!(agent = %agent_id, saw_terminal, "dispatch pump 退出");
         });
 
         Ok(())
@@ -433,7 +458,9 @@ impl Fuxi {
                 id
             };
             let _ = agent; // 不再直接操作 agent，下面 dispatch 内部会再拿一次
-            let task = Task::new("intervention", text);
+            // 2026-04-20 改：title 从 "intervention" → "user-turn"——
+            // 语义上就是一轮用户对话，和 TUI Submit::Xuannv 统一，避免混两种 task 类型
+            let task = Task::new("user-turn", text);
             self.dispatch(agent_id, task).await?;
             // 抄送玄女
             let xuannv = self.xuannv_id().await;
