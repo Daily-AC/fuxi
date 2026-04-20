@@ -10,8 +10,14 @@ use std::path::PathBuf;
 /// 不写死，是因为 codex 的可用模型与登录账号类型强相关
 /// （ChatGPT 账号 vs API key），硬编码会导致不同环境初始化失败。
 pub const DEFAULT_MODEL_ENV: &str = "FUXI_CODEX_MODEL";
-/// ChatGPT 账号默认可用；如果走 API key 请用 env 覆盖成 `gpt-5.1-mini` 等。
-pub const DEFAULT_MODEL_FALLBACK: &str = "gpt-5.1-mini";
+/// 空串 = 不传 `-m` flag，让 codex 按登录账号自选默认模型。
+///
+/// 2026-04-20 用户复测发现：硬编码 `gpt-5.1-mini` 在 ChatGPT 账号
+/// auth 下会被 codex 拒 `invalid_request_error`，进程 exit 但因为
+/// 没有进程 exit 检测 → 没 AgentDead → 用户看起来卡住 4 分钟。
+/// CLAUDE.md 里早记过这坑，这轮把默认改空让 codex 自选。走 API key
+/// 的用户显式 `export FUXI_CODEX_MODEL=<可用模型>` 即可。
+pub const DEFAULT_MODEL_FALLBACK: &str = "";
 
 /// `codex exec` 启动参数。
 ///
