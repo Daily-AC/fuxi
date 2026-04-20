@@ -20,23 +20,23 @@ pub struct ServerSentEvent {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ServerSentEventPayload {
     /// `tasks/sendSubscribe` 的状态变化事件（`event: status`）。
-    Status(crate::types::TaskStatusUpdateEvent),
+    Status(crate::wire::TaskStatusUpdateEvent),
     /// artifact 增量（`event: artifact`）。
-    Artifact(crate::types::TaskArtifactUpdateEvent),
+    Artifact(crate::wire::TaskArtifactUpdateEvent),
 }
 
 pub const EVENT_STATUS: &str = "status";
 pub const EVENT_ARTIFACT: &str = "artifact";
 
 impl ServerSentEvent {
-    pub fn status(update: &crate::types::TaskStatusUpdateEvent) -> crate::Result<Self> {
+    pub fn status(update: &crate::wire::TaskStatusUpdateEvent) -> crate::Result<Self> {
         Ok(Self {
             event: EVENT_STATUS.into(),
             data: serde_json::to_value(update)?,
         })
     }
 
-    pub fn artifact(update: &crate::types::TaskArtifactUpdateEvent) -> crate::Result<Self> {
+    pub fn artifact(update: &crate::wire::TaskArtifactUpdateEvent) -> crate::Result<Self> {
         Ok(Self {
             event: EVENT_ARTIFACT.into(),
             data: serde_json::to_value(update)?,

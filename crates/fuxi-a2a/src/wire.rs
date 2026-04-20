@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// 与 `fuxi_core::AgentCard` 不是同一个概念：后者是内部注册表记录，
 /// 包含 `AgentId`、进程状态等 **不应暴露给外部** 的字段；前者是跟
-/// 外部握手时使用的能力声明。
+/// 外部握手时使用的能力声明。用 `From<fuxi_core::AgentCard>` 在边界
+/// 互转，禁止手抄字段（M3.4 约束）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCard {
     pub name: String,
@@ -48,6 +49,56 @@ pub struct AgentSkill {
     pub input_modes: Vec<String>,
     #[serde(rename = "outputModes", default)]
     pub output_modes: Vec<String>,
+}
+
+/// 从内部注册表视图转 wire 视图。
+///
+/// 信息流单向：core → wire。**不**写反向 From（wire 缺 AgentId / status / tags
+/// 等内部字段，反向无意义）。**有损**字段处理：
+/// - `id` / `status` 主动丢弃（不暴露内部状态给外部）
+/// - `description` 用 `profile.system_prompt` 第一行（截 200 字），无则空
+/// - `version` 取本 crate 的 `CARGO_PKG_VERSION`（A2A 协议没要求 agent 自报版本）
+/// - `capabilities` 默认 `streaming: true, push_notifications: false`——
+///   cc/codex 都通过 SSE 流送状态，符合 streaming；push 需要外部 webhook 暂不支持
+/// - `skills` 从 `profile.tags` 平铺成 stub，每个 tag 一个 `AgentSkill`
+///   （A2A skill 定义比 fuxi tag 重，缺真名字段；caller 可在 patch 阶段补全）
+impl From<fuxi_core::agent::AgentCard> for AgentCard {
+    fn from(core: fuxi_core::agent::AgentCard) -> Self {
+        let description = core
+            .profile
+            .system_prompt
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect();
+        let skills = core
+            .profile
+            .tags
+            .iter()
+            .map(|t| AgentSkill {
+                id: t.clone(),
+                name: t.clone(),
+                description: format!("(stub from tag {t})"),
+                tags: vec![],
+                examples: vec![],
+                input_modes: vec![],
+                output_modes: vec![],
+            })
+            .collect();
+        Self {
+            name: core.profile.name,
+            description,
+            version: env!("CARGO_PKG_VERSION").into(),
+            url: core.endpoint,
+            capabilities: AgentCapabilities {
+                streaming: true,
+                push_notifications: false,
+            },
+            skills,
+        }
+    }
 }
 
 /// 状态机 on wire——kebab-case。
@@ -198,6 +249,8 @@ pub struct TaskArtifactUpdateEvent {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use fuxi_core::agent::{AgentCard as CoreAgentCard, AgentProfile, AgentStatus};
+    use fuxi_core::id::AgentId;
     use serde_json::json;
 
     fn ts() -> DateTime<Utc> {
@@ -253,6 +306,37 @@ mod tests {
             }],
         };
         roundtrip(&card);
+    }
+
+    /// M3.4 · `From<core::AgentCard> for wire::AgentCard`：
+    /// - 内部字段（id / status）丢弃；name/url/description/skills 来自 profile + endpoint
+    /// - capabilities 默认 streaming=true（fuxi 走 SSE）/ push=false
+    /// - version 取本 crate 包版本（不暴露 fuxi 工程版本）
+    #[test]
+    fn from_core_agent_card_drops_internal_fields_and_maps_profile() {
+        let core = CoreAgentCard {
+            id: AgentId::new(),
+            profile: AgentProfile {
+                name: "luban-1".into(),
+                role: "luban".into(),
+                cli: "claude-code".into(),
+                system_prompt: "你是工匠门客\n更多说明".into(),
+                tags: vec!["rust".into(), "frontend".into()],
+                extra: Default::default(),
+            },
+            endpoint: "http://127.0.0.1:4101".into(),
+            status: AgentStatus::Idle,
+        };
+        let w: AgentCard = core.into();
+        assert_eq!(w.name, "luban-1");
+        assert_eq!(w.url, "http://127.0.0.1:4101");
+        assert_eq!(w.description, "你是工匠门客", "应取 system_prompt 第一行");
+        assert!(w.capabilities.streaming, "fuxi 默认 SSE streaming=true");
+        assert!(!w.capabilities.push_notifications);
+        assert_eq!(w.skills.len(), 2, "tag 平铺成 stub skill");
+        assert_eq!(w.skills[0].id, "rust");
+        assert_eq!(w.skills[1].name, "frontend");
+        assert_eq!(w.version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
