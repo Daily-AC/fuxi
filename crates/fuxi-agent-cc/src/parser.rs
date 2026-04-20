@@ -65,6 +65,13 @@ pub enum CcEvent {
 pub struct TranslateState {
     /// 当前处于 thinking 累积中。进入时推 `ThinkingStarted`；离开时推 `Finished`。
     in_thinking: bool,
+    /// 本 turn 是否已发过 `AgentResponded`（走 `AssistantText` 路径）——
+    /// 2026-04-20 修双发 bug：`ResultSuccess` 的 `text` 和最后一条
+    /// `AssistantText` 内容一致，再发一次 `AgentResponded` 让 TUI 看到相同文本
+    /// 两遍。新策略：`AssistantText` 发的同时置标；`ResultSuccess` 看标——
+    /// 已发则跳过冗余文本；未发（极短响应只在 result 里给 text 的冷场景）才发。
+    /// terminal 后由 pump 调 `finish()` reset 给下一 turn。
+    responded_this_turn: bool,
 }
 
 impl TranslateState {
@@ -73,10 +80,11 @@ impl TranslateState {
     }
 
     /// 标记当前事件流已收尾（result 到达）——如果还挂在 thinking 里，
-    /// 强制闭合。
+    /// 强制闭合。同时 reset `responded_this_turn` 给下一轮 turn 用。
     pub fn finish(&mut self) -> bool {
         let was = self.in_thinking;
         self.in_thinking = false;
+        self.responded_this_turn = false;
         was
     }
 }
@@ -306,6 +314,7 @@ pub fn translate(
             }
         }
         CcEvent::AssistantText { text } => {
+            state.responded_this_turn = true;
             out.push(mk_event(
                 agent_id,
                 task_id,
@@ -352,11 +361,10 @@ pub fn translate(
             ));
         }
         CcEvent::ResultSuccess { text } => {
-            // 任务命中终态——先发状态转移，再发最终响应。
+            // 任务命中终态——先发状态转移。
             // InProgress → Delivering → Done 是合法路径，但我们没有 Delivering
             // 的语义锚点，直接从 InProgress 推到 Done 会破坏 can_transition_to；
-            // 取折中：发 Delivering→Done（上层已负责进入 Delivering），
-            // 同时 AgentResponded 带最终文本。
+            // 取折中：发 Delivering→Done（上层已负责进入 Delivering）。
             out.push(mk_event(
                 agent_id,
                 task_id,
@@ -365,11 +373,17 @@ pub fn translate(
                     to: TaskState::Done,
                 },
             ));
-            out.push(mk_event(
-                agent_id,
-                task_id,
-                EventKind::AgentResponded { text },
-            ));
+            // 修双发 bug（2026-04-20）：`AssistantText` 已经把流式最后一段发成
+            // AgentResponded 了；result 里的 `text` 是同内容的终态副本，再发
+            // 一次会让 TUI 显示两遍。仅在本 turn 没发过 AgentResponded 的
+            // 极端场景（cc 只给 result text 没给 assistant stream）才补发。
+            if !state.responded_this_turn && !text.is_empty() {
+                out.push(mk_event(
+                    agent_id,
+                    task_id,
+                    EventKind::AgentResponded { text },
+                ));
+            }
         }
         CcEvent::ResultError { reason } => {
             out.push(mk_event(
@@ -818,6 +832,85 @@ mod tests {
         // ThinkingFinished + TaskStateChanged + AgentResponded
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0].kind, EventKind::ThinkingFinished));
+    }
+
+    /// 双发 bug 回归保护（2026-04-20 用户复测发现）：
+    /// 若一个 turn 里先 AssistantText 发了 AgentResponded，result 来时 text 是
+    /// 同内容副本，**不应再发第二次 AgentResponded**——TUI 会显示两遍。
+    #[test]
+    fn translate_assistant_text_then_result_does_not_double_emit_responded() {
+        let mut st = TranslateState::new();
+        let out1 = translate(
+            CcEvent::AssistantText {
+                text: "hello world".into(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        // AssistantText 阶段应发 AgentResponded
+        assert_eq!(out1.len(), 1);
+        assert!(matches!(out1[0].kind, EventKind::AgentResponded { .. }));
+
+        // terminal 阶段：cc 把最后那段文本又在 result 里重复一次
+        let out2 = translate(
+            CcEvent::ResultSuccess {
+                text: "hello world".into(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        // 仅发 TaskStateChanged，不再 AgentResponded
+        assert_eq!(
+            out2.len(),
+            1,
+            "已有 AssistantText 的 turn 不应在 result 再发 AgentResponded"
+        );
+        assert!(matches!(out2[0].kind, EventKind::TaskStateChanged { .. }));
+    }
+
+    /// 冷场景保护：cc 某些极短响应只在 result 带 text 不发 assistant stream，
+    /// 此时仍必须发 AgentResponded（否则 TUI 完全看不到回复）。
+    #[test]
+    fn translate_result_only_still_emits_responded_without_prior_assistant() {
+        let mut st = TranslateState::new();
+        let out = translate(
+            CcEvent::ResultSuccess { text: "ok".into() },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 2, "冷场景应发 TaskStateChanged + AgentResponded");
+        assert!(matches!(out[1].kind, EventKind::AgentResponded { .. }));
+    }
+
+    /// `finish()` 必须 reset responded_this_turn——否则下一 turn 的 result
+    /// （即使是冷场景）也会被误跳。
+    #[test]
+    fn finish_resets_responded_flag_for_next_turn() {
+        let mut st = TranslateState::new();
+        translate(
+            CcEvent::AssistantText { text: "a".into() },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        st.finish();
+        // 新 turn 冷启动：应正常发 AgentResponded
+        let out = translate(
+            CcEvent::ResultSuccess { text: "b".into() },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 2, "finish reset 后应恢复冷场景的 AgentResponded");
+        assert!(matches!(out[1].kind, EventKind::AgentResponded { .. }));
     }
 
     #[test]
