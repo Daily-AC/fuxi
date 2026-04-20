@@ -249,7 +249,6 @@ pub async fn run(args: Args) -> Result<()> {
     // 保证一接客就能落库，不丢 race 窗口里的早期 task。
     fuxi.set_recall_sink(Arc::new(crate::recall_sink::OracleRecallSink::new(
         oracle.clone(),
-        fuxi.clone(),
     )))
     .await;
     let daemon = Daemon::new(

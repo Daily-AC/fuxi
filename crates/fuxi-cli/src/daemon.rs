@@ -172,12 +172,11 @@ async fn dispatch_command(
             recall_task,
             recall_role,
         } => {
-            let resume_sid =
-                match resolve_recall_session_id(&oracle, recall_task, recall_role).await {
-                    Ok(s) => s,
-                    Err(resp) => return resp,
-                };
-            match spawn_by_role(&fuxi, &role, name, resume_sid).await {
+            let recall = match resolve_recall_handle(&oracle, recall_task, recall_role).await {
+                Ok(h) => h,
+                Err(resp) => return resp,
+            };
+            match spawn_by_role(&fuxi, &role, name, recall).await {
                 Ok(id) => Response::ok(serde_json::json!({"agent_id": id.to_string()})),
                 Err(e) => Response::err(e.to_string()),
             }
@@ -482,21 +481,25 @@ fn parse_task_id(s: &str) -> std::result::Result<fuxi_core::id::TaskId, String> 
         .map_err(|e| format!("无效 task_id {s:?}: {e}"))
 }
 
-/// 根据 role 读 Skill → 构造 AgentProfile + 对应 LaunchConfig → 丢给 Fuxi.spawn_worker。
+/// P2 召回的"可恢复 spawn 参数包"——从 oracle 里查出来的 worktree 和 session_id。
 ///
-/// CLI 选择来自 `LoadedSkill.profile.cli`（其值由 SKILL.md 的 `metadata.cli` 决定，
-/// 缺省 `claude-code`）。**新增 CLI 必须同时**：
-/// 1. 在 `WorkerKind::cli_tag` 加分支（保证 cli_tag 字符串可逆）；
-/// 2. 在这里加 match arm 选 LaunchConfig；
-/// 3. 写 `skills/<role>/SKILL.md` 把 `metadata.cli` 设成对应字符串。
+/// worktree 是所有 CLI 门客共用的 cwd 入口（召回的最小单位）；session_id 是 cc 专属，
+/// 其他 CLI 为 None。codex 走 `worktree.is_some() && session_id.is_none()` 路径。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecallHandle {
+    pub resume_session_id: Option<String>,
+    pub worktree: Option<PathBuf>,
+}
+
+/// 根据 role 读 Skill → 构造 AgentProfile + 对应 LaunchConfig → 丢给 Fuxi.spawn_worker
+/// 或 spawn_worker_in_worktree（有召回 worktree 时）。
 ///
-/// `resume_session_id`：P2 召回——非 None 时 cc 走 `--resume <id>`。
-/// codex 不支持 resume（exec 模式 spawn-per-dispatch），命中 codex 分支就 warn 后忽略。
+/// CLI 选择来自 `LoadedSkill.profile.cli`。新增 CLI 同步更新三处（同上版注释）。
 async fn spawn_by_role(
     fuxi: &Fuxi,
     role: &str,
     name_override: Option<String>,
-    resume_session_id: Option<String>,
+    recall: RecallHandle,
 ) -> Result<AgentId> {
     let loaded =
         skill_loader::load(role).with_context(|| format!("加载 skills/{role}/SKILL.md"))?;
@@ -506,26 +509,38 @@ async fn spawn_by_role(
     }
 
     let kind: WorkerKind = match profile.cli.as_str() {
-        "claude-code" => WorkerKind::Cc(CcLaunchConfig {
-            append_system_prompt: if loaded.append_system_prompt.is_empty() {
-                None
+        "claude-code" => {
+            // P2 召回前提：cc 必须 persist session 才能下次 --resume 命中。
+            // CcLaunchConfig 默认在 resume_session_id 和 session_id **都 None** 时
+            // 加 `--no-session-persistence`——sink 记的 session_id 第二轮 resume 即死。
+            // 普通 spawn（无召回）时强塞一个新 uuid 给 `session_id`：cc honor 这个 id
+            // 在 system/init 事件里回报，sink 拿到的就是这个值。
+            let resume_session_id = recall.resume_session_id.clone();
+            let session_id = if resume_session_id.is_none() {
+                Some(Uuid::new_v4().to_string())
             } else {
-                Some(loaded.append_system_prompt)
-            },
-            allowed_tools: loaded.allowed_tools,
-            resume_session_id,
-            ..Default::default()
-        }),
+                None
+            };
+            WorkerKind::Cc(CcLaunchConfig {
+                append_system_prompt: if loaded.append_system_prompt.is_empty() {
+                    None
+                } else {
+                    Some(loaded.append_system_prompt)
+                },
+                allowed_tools: loaded.allowed_tools,
+                resume_session_id,
+                session_id,
+                ..Default::default()
+            })
+        }
         "codex" => {
-            // codex 不消化 `--append-system-prompt` / `--allowed-tools`——这两个是 cc 专属。
-            // SKILL.md body（系统提示）已被 spawn_codex 当作 prompt 上下文丢失——
-            // 这是 codex exec 模式的 P2 限制（位置参数只有一个）。后续若引入 codex
-            // conversation API 可恢复 system prompt 路径；当前先保证能跑起来。
-            if resume_session_id.is_some() {
+            // codex 不消化 `--append-system-prompt` / `--allowed-tools`——cc 专属。
+            // codex `exec` 模式无持久 session——resume_session_id 命中 warn 后忽略，
+            // 但 **worktree 复用仍有效**（L2 核心：召回 = 复用工作环境，不依赖 session）。
+            if recall.resume_session_id.is_some() {
                 tracing::warn!(
                     role = %role,
-                    "codex 不支持 --resume（spawn-per-dispatch 无持久 session），\
-                     P2 召回 flag 已忽略，走普通 spawn"
+                    "codex 不支持 session resume；worktree 仍会复用（如有）"
                 );
             }
             WorkerKind::Codex(CodexLaunchConfig::default())
@@ -538,48 +553,64 @@ async fn spawn_by_role(
         }
     };
 
-    fuxi.spawn_worker(profile, kind)
-        .await
-        .map_err(|e| anyhow!(e.to_string()))
+    if let Some(wt_path) = recall.worktree {
+        // 召回路径：复用已有 worktree，绕过 workspace.create。
+        // branch_hint 用"recall-<role>"纯标签——borrowed handle 的 destroy 短路，
+        // 这个 branch 名只在事件日志/ TUI 里出现，不会走 git。
+        let branch_hint = format!("recall-{role}");
+        fuxi.spawn_worker_in_worktree(profile, kind, wt_path, branch_hint)
+            .await
+            .map_err(|e| anyhow!(e.to_string()))
+    } else {
+        fuxi.spawn_worker(profile, kind)
+            .await
+            .map_err(|e| anyhow!(e.to_string()))
+    }
 }
 
-/// P2 召回：把 `--recall-task` / `--recall-role` 翻成 `resume_session_id`。
+/// P2 召回：把 `--recall-task` / `--recall-role` 翻成 `RecallHandle`。
 ///
-/// 抽出来纯函数化：daemon dispatch 只调它，单测可以脱离 Fuxi 直接验。返回
-/// `Result<Option<String>, Response>`——`Err` 是直接可以回客户端的错误响应。
+/// 抽出纯函数——daemon dispatch 只调它，单测可脱离 Fuxi 验。返回
+/// `Result<RecallHandle, Response>`——`Err` 是可直接回客户端的错误响应；
+/// 都 None 返回空 handle 走普通 spawn。
 ///
-/// 设计点（见 `docs/handoff/v1-session3.md` §4）：
-/// - **task_id 是入口、session_id 是值**。subject 形如 `task-<uuid>`。
-/// - **recall_role 查 `role-<role>`** —— 由 `OracleRecallSink`（主线另开）在
-///   每次 dispatch 完成时同时写 `task-<id>` 和 `role-<role>` 两条 fact，β 这边只读。
-/// - 两个 flag 互斥；没给则返 `Ok(None)`，daemon 走普通 spawn。
-pub(crate) async fn resolve_recall_session_id(
+/// 设计点：
+/// - **task_id 是入口、session_id+worktree 是值**。查 `task-<id>` / `role-<role>` 两张表。
+/// - worktree 缺失：走无 worktree 召回（退化 = 普通 spawn，但保留 resume_session_id 如有）
+/// - session_id 缺失（codex）：只复用 worktree，不传 resume
+pub(crate) async fn resolve_recall_handle(
     oracle: &OracleStore,
     recall_task: Option<String>,
     recall_role: Option<String>,
-) -> std::result::Result<Option<String>, Response> {
-    match (recall_task, recall_role) {
-        (Some(_), Some(_)) => Err(Response::err("recall_task / recall_role 互斥")),
+) -> std::result::Result<RecallHandle, Response> {
+    let subject = match (recall_task, recall_role) {
+        (Some(_), Some(_)) => return Err(Response::err("recall_task / recall_role 互斥")),
         (Some(task_raw), None) => {
-            // 容错：用户给 `task-<uuid>` 或裸 `<uuid>` 都能接，统一成 `task-<uuid>`。
+            // 容错：用户给 `task-<uuid>` 或裸 `<uuid>` 都能接。
             let core = task_raw.strip_prefix("task-").unwrap_or(&task_raw);
-            let subject = format!("task-{core}");
-            match oracle.query_one(&subject, "session_id").await {
-                Ok(Some(fact)) => Ok(Some(fact.object)),
-                Ok(None) => Err(Response::err(format!("无召回记录：subject={subject}"))),
-                Err(e) => Err(Response::err(e.to_string())),
-            }
+            format!("task-{core}")
         }
-        (None, Some(role_q)) => {
-            let subject = format!("role-{role_q}");
-            match oracle.query_one(&subject, "session_id").await {
-                Ok(Some(fact)) => Ok(Some(fact.object)),
-                Ok(None) => Err(Response::err(format!("无召回记录：subject={subject}"))),
-                Err(e) => Err(Response::err(e.to_string())),
-            }
-        }
-        (None, None) => Ok(None),
+        (None, Some(role_q)) => format!("role-{role_q}"),
+        (None, None) => return Ok(RecallHandle::default()),
+    };
+
+    // 同一个 subject 上查两条 predicate；至少一条命中才算有召回记录。
+    let session_fact = oracle
+        .query_one(&subject, "session_id")
+        .await
+        .map_err(|e| Response::err(e.to_string()))?;
+    let worktree_fact = oracle
+        .query_one(&subject, "worktree")
+        .await
+        .map_err(|e| Response::err(e.to_string()))?;
+
+    if session_fact.is_none() && worktree_fact.is_none() {
+        return Err(Response::err(format!("无召回记录：subject={subject}")));
     }
+    Ok(RecallHandle {
+        resume_session_id: session_fact.map(|f| f.object),
+        worktree: worktree_fact.map(|f| PathBuf::from(f.object)),
+    })
 }
 
 /// 供测试：构造一个 socket 路径在临时目录下。
@@ -690,37 +721,44 @@ mod tests {
         server.await.ok();
     }
 
-    // ── P2 召回（resolve_recall_session_id 纯函数测）──
+    // ── P2 召回（resolve_recall_handle 纯函数测）──
     //
-    // 为什么测纯函数而不是端到端串 spawn_by_role：spawn_by_role 真起 cc 进程
-    // 太重，而 P2 召回的全部"决策逻辑"集中在 resolve_recall_session_id 里。
+    // 测纯函数而不是端到端串 spawn_by_role——spawn_by_role 真起 cc 进程太重，
+    // P2 召回的全部"决策逻辑"集中在 resolve_recall_handle 里。
     // 这种切法和 session.rs::resolve_xuannv_session 的测策略一致。
 
-    /// `--recall-task task-abc` → oracle.query_one("task-abc","session_id") = "sess-xyz"。
-    /// 兼容裸 uuid（不带 `task-` 前缀）传入也要解析。
+    /// cc 完整召回：`--recall-task task-abc` → 返 RecallHandle 含 session + worktree。
+    /// 兼容裸 uuid（不带 `task-` 前缀）。
     #[tokio::test]
-    async fn spawn_with_recall_task_resolves_session_id_from_oracle() {
+    async fn spawn_with_recall_task_resolves_full_handle_from_oracle() {
         let oracle = OracleStore::connect_memory().await.unwrap();
         oracle
             .insert(NewFact::new("task-abc", "session_id", "sess-xyz"))
             .await
             .unwrap();
+        oracle
+            .insert(NewFact::new("task-abc", "worktree", "/tmp/wt-abc"))
+            .await
+            .unwrap();
 
         // 带前缀
-        let got = resolve_recall_session_id(&oracle, Some("task-abc".into()), None)
+        let h = resolve_recall_handle(&oracle, Some("task-abc".into()), None)
             .await
             .expect("Ok");
-        assert_eq!(got.as_deref(), Some("sess-xyz"));
+        assert_eq!(h.resume_session_id.as_deref(), Some("sess-xyz"));
+        assert_eq!(
+            h.worktree.as_deref().and_then(|p| p.to_str()),
+            Some("/tmp/wt-abc")
+        );
 
-        // 裸 uuid 也接（subject 端拼回 task-<id>）
-        let got = resolve_recall_session_id(&oracle, Some("abc".into()), None)
+        // 裸 uuid 也接
+        let h = resolve_recall_handle(&oracle, Some("abc".into()), None)
             .await
             .expect("Ok");
-        assert_eq!(got.as_deref(), Some("sess-xyz"));
+        assert_eq!(h.resume_session_id.as_deref(), Some("sess-xyz"));
     }
 
-    /// `--recall-role dev` → oracle.query_one("role-dev","session_id") 取
-    /// updated_at DESC 第一条。后插入的应覆盖前一条。
+    /// `--recall-role dev` 取 query_one 最新（updated_at DESC）。
     #[tokio::test]
     async fn spawn_with_recall_role_picks_latest_session() {
         let oracle = OracleStore::connect_memory().await.unwrap();
@@ -735,20 +773,21 @@ mod tests {
             .await
             .unwrap();
 
-        let got = resolve_recall_session_id(&oracle, None, Some("dev".into()))
+        let h = resolve_recall_handle(&oracle, None, Some("dev".into()))
             .await
             .expect("Ok");
-        assert_eq!(got.as_deref(), Some("new"));
+        assert_eq!(h.resume_session_id.as_deref(), Some("new"));
     }
 
-    /// 都 None → 返 Ok(None)，daemon 走普通 spawn 不带 --resume。
+    /// 都 None → 返空 handle，daemon 走普通 spawn。
     #[tokio::test]
-    async fn spawn_with_no_recall_returns_none() {
+    async fn spawn_with_no_recall_returns_empty_handle() {
         let oracle = OracleStore::connect_memory().await.unwrap();
-        let got = resolve_recall_session_id(&oracle, None, None)
+        let h = resolve_recall_handle(&oracle, None, None)
             .await
             .expect("Ok");
-        assert!(got.is_none());
+        assert!(h.resume_session_id.is_none());
+        assert!(h.worktree.is_none());
     }
 
     /// 同时给两个 flag → 返 Err Response（互斥）。CLI 层 clap 已挡，但 wire/IPC
@@ -756,12 +795,49 @@ mod tests {
     #[tokio::test]
     async fn spawn_with_both_recall_flags_errors() {
         let oracle = OracleStore::connect_memory().await.unwrap();
-        let err = resolve_recall_session_id(&oracle, Some("task-abc".into()), Some("dev".into()))
+        let err = resolve_recall_handle(&oracle, Some("task-abc".into()), Some("dev".into()))
             .await
             .expect_err("应返 Err");
         match err {
             Response::Err { error } => assert!(error.contains("互斥"), "got: {error}"),
             other => panic!("expected Err response, got {other:?}"),
+        }
+    }
+
+    /// codex 路径：oracle 只有 worktree fact 没有 session_id → 返 worktree-only handle。
+    /// 这是 L2 关键场景：codex 也能进召回 wire（worktree 复用即可）。
+    #[tokio::test]
+    async fn spawn_with_recall_codex_returns_worktree_only_handle() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        oracle
+            .insert(NewFact::new(
+                "role-luban-codex",
+                "worktree",
+                "/tmp/wt-codex",
+            ))
+            .await
+            .unwrap();
+
+        let h = resolve_recall_handle(&oracle, None, Some("luban-codex".into()))
+            .await
+            .expect("Ok");
+        assert!(h.resume_session_id.is_none(), "codex 不该有 session");
+        assert_eq!(
+            h.worktree.as_deref().and_then(|p| p.to_str()),
+            Some("/tmp/wt-codex")
+        );
+    }
+
+    /// subject 完全没记录 → 返 Err，避免静默退化让用户以为召回成功了实际是普通 spawn。
+    #[tokio::test]
+    async fn spawn_with_recall_no_record_errors() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        let err = resolve_recall_handle(&oracle, Some("ghost".into()), None)
+            .await
+            .expect_err("应返 Err");
+        match err {
+            Response::Err { error } => assert!(error.contains("无召回记录"), "got: {error}"),
+            other => panic!("expected Err, got {other:?}"),
         }
     }
 }
