@@ -15,6 +15,7 @@ use crate::ipc::{Command, InterveneMode, Response};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use fuxi_agent_cc::CcLaunchConfig;
+use fuxi_agent_codex::CodexLaunchConfig;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::AgentId;
 use fuxi_core::task::Task;
@@ -454,7 +455,13 @@ fn parse_task_id(s: &str) -> std::result::Result<fuxi_core::id::TaskId, String> 
         .map_err(|e| format!("无效 task_id {s:?}: {e}"))
 }
 
-/// 根据 role 读 Skill → 构造 AgentProfile + CcLaunchConfig → 丢给 Fuxi.spawn_worker
+/// 根据 role 读 Skill → 构造 AgentProfile + 对应 LaunchConfig → 丢给 Fuxi.spawn_worker。
+///
+/// CLI 选择来自 `LoadedSkill.profile.cli`（其值由 SKILL.md 的 `metadata.cli` 决定，
+/// 缺省 `claude-code`）。**新增 CLI 必须同时**：
+/// 1. 在 `WorkerKind::cli_tag` 加分支（保证 cli_tag 字符串可逆）；
+/// 2. 在这里加 match arm 选 LaunchConfig；
+/// 3. 写 `skills/<role>/SKILL.md` 把 `metadata.cli` 设成对应字符串。
 async fn spawn_by_role(fuxi: &Fuxi, role: &str, name_override: Option<String>) -> Result<AgentId> {
     let loaded =
         skill_loader::load(role).with_context(|| format!("加载 skills/{role}/SKILL.md"))?;
@@ -462,16 +469,33 @@ async fn spawn_by_role(fuxi: &Fuxi, role: &str, name_override: Option<String>) -
     if let Some(n) = name_override {
         profile.name = n;
     }
-    let cfg = CcLaunchConfig {
-        append_system_prompt: if loaded.append_system_prompt.is_empty() {
-            None
-        } else {
-            Some(loaded.append_system_prompt)
-        },
-        allowed_tools: loaded.allowed_tools,
-        ..Default::default()
+
+    let kind: WorkerKind = match profile.cli.as_str() {
+        "claude-code" => WorkerKind::Cc(CcLaunchConfig {
+            append_system_prompt: if loaded.append_system_prompt.is_empty() {
+                None
+            } else {
+                Some(loaded.append_system_prompt)
+            },
+            allowed_tools: loaded.allowed_tools,
+            ..Default::default()
+        }),
+        "codex" => {
+            // codex 不消化 `--append-system-prompt` / `--allowed-tools`——这两个是 cc 专属。
+            // SKILL.md body（系统提示）已被 spawn_codex 当作 prompt 上下文丢失——
+            // 这是 codex exec 模式的 P2 限制（位置参数只有一个）。后续若引入 codex
+            // conversation API 可恢复 system prompt 路径；当前先保证能跑起来。
+            WorkerKind::Codex(CodexLaunchConfig::default())
+        }
+        other => {
+            return Err(anyhow!(
+                "未知 CLI 标签 '{other}'（来自 skills/{role}/SKILL.md 的 metadata.cli）；\
+                 当前支持：claude-code | codex"
+            ));
+        }
     };
-    fuxi.spawn_worker(profile, WorkerKind::Cc(cfg))
+
+    fuxi.spawn_worker(profile, kind)
         .await
         .map_err(|e| anyhow!(e.to_string()))
 }

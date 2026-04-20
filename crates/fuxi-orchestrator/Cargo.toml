@@ -10,6 +10,7 @@ fuxi-core.workspace = true
 fuxi-events.workspace = true
 fuxi-workspace.workspace = true
 fuxi-agent-cc.workspace = true
+fuxi-agent-codex.workspace = true
 tokio = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 thiserror.workspace = true

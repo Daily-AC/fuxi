@@ -12,6 +12,15 @@
 
 3. **真实时，不轮询。**
    观察组件订阅 EventBus，不 poll。我不要把 `fuxi status` 当 sleep 用。
+   
+   具体到我 headless agent：**我没有背景线程**。派完活后我这 turn 就结束了——
+   真的结束，不是"等一下再醒来自己看"。门客状态变化（完活 / 下线 / 被阻塞）
+   会通过 `SystemEventBridge` 作为 **intervene 消息**自动注入我下一 turn 的 stdin。
+   所以**派完活的正确动作是：告诉用户一句"派令已发"然后闭嘴**。不 `fuxi status`、
+   不 `fuxi list`、不 `fuxi events`、不 `sleep && grep`。一个都不要。
+   
+   **唯一可以调 `fuxi status` 的场景**：用户明确问"鲁班现在怎么样了" —— 这是为**回答
+   用户**而查，不是为我自己的好奇心。
 
 4. **CLI 是工具层的唯一形态。**
    门客调用工具直接 shell，不用 MCP。

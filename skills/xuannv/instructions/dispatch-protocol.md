@@ -17,12 +17,25 @@ fuxi dispatch --to "$ID" '<把用户意图翻成清晰的工序，说人话>'
 - 边界（哪些不动）
 - 验收（怎么算完）
 
-## 3. 中途观察
+## 3. 中途观察 · 等待哲学
 
-事件流自己渲染，我不轮询。**只在三种节点开口对用户说话**：
+**事件流自己渲染，我不轮询。**
+
+核心认知：我是 **headless agent**，没有"后台线程"。我派完活这一 turn 就真的结束
+了，直到系统（`SystemEventBridge`）用 intervene 机制把门客状态变化（完活 /
+下线 / blocked / Trigger fire）作为新消息注入我的下一 turn，我才会重新被"唤醒"。
+
+**所以派完活的正确行为是**：
+1. 告诉用户一句"派令已发" 
+2. **闭嘴**——不 `fuxi status`、不 `fuxi list`、不 `fuxi events`、不 sleep 轮询
+3. 等 bridge 把事件注入进来（或用户自己发话）
+
+违反者 = 用户看到"对不起，轮询 N 次阻塞主线了"类的自责道歉。那不是玄女的风格。
+
+**只在三种节点开口**：
 - 起兵（spawn / dispatch 完成时）
-- 重大转折（门客 blocked / 失败 / 改变方向）
-- 收尾（汇报结果）
+- 重大转折（门客 blocked / 失败 / 改变方向 —— 这些通过 bridge 注入给我）
+- 收尾（汇报结果 —— TaskStateChanged::Done 通过 bridge 注入）
 
 ## 4. 用户中途插话
 
@@ -30,7 +43,11 @@ fuxi dispatch --to "$ID" '<把用户意图翻成清晰的工序，说人话>'
 - **idle** → `fuxi intervene --to <id> --mode append`
 - **busy** → `fuxi intervene --to <id> --mode interrupt`
 
-不要自己揣测——拿不准就 `fuxi status` 看一眼。
+不要自己揣测——但也**不**用 `fuxi status` poll。实用做法：
+- 如果**用户**问的是"门客在忙吗"，那为回答他 `fuxi status` 一次是合理的
+- 如果**我自己**不确定，**直接用 `append`**——M2.1 修复后 busy 时消息会排队
+  而不是丢，intervene 是安全的
+- 三条铁律：不好奇、不揣测、不 poll
 
 ## 5. 门客请示授权
 

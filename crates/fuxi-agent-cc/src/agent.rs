@@ -21,11 +21,12 @@
 
 use crate::config::CcLaunchConfig;
 use crate::parser::{self, TranslateState, parse_line, translate};
+use crate::pending::{EnqueueOutcome, PendingOutbox};
 use crate::spawn::{SpawnedCc, spawn_claude};
 use crate::ws_bridge::WsChannel;
 use async_trait::async_trait;
 use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
-use fuxi_core::event::Event;
+use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::Task;
 use fuxi_core::{CoreError, Result};
@@ -85,6 +86,11 @@ struct Inner {
     /// pump_loop 退出（WS channel 关闭）时发一条"ws closed"；shutdown 主动清空。
     /// why `Option`: 一旦发过一次就置 None，避免重复发。
     death_tx: Option<mpsc::UnboundedSender<String>>,
+    /// M2.1 · 消息黑洞修：cc 在 tool loop 中不 poll WS，busy 时直送会被吞。
+    /// `send_message` 总是入队，pump 在 turn terminal（`ResultSuccess`/`ResultError`）
+    /// 处 drain 后按 FIFO 调 `channel.send`；idle 时由 `send_message` 立即 drain
+    /// 自送（无 turn 触发它）。
+    pending: PendingOutbox,
 }
 
 /// Claude Code 门客——WS 反连承载。
@@ -183,6 +189,7 @@ impl CcAgent {
             current_task: None,
             translate_state: TranslateState::new(),
             death_tx: Some(death_tx),
+            pending: PendingOutbox::new(),
         }));
 
         // 4. pump task——长跑，直到 channel 关闭
@@ -264,13 +271,96 @@ impl Agent for CcAgent {
     }
 
     async fn send_message(&self, _task_id: TaskId, text: &str) -> Result<()> {
-        // 追加式介入：保持 active_tx 不换，直接发第二条 user message。
-        // 门客下一 turn 开始时看见这条新输入（cc 会在当前 turn 结束后 poll）。
-        let inner = self.inner.lock().await;
-        let cli_sid = inner.channel.cli_session_id().await.unwrap_or_default();
-        let msg = Self::user_message_value(text, &cli_sid);
-        inner.channel.send(msg).map_err(CcError::from)?;
-        tracing::info!(agent = %self.card.id, "追加介入：sent follow-up user message");
+        // M2.1 · 消息黑洞修：
+        // 旧路径直接 channel.send，但 cc 在 tool loop 的 turn 中**不 poll WS**——
+        // 消息进了 axum outgoing chan 也送不到 cc，下个 turn 后才被消化。
+        // 修法：总是入队，pump 在 turn terminal 处 drain 自送；idle 时由本函数立即 drain。
+        //
+        // overflow 时驱逐最旧消息 + 通过 active_tx 发 `AgentInterrupted{queue_overflow}`
+        // 让玄女知情（active_tx 为 None 时只能 trace warn——CcAgent 不直接持 EventBus，
+        // 等下游接通过 take_death_watch 类似的回调注入 bus 才能完全无损上报，TODO M2.x）。
+        let cli_sid = self
+            .inner
+            .lock()
+            .await
+            .channel
+            .cli_session_id()
+            .await
+            .unwrap_or_default();
+
+        // 入队 + 决定 idle 是否立即 drain；锁内只动状态不做 IO。
+        let (to_send, status_snapshot, overflow_event) = {
+            let mut inner = self.inner.lock().await;
+            let outcome = inner.pending.enqueue(text.to_string());
+            let overflow_evt = match outcome {
+                EnqueueOutcome::Queued => None,
+                EnqueueOutcome::Overflowed { dropped } => {
+                    tracing::warn!(
+                        agent = %self.card.id,
+                        dropped_preview = %dropped.chars().take(80).collect::<String>(),
+                        "pending queue overflow，驱逐最旧消息"
+                    );
+                    let mut meta = EventMeta::now();
+                    meta.agent = Some(self.card.id);
+                    meta.task = inner.current_task;
+                    Some(Event {
+                        meta,
+                        kind: EventKind::AgentInterrupted {
+                            reason: "queue_overflow".to_string(),
+                        },
+                    })
+                }
+            };
+
+            // idle → 立即 drain（无 turn 会触发 pump 的 drain）；busy → 等 pump terminal。
+            let snapshot = inner.status;
+            let drained = if matches!(snapshot, AgentStatus::Idle) {
+                inner.pending.drain_all()
+            } else {
+                Vec::new()
+            };
+            (drained, snapshot, overflow_evt)
+        };
+
+        // overflow 事件：尽力上报到 active_tx（下游 orchestrator 听这个 chan 转
+        // EventBus）。若 active_tx 已被清空，只能日志记账——参见 M2.x TODO。
+        if let Some(ev) = overflow_event {
+            let tx_opt = self.inner.lock().await.active_tx.clone();
+            if let Some(tx) = tx_opt {
+                if tx.send(ev).await.is_err() {
+                    tracing::debug!(agent = %self.card.id, "overflow 事件投递失败：active_tx 已关闭");
+                }
+            } else {
+                tracing::warn!(
+                    agent = %self.card.id,
+                    "overflow 事件无处投递：active_tx=None；玄女将无法实时获知（下游需补 bus 回调）"
+                );
+            }
+        }
+
+        // 锁外发送——channel.send 是 unbounded mpsc，不会 block；保守起见离锁做。
+        if !to_send.is_empty() {
+            // 从 inner 里再取一次 channel 引用——不持锁。
+            let channel = self.inner.lock().await.channel.clone();
+            for body in to_send {
+                let msg = Self::user_message_value(&body, &cli_sid);
+                channel.send(msg).map_err(CcError::from)?;
+            }
+            tracing::info!(
+                agent = %self.card.id,
+                status = ?status_snapshot,
+                "追加介入：idle drain 直送"
+            );
+        } else {
+            // why 取 len 拆两步：tracing 宏会借住临时值跨 await，导致 future !Send。
+            let pending_len = self.inner.lock().await.pending.len();
+            tracing::info!(
+                agent = %self.card.id,
+                status = ?status_snapshot,
+                pending = pending_len,
+                "追加介入：busy 入队，等 turn terminal drain"
+            );
+        }
         Ok(())
     }
 
@@ -422,8 +512,24 @@ async fn pump_loop(
         if is_terminal {
             // terminal 后，不再 auto-drop active_tx——调用方可能要留着用 send_message 追加
             // 任务完成的认定由 orchestrator 层看到 TaskStateChanged → Done 来决
-            let mut guard = inner.lock().await;
-            guard.status = AgentStatus::Idle;
+            //
+            // M2.1 · 消息黑洞修：turn 结束此刻是 cc 重新 poll WS 的窗口——把 pending
+            // 队列的 follow-up 消息按 FIFO drain 自送。先从锁内 take channel + drain，
+            // 再锁外 send 避免长持锁。
+            let (channel_clone, cli_sid, drained) = {
+                let mut guard = inner.lock().await;
+                guard.status = AgentStatus::Idle;
+                let drained = guard.pending.drain_all();
+                let cli_sid = guard.channel.cli_session_id().await.unwrap_or_default();
+                (guard.channel.clone(), cli_sid, drained)
+            };
+            for body in drained {
+                let msg = CcAgent::user_message_value(&body, &cli_sid);
+                if let Err(e) = channel_clone.send(msg) {
+                    tracing::warn!(error = %e, "pump terminal drain：channel send 失败（channel 已关？）");
+                    break;
+                }
+            }
         }
     }
     tracing::info!("ws_pump: channel closed, pump exiting");

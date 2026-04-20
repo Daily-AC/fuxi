@@ -14,6 +14,7 @@ fuxi-core.workspace = true
 fuxi-events.workspace = true
 fuxi-a2a.workspace = true
 fuxi-agent-cc.workspace = true
+fuxi-agent-codex.workspace = true
 fuxi-firehose.workspace = true
 fuxi-orchestrator.workspace = true
 fuxi-workspace.workspace = true

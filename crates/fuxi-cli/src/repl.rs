@@ -1974,7 +1974,7 @@ mod tests {
     #[test]
     fn count_wrapped_rows_multi_span_sums_widths() {
         let line = Line::from(vec![
-            Span::raw("▍ "),  // 2 宽（▍ + 空格）
+            Span::raw("▍ "),          // 2 宽（▍ + 空格）
             Span::raw("hello world"), // 11 宽
         ]);
         // 总 13 宽 / 10 = 2 行

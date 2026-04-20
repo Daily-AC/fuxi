@@ -12,11 +12,13 @@
 pub mod agent;
 pub mod config;
 pub mod parser;
+pub mod pending;
 pub mod spawn;
 pub mod ws_bridge;
 
 pub use agent::{CcAgent, CcError};
 pub use config::{CcLaunchConfig, DEFAULT_MODEL_ENV, resolve_default_model};
 pub use parser::{CcEvent, TranslateState, parse_line, translate};
+pub use pending::{DEFAULT_PENDING_CAP, EnqueueOutcome, PendingOutbox};
 pub use spawn::{SpawnedCc, spawn_claude};
 pub use ws_bridge::{WsChannel, WsError};

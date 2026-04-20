@@ -114,10 +114,20 @@ pub fn load_from_file(path: &Path, role_hint: &str) -> Result<LoadedSkill> {
         );
     }
 
+    // CLI 选择来自 frontmatter `metadata.cli`；缺省回 `claude-code`。
+    // 取值必须与 `fuxi-orchestrator::WorkerKind::cli_tag` 对齐——daemon 据此
+    // 路由到 Cc / Codex / 未来的 Gemini 分支。常见取值："claude-code" / "codex"。
+    let cli = fm
+        .metadata
+        .get("cli")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude-code")
+        .to_string();
+
     let profile = AgentProfile {
         name: fm.name.clone(),
         role: role_hint.to_string(),
-        cli: "claude-code".to_string(),
+        cli,
         system_prompt: body.trim().to_string(),
         tags: vec![role_hint.to_string()],
         extra,
@@ -163,5 +173,34 @@ mod tests {
         let (fm, body) = split_frontmatter(content);
         assert_eq!(fm, "");
         assert_eq!(body, "no fm here");
+    }
+
+    /// SKILL.md 缺 metadata.cli 时回退到 `claude-code`（保留 v0.1 默认行为）。
+    #[test]
+    fn loader_defaults_cli_to_claude_code_when_metadata_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let role_dir = dir.path().join("luban");
+        std::fs::create_dir_all(&role_dir).unwrap();
+        let path = role_dir.join("SKILL.md");
+        std::fs::write(&path, "---\nname: luban\ndescription: d\n---\nbody\n").unwrap();
+        let loaded = load_from_file(&path, "luban").expect("load");
+        assert_eq!(loaded.profile.cli, "claude-code");
+    }
+
+    /// SKILL.md 写了 `metadata.cli: codex` 时 profile.cli 必须是 codex——
+    /// 这是 daemon::spawn_by_role 路由到 WorkerKind::Codex 的唯一依据。
+    #[test]
+    fn loader_reads_codex_cli_from_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let role_dir = dir.path().join("luban-codex");
+        std::fs::create_dir_all(&role_dir).unwrap();
+        let path = role_dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: luban-codex\ndescription: d\nmetadata:\n  cli: codex\n---\nbody\n",
+        )
+        .unwrap();
+        let loaded = load_from_file(&path, "luban-codex").expect("load");
+        assert_eq!(loaded.profile.cli, "codex");
     }
 }
