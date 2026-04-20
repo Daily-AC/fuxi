@@ -215,23 +215,10 @@ impl Fuxi {
     /// 失败时已分配的 worktree 会被回滚（destroy 失败只 warn，不让清理错误掩盖
     /// 原始 launch 错误）；同时发 `AgentDead { cause: launch failed: ... }`。
     pub async fn spawn_worker(&self, profile: AgentProfile, kind: WorkerKind) -> Result<AgentId> {
-        // M2.4 · spawn 去重：同 role 已有 idle 门客 → 直接复用。
-        // 用户反馈 N4 / 玄女 §11 #5：反复 spawn 同 role 堆积不回收。GC 管过期，
-        // 这里管**新 spawn 时的去重**。两条道一起治，避免"玄女连点 5 次 spawn"
-        // 就起 5 个 cc subprocess。
-        //
-        // 用 find 不用 claim：spawn 语义返回"一个 Ready 的门客"，下一步由调用方
-        // 显式 dispatch 才切 Busy。并发 spawn 拿到同一 idle id 是正确的——复用
-        // 本来就想要这效果。
-        if let Some(existing) = self.shelf.find_idle_by_role(&profile.role).await {
-            info!(
-                agent = %existing,
-                role = %profile.role,
-                "spawn_worker 命中 idle 复用（跳过真 spawn）"
-            );
-            return Ok(existing);
-        }
-
+        // spawn 语义就是"新建一个门客实例"——用户说"起三个鲁班"就真起三个。
+        // 复用的职责在**调度层**：用 `dispatch_to_any(role)` 按需挑 idle 门客，
+        // 或玄女 skill 先 `fuxi list --role X` 看有没有现成的再决定 spawn。
+        // 过期回收由 `IdleGcTask`（M2.4）做。
         let agent_id = AgentId::new();
         info!(agent = %agent_id, role = %profile.role, "spawn worker");
 
