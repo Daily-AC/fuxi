@@ -23,6 +23,7 @@ pub mod bridge;
 pub mod error;
 pub mod fuxi;
 pub mod idle_gc;
+pub mod recall;
 pub mod registry;
 
 pub use bridge::{Intervener, SystemEventBridge};
@@ -31,4 +32,5 @@ pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use idle_gc::{
     DEFAULT_IDLE_TTL_SECS, DEFAULT_TICK_INTERVAL_SECS, IdleGcTask, IdleShutdowner, ttl_from_env,
 };
+pub use recall::RecallSink;
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};

@@ -29,10 +29,21 @@ struct StubAgent {
     /// 每次 dispatch 要 emit 的事件脚本（按顺序发送）。
     /// task_id 会在 dispatch 时填入 meta。
     script: Vec<EventKind>,
+    /// P2 召回测试用：override `session_id()` 返回固定值。None = 走默认 None。
+    session_id_override: Option<String>,
 }
 
 impl StubAgent {
     fn new(role: &str, script: Vec<EventKind>) -> Arc<Self> {
+        Self::with_session_id(role, script, None)
+    }
+
+    /// P2 召回测试用：构造一个能返回固定 session_id 的 stub。
+    fn with_session_id(
+        role: &str,
+        script: Vec<EventKind>,
+        session_id_override: Option<String>,
+    ) -> Arc<Self> {
         let card = AgentCard {
             id: AgentId::new(),
             profile: AgentProfile {
@@ -50,6 +61,7 @@ impl StubAgent {
             card,
             dispatch_count: AtomicUsize::new(0),
             script,
+            session_id_override,
         })
     }
 
@@ -93,6 +105,10 @@ impl Agent for StubAgent {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn session_id(&self) -> Option<String> {
+        self.session_id_override.clone()
     }
 }
 
@@ -1153,4 +1169,110 @@ async fn dispatch_publishes_task_created_and_dispatched_at_start() {
     }
     assert!(saw_created, "dispatch 开头应发 TaskCreated");
     assert!(saw_dispatched, "dispatch 开头应发 TaskDispatched");
+}
+
+// ── P2 召回 · RecallSink 入库 task→session 映射（dispatch pump 钩子）──
+
+/// 测试用 RecallSink：记录所有 record 调用便于断言。
+#[derive(Default, Clone)]
+struct CapturingRecallSink {
+    /// (agent_id, task_id, session_id) 序列。clone 共享 Arc<Mutex<…>> 让 worker / 主线都能读。
+    captured: Arc<std::sync::Mutex<Vec<(AgentId, TaskId, String)>>>,
+}
+
+impl CapturingRecallSink {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn snapshot(&self) -> Vec<(AgentId, TaskId, String)> {
+        self.captured.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl fuxi_orchestrator::RecallSink for CapturingRecallSink {
+    async fn record_task_session(&self, agent_id: AgentId, task_id: TaskId, session_id: String) {
+        self.captured
+            .lock()
+            .expect("lock")
+            .push((agent_id, task_id, session_id));
+    }
+}
+
+#[tokio::test]
+async fn dispatch_pump_records_session_on_done() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus, ws);
+
+    let sink = Arc::new(CapturingRecallSink::new());
+    fuxi.set_recall_sink(sink.clone()).await;
+
+    let stub = StubAgent::with_session_id("dev", happy_script(), Some("sess-stub-123".into()));
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("recall-target", "");
+    let task_id = task.id;
+    fuxi.dispatch(id, task).await.unwrap();
+
+    // 等 pump 处理完 Done + 调 sink。
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    let recorded = sink.snapshot();
+    assert_eq!(recorded.len(), 1, "Done 时应入库一次，实际 {recorded:?}");
+    assert_eq!(recorded[0].0, id, "agent_id 错");
+    assert_eq!(recorded[0].1, task_id, "task_id 错");
+    assert_eq!(recorded[0].2, "sess-stub-123", "session_id 错");
+}
+
+#[tokio::test]
+async fn dispatch_pump_skips_record_on_cancelled() {
+    // 设计：召回基于完成态。Cancelled 不入库——避免脏数据被 `--recall` 拉出。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus, ws);
+
+    let sink = Arc::new(CapturingRecallSink::new());
+    fuxi.set_recall_sink(sink.clone()).await;
+
+    let cancelled_script = vec![EventKind::TaskStateChanged {
+        from: TaskState::InProgress,
+        to: TaskState::Cancelled,
+    }];
+    let stub = StubAgent::with_session_id("dev", cancelled_script, Some("sess-cancelled".into()));
+    let id = fuxi.insert_agent(stub, None).await;
+
+    fuxi.dispatch(id, Task::new("doomed", "")).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    assert!(
+        sink.snapshot().is_empty(),
+        "Cancelled 不应入库，实际 {:?}",
+        sink.snapshot()
+    );
+}
+
+#[tokio::test]
+async fn dispatch_pump_skips_record_when_session_id_none() {
+    // Agent 无 session_id（codex/StubAgent 默认）时 silent skip——不 panic 也不 record。
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus, ws);
+
+    let sink = Arc::new(CapturingRecallSink::new());
+    fuxi.set_recall_sink(sink.clone()).await;
+
+    // 默认 None
+    let stub = StubAgent::new("dev", happy_script());
+    let id = fuxi.insert_agent(stub, None).await;
+
+    fuxi.dispatch(id, Task::new("no-sess", "")).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    assert!(
+        sink.snapshot().is_empty(),
+        "session_id=None 时不应入库，实际 {:?}",
+        sink.snapshot()
+    );
 }

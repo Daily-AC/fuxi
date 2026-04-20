@@ -20,6 +20,7 @@ mod demo;
 mod extractor_hook;
 mod ipc;
 mod memory_cmd;
+mod recall_sink;
 mod repl;
 mod session;
 mod skill;

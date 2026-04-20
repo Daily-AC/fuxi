@@ -233,7 +233,32 @@ pub async fn run(args: Args) -> Result<()> {
     )
     .spawn();
 
-    let daemon = Daemon::new(fuxi.clone(), bus.clone(), sched_store.clone(), keeper);
+    // 玄女 cc session 续写：策府存哪一个 session_id 就 `--resume` 它，没有则
+    // 首次新生成并回写。这样关了 fuxi 再开，玄女上下文不丢。见 `session.rs`。
+    //
+    // 策府要在 Daemon::new 前打开，因为 daemon 也需要它来处理 P2 召回 spawn flag
+    // (`--recall-task` / `--recall-role`)。oracle 是 Arc<SqlitePool> 语义 clone 便宜，
+    // repl 主线和 daemon 共享同一个 pool 不冲突。
+    let memory_db = crate::memory_cmd::resolve_db_path(None).context("解析策府 DB 路径")?;
+    let oracle = OracleStore::connect_file(&memory_db)
+        .await
+        .with_context(|| format!("连接策府 DB {}", memory_db.display()))?;
+
+    // P2 召回入库——dispatch pump Done 时落 task-<id> + role-<role> 两条 fact。
+    // why 在 daemon::new 之前：sink 写入路径独立于 daemon 查询路径，先注入再起 daemon
+    // 保证一接客就能落库，不丢 race 窗口里的早期 task。
+    fuxi.set_recall_sink(Arc::new(crate::recall_sink::OracleRecallSink::new(
+        oracle.clone(),
+        fuxi.clone(),
+    )))
+    .await;
+    let daemon = Daemon::new(
+        fuxi.clone(),
+        bus.clone(),
+        sched_store.clone(),
+        keeper,
+        oracle.clone(),
+    );
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
     let daemon_task = tokio::spawn(async move {
@@ -252,13 +277,6 @@ pub async fn run(args: Args) -> Result<()> {
     let loaded = skill_loader::load(&args.xuannv_role)
         .with_context(|| format!("加载 skills/{}/SKILL.md", args.xuannv_role))?;
     let xuannv_profile = loaded.profile.clone();
-
-    // 玄女 cc session 续写：策府存哪一个 session_id 就 `--resume` 它，没有则
-    // 首次新生成并回写。这样关了 fuxi 再开，玄女上下文不丢。见 `session.rs`。
-    let memory_db = crate::memory_cmd::resolve_db_path(None).context("解析策府 DB 路径")?;
-    let oracle = OracleStore::connect_file(&memory_db)
-        .await
-        .with_context(|| format!("连接策府 DB {}", memory_db.display()))?;
     let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(&oracle)
         .await
         .context("解析玄女 session_id")?;

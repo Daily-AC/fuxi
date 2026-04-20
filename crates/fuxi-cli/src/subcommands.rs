@@ -24,12 +24,21 @@ pub struct SpawnArgs {
     /// 可选名字（默认 role-N）。
     #[arg(long)]
     pub name: Option<String>,
+    /// P2 召回：续写指定 task 的 cc session（与 --recall-role 互斥）。
+    /// 接受 `task-<uuid>` 或裸 `<uuid>`——daemon 端会标准化成 `task-<uuid>`。
+    #[arg(long = "recall-task", conflicts_with = "recall_role")]
+    pub recall_task: Option<String>,
+    /// P2 召回：续写该 role 最近活动的 session（subject=`role-<role>`）。
+    #[arg(long = "recall-role")]
+    pub recall_role: Option<String>,
 }
 
 pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
     let resp = client::send(Command::Spawn {
         role: args.role,
         name: args.name,
+        recall_task: args.recall_task,
+        recall_role: args.recall_role,
     })
     .await?;
     print_response(resp)
@@ -320,5 +329,47 @@ fn print_response(resp: Response) -> Result<()> {
             Ok(())
         }
         Response::Err { error } => Err(anyhow!(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--recall-task` 与 `--recall-role` 是 P2 召回的两条互斥入口；clap 的
+    /// `conflicts_with` 必须在 wire 上即生效，避免错误同时给两个 flag 后
+    /// 跑到 daemon 才报错——CLI 层早死早超生。
+    #[test]
+    fn spawn_args_recall_task_and_role_are_mutually_exclusive() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: SpawnArgs,
+        }
+        let r = W::try_parse_from([
+            "w",
+            "--role",
+            "dev",
+            "--recall-task",
+            "t1",
+            "--recall-role",
+            "dev",
+        ]);
+        assert!(r.is_err(), "互斥 flag 同时给应失败");
+    }
+
+    /// 单独给 `--recall-task` 应正常解析；recall_role 必须留 None。
+    #[test]
+    fn spawn_args_recall_task_only() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: SpawnArgs,
+        }
+        let w = W::try_parse_from(["w", "--role", "dev", "--recall-task", "task-abc"]).unwrap();
+        assert_eq!(w.a.recall_task.as_deref(), Some("task-abc"));
+        assert!(w.a.recall_role.is_none());
     }
 }
