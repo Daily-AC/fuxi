@@ -167,44 +167,116 @@ crates/
 
 ---
 
-### M1.4 · 三栏 TUI（repl.rs 重构）
+### M1.4 · 三栏 TUI（repl.rs 重构）· **Fix-D override**
 
-> ⚠️ **2026-04-20 override**：左栏 roster 改**任务树**（按 task 分组，agent 挂 task 下）。详见 `docs/decisions/03-tui-task-tree-override.md`。下面 R4 原决策保留作历史参考，实装以 decision 03 为准。Fix-D teammate 负责全改。
+> ⚠️ **2026-04-20 override · Fix-D**：C2 发布后用户实测列了 12 条 UX 问题。本节按 Fix-D
+> 实装结果重写；旧 C2 版决策（roster 为扁平门客列表 / 自实现单行 input）作为决策 log 保留在
+> 段末，方便追溯。决策背景详见 `docs/decisions/03-tui-task-tree-override.md`。
 
-**决策**（来自 R4）：
+**决策（Fix-D 版）**：
 
-- **布局**：`Layout::horizontal([Length(26), Min(40), Length(28)])` → 中栏 `Vertical(dialogue=Min(5) + input=Length(3) + status=Length(1))` → 左栏下端折叠事件流（F2 toggle）
-- **State 重构**：
+- **任务树**（核心变更）：左栏不再是"扁平 agent 列表"——改为按 **task** 分组的树：
+  ```
+  🟢 玄女 · 总控               ← 持久顶部
+  📁 <task 1 title>  🔵 鲁班   ← task 挂负责门客
+  📁 <task 2 title>  🔵 造父
+  ─ 空闲门客 ─
+  🟢 <role>  <name>           ← 还没派活的门客
+  ```
+  模型：
   ```rust
-  enum Focus { Roster, Input }
-  enum ActiveTarget { Xuannv, Worker(AgentId) }
+  struct TaskNode {
+      task_id: TaskId, title, description, state: TaskState,
+      worker: AgentId, worker_role: String,
+      dispatched_at: Instant, prune_after: Option<Instant>,  // Done/Cancelled 后 5s 后 prune
+      thinking: bool, worktree: Option<PathBuf>,
+      recent_tools: VecDeque<String>,  // 右栏"最近工具调用"
+  }
   struct ReplApp {
-      active: ActiveTarget,              // 当前主对话对象
-      focus: Focus,                      // 键盘焦点
-      dialogues: HashMap<ActiveTarget, VecDeque<DialogueLine>>,  // 按 target 分桶
-      task_meta: HashMap<AgentId, TaskMeta>,  // 右栏展示
-      roster: Vec<AgentCard>,            // 左栏门客列表
-      events: FirehoseApp,               // 复用
-      events_visible: bool,              // F2 toggle
-      input: String,
-      ...
+      xuannv_id, xuannv_status, xuannv_thinking,
+      active: ActiveTarget,  // Xuannv | Worker(AgentId)
+      focus: Focus,          // Roster | Input（events 折叠靠 F2，不抢焦点）
+      dialogues: HashMap<ActiveTarget, VecDeque<DialogueLine>>,
+      tasks: Vec<TaskNode>, idle_workers: Vec<RosterRow>,
+      events: FirehoseApp, events_visible: bool,
+      input: tui_textarea::TextArea<'static>,  // 见下
+      dialogue_scroll: u16, dialogue_auto_scroll: bool,
+      prune_delay: Duration,
   }
   ```
-- **Key routing 两层**：全局（Ctrl-C / Tab / Esc / F2）先拦 → 剩下按 focus 分派
-  - Tab：循环切 `active` 到下一个门客（Xuannv → 门客1 → 门客2 → Xuannv ...）
-  - Esc：速切回 Xuannv
-  - ↑↓（focus=Roster）：上下移门客高亮，Enter 切 active
-  - 输入 / Enter / Backspace（focus=Input）：编辑输入框 / 发送 / 删字
-- **对门客说话 = intervene**（复用薄片 I 的 `Fuxi::intervene(agent_id, false, text)` append 模式）。发给玄女就是 `dispatch` 新 task
-- **shelf 加** `worktree_of(agent_id) -> Option<PathBuf>` 只读方法，供右栏展示
+- **布局**：`Layout::horizontal([Length(28), Min(40), Length(30)])` → 中栏
+  `Vertical(dialogue=Min(5) + input=Length(5) + status=Length(1))`
+- **事件 → 任务树**（在 `ReplApp::ingest` 维护）：
+  - `TaskDispatched { to }` + `meta.task` → `upsert_task`；若该 worker 在 idle 桶，搬到 tasks
+  - `TaskCreated { title, description }` → 找/建 task，写 title/desc
+  - `TaskStateChanged { to: Done|Cancelled }` / `TaskDelivered` / `TaskCancelled` → 置 `prune_after = now + 5s`
+  - `AgentReady` / `AgentSpawning` → idle_workers 入桶
+  - `AgentDead` → 清空闲桶；活跃 task 置 prune；active 若指向它，`tick` 里自动回 Xuannv
+  - `ToolCallStarted` → 挂到对应 task 的 `recent_tools`（右栏展示）
+  - `ConversationHandoffRequested { to }` → 主对话权切到 `to`
+  - `tick(now)` 每帧前调一次：扫 `prune_after`，过期则清 task（worker 回 idle）
+- **输入框** = **`tui-textarea`**（community widget，ratatui 0.29 兼容）
+  - 支持 multi-line：`Shift+Enter` 换行 / `Enter` 提交 / 光标移动 / `Ctrl+W` 删词 / 全选等
+  - 粘贴：启用 crossterm `EnableBracketedPaste`，`Event::Paste(s)` 走 `app.handle_paste(&s)` 直接塞 textarea
+- **Key routing**：全局（`Ctrl-C` / `Tab` / `Esc` / `F2` / `PageUp`|`PageDown` / `Home`|`End` when input 空）先拦 → 其余按 focus 分派
+  - `Tab`：循环 Xuannv → 每个 task 的 worker → 每个 idle → Xuannv（跳过 IdleHeader）
+  - `Esc`：速切回 Xuannv
+  - `PageUp` / `PageDown`：对话区翻页，PgUp 冻结 `dialogue_auto_scroll`；到底部自动重贴底
+  - `End` / `Home`（输入空时）：回贴底 / 跳顶
+- **对话区渲染**：
+  - 连续同 speaker 消息折叠前缀（`render_dialogue_collapsed`）——第一行显示 `玄女> `，后续行用等宽空白缩进
+  - 滚动条用 `Paragraph::scroll((offset, 0))` + 自算 `last_dialogue_total/view`
+- **事件面板**（F2 展开）：过滤噪声
+  - 默认隐藏 `custom { label: "cc_system_*" | "cc_thinking_delta" | "rate_limit" | "cc_raw" }`、`thinking_started/finished`、`user_prompted`、`agent_responded`（这些已在对话区呈现）
+  - 其余按 `[time] [who] [kind_tag] [summary]` 四列渲染
+- **右栏 meta** · **任务级**：
+  - Xuannv active：总控视图（agent/status/active task/tasks count/idle count）
+  - Worker active 且挂 task：task title / desc / worker / role / state / elapsed / worktree / 最近工具调用
+  - Worker active 且空闲：空闲门客视图（role / status / 等玄女派活）
+- **CJK 宽度**：所有左栏/右栏/事件流截断用 `unicode-width::UnicodeWidthStr::width` 算 displayed width，不用 `str.len()` 或 `chars().count()`
+- **shelf 加** `worktree_of(agent_id) -> Option<PathBuf>` 只读方法（已随 C2 进仓）
 - **mouse**：v1 不上（纯键盘）；v2 考虑 hit-test
-- **input**：v1 自实现（单行够用）；tui-textarea 留 v2
 
-**TDD 契约**：
-- 5 个新单测：Tab 循环切 active / Esc 速回玄女 / 按 target 分桶分派 / worker dispatch vs xuannv intervene / task_meta 维护
-- 1 个三栏 TestBackend snapshot（检查左栏 roster / 中栏 dialogue / 右栏元信息都渲染到）
+**TDD 契约**（Fix-D 落地时实际写了 24 个单测，含以下 hard 断言）：
+- 任务树：`task_dispatched_event_appends_task_node` / `task_done_prunes_after_delay` /
+  `idle_worker_shows_in_idle_bucket` / `tab_cycles_xuannv_tasks_idle_order` /
+  `agent_dead_event_marks_tasks_for_prune`
+- tui-textarea：`tui_textarea_enter_submits_shift_enter_newlines` /
+  `bracketed_paste_fills_input` / `backspace_deletes_last_char`（迁移到 textarea 后仍保持）
+- 滚动：`scroll_up_breaks_auto_scroll_then_end_resumes`
+- 多行折叠：`consecutive_same_speaker_collapses_prefix` / `different_speakers_keep_prefix`
+- CJK 宽度：`truncate_by_width_handles_cjk`
+- 事件流噪声：`noise_filter_hides_low_value_events`
+- Snapshot：`three_pane_snapshot_contains_expected_widgets`（断言左栏标题「任务」、"空闲门客" header、玄女字样、对话内容）
 
-**落地步骤**：见 R4 survey 第 8 条。预估 repl.rs ~400 行改动，无新 crate 依赖。
+**落地**：单 crate 改动（`fuxi-cli/src/repl.rs` + `Cargo.toml`）；新增依赖 `tui-textarea = "0.7"` + `unicode-width = "0.2"`；无其它 crate 变动。
+
+---
+
+<details>
+<summary>C2 旧决策 log（2026-04-19，被 Fix-D 替换，保留备忘）</summary>
+
+- 扁平 `Vec<RosterRow>` 当左栏，`task_meta: HashMap<AgentId, TaskMeta>` 补元信息
+- 单行 `String` 输入，自实现 Backspace/Char；Enter 直接 submit；无多行、无粘贴
+- 事件面板不过滤噪声；`user_prompted` / `cc_system_*` 大量刷屏
+- 对话区 `Paragraph::scroll` 用自算 offset 紧贴底，无滚上看历史的交互
+- 左栏标题「门客」
+
+实测暴露的 12 条 UX 问题（Fix-D 已解）：
+1. 左栏应是任务树不是扁平 agent 列表
+2. 单行输入太局促，IME 长粘贴丢字
+3. 没有 bracketed paste
+4. 对话超出可视区看不到历史
+5. 同 speaker 连续消息重复前缀刷屏
+6. 事件流信息密度极低
+7. CJK 按 `str.len()` 算宽度错位
+8. 某些 terminal 输入不聚焦 / IME 丢首字
+9. 左栏标题应是「任务」
+10. 右栏应展示任务级元信息，不是 agent 级
+11. 本节文字与实装脱节
+12. 原 13 个单测多数失效，需要 TDD 重写
+
+</details>
 
 ---
 
