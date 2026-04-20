@@ -34,6 +34,10 @@ ratatui.workspace = true
 chrono.workspace = true
 url = "2"
 uuid = { workspace = true }
+# 社区成熟的 multi-line / paste-aware text editor widget（ratatui 0.29 兼容）
+tui-textarea = { version = "0.7", default-features = false, features = ["ratatui", "crossterm"] }
+# CJK 宽度正确计算——str.len() 会把中文当 3 字节，chars().count() 不懂东亚宽字符
+unicode-width = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
