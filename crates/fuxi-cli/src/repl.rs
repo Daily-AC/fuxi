@@ -1747,11 +1747,15 @@ async fn drive_tui(
                                         meta: { let mut m = EventMeta::now(); m.agent = Some(xuannv_id); m },
                                         kind: EventKind::UserPrompted { text: text.clone() },
                                     });
+                                    // 2026-04-20 改：走 intervene 不走 dispatch。
+                                    // 原实装每条消息 dispatch 新 user-turn task → 用户连发
+                                    // 5 条变 5 个僵尸 task 堆左栏。intervene 路径：
+                                    //  - idle → Decision 04 degrade 为单次 dispatch（正常）
+                                    //  - busy → send_message 走 M2.1 pending queue（不起新 task）
                                     let fuxi_cl = fuxi.clone();
-                                    let task = Task::new("user-turn", &text);
                                     tokio::spawn(async move {
-                                        if let Err(e) = fuxi_cl.dispatch(xuannv_id, task).await {
-                                            tracing::warn!(error = %e, "xuannv dispatch 失败");
+                                        if let Err(e) = fuxi_cl.intervene(xuannv_id, false, &text).await {
+                                            tracing::warn!(error = %e, "xuannv intervene 失败");
                                         }
                                     });
                                 }
