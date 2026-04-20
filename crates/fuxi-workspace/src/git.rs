@@ -222,6 +222,7 @@ impl Workspace for GitWorktreeWorkspace {
             repo_root: self.repo_root.clone(),
             worktree_path,
             branch,
+            borrowed: false,
         };
 
         self.registry.write().await.insert(agent, handle.clone());
@@ -230,6 +231,16 @@ impl Workspace for GitWorktreeWorkspace {
     }
 
     async fn destroy(&self, handle: &WorkspaceHandle) -> fuxi_core::Result<()> {
+        // 借用 handle（召回复用 worktree 走的）不动 git——其他召回还可能指向同一 path。
+        // registry 也不删（borrowed handle 一开始就没 insert）。
+        if handle.borrowed {
+            tracing::debug!(
+                agent = %handle.agent,
+                path = %handle.worktree_path.display(),
+                "destroy: borrowed worktree, skip git ops"
+            );
+            return Ok(());
+        }
         let _guard = self.git_op_lock.lock().await;
 
         let wt_path_str = handle.worktree_path.to_str().ok_or_else(|| {

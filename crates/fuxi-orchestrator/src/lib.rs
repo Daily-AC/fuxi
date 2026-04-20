@@ -32,5 +32,5 @@ pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use idle_gc::{
     DEFAULT_IDLE_TTL_SECS, DEFAULT_TICK_INTERVAL_SECS, IdleGcTask, IdleShutdowner, ttl_from_env,
 };
-pub use recall::RecallSink;
+pub use recall::{RecallContext, RecallSink};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};

@@ -861,6 +861,7 @@ async fn shelf_worktree_of_returns_path_when_allocated() {
         repo_root: PathBuf::from("/tmp/fuxi-repo"),
         worktree_path: PathBuf::from("/tmp/fuxi-wt/agent-1"),
         branch: "main".into(),
+        borrowed: false,
     };
     shelf
         .insert(ShelfEntry {
@@ -1176,8 +1177,8 @@ async fn dispatch_publishes_task_created_and_dispatched_at_start() {
 /// 测试用 RecallSink：记录所有 record 调用便于断言。
 #[derive(Default, Clone)]
 struct CapturingRecallSink {
-    /// (agent_id, task_id, session_id) 序列。clone 共享 Arc<Mutex<…>> 让 worker / 主线都能读。
-    captured: Arc<std::sync::Mutex<Vec<(AgentId, TaskId, String)>>>,
+    /// 收到的完整 RecallContext。clone 共享让 worker / 主线都能读。
+    captured: Arc<std::sync::Mutex<Vec<fuxi_orchestrator::RecallContext>>>,
 }
 
 impl CapturingRecallSink {
@@ -1185,18 +1186,15 @@ impl CapturingRecallSink {
         Self::default()
     }
 
-    fn snapshot(&self) -> Vec<(AgentId, TaskId, String)> {
+    fn snapshot(&self) -> Vec<fuxi_orchestrator::RecallContext> {
         self.captured.lock().expect("lock").clone()
     }
 }
 
 #[async_trait]
 impl fuxi_orchestrator::RecallSink for CapturingRecallSink {
-    async fn record_task_session(&self, agent_id: AgentId, task_id: TaskId, session_id: String) {
-        self.captured
-            .lock()
-            .expect("lock")
-            .push((agent_id, task_id, session_id));
+    async fn record(&self, ctx: fuxi_orchestrator::RecallContext) {
+        self.captured.lock().expect("lock").push(ctx);
     }
 }
 
@@ -1221,9 +1219,13 @@ async fn dispatch_pump_records_session_on_done() {
 
     let recorded = sink.snapshot();
     assert_eq!(recorded.len(), 1, "Done 时应入库一次，实际 {recorded:?}");
-    assert_eq!(recorded[0].0, id, "agent_id 错");
-    assert_eq!(recorded[0].1, task_id, "task_id 错");
-    assert_eq!(recorded[0].2, "sess-stub-123", "session_id 错");
+    let ctx = &recorded[0];
+    assert_eq!(ctx.agent_id, id, "agent_id 错");
+    assert_eq!(ctx.task_id, task_id, "task_id 错");
+    assert_eq!(ctx.cli_session_id.as_deref(), Some("sess-stub-123"));
+    assert_eq!(ctx.role, "dev", "role 应来自 agent.card.profile");
+    // StubAgent 是 insert_agent 不分 worktree → None。L2 设计：worktree 缺失也调 sink。
+    assert!(ctx.worktree.is_none(), "stub agent 不该有 worktree");
 }
 
 #[tokio::test]
@@ -1254,8 +1256,9 @@ async fn dispatch_pump_skips_record_on_cancelled() {
 }
 
 #[tokio::test]
-async fn dispatch_pump_skips_record_when_session_id_none() {
-    // Agent 无 session_id（codex/StubAgent 默认）时 silent skip——不 panic 也不 record。
+async fn dispatch_pump_records_even_when_session_id_none() {
+    // L2 设计变化：pump 不再以 cli_session_id 守门。codex 这类无 session 的门客
+    // 仍要进 sink（worktree 复用走得通）。sink 自行决定哪些字段值得落 fact。
     let bus = EventBus::with_memory_store().await.unwrap();
     let (_dir, ws) = make_workspace().await;
     let fuxi = Fuxi::new(bus, ws);
@@ -1263,16 +1266,18 @@ async fn dispatch_pump_skips_record_when_session_id_none() {
     let sink = Arc::new(CapturingRecallSink::new());
     fuxi.set_recall_sink(sink.clone()).await;
 
-    // 默认 None
+    // 默认 session_id_override=None
     let stub = StubAgent::new("dev", happy_script());
     let id = fuxi.insert_agent(stub, None).await;
 
     fuxi.dispatch(id, Task::new("no-sess", "")).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
+    let recorded = sink.snapshot();
+    assert_eq!(recorded.len(), 1, "Done 仍应触发 sink");
+    assert_eq!(recorded[0].agent_id, id);
     assert!(
-        sink.snapshot().is_empty(),
-        "session_id=None 时不应入库，实际 {:?}",
-        sink.snapshot()
+        recorded[0].cli_session_id.is_none(),
+        "cli_session_id 应继承 agent.session_id() = None"
     );
 }

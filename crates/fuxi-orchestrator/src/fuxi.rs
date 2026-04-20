@@ -5,7 +5,8 @@
 //! 2. `spawn_worker(profile, WorkerKind::Cc(cfg))` 拉起具体门客，返回 `AgentId`。
 //! 3. `dispatch(id, task)` 把 task 丢给指定门客——事件自动 republish 到 bus。
 //! 4. `dispatch_to_any(role, task)` 按角色找空闲门客或拉起新的。
-//! 5. `shutdown()` 把所有门客 + 对应 worktree 按顺序销毁。
+//! 5. `shutdown()` 关停所有门客进程；**不**销毁 worktree（保留供 P2 召回，
+//!    见 Decision 07）——物理清理留给 `fuxi worktree clean`（v1.2）。
 //!
 //! 所有 mutating 方法是 `&self` 而非 `&mut self`——内部用 Arc+RwLock/Mutex。
 //! 这样 `Arc<Fuxi>` 可以被多个后台 task 安全共享（CLI 的 REPL、A2A server 的
@@ -227,14 +228,8 @@ impl Fuxi {
     /// 失败时已分配的 worktree 会被回滚（destroy 失败只 warn，不让清理错误掩盖
     /// 原始 launch 错误）；同时发 `AgentDead { cause: launch failed: ... }`。
     pub async fn spawn_worker(&self, profile: AgentProfile, kind: WorkerKind) -> Result<AgentId> {
-        // spawn 语义就是"新建一个门客实例"——用户说"起三个鲁班"就真起三个。
-        // 复用的职责在**调度层**：用 `dispatch_to_any(role)` 按需挑 idle 门客，
-        // 或玄女 skill 先 `fuxi list --role X` 看有没有现成的再决定 spawn。
-        // 过期回收由 `IdleGcTask`（M2.4）做。
         let agent_id = AgentId::new();
-        info!(agent = %agent_id, role = %profile.role, "spawn worker");
-
-        // 1. AgentSpawning。
+        // 1. AgentSpawning + 2. worktree 分配（可能 None）
         self.publish_with_agent(
             agent_id,
             EventKind::AgentSpawning {
@@ -242,8 +237,6 @@ impl Fuxi {
                 cli: kind.cli_tag().to_string(),
             },
         );
-
-        // 2. worktree（可选，失败硬返）。
         let worktree = if self.cfg.allocate_worktree {
             Some(
                 self.workspace
@@ -253,8 +246,64 @@ impl Fuxi {
         } else {
             None
         };
+        info!(agent = %agent_id, role = %profile.role, "spawn worker");
+        self.launch_and_register(agent_id, profile, kind, worktree)
+            .await
+    }
 
-        // 3. 适配器 launch。每个分支都返回一个统一的
+    /// P2 召回入口：复用一个已存在的 worktree path 起新门客。
+    ///
+    /// 和 `spawn_worker` 关键差别：**不调** `workspace.create`，把外部传入的 path 包
+    /// 成 `borrowed: true` 的 `WorkspaceHandle`。该 handle 在 destroy 时不动 git
+    /// （见 `WorkspaceHandle.borrowed`），让 worktree 留作下次召回。
+    ///
+    /// 用户通过 `fuxi spawn --recall-task/--recall-role` 触发；daemon 从 oracle
+    /// 拿 worktree path 后调本方法。如果 path 在磁盘上不存在（被手动 rm 或 git
+    /// worktree prune 了）— 不预检：cc launch 自己会以 cwd-not-exist 报错；caller
+    /// 看到 launch 失败再决定 fallback 普通 spawn。
+    pub async fn spawn_worker_in_worktree(
+        &self,
+        profile: AgentProfile,
+        kind: WorkerKind,
+        worktree_path: std::path::PathBuf,
+        branch_hint: String,
+    ) -> Result<AgentId> {
+        let agent_id = AgentId::new();
+        self.publish_with_agent(
+            agent_id,
+            EventKind::AgentSpawning {
+                role: profile.role.clone(),
+                cli: kind.cli_tag().to_string(),
+            },
+        );
+        // 借用 handle——destroy 走 borrowed 短路，git worktree 不动。
+        let handle = fuxi_core::workspace::WorkspaceHandle {
+            agent: agent_id,
+            repo_root: PathBuf::new(), // borrowed 不需要——destroy 看 borrowed=true 直接返
+            worktree_path,
+            branch: branch_hint,
+            borrowed: true,
+        };
+        info!(
+            agent = %agent_id,
+            role = %profile.role,
+            wt = %handle.worktree_path.display(),
+            "spawn worker in borrowed worktree (recall)"
+        );
+        self.launch_and_register(agent_id, profile, kind, Some(handle))
+            .await
+    }
+
+    /// `spawn_worker` / `spawn_worker_in_worktree` 共享的"已有 agent_id + 可选
+    /// worktree → 跑 adapter launch → 注册 / 回滚"段。
+    async fn launch_and_register(
+        &self,
+        agent_id: AgentId,
+        profile: AgentProfile,
+        kind: WorkerKind,
+        worktree: Option<fuxi_core::workspace::WorkspaceHandle>,
+    ) -> Result<AgentId> {
+        // 适配器 launch。每个分支都返回一个统一的
         //    `Result<(Arc<dyn Agent>, String /* endpoint_hint */), CoreError>`，
         //    后面共享同一段 register / 失败回滚逻辑。
         //    cc 还需要把 `take_death_watch` 的 rx 起转发——只有 cc 有 WS 死亡通道，
@@ -412,18 +461,19 @@ impl Fuxi {
                     }
                 );
                 if is_done && let Some(sink) = recall_sink.as_ref() {
-                    match recall_agent.session_id().await {
-                        Some(sid) => {
-                            sink.record_task_session(agent_id, task_id, sid).await;
-                        }
-                        None => {
-                            debug!(
-                                agent = %agent_id,
-                                %task_id,
-                                "recall: agent 无 session_id，silent skip"
-                            );
-                        }
-                    }
+                    // 收齐 RecallContext 整包传 sink——pump 不再判 session_id 是否 None
+                    // （codex 永远 None 但 worktree 有）；sink 自行决定写哪些 fact。
+                    let role = recall_agent.card().profile.role.clone();
+                    let worktree = shelf.worktree_of(agent_id).await;
+                    let cli_session_id = recall_agent.session_id().await;
+                    sink.record(crate::recall::RecallContext {
+                        agent_id,
+                        task_id,
+                        role,
+                        worktree,
+                        cli_session_id,
+                    })
+                    .await;
                 }
 
                 let is_terminal = matches!(
@@ -688,22 +738,31 @@ impl Fuxi {
         if let Err(e) = entry.agent.shutdown().await {
             warn!(agent = %id, error = %e, "agent shutdown 出错");
         }
-        if let Some(h) = entry.worktree.as_ref()
-            && let Err(e) = self.workspace.destroy(h).await
-        {
-            warn!(agent = %id, error = %e, "worktree destroy 出错");
+        // P2 召回边界（Decision 07）：shutdown 默认**不销毁 worktree**——留作召回 stash。
+        // 用户重开 fuxi 后 `--recall-task/role` 才能复用旧 cwd，cc session 文件也才在。
+        // 物理清理由专门的 `fuxi worktree clean`（v1.2）做；borrowed handle 本就 noop。
+        if let Some(h) = entry.worktree.as_ref() {
+            tracing::debug!(
+                agent = %id,
+                wt = %h.worktree_path.display(),
+                "shutdown_agent: 保留 worktree 供召回 stash"
+            );
         }
         self.publish_with_agent(id, EventKind::AgentDead { cause: reason });
         Ok(())
     }
 
-    /// 停掉所有门客 + 对应 worktree。幂等——连续调多次等价于调一次。
+    /// 停掉所有门客（仅 stop process，不动 worktree）。幂等。
     ///
-    /// 事件顺序（每个门客）：`AgentShuttingDown`（动作前） → agent.shutdown +
-    /// worktree.destroy → `AgentDead`（动作后）。确保 Firehose 能把生命周期完整收尾。
+    /// 事件顺序（每个门客）：`AgentShuttingDown` → agent.shutdown → `AgentDead`。
+    /// **不**销毁 worktree——P2 召回（Decision 07）要求 worktree 跨 daemon 重启可用，
+    /// 物理清理由 `fuxi worktree clean`（v1.2）显式做。
     pub async fn shutdown(&self) -> Result<()> {
         let cards = self.shelf.list_cards().await;
-        info!(count = cards.len(), "fuxi shutdown: 关闭所有门客");
+        info!(
+            count = cards.len(),
+            "fuxi shutdown: 关闭所有门客（保留 worktree 供召回）"
+        );
         for card in cards {
             let Some(entry) = self.shelf.take(card.id).await else {
                 continue;
@@ -716,11 +775,6 @@ impl Fuxi {
             );
             if let Err(e) = entry.agent.shutdown().await {
                 warn!(agent = %card.id, error = %e, "agent shutdown 出错");
-            }
-            if let Some(h) = entry.worktree.as_ref()
-                && let Err(e) = self.workspace.destroy(h).await
-            {
-                warn!(agent = %card.id, error = %e, "worktree destroy 出错");
             }
             self.publish_with_agent(
                 card.id,

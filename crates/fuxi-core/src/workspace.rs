@@ -14,6 +14,12 @@ pub struct WorkspaceHandle {
     pub repo_root: PathBuf,
     pub worktree_path: PathBuf,
     pub branch: String,
+    /// 召回复用入口：true 表示这个 handle 只是"借用现有 worktree"——
+    /// 不是 fuxi 创建的；destroy 时必须跳过 `git worktree remove` 和 `branch -D`，
+    /// 否则会把仍可能被其他召回引用的 worktree 干掉。
+    /// 默认 false 兼容旧 serde 数据。
+    #[serde(default)]
+    pub borrowed: bool,
 }
 
 #[async_trait]

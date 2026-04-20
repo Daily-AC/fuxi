@@ -126,10 +126,10 @@ pub async fn run(args: Args) -> Result<()> {
     };
     let sock_path = args.sock_path.clone().unwrap_or_else(ipc::socket_path);
     // P2 召回入库钩子——daemon 持 oracle 是查询路径（--recall-task/role 时用），
-    // sink 是写入路径（dispatch pump Done 时落 task-<id> + role-<role>）。两条独立。
+    // sink 是写入路径（dispatch pump Done 时由 RecallContext 提供 role/worktree/sid）。
+    // sink 不再持 fuxi 反查 role——L2 后 pump 直接送整包 context。
     fuxi.set_recall_sink(Arc::new(crate::recall_sink::OracleRecallSink::new(
         oracle.clone(),
-        fuxi.clone(),
     )))
     .await;
     let daemon = Daemon::new(
