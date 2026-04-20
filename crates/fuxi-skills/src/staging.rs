@@ -1,8 +1,9 @@
 //! 招贤的文件系统操作——榜文（staging）⇄ 玉牒（active）⇄ 删除。
 //!
-//! 约定（点将台布局）：
-//! - 玉牒：`<root>/<role>/SKILL.md`
-//! - 榜文：`<root>/<role>.staging/SKILL.md`
+//! 约定（点将台布局）（M3.2 起：旧 SKILL.md 改 ROLE.md）：
+//! - 玉牒：`<root>/<role>/ROLE.md`
+//! - 榜文：`<root>/<role>.staging/ROLE.md`
+//! - 兼容：`list_all` 也接纳仍叫 SKILL.md 的旧目录（warn），便于渐进迁移
 //!
 //! 宗旨：
 //! - **approve 必须原子**——用 `rename` 移动整个目录，避免半写。
@@ -28,20 +29,24 @@ pub enum SkillState {
 pub struct SkillEntry {
     pub role: String,
     pub state: SkillState,
-    /// SKILL.md 的绝对路径。
+    /// role 定义文件的绝对路径（通常是 `ROLE.md`，旧目录可能仍是 `SKILL.md`）。
     pub path: PathBuf,
 }
 
 const STAGING_SUFFIX: &str = ".staging";
 const BAK_PREFIX: &str = ".bak-";
+/// 新名——M3.2 起 `ROLE.md`；`SKILL.md` 是读取兼容保留。
+pub(crate) const ROLE_FILE: &str = "ROLE.md";
+/// 旧名——仅在读取路径兜底，写都走 `ROLE_FILE`。
+pub(crate) const LEGACY_SKILL_FILE: &str = "SKILL.md";
 
-/// 写榜文：创建 `<root>/<role>.staging/SKILL.md` 并返回文件路径。
+/// 写榜文：创建 `<root>/<role>.staging/ROLE.md` 并返回文件路径。
 pub fn stage_write(root: &Path, role: &str, content: &str) -> Result<PathBuf> {
     validate_role(role)?;
     let stage_dir = root.join(format!("{role}{STAGING_SUFFIX}"));
     std::fs::create_dir_all(&stage_dir)
         .with_context(|| format!("创建榜文目录 {}", stage_dir.display()))?;
-    let path = stage_dir.join("SKILL.md");
+    let path = stage_dir.join(ROLE_FILE);
     std::fs::write(&path, content).with_context(|| format!("写榜文 {}", path.display()))?;
     Ok(path)
 }
@@ -73,7 +78,14 @@ pub fn approve(root: &Path, role: &str) -> Result<PathBuf> {
             active_dir.display()
         )
     })?;
-    Ok(active_dir.join("SKILL.md"))
+    // 新 approve 落盘用 ROLE.md；若目录里仍是旧 SKILL.md（不该发生——stage_write 已写 ROLE.md），
+    // 返回实际在的那个。
+    let role_md = active_dir.join(ROLE_FILE);
+    if role_md.exists() {
+        Ok(role_md)
+    } else {
+        Ok(active_dir.join(LEGACY_SKILL_FILE))
+    }
 }
 
 /// reject：删榜文目录。没有榜文则报错。
@@ -108,20 +120,23 @@ pub fn list_all(root: &Path) -> Result<Vec<SkillEntry>> {
         if name.starts_with('.') || name.contains(BAK_PREFIX) {
             continue;
         }
-        let skill_md = entry.path().join("SKILL.md");
-        if !skill_md.exists() {
-            continue;
-        }
+        // M3.2 · 优先 ROLE.md，fallback SKILL.md（兼容未迁移的旧目录）
+        let role_file = entry.path().join(ROLE_FILE);
+        let path = if role_file.exists() {
+            role_file
+        } else {
+            let legacy = entry.path().join(LEGACY_SKILL_FILE);
+            if !legacy.exists() {
+                continue;
+            }
+            legacy
+        };
         let (role, state) = if let Some(stripped) = name.strip_suffix(STAGING_SUFFIX) {
             (stripped.to_string(), SkillState::Staging)
         } else {
             (name.to_string(), SkillState::Active)
         };
-        out.push(SkillEntry {
-            role,
-            state,
-            path: skill_md,
-        });
+        out.push(SkillEntry { role, state, path });
     }
     Ok(out)
 }
