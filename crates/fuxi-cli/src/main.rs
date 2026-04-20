@@ -17,6 +17,7 @@ mod click_registry;
 mod client;
 mod daemon;
 mod demo;
+mod extractor_hook;
 mod ipc;
 mod memory_cmd;
 mod repl;

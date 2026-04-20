@@ -9,6 +9,7 @@ use fuxi_core::id::AgentId;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// 单个门客的 shelf 记录。
@@ -23,6 +24,13 @@ pub struct ShelfEntry {
     pub status: ShelfStatus,
     /// 分配给该门客的 worktree。None 表示"在主目录上干活"（不推荐，但支持）。
     pub worktree: Option<fuxi_core::workspace::WorkspaceHandle>,
+    /// 门客进入 Idle 的时间戳——用于 M2.4 idle TTL GC。
+    ///
+    /// WHY `Option`：只在 status==Idle 时有值；Busy / Dead 下立刻清 None，
+    /// 避免 GC 误把忙碌或已死门客算作"idle 了多久"。
+    /// WHY `Instant` 而非 `SystemTime`：monotonic，不受墙钟回拨影响；TTL 只关心
+    /// 流逝时长，用 Instant 语义正确。
+    pub idle_since: Option<Instant>,
 }
 
 /// 门客的局部可观测状态。**不是** `AgentStatus`——那是 agent 自报、
@@ -60,9 +68,17 @@ impl Shelf {
     }
 
     /// 更新状态。id 不存在时静默忽略（竞态：门客可能刚被 destroy）。
+    ///
+    /// 同步维护 `idle_since`：
+    /// - → `Idle`：刻此刻，供 TTL GC 判定空闲时长
+    /// - → `Busy` / `Dead`：清 None，避免误算
     pub async fn set_status(&self, id: AgentId, new: ShelfStatus) {
         if let Some(e) = self.inner.write().await.get_mut(&id) {
             e.status = new;
+            e.idle_since = match new {
+                ShelfStatus::Idle => Some(Instant::now()),
+                ShelfStatus::Busy | ShelfStatus::Dead => None,
+            };
         }
     }
 
@@ -83,6 +99,9 @@ impl Shelf {
             .find(|(_, e)| e.status == ShelfStatus::Idle && e.card.profile.role == role);
         if let Some((id, e)) = pick {
             e.status = ShelfStatus::Busy;
+            // claim 等价于"占用"——同 set_status(Busy) 语义，必须清 idle_since，
+            // 否则 GC 仍然把这只门客算作 idle 超时（竞态会把已 busy 的门客误杀）。
+            e.idle_since = None;
             Some(*id)
         } else {
             None
@@ -133,5 +152,30 @@ impl Shelf {
     /// 是否为空——避免测试里 `len() == 0` 的冗长。
     pub async fn is_empty(&self) -> bool {
         self.inner.read().await.is_empty()
+    }
+
+    /// 返回某门客当前的 `idle_since`——仅供内部（GC 测试 / 观测）用。
+    /// 找不到或非 Idle 态时返回 None。
+    pub async fn idle_since_of(&self, id: AgentId) -> Option<Instant> {
+        self.inner.read().await.get(&id).and_then(|e| e.idle_since)
+    }
+
+    /// 返回所有 `Idle` 且超过 `ttl` 没动的门客 id。
+    ///
+    /// 供 M2.4 idle GC 用——只看 `idle_since`，不在意 status 以外的属性。
+    /// 时间基准是 monotonic `Instant`，不受墙钟回拨影响。
+    pub async fn idle_longer_than(&self, ttl: Duration) -> Vec<AgentId> {
+        let now = Instant::now();
+        self.inner
+            .read()
+            .await
+            .iter()
+            .filter_map(|(id, e)| match (e.status, e.idle_since) {
+                (ShelfStatus::Idle, Some(since)) if now.saturating_duration_since(since) >= ttl => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect()
     }
 }

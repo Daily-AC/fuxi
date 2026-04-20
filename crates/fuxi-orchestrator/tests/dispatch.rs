@@ -852,6 +852,7 @@ async fn shelf_worktree_of_returns_path_when_allocated() {
             agent: stub.clone() as Arc<dyn Agent>,
             status: ShelfStatus::Idle,
             worktree: Some(wt.clone()),
+            idle_since: Some(std::time::Instant::now()),
         })
         .await;
 

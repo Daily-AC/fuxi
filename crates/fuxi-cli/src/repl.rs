@@ -65,7 +65,10 @@ static THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
 pub(crate) fn theme() -> &'static Theme {
     THEME.get_or_init(theme::from_env)
 }
-use fuxi_orchestrator::{Fuxi, FuxiConfig, ShelfStatus, SystemEventBridge, WorkerKind};
+use fuxi_orchestrator::{
+    DEFAULT_TICK_INTERVAL_SECS, Fuxi, FuxiConfig, IdleGcTask, IdleShutdowner, ShelfStatus,
+    SystemEventBridge, WorkerKind, ttl_from_env,
+};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::{Keeper, TriggerStore};
 use fuxi_skills as skill_loader;
@@ -217,6 +220,19 @@ pub async fn run(args: Args) -> Result<()> {
         Arc::new(SystemClock),
     ));
     let keeper_task = Arc::clone(&keeper).spawn();
+
+    // 门客 idle GC（M2.4）——每 30s 扫一次 shelf，超时 idle 门客回收。
+    // Arc<Fuxi> 实现 IdleShutdowner；GC 拿 Arc 持 'static，不阻止 Fuxi drop。
+    let gc_shutdowner: Arc<dyn IdleShutdowner> = fuxi.clone();
+    let gc_task = IdleGcTask::new(
+        fuxi.clone_shelf(),
+        gc_shutdowner,
+        bus.clone(),
+        ttl_from_env(),
+        Duration::from_secs(DEFAULT_TICK_INTERVAL_SECS),
+    )
+    .spawn();
+
     let daemon = Daemon::new(fuxi.clone(), bus.clone(), sched_store.clone(), keeper);
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
@@ -284,6 +300,33 @@ pub async fn run(args: Args) -> Result<()> {
     let bridge_task =
         SystemEventBridge::spawn(fuxi.clone(), bus.clone(), xuannv_id, trigger_lookup);
 
+    // M2.5 · 策府 Extractor 挂载：订阅 TaskStateChanged::Done，spawn extractor
+    // 门客自动抽 S-P-O 入甲骨。skill 缺失时降级为跳过（warn 提示用户装）。
+    // FUXI_EXTRACTOR_ENABLED=0 关。
+    let oracle = Arc::new(oracle);
+    let extractor_task = match crate::extractor_hook::load_extractor_launch() {
+        Ok((ex_profile, ex_cfg)) => {
+            let spawner = Arc::new(crate::extractor_hook::FuxiExtractorSpawner::new(
+                fuxi.clone(),
+                bus.clone(),
+                ex_profile,
+                ex_cfg,
+            ));
+            let extractor = fuxi_memory::Extractor::new(
+                bus.clone(),
+                oracle.clone(),
+                spawner,
+                crate::extractor_hook::extractor_cfg_from_env(),
+            );
+            tracing::info!("Extractor 已挂载——task Done 后自动抽 fact 入策府");
+            Some(extractor.spawn())
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "extractor skill 加载失败，长期记忆自动抽取禁用");
+            None
+        }
+    };
+
     let greet = Task::new(
         "greet",
         "用户刚启动 fuxi REPL。请用一句话（十字以内）主动问好，邀请用户提需求。不要自我介绍。",
@@ -302,7 +345,11 @@ pub async fn run(args: Args) -> Result<()> {
     hub_task.abort();
     daemon_task.abort();
     keeper_task.abort();
+    gc_task.abort();
     bridge_task.abort();
+    if let Some(t) = extractor_task {
+        t.abort();
+    }
 
     outcome
 }
