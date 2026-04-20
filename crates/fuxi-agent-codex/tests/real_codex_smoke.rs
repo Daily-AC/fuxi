@@ -52,7 +52,9 @@ async fn real_codex_echo_roundtrip() {
         ..Default::default()
     };
 
-    let agent = CodexAgent::launch(profile, cfg).expect("launch codex");
+    let agent = CodexAgent::launch(profile, cfg)
+        .await
+        .expect("launch codex");
     let task = Task::new("echo hi", "Reply with exactly the word hi then stop.");
     let mut rx = agent.dispatch(task).await.expect("dispatch");
 

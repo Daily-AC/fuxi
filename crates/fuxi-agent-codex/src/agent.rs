@@ -78,9 +78,26 @@ impl CodexAgent {
     /// 为什么 `launch` 不 spawn：codex exec 的 prompt 是位置参数，必须在 Task
     /// 到来时才有。懒 spawn 避免「起了进程但还没 prompt，codex 开始读 stdin
     /// 假死」的坑。
-    pub fn launch(profile: AgentProfile, cfg: CodexLaunchConfig) -> Result<Self> {
+    ///
+    /// 内部只是给 `launch_with_id` 套个新 `AgentId::new()` 的便利层。新业务代码
+    /// 都应该走 `launch_with_id`——编排层（玄女）必须做唯一 id 真相源（S1 教训）。
+    pub async fn launch(profile: AgentProfile, cfg: CodexLaunchConfig) -> Result<Self> {
+        Self::launch_with_id(AgentId::new(), profile, cfg).await
+    }
+
+    /// 编排层指定 id 版本——解决 S1 教训的 AgentId 双生问题。
+    ///
+    /// 与 `CcAgent::launch_with_id` 签名对齐（`async fn`），方便
+    /// `Fuxi::spawn_worker` 用同一个 await 语法在不同 `WorkerKind` 分支间路由。
+    /// 实际 codex 不需要任何异步初始化（懒 spawn），但保持 trait 签名一致比省一个
+    /// `await` 更值得。
+    pub async fn launch_with_id(
+        id: AgentId,
+        profile: AgentProfile,
+        cfg: CodexLaunchConfig,
+    ) -> Result<Self> {
         let card = AgentCard {
-            id: AgentId::new(),
+            id,
             profile,
             // 没 spawn 过所以没有 pid；dispatch 时会变。
             endpoint: "pid:unspawned".to_string(),
@@ -282,7 +299,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_returns_error_in_exec_mode() {
-        let agent = CodexAgent::launch(profile(), CodexLaunchConfig::default()).expect("launch");
+        let agent = CodexAgent::launch(profile(), CodexLaunchConfig::default())
+            .await
+            .expect("launch");
         let res = agent.send_message(TaskId::new(), "hi").await;
         let err = res.expect_err("send_message should reject in exec mode");
         // 错误文本里必须提到 follow-up/exec，方便上层日志排障。
@@ -295,9 +314,29 @@ mod tests {
 
     #[tokio::test]
     async fn launch_does_not_spawn_any_child() {
-        let agent = CodexAgent::launch(profile(), CodexLaunchConfig::default()).expect("launch");
+        let agent = CodexAgent::launch(profile(), CodexLaunchConfig::default())
+            .await
+            .expect("launch");
         let inner = agent.inner.lock().await;
         assert!(inner.child.is_none());
         assert_eq!(inner.status, AgentStatus::Idle);
+    }
+
+    /// S1 教训守门：`launch_with_id` 必须保留 caller 给的 id，不能内部 `AgentId::new()`。
+    /// 没这条 lifecycle 事件 (AgentSpawning/AgentReady) 会属于不同 id，shelf 永远 Busy。
+    #[tokio::test]
+    async fn launch_with_id_preserves_caller_id() {
+        let want = AgentId::new();
+        let agent = CodexAgent::launch_with_id(want, profile(), CodexLaunchConfig::default())
+            .await
+            .expect("launch_with_id");
+        assert_eq!(agent.card().id, want);
+    }
+
+    /// 编译时 trait 实装断言——若 `impl Agent for CodexAgent` 被误删，本测试不通过。
+    #[test]
+    fn codex_agent_implements_agent_trait() {
+        fn assert_agent<T: Agent>() {}
+        assert_agent::<CodexAgent>();
     }
 }

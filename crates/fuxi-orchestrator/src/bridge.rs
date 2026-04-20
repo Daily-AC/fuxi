@@ -203,9 +203,7 @@ async fn handle_event(
             }
         }
         EventKind::OrchestratorCcReceived {
-            from_user_to,
-            text,
-            ..
+            from_user_to, text, ..
         } => {
             // 过滤条件：抄送的目标（meta.agent）必须就是玄女；否则这不是发给她的抄送。
             let Some(target) = ev.meta.agent else {

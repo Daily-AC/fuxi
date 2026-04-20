@@ -15,6 +15,7 @@ use crate::error::{OrchestratorError, Result};
 use crate::registry::{Shelf, ShelfEntry, ShelfStatus};
 use futures_util::StreamExt;
 use fuxi_agent_cc::{CcAgent, CcLaunchConfig};
+use fuxi_agent_codex::{CodexAgent, CodexLaunchConfig};
 use fuxi_core::agent::{Agent, AgentProfile};
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::AgentId;
@@ -46,22 +47,25 @@ impl Default for FuxiConfig {
     }
 }
 
-/// 支持 spawn 的门客种类。暂时只有 cc；codex/gemini/opencode 随其适配器
-/// 完成后加分支即可。
+/// 支持 spawn 的门客种类。gemini/opencode 随其适配器完成后加分支即可。
 #[derive(Debug, Clone)]
 pub enum WorkerKind {
     /// Claude Code 门客，带启动参数。
     Cc(CcLaunchConfig),
+    /// OpenAI Codex CLI 门客（`codex exec --json`，spawn-per-dispatch）。
+    Codex(CodexLaunchConfig),
 }
 
 impl WorkerKind {
     /// 对应到 `AgentProfile.cli` / `AgentSpawning.cli` 的文本标签。
     ///
-    /// WHY 独立方法：P2 还会加 codex/gemini 的 variant；集中在此避免每个调用点
-    /// 都 match 一次 `to_string`。
+    /// WHY 独立方法：集中在此避免每个调用点都 match 一次 `to_string`。
+    /// 标签必须和 `fuxi-skills` loader 里 frontmatter `metadata.cli` 的取值
+    /// 对齐——daemon::spawn_by_role 据此选 WorkerKind 分支。
     pub fn cli_tag(&self) -> &'static str {
         match self {
             WorkerKind::Cc(_) => "claude-code",
+            WorkerKind::Codex(_) => "codex",
         }
     }
 }
@@ -234,36 +238,56 @@ impl Fuxi {
             None
         };
 
-        // 3. 适配器 launch。
-        let launch_result = match kind {
+        // 3. 适配器 launch。每个分支都返回一个统一的
+        //    `Result<(Arc<dyn Agent>, String /* endpoint_hint */), CoreError>`，
+        //    后面共享同一段 register / 失败回滚逻辑。
+        //    cc 还需要把 `take_death_watch` 的 rx 起转发——只有 cc 有 WS 死亡通道，
+        //    codex 是 spawn-per-dispatch，进程在 dispatch 结束就退出，无需独立死亡 watcher。
+        let launch_result: Result<(Arc<dyn Agent>, String)> = match kind {
             WorkerKind::Cc(mut cc_cfg) => {
                 if let (None, Some(h)) = (cc_cfg.cwd.as_ref(), worktree.as_ref()) {
                     cc_cfg.cwd = Some(h.worktree_path.clone());
                 }
-                CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg).await
-            }
-        };
-        match launch_result {
-            Ok(a) => {
-                let endpoint_hint = a.card().endpoint.clone();
-                // 取出死亡信号接收端 → spawn 转发任务 → 死亡时 publish AgentDead。
-                // 放在 Arc::new 之前——take_death_watch 是 `&CcAgent` 方法，
-                // 装进 Arc<dyn Agent> 后就拿不动了。
-                let death_rx = a.take_death_watch();
-                if let Some(mut rx) = death_rx {
-                    let bus = self.bus.clone();
-                    tokio::spawn(async move {
-                        if let Some(reason) = rx.recv().await {
-                            let mut meta = EventMeta::now();
-                            meta.agent = Some(agent_id);
-                            let _ = bus.publish(Event {
-                                meta,
-                                kind: EventKind::AgentDead { cause: reason },
+                match CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg).await {
+                    Ok(a) => {
+                        let endpoint_hint = a.card().endpoint.clone();
+                        // 取出死亡信号接收端 → spawn 转发任务 → 死亡时 publish AgentDead。
+                        // 放在 Arc::new 之前——take_death_watch 是 `&CcAgent` 方法，
+                        // 装进 Arc<dyn Agent> 后就拿不动了。
+                        if let Some(mut rx) = a.take_death_watch() {
+                            let bus = self.bus.clone();
+                            tokio::spawn(async move {
+                                if let Some(reason) = rx.recv().await {
+                                    let mut meta = EventMeta::now();
+                                    meta.agent = Some(agent_id);
+                                    let _ = bus.publish(Event {
+                                        meta,
+                                        kind: EventKind::AgentDead { cause: reason },
+                                    });
+                                }
                             });
                         }
-                    });
+                        Ok((Arc::new(a) as Arc<dyn Agent>, endpoint_hint))
+                    }
+                    Err(e) => Err(e.into()),
                 }
-                let agent: Arc<dyn Agent> = Arc::new(a);
+            }
+            WorkerKind::Codex(mut codex_cfg) => {
+                if let (None, Some(h)) = (codex_cfg.cwd.as_ref(), worktree.as_ref()) {
+                    codex_cfg.cwd = Some(h.worktree_path.clone());
+                }
+                match CodexAgent::launch_with_id(agent_id, profile.clone(), codex_cfg).await {
+                    Ok(a) => {
+                        let endpoint_hint = a.card().endpoint.clone();
+                        Ok((Arc::new(a) as Arc<dyn Agent>, endpoint_hint))
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+        };
+
+        match launch_result {
+            Ok((agent, endpoint_hint)) => {
                 let id = self.register_ready(agent, worktree, endpoint_hint).await;
                 debug_assert_eq!(id, agent_id, "launch_with_id 应保证 id 一致");
                 Ok(agent_id)
@@ -275,13 +299,9 @@ impl Fuxi {
                 {
                     warn!(error = %cleanup, "回滚 worktree 失败（留档）");
                 }
-                self.publish_with_agent(
-                    agent_id,
-                    EventKind::AgentDead {
-                        cause: format!("launch failed: {e}"),
-                    },
-                );
-                Err(OrchestratorError::Core(e))
+                let cause = format!("launch failed: {e}");
+                self.publish_with_agent(agent_id, EventKind::AgentDead { cause });
+                Err(e)
             }
         }
     }
@@ -653,4 +673,20 @@ fn spawn_death_watcher(bus: EventBus, shelf: Arc<Shelf>) {
         }
         debug!("death_watcher: bus 订阅流结束，退出");
     });
+}
+
+#[cfg(test)]
+mod worker_kind_tests {
+    use super::*;
+    use fuxi_agent_codex::CodexLaunchConfig;
+
+    /// 守门：cli_tag 必须分别返回 cc / codex 适配器对应的标签。daemon::spawn_by_role
+    /// 用 `profile.cli` 反查 WorkerKind 分支，标签飘了就 spawn 不出来。
+    #[test]
+    fn cli_tag_distinguishes_cc_and_codex() {
+        let cc = WorkerKind::Cc(CcLaunchConfig::default());
+        let codex = WorkerKind::Codex(CodexLaunchConfig::default());
+        assert_eq!(cc.cli_tag(), "claude-code");
+        assert_eq!(codex.cli_tag(), "codex");
+    }
 }
