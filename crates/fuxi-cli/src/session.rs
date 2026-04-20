@@ -36,8 +36,7 @@ pub async fn resolve_xuannv_session(
     let new_id = Uuid::new_v4().to_string();
     oracle
         .insert(
-            NewFact::new(XUANNV_SUBJECT, SESSION_PREDICATE, &new_id)
-                .with_source("repl-bootstrap"),
+            NewFact::new(XUANNV_SUBJECT, SESSION_PREDICATE, &new_id).with_source("repl-bootstrap"),
         )
         .await?;
     Ok((None, Some(new_id)))
@@ -73,7 +72,11 @@ mod tests {
     async fn subsequent_run_returns_resume_and_skips_write() {
         let oracle = OracleStore::connect_memory().await.unwrap();
         oracle
-            .insert(NewFact::new(XUANNV_SUBJECT, SESSION_PREDICATE, "existing-sess"))
+            .insert(NewFact::new(
+                XUANNV_SUBJECT,
+                SESSION_PREDICATE,
+                "existing-sess",
+            ))
             .await
             .unwrap();
 

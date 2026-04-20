@@ -18,8 +18,9 @@ use crate::ipc;
 use anyhow::{Context, Result, anyhow};
 use clap::Args as ClapArgs;
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
@@ -29,13 +30,41 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use fuxi_agent_cc::CcLaunchConfig;
 use fuxi_core::agent::AgentCard;
-use fuxi_memory::OracleStore;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
 use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
 use fuxi_firehose::{EventRow, FirehoseApp, Hub};
+use fuxi_memory::OracleStore;
+
+use crate::click_registry::ClickRegistry;
+use crate::theme::{self, Theme};
+
+/// 鼠标点击落到哪里就触发哪个动作。v1 只三个粗粒度 pane 切换——
+/// per-row 选中 / 按钮 hit-test 等留 v2。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // Focus* 共享前缀是有意的：语义就是"把焦点切到 X"
+pub(crate) enum ClickAction {
+    /// 点到左栏：把焦点切到任务树。
+    FocusRoster,
+    /// 点到中下输入框：把焦点切到输入（用户期望的默认态）。
+    FocusInput,
+    /// 点到中上对话区：焦点设为 Input 但不吞当前行——等 v2 做 per-msg 交互。
+    FocusDialogue,
+}
+
+/// 全局主题——启动时一次从 env 读定，widget 内 `theme()` 取引用。
+///
+/// 为什么 `OnceLock` 而不是 struct field：theme 是**只读**的 presentation
+/// 配置，把它塞到 ReplApp / 各 draw_* 方法会让大量函数签名污染。OnceLock
+/// 让静态访问成 O(1) 指针 deref，多线程读也安全。v1 不支持运行时切主题
+/// （重启 fuxi 才重读 FUXI_THEME），v2 若要可以 `RwLock<Theme>`。
+static THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+
+pub(crate) fn theme() -> &'static Theme {
+    THEME.get_or_init(theme::from_env)
+}
 use fuxi_orchestrator::{Fuxi, FuxiConfig, ShelfStatus, SystemEventBridge, WorkerKind};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::{Keeper, TriggerStore};
@@ -368,6 +397,10 @@ pub(crate) struct ReplApp {
 
     /// 任务 prune 延迟——测试里可调短。
     pub(crate) prune_delay: Duration,
+
+    /// 鼠标点击区注册表。每帧 `draw()` 开头 `clear()`，各 draw_*
+    /// 末尾 `register(area, ClickAction::Xxx)`。mouse 事件 hit_test 分派。
+    pub(crate) click: ClickRegistry<ClickAction>,
 }
 
 fn new_textarea() -> TextArea<'static> {
@@ -399,6 +432,7 @@ impl ReplApp {
             should_quit: false,
             confirm_quit: false,
             prune_delay: TASK_PRUNE_DELAY,
+            click: ClickRegistry::new(),
         };
         app.roster_state.select(Some(0));
         app
@@ -969,6 +1003,10 @@ impl ReplApp {
     }
 
     pub(crate) fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
+        // 新一帧：清空上帧的 click regions（hit-test 后者胜，所以最后 register
+        // 的 pane 会命中——pane 区域互不重叠，谁先注册其实无关）。
+        self.click.clear();
+
         let root = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -986,6 +1024,7 @@ impl ReplApp {
             ])
             .split(root[0]);
         self.draw_roster(f, left[0]);
+        self.click.register(left[0], ClickAction::FocusRoster);
         if self.events_visible {
             self.draw_events(f, left[1]);
         }
@@ -999,10 +1038,47 @@ impl ReplApp {
             ])
             .split(root[1]);
         self.draw_dialogue(f, center[0]);
+        self.click.register(center[0], ClickAction::FocusDialogue);
         self.draw_input(f, center[1]);
+        self.click.register(center[1], ClickAction::FocusInput);
         self.draw_status(f, center[2]);
 
         self.draw_meta(f, root[2]);
+    }
+
+    /// 处理鼠标事件。v1 仅三类：
+    ///
+    /// - 左键按下 → `click.hit_test` → 切 pane focus
+    /// - 滚轮 → 对话区滚动（与 PgUp/PgDn 行为一致）
+    ///
+    /// 其他（Drag / Moved / Right / Middle）先不处理。
+    pub(crate) fn handle_mouse(&mut self, ev: MouseEvent) {
+        match ev.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_up_page();
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_down_page();
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(action) = self.click.hit_test(ev.column, ev.row).copied() {
+                    self.apply_click(action);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_click(&mut self, a: ClickAction) {
+        match a {
+            ClickAction::FocusRoster => {
+                self.focus = Focus::Roster;
+            }
+            ClickAction::FocusInput | ClickAction::FocusDialogue => {
+                // 对话区点击暂等同"准备输入"——比把焦点悬空在对话上更符合用户直觉
+                self.focus = Focus::Input;
+            }
+        }
     }
 
     fn draw_roster(&mut self, f: &mut ratatui::Frame<'_>, area: Rect) {
@@ -1116,13 +1192,13 @@ impl ReplApp {
                 " 任务 "
             })
             .border_style(Style::default().fg(if self.focus == Focus::Roster {
-                Color::Cyan
+                theme().focus_border()
             } else {
-                Color::DarkGray
+                theme().dim_border()
             }));
         let list = List::new(items).block(block).highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(theme().muted())
                 .add_modifier(Modifier::BOLD),
         );
         let _ = selected;
@@ -1130,10 +1206,11 @@ impl ReplApp {
     }
 
     fn draw_events(&mut self, f: &mut ratatui::Frame<'_>, area: Rect) {
+        let t = theme();
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" 事件（过滤噪声） ")
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(t.dim_border()));
         let inner = block.inner(area);
         f.render_widget(block, area);
         let rows = self.events.visible_rows();
@@ -1149,14 +1226,16 @@ impl ReplApp {
                 let (icon, color, narrative) = narrate_event(r);
                 // 时间 (8) + icon (2) + who (6) + 3 空格 = 19 预留给头部
                 let reserved = 20u16;
-                let narrative_width =
-                    inner.width.saturating_sub(reserved).max(10) as usize;
+                let narrative_width = inner.width.saturating_sub(reserved).max(10) as usize;
                 Line::from(vec![
-                    Span::styled(r.time.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(r.time.clone(), Style::default().fg(t.muted())),
                     Span::raw(" "),
-                    Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        icon,
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(" "),
-                    Span::styled(short_str(&r.who, 6), Style::default().fg(Color::Blue)),
+                    Span::styled(short_str(&r.who, 6), Style::default().fg(t.info())),
                     Span::raw(" "),
                     Span::styled(
                         truncate_by_width(&narrative, narrative_width),
@@ -1190,7 +1269,7 @@ impl ReplApp {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(theme().focus_border()));
 
         let empty = VecDeque::new();
         let bucket = self.dialogues.get(&self.active).unwrap_or(&empty);
@@ -1228,9 +1307,9 @@ impl ReplApp {
                 .borders(Borders::ALL)
                 .title(title)
                 .border_style(Style::default().fg(if self.focus == Focus::Input {
-                    Color::Green
+                    theme().success()
                 } else {
-                    Color::DarkGray
+                    theme().dim_border()
                 })),
         );
         f.render_widget(&ta_widget, area);
@@ -1341,6 +1420,7 @@ fn render_dialogue_collapsed<'a, I>(iter: I) -> Vec<Line<'a>>
 where
     I: IntoIterator<Item = &'a DialogueLine>,
 {
+    let th = theme();
     let mut out = Vec::new();
     let mut prev_speaker: Option<String> = None;
     for line in iter {
@@ -1348,7 +1428,7 @@ where
             DialogueLine::User(t) => {
                 for ln in t.lines() {
                     out.push(Line::from(vec![
-                        Span::styled("▍ ", Style::default().fg(Color::Cyan)),
+                        Span::styled("▍ ", Style::default().fg(th.user_message())),
                         Span::raw(ln.to_string()),
                     ]));
                 }
@@ -1366,13 +1446,10 @@ where
                             Span::styled(
                                 "● ",
                                 Style::default()
-                                    .fg(Color::Magenta)
+                                    .fg(th.agent_message())
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(
-                                format!("{name} "),
-                                Style::default().fg(Color::DarkGray),
-                            ),
+                            Span::styled(format!("{name} "), Style::default().fg(th.muted())),
                             Span::raw(ln.to_string()),
                         ]));
                     } else {
@@ -1387,11 +1464,11 @@ where
             DialogueLine::System(t) => {
                 for ln in t.lines() {
                     out.push(Line::from(vec![
-                        Span::styled("· ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("· ", Style::default().fg(th.muted())),
                         Span::styled(
                             ln.to_string(),
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(th.warn())
                                 .add_modifier(Modifier::ITALIC),
                         ),
                     ]));
@@ -1410,43 +1487,44 @@ where
 /// 未知 kind 回退用 `row.summary` 原文，至少不会丢信息。设计参考
 /// `docs/research/tui-v2-aesthetics.md` §4 Claude Code transcript 翻译表。
 fn narrate_event(r: &EventRow) -> (&'static str, Color, String) {
+    let t = theme();
     let summary = r.summary.as_str();
     match r.kind_tag {
-        "platform_started" => ("★", Color::Green, "平台启动".to_string()),
-        "platform_stopping" => ("☾", Color::DarkGray, "平台关闭".to_string()),
-        "agent_spawning" => ("·", Color::DarkGray, "招募中…".to_string()),
-        "agent_ready" => ("●", Color::Green, format!("上线 · {summary}")),
-        "agent_shutting_down" => ("·", Color::DarkGray, "准备下线".to_string()),
-        "agent_dead" => ("✗", Color::Red, format!("下线 · {summary}")),
-        "task_created" => ("◇", Color::Cyan, format!("新任务 · {summary}")),
-        "task_dispatched" => ("→", Color::Cyan, format!("接单 · {summary}")),
-        "task_state_changed" => ("↻", Color::Yellow, summary.to_string()),
-        "task_delivered" => ("✓", Color::Green, format!("完成 · {summary}")),
-        "task_blocked" => ("!", Color::Yellow, format!("阻塞 · {summary}")),
-        "task_resumed" => ("▶", Color::Green, format!("续上 · {summary}")),
-        "task_cancelled" => ("×", Color::DarkGray, format!("取消 · {summary}")),
-        "user_prompted" => ("▍", Color::Cyan, format!("用户 · {summary}")),
-        "agent_responded" => ("●", Color::Magenta, format!("回话 · {summary}")),
-        "user_intervention_sent" => ("✋", Color::Yellow, format!("指令 · {summary}")),
-        "agent_interrupted" => ("⎋", Color::Yellow, format!("打断 · {summary}")),
-        "task_intervention_applied" => ("✎", Color::Yellow, format!("追加 · {summary}")),
-        "orchestrator_cc_received" => ("📣", Color::Blue, format!("抄送 · {summary}")),
-        "conversation_handoff_requested" => ("⇄", Color::Magenta, format!("让贤 · {summary}")),
-        "conversation_transferred" => ("⇄", Color::Magenta, format!("已让贤 · {summary}")),
-        "conversation_returned" => ("↩", Color::Magenta, format!("回席 · {summary}")),
-        "trigger_registered" => ("⏰", Color::Blue, format!("更漏登记 · {summary}")),
-        "trigger_fired" => ("⏰", Color::Blue, format!("更漏响 · {summary}")),
-        "trigger_dispatched" => ("→", Color::Blue, format!("更漏派活 · {summary}")),
-        "trigger_skipped" => ("·", Color::DarkGray, format!("更漏跳过 · {summary}")),
-        "trigger_failed" => ("!", Color::Red, format!("更漏失败 · {summary}")),
-        "tool_call_started" => ("◈", Color::Yellow, format!("工具 · {summary}")),
-        "tool_call_finished" => ("✓", Color::DarkGray, format!("工具完 · {summary}")),
-        "message_sent" => ("→", Color::Blue, format!("消息 · {summary}")),
-        "message_received" => ("←", Color::Blue, format!("收信 · {summary}")),
+        "platform_started" => ("★", t.success(), "平台启动".to_string()),
+        "platform_stopping" => ("☾", t.muted(), "平台关闭".to_string()),
+        "agent_spawning" => ("·", t.muted(), "招募中…".to_string()),
+        "agent_ready" => ("●", t.success(), format!("上线 · {summary}")),
+        "agent_shutting_down" => ("·", t.muted(), "准备下线".to_string()),
+        "agent_dead" => ("✗", t.error(), format!("下线 · {summary}")),
+        "task_created" => ("◇", t.user_message(), format!("新任务 · {summary}")),
+        "task_dispatched" => ("→", t.user_message(), format!("接单 · {summary}")),
+        "task_state_changed" => ("↻", t.warn(), summary.to_string()),
+        "task_delivered" => ("✓", t.success(), format!("完成 · {summary}")),
+        "task_blocked" => ("!", t.warn(), format!("阻塞 · {summary}")),
+        "task_resumed" => ("▶", t.success(), format!("续上 · {summary}")),
+        "task_cancelled" => ("×", t.muted(), format!("取消 · {summary}")),
+        "user_prompted" => ("▍", t.user_message(), format!("用户 · {summary}")),
+        "agent_responded" => ("●", t.agent_message(), format!("回话 · {summary}")),
+        "user_intervention_sent" => ("✋", t.warn(), format!("指令 · {summary}")),
+        "agent_interrupted" => ("⎋", t.warn(), format!("打断 · {summary}")),
+        "task_intervention_applied" => ("✎", t.warn(), format!("追加 · {summary}")),
+        "orchestrator_cc_received" => ("📣", t.info(), format!("抄送 · {summary}")),
+        "conversation_handoff_requested" => ("⇄", t.agent_message(), format!("让贤 · {summary}")),
+        "conversation_transferred" => ("⇄", t.agent_message(), format!("已让贤 · {summary}")),
+        "conversation_returned" => ("↩", t.agent_message(), format!("回席 · {summary}")),
+        "trigger_registered" => ("⏰", t.info(), format!("更漏登记 · {summary}")),
+        "trigger_fired" => ("⏰", t.info(), format!("更漏响 · {summary}")),
+        "trigger_dispatched" => ("→", t.info(), format!("更漏派活 · {summary}")),
+        "trigger_skipped" => ("·", t.muted(), format!("更漏跳过 · {summary}")),
+        "trigger_failed" => ("!", t.error(), format!("更漏失败 · {summary}")),
+        "tool_call_started" => ("◈", t.tool_call(), format!("工具 · {summary}")),
+        "tool_call_finished" => ("✓", t.muted(), format!("工具完 · {summary}")),
+        "message_sent" => ("→", t.info(), format!("消息 · {summary}")),
+        "message_received" => ("←", t.info(), format!("收信 · {summary}")),
         "skill_staged" | "skill_approved" | "skill_rejected" | "skill_activated" => {
-            ("◆", Color::Magenta, format!("点将台 · {summary}"))
+            ("◆", t.agent_message(), format!("点将台 · {summary}"))
         }
-        "no_role_matched" => ("?", Color::Yellow, format!("无匹配 · {summary}")),
+        "no_role_matched" => ("?", t.warn(), format!("无匹配 · {summary}")),
         _ => ("·", r.color, summary.to_string()),
     }
 }
@@ -1568,7 +1646,12 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
     enable_raw_mode().context("enable_raw_mode")?;
     let mut stdout = io::stdout();
     // bracketed paste：让 IME / 剪贴板整块内容一次进入，不被 KEY_POLL 拆分成逐键序列
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     // Kitty keyboard protocol：让现代终端（iTerm2 ≥ 3.5 / Ghostty / Kitty / Alacritty）
     // 把 Shift+Enter 真的送成 `Enter + SHIFT`。不支持的终端（macOS Terminal.app、
     // tmux 未开 passthrough 等）会返回错误——我们吞掉，由 Alt+Enter / Ctrl+J 兜底。
@@ -1639,6 +1722,9 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
                         TermEvent::Paste(s) => {
                             app.handle_paste(&s);
                         }
+                        TermEvent::Mouse(m) => {
+                            app.handle_mouse(m);
+                        }
                         _ => {}
                     }
                 }
@@ -1653,6 +1739,7 @@ async fn drive_tui(bus: EventBus, fuxi: Arc<Fuxi>, xuannv_id: AgentId) -> Result
     }
     let _ = execute!(
         terminal.backend_mut(),
+        DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
     );
@@ -1687,7 +1774,12 @@ fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         prev(info);
     }));
 }
@@ -1782,8 +1874,77 @@ mod tests {
 
     #[test]
     fn narrate_event_covers_handoff_and_cc() {
-        assert!(narrate_event(&mk_row("conversation_handoff_requested", "a→b")).2.contains("让贤"));
-        assert!(narrate_event(&mk_row("orchestrator_cc_received", "luban")).2.contains("抄送"));
+        assert!(
+            narrate_event(&mk_row("conversation_handoff_requested", "a→b"))
+                .2
+                .contains("让贤")
+        );
+        assert!(
+            narrate_event(&mk_row("orchestrator_cc_received", "luban"))
+                .2
+                .contains("抄送")
+        );
+    }
+
+    // ───────── 鼠标交互：C4 click_registry 集成 ─────────
+
+    fn mk_mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn mouse_left_click_on_roster_region_focuses_roster() {
+        let mut app = ReplApp::stub();
+        app.focus = Focus::Input;
+        app.click
+            .register(Rect::new(0, 0, 28, 40), ClickAction::FocusRoster);
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 5, 5));
+        assert_eq!(app.focus, Focus::Roster);
+    }
+
+    #[test]
+    fn mouse_left_click_on_input_region_focuses_input() {
+        let mut app = ReplApp::stub();
+        app.focus = Focus::Roster;
+        app.click
+            .register(Rect::new(28, 40, 60, 5), ClickAction::FocusInput);
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 40, 42));
+        assert_eq!(app.focus, Focus::Input);
+    }
+
+    #[test]
+    fn mouse_click_outside_any_region_does_nothing() {
+        let mut app = ReplApp::stub();
+        let before = app.focus;
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        assert_eq!(app.focus, before, "空 registry 不应改 focus");
+    }
+
+    #[test]
+    fn mouse_scroll_up_breaks_autoscroll_same_as_pgup() {
+        let mut app = ReplApp::stub();
+        app.last_dialogue_total = 100;
+        app.last_dialogue_view = 10;
+        app.dialogue_scroll = 90;
+        assert!(app.dialogue_auto_scroll);
+        app.handle_mouse(mk_mouse(MouseEventKind::ScrollUp, 0, 0));
+        assert!(!app.dialogue_auto_scroll, "滚轮上应解除 auto-scroll");
+        assert!(app.dialogue_scroll < 90, "应真往上翻一页");
+    }
+
+    #[test]
+    fn mouse_right_button_is_ignored_in_v1() {
+        let mut app = ReplApp::stub();
+        let before = app.focus;
+        app.click
+            .register(Rect::new(0, 0, 28, 40), ClickAction::FocusRoster);
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Right), 5, 5));
+        assert_eq!(app.focus, before, "v1 不处理右键点击");
     }
 
     fn mk_task_ev(agent: Option<AgentId>, task: TaskId, kind: EventKind) -> Event {
@@ -2078,7 +2239,10 @@ mod tests {
         assert_eq!(rendered.len(), 2, "应生成两行");
         let first = line_to_plain(&rendered[0]);
         let second = line_to_plain(&rendered[1]);
-        assert!(first.starts_with("● 玄女 "), "第一行应带名字前缀: {first:?}");
+        assert!(
+            first.starts_with("● 玄女 "),
+            "第一行应带名字前缀: {first:?}"
+        );
         assert!(!second.starts_with("● "), "第二行应去前缀缩进: {second:?}");
         assert!(second.contains("line2"));
     }
