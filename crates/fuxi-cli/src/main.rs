@@ -19,6 +19,7 @@ mod demo;
 mod ipc;
 mod memory_cmd;
 mod repl;
+mod session;
 mod skill;
 mod subcommands;
 mod up;
