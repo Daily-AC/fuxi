@@ -169,6 +169,8 @@ crates/
 
 ### M1.4 · 三栏 TUI（repl.rs 重构）
 
+> ⚠️ **2026-04-20 override**：左栏 roster 改**任务树**（按 task 分组，agent 挂 task 下）。详见 `docs/decisions/03-tui-task-tree-override.md`。下面 R4 原决策保留作历史参考，实装以 decision 03 为准。Fix-D teammate 负责全改。
+
 **决策**（来自 R4）：
 
 - **布局**：`Layout::horizontal([Length(26), Min(40), Length(28)])` → 中栏 `Vertical(dialogue=Min(5) + input=Length(3) + status=Length(1))` → 左栏下端折叠事件流（F2 toggle）

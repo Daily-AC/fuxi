@@ -80,7 +80,17 @@ fuxi/
   1. 必须提供 `launch_with_id(id, ...)`——不能自己 `AgentId::new()`，否则 `AgentSpawning`/`AgentReady` 属不同 id
   2. 任何事件 pump 要保证"无论怎么退出都摊回 Idle"，否则 shelf 永久 Busy
   3. "find then act" 类接口要原子（`claim_*_by_*` 命名），不能 find + set_status 两步，否则并发会双派
+- **cc 反连 --sdk-url 被 Clash TUN 吞**：本机 VPN（Clash/Surge TUN 模式）把 127.0.0.1 也代理走，cc 反连 WS 的 SYN 被拦，表现是 30s timeout。`spawn_claude` 已注入 `NO_PROXY=127.0.0.1,localhost`；**手动起 claude 也要加**（并行 cc team 脚本时踩过）。sia/src/core/cc-process.ts:666-667 同坑同解。
+- **起子 cc 必清 `CLAUDECODE*` env**：父 cc（我主线）起子 cc 时子进程继承 env 会触发嵌套检测静默卡死。`agent-cc/spawn.rs` 已做；主线 Bash 起 `claude -p` 也要 `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_NO_FLICKER -u CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS -u CLAUDE_CODE_EXECPATH`。
+- **TUI stderr 重定向必须在 `init_tracing` 之前**（2026-04-20 踩，`main.rs` 修过）：否则 fuxi 启动期（hub/daemon/spawn）的 tracing 打到原 fd 2，alt screen 遮住，退 TUI 后一把冒出来满屏。在 `main()` 开头就 `dup2(file, 2)`。
+- **`intervene` Idle 自动退化 dispatch**（2026-04-20 玄女自诊断）：cc Idle 状态下 `active_tx=None`，`send_message` 发 WS 消息响应被 drop。`Fuxi::intervene` 入口检 shelf status，Idle → `dispatch(Task::new("intervention", text))`。见 `docs/decisions/04`。
+- **加 EventKind 新变体**必同步 5 处（再强调一次）：`events/store.rs::kind_tag` + `firehose/hub.rs::kind_tag` + `firehose/tui.rs::summarize + color_for` + 持久化测试。clippy `-D warnings` 会一次性报三处。
+- **Cargo.lock cherry-pick 后常坏**：多 teammate 改 Cargo.toml 时 lock 自动合并失败。直接 `rm Cargo.lock && cargo build` 重生，比 manual 解快且稳。
 
-## 设计文档
+## 决策 + 过程文档
 
-`docs/superpowers/specs/2026-04-19-伏羲-design.md` — 宏观设计。改方向前先改这份。
+- `docs/architecture-v1.md` — v1 蓝图（**改方向先改这份**）
+- `docs/decisions/` — 6 份独立决策（01 并行 cc / 02 soul-first skill / 03 任务树 UI / 04 intervene 退化 / 05 让贤保留 / 06 文化命名）
+- `docs/handoff/v1-session2.md` — 下个 session 开工指引
+- `docs/session-review-2026-04-*.md` — 过程性记录（为什么这么做 / 踩坑 / 否决方案）
+- `docs/superpowers/specs/2026-04-19-伏羲-design.md` — 最早的宏观设计
