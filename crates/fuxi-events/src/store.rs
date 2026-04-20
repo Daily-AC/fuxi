@@ -149,6 +149,25 @@ impl EventStore {
         Box::pin(ReceiverStream::new(rx))
     }
 
+    /// 拿某 task 的完整历史事件（按 rowid 升序）。
+    ///
+    /// 给 Extractor（M2.5）用：task 结束后拼 transcript 要按 task_id 取
+    /// UserPrompted + AgentResponded。用非流式 `Vec` 而非 stream：任务级事件
+    /// 量 O(几十)，接收方直接过滤 enum variant 更顺手，没必要 Stream。
+    pub async fn history_for_task(&self, task: fuxi_core::TaskId) -> Result<Vec<Event>> {
+        let rows = sqlx::query("SELECT payload FROM events WHERE task = ?1 ORDER BY rowid ASC")
+            .bind(task.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload: String = row.try_get("payload")?;
+            let ev: Event = serde_json::from_str(&payload)?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
+
     /// 同 crate 内暴露 pool 给 bus/测试使用。
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {
@@ -452,6 +471,39 @@ mod tests {
             .await
             .expect("replay");
         assert_eq!(got.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn history_for_task_returns_only_matching_task_in_order() {
+        // WHY：Extractor（M2.5）要按 task_id 拉该任务的完整事件序列拼 transcript。
+        // 现在没有任何 bus/store API 暴露"按 task 筛"的能力，必须显式返回按存储
+        // 顺序升序、过滤同一 task_id 的历史事件。别的 task 的事件不应混进来。
+        let store = EventStore::connect_memory().await.expect("connect");
+        let t1 = TaskId::new();
+        let t2 = TaskId::new();
+
+        let ev_for_task = |task: TaskId, label: &str| {
+            let mut meta = EventMeta::now();
+            meta.task = Some(task);
+            Event {
+                meta,
+                kind: EventKind::Custom {
+                    label: label.to_string(),
+                    payload: serde_json::json!({}),
+                },
+            }
+        };
+        let a = ev_for_task(t1, "a");
+        let b = ev_for_task(t2, "b"); // 噪声，别让它混进来
+        let c = ev_for_task(t1, "c");
+        for ev in [&a, &b, &c] {
+            store.append(ev).await.expect("append");
+        }
+
+        let hist = store.history_for_task(t1).await.expect("history");
+        assert_eq!(hist.len(), 2, "只应返回 task=t1 的两条事件");
+        assert_eq!(hist[0].meta.id, a.meta.id);
+        assert_eq!(hist[1].meta.id, c.meta.id);
     }
 
     #[tokio::test]

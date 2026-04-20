@@ -16,7 +16,10 @@ pub mod hetu;
 pub mod oracle;
 
 pub use error::{Error, Result};
-pub use extractor::{Extractor, ExtractorConfig};
+pub use extractor::{
+    DEFAULT_PROMPT_TEMPLATE, EXTRACTOR_ROLE, EXTRACTOR_SOURCE, Extractor, ExtractorConfig,
+    FactExtractorSpawner, SpawnerError, SpawnerResult,
+};
 pub use hetu::{HetuPattern, HetuStore, NewPattern};
 pub use oracle::{NewFact, OracleFact, OracleStore};
 

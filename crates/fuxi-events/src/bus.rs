@@ -192,6 +192,15 @@ impl EventBus {
         &self.inner.store
     }
 
+    /// 拿某 task 的完整历史事件（按存储顺序升序）。
+    ///
+    /// 薄包装 `EventStore::history_for_task`——Extractor（M2.5）作为 bus 消费者
+    /// 不该直接摸 store。这里转发一层，顺便让 `EventBus` 的消费方不必关心
+    /// "historical 读" 和 "实时 subscribe" 走的是同一 store 还是不同路径。
+    pub async fn history_for_task(&self, task: fuxi_core::TaskId) -> Result<Vec<fuxi_core::Event>> {
+        self.inner.store.history_for_task(task).await
+    }
+
     fn maybe_emit_lag_sentinel(&self, pending: usize) {
         // 为什么计数器：避免同一时刻狂刷 lag 哨兵反而加剧拥塞。
         let prev = self
@@ -291,6 +300,35 @@ mod tests {
             .expect("closed")
             .expect("err");
         assert_eq!(label_of(&got), "first");
+    }
+
+    #[tokio::test]
+    async fn history_for_task_delegates_to_store() {
+        // WHY：Extractor 订阅 bus、在 Done 后拉 task 的历史。作为 bus 的消费者
+        // 不该知道底下是 SQLite——从 bus 上直接有 `history_for_task` 最干净。
+        use fuxi_core::TaskId;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let t = TaskId::new();
+
+        let make = |label: &str| {
+            let mut meta = EventMeta::now();
+            meta.task = Some(t);
+            Event {
+                meta,
+                kind: EventKind::Custom {
+                    label: label.to_string(),
+                    payload: serde_json::json!({}),
+                },
+            }
+        };
+        bus.publish(make("a")).expect("publish a");
+        bus.publish(make("b")).expect("publish b");
+        wait_flush(&bus).await;
+
+        let hist = bus.history_for_task(t).await.expect("history");
+        assert_eq!(hist.len(), 2);
+        assert_eq!(label_of(&hist[0]), "a");
+        assert_eq!(label_of(&hist[1]), "b");
     }
 
     #[tokio::test]

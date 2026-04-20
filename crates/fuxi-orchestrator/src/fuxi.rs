@@ -215,6 +215,23 @@ impl Fuxi {
     /// 失败时已分配的 worktree 会被回滚（destroy 失败只 warn，不让清理错误掩盖
     /// 原始 launch 错误）；同时发 `AgentDead { cause: launch failed: ... }`。
     pub async fn spawn_worker(&self, profile: AgentProfile, kind: WorkerKind) -> Result<AgentId> {
+        // M2.4 · spawn 去重：同 role 已有 idle 门客 → 直接复用。
+        // 用户反馈 N4 / 玄女 §11 #5：反复 spawn 同 role 堆积不回收。GC 管过期，
+        // 这里管**新 spawn 时的去重**。两条道一起治，避免"玄女连点 5 次 spawn"
+        // 就起 5 个 cc subprocess。
+        //
+        // 用 find 不用 claim：spawn 语义返回"一个 Ready 的门客"，下一步由调用方
+        // 显式 dispatch 才切 Busy。并发 spawn 拿到同一 idle id 是正确的——复用
+        // 本来就想要这效果。
+        if let Some(existing) = self.shelf.find_idle_by_role(&profile.role).await {
+            info!(
+                agent = %existing,
+                role = %profile.role,
+                "spawn_worker 命中 idle 复用（跳过真 spawn）"
+            );
+            return Ok(existing);
+        }
+
         let agent_id = AgentId::new();
         info!(agent = %agent_id, role = %profile.role, "spawn worker");
 
@@ -605,6 +622,38 @@ impl Fuxi {
         Ok(chosen)
     }
 
+    /// 停掉单个门客——M2.4 idle GC 的落地钩子。
+    ///
+    /// 语义与 `shutdown()` 对齐：事件顺序 `AgentShuttingDown`（reason 自带）→
+    /// agent.shutdown + worktree.destroy → `AgentDead`；worktree/agent 清理出错只
+    /// warn 不传播，避免单只门客回收失败阻塞整个 GC tick。
+    ///
+    /// 幂等：id 找不到（已被清走）返回 Ok(())；`fuxi kill --id` 留给 M3.7。
+    pub async fn shutdown_agent(&self, id: AgentId, reason: String) -> Result<()> {
+        let Some(entry) = self.shelf.take(id).await else {
+            // 已被清走（并发 GC / 手动 shutdown）——noop，外层不用特判。
+            debug!(agent = %id, "shutdown_agent: 门客不在 shelf，跳过");
+            return Ok(());
+        };
+        info!(agent = %id, reason = %reason, "shutdown_agent");
+        self.publish_with_agent(
+            id,
+            EventKind::AgentShuttingDown {
+                reason: reason.clone(),
+            },
+        );
+        if let Err(e) = entry.agent.shutdown().await {
+            warn!(agent = %id, error = %e, "agent shutdown 出错");
+        }
+        if let Some(h) = entry.worktree.as_ref()
+            && let Err(e) = self.workspace.destroy(h).await
+        {
+            warn!(agent = %id, error = %e, "worktree destroy 出错");
+        }
+        self.publish_with_agent(id, EventKind::AgentDead { cause: reason });
+        Ok(())
+    }
+
     /// 停掉所有门客 + 对应 worktree。幂等——连续调多次等价于调一次。
     ///
     /// 事件顺序（每个门客）：`AgentShuttingDown`（动作前） → agent.shutdown +
@@ -668,6 +717,8 @@ impl Fuxi {
                 agent,
                 status: ShelfStatus::Idle,
                 worktree,
+                // 新 spawn 的门客立即算作"刚进入 idle"——TTL 从这一刻起计时。
+                idle_since: Some(std::time::Instant::now()),
             })
             .await;
         self.publish_with_agent(
@@ -677,6 +728,18 @@ impl Fuxi {
             },
         );
         id
+    }
+}
+
+/// `Fuxi` 实现 [`crate::idle_gc::IdleShutdowner`]——GC 任务拿 `Arc<Fuxi>` 通过
+/// `Arc<dyn IdleShutdowner>` 的 unsize coercion 直接调用。
+///
+/// WHY 不 impl 在 `Arc<Fuxi>` 上：那样 `Arc<Fuxi> → Arc<dyn Trait>` 的
+/// `CoerceUnsized` 不成立（coercion 要求目标 `dyn Trait` 对 `Fuxi` 本身成立）。
+#[async_trait::async_trait]
+impl crate::idle_gc::IdleShutdowner for Fuxi {
+    async fn shutdown_idle(&self, id: AgentId, reason: String) -> Result<()> {
+        self.shutdown_agent(id, reason).await
     }
 }
 

@@ -22,9 +22,13 @@
 pub mod bridge;
 pub mod error;
 pub mod fuxi;
+pub mod idle_gc;
 pub mod registry;
 
 pub use bridge::{Intervener, SystemEventBridge};
 pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
+pub use idle_gc::{
+    DEFAULT_IDLE_TTL_SECS, DEFAULT_TICK_INTERVAL_SECS, IdleGcTask, IdleShutdowner, ttl_from_env,
+};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};
