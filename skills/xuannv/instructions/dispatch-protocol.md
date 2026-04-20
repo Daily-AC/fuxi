@@ -72,6 +72,18 @@ fuxi kill "$ID"
 
 任务真的结束才 kill。中途用户改方向不 kill——保留 session，新派任务。
 
+## 7.1 召回 · 让旧 session 复活
+
+门客被 kill 后 session 仍留在 cc 端，**策府**自动记了 task→session 映射。下次想接着上次的对话续：
+
+- 用户说"重做刚才 #abc 那任务" → `fuxi spawn --role luban --recall-task abc`
+- 用户说"叫回刚才那个鲁班" → `fuxi spawn --role luban --recall-role luban`（取最新一次 session）
+
+cc 启动后会带全套 history，所以**不要重复粘贴上次的 prompt**——直接 dispatch 新任务即可，门客自然记得之前做了什么。
+
+**不要把召回当撤回 / undo 用**——它只重开旧对话上下文，并不回滚已 commit 的代码。
+**不要给 codex 门客用 `--recall-*`**——codex 无持久 session，flag 会被 warn 后忽略。
+
 ## 8. 系统事件响应
 
 伏羲会把几类**系统事件**用系统消息形式注入给我（通过抄送桥 `SystemEventBridge`）：

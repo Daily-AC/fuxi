@@ -34,6 +34,12 @@ pub enum Command {
         role: String,
         /// 可选门客名（默认走 role-N）。
         name: Option<String>,
+        /// P2 召回：把 `task-<id>` 在策府里的 session_id 装到
+        /// `CcLaunchConfig.resume_session_id`。和 `recall_role` 互斥。
+        recall_task: Option<String>,
+        /// P2 召回：取该 role 最近活动的 session（subject=`role-<role>`,
+        /// `query_one` 拿 updated_at DESC 最新一条）。
+        recall_role: Option<String>,
     },
     /// 给指定门客派个任务。
     Dispatch {
@@ -196,6 +202,8 @@ mod tests {
         let cmd = Command::Spawn {
             role: "dev".into(),
             name: None,
+            recall_task: None,
+            recall_role: None,
         };
         let s = serde_json::to_string(&cmd).unwrap();
         assert!(s.contains(r#""cmd":"spawn""#), "got: {s}");
@@ -203,6 +211,31 @@ mod tests {
 
         let parsed: Command = serde_json::from_str(&s).unwrap();
         matches!(parsed, Command::Spawn { .. });
+    }
+
+    /// P2 召回：`recall_task` / `recall_role` 字段必须能完整 roundtrip——daemon
+    /// 端反序列化失败 = 召回功能整条链路死。
+    #[test]
+    fn spawn_command_serdes_recall_flags() {
+        let cmd = Command::Spawn {
+            role: "dev".into(),
+            name: None,
+            recall_task: Some("task-abc".into()),
+            recall_role: None,
+        };
+        let s = serde_json::to_string(&cmd).unwrap();
+        let back: Command = serde_json::from_str(&s).unwrap();
+        match back {
+            Command::Spawn {
+                recall_task,
+                recall_role,
+                ..
+            } => {
+                assert_eq!(recall_task.as_deref(), Some("task-abc"));
+                assert!(recall_role.is_none());
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
     }
 
     #[test]

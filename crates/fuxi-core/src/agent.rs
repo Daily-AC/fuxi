@@ -75,4 +75,17 @@ pub trait Agent: Send + Sync {
 
     /// Tear the underlying process down.
     async fn shutdown(&self) -> Result<()>;
+
+    /// 拿到底层 CLI session id（cc 的 `--resume` / 代理 resume 凭证）。
+    ///
+    /// WHY 默认 None：codex 是 spawn-per-dispatch 模式，没有持续 session；
+    /// stub/test agent 也无须返。返 None 的语义是"该门客无可恢复 session 的概念"，
+    /// 上层（dispatch pump）见 None 应 silent skip 召回入库，不当错误。
+    ///
+    /// WHY async：cc 的 session id 由 CLI 的 `system/init` 异步推过来，缓存在
+    /// tokio Mutex 内（参见 `WsChannel::cli_session_id`）；同步暴露要么强加
+    /// `std::sync::Mutex` 要么牵入 `OnceCell`，反而把适配层复杂化。
+    async fn session_id(&self) -> Option<String> {
+        None
+    }
 }

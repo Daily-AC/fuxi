@@ -12,6 +12,7 @@
 //! handler、世界模型 watcher 会一起持它）。
 
 use crate::error::{OrchestratorError, Result};
+use crate::recall::RecallSink;
 use crate::registry::{Shelf, ShelfEntry, ShelfStatus};
 use futures_util::StreamExt;
 use fuxi_agent_cc::{CcAgent, CcLaunchConfig};
@@ -80,6 +81,10 @@ pub struct Fuxi {
     /// Why `Option`：`Fuxi::new` 零门客启动，早于任何 spawn；抄送路径
     /// 遇到 `None` 时 graceful skip，不强求设置。
     xuannv_id: Arc<RwLock<Option<AgentId>>>,
+    /// P2 召回入库钩子。Why `Option`：默认 None 向后兼容——未设 sink 时
+    /// dispatch pump silent skip，不阻塞 Done 流程。具体 impl 由 fuxi-cli 注入
+    /// （参见 fuxi-cli/src/extractor_hook.rs 的反向依赖 pattern）。
+    recall_sink: Arc<RwLock<Option<Arc<dyn RecallSink>>>>,
 }
 
 impl Fuxi {
@@ -101,6 +106,7 @@ impl Fuxi {
             shelf: shelf.clone(),
             cfg,
             xuannv_id: Arc::new(RwLock::new(None)),
+            recall_sink: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -129,6 +135,12 @@ impl Fuxi {
     /// 读玄女 id——未设置返回 None。
     pub async fn xuannv_id(&self) -> Option<AgentId> {
         *self.xuannv_id.read().await
+    }
+
+    /// 注入 P2 召回入库钩子。fuxi-cli 启动时调一次；未调时 dispatch pump silent skip。
+    /// 幂等：再次调用以最新值为准（测试场景偶尔会换 sink）。
+    pub async fn set_recall_sink(&self, sink: Arc<dyn RecallSink>) {
+        *self.recall_sink.write().await = Some(sink);
     }
 
     /// 读某门客分配的 worktree 路径——纯转发 shelf，供 TUI/CLI 用。
@@ -357,6 +369,11 @@ impl Fuxi {
         let mut rx = agent.dispatch(task).await?;
         let bus = self.bus.clone();
         let shelf = self.shelf.clone();
+        // P2 召回：把 sink 和 agent 引用 clone 进 pump——Done 时 best-effort 入库。
+        // why clone agent：session_id() 是 trait method，pump 内部需要直接调；
+        // sink 取 snapshot（拿当下 setter 设的那个，不持锁等更新——pump 短命）。
+        let recall_sink = self.recall_sink.read().await.clone();
+        let recall_agent = agent.clone();
         tokio::spawn(async move {
             // M2.1+ 修 pending drain 漏洞（2026-04-20 用户复测发现）：
             // 旧逻辑看到 terminal 事件立即 break，但 agent pump 的 pending queue
@@ -383,6 +400,31 @@ impl Fuxi {
                     rx.recv().await
                 };
                 let Some(ev) = ev_opt else { break };
+
+                // P2 召回入库——仅 Done（不是任意 terminal）。
+                // why 仅 Done：Cancelled/Dead 是失败终结，session 可能没意义甚至有脏 context；
+                // 召回基于"完成态"避免拉出半截数据。Blocked/Delivered 不是终结所以也跳。
+                let is_done = matches!(
+                    &ev.kind,
+                    EventKind::TaskStateChanged {
+                        to: fuxi_core::task::TaskState::Done,
+                        ..
+                    }
+                );
+                if is_done && let Some(sink) = recall_sink.as_ref() {
+                    match recall_agent.session_id().await {
+                        Some(sid) => {
+                            sink.record_task_session(agent_id, task_id, sid).await;
+                        }
+                        None => {
+                            debug!(
+                                agent = %agent_id,
+                                %task_id,
+                                "recall: agent 无 session_id，silent skip"
+                            );
+                        }
+                    }
+                }
 
                 let is_terminal = matches!(
                     &ev.kind,

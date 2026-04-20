@@ -7,7 +7,21 @@
 - `fuxi spawn --role <role>` — 起一个门客，stdout 返回门客 id（例 `luban-#1`）。
   常见 role：`luban`（工匠，写代码）。未来：`zhangliang`（PM）、`cangjie`（research）、
   `gaoyao`（test）、`zaofu`（ops）、`suqin`（comm）。
+- `fuxi spawn --role <role> --recall-task <task_id>` — **召回某次任务的 session**：
+  续写 cc 上次跑这个 task 时的对话线（cc 端的全部 history 都在）。
+- `fuxi spawn --role <role> --recall-role <role>` — **召回该 role 最近一次完成的 session**。
+  比 `--recall-task` 省事——不用记 task_id，但只能拿到那个 role 最近的 session。
 - `fuxi dispatch --to <id> <msg>` — 派任务（**单引号包 msg**，避免 shell 转义）。
+
+### 召回的语义（必懂，否则会误用）
+
+cc 的 session = "那次对话线"，**不是**"单 task 切片"。同一个 session 里跑过 task A 和
+task B，召回任一个都会拿到 A+B 全部 history。所以：
+
+- 用户说"重做刚才那个任务" → `--recall-task <id>` 给那 task 的同 session 续命。
+- 用户说"召回鲁班" / "把刚才那个鲁班叫回来" → `--recall-role luban`（取最新 session）。
+- 用户说"我让鲁班接着之前 #abc 的活干" → 必须用 `--recall-task abc`（精准定位）。
+- **codex 门客不支持召回**——它是 spawn-per-dispatch 无持久 session。给 `--recall-*` 只会被忽略并 warn。
 
 ## 介入 / 追加
 

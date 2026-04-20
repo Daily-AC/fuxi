@@ -380,6 +380,13 @@ impl Agent for CcAgent {
         Ok(())
     }
 
+    async fn session_id(&self) -> Option<String> {
+        // P2 召回：cc 的 cli_session_id 在 CLI 推 system/init 后才填好；
+        // dispatch pump 在 task Done 时来取，那时一定已经填了——任 None
+        // 也是合法（譬如门客在 init 前就死掉），上层 silent skip。
+        self.inner.lock().await.channel.cli_session_id().await
+    }
+
     async fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.status = AgentStatus::Stopping;
@@ -625,5 +632,16 @@ mod tests {
     fn early_exit_error_maps_to_core_other() {
         let e: CoreError = CcError::EarlyExit.into();
         assert!(matches!(e, CoreError::Other(_)));
+    }
+
+    /// 编译断言：CcAgent 必须 override `Agent::session_id`（P2 召回依赖此）。
+    /// 真起 cc 太重不在单测；此测保证签名/默认 None 退化不会回潮。
+    /// 取 `Agent::session_id` 函数指针隐式要求 trait method 存在；CcAgent 实现 Agent
+    /// 即可通过——若哪天误删 override 退化为默认 None，dispatch_pump 召回链断裂会被
+    /// orchestrator 的集成测试抓到，单测层这里只守 trait 契约。
+    #[test]
+    fn cc_agent_implements_session_id_via_agent_trait() {
+        fn assert_agent<A: Agent>() {}
+        assert_agent::<CcAgent>();
     }
 }

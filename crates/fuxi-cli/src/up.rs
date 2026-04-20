@@ -16,6 +16,7 @@ use clap::Args as ClapArgs;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_events::{EventBus, EventStore};
 use fuxi_firehose::Hub;
+use fuxi_memory::OracleStore;
 use fuxi_orchestrator::{Fuxi, FuxiConfig};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::watcher::{FsWatcherConfig, FsWatcherRig};
@@ -110,13 +111,33 @@ pub async fn run(args: Args) -> Result<()> {
     });
     let app = firehose_router.merge(webhook_router);
 
-    // 5. Daemon socket
+    // 5. Daemon socket + 策府（P2 召回）
+    //
+    // 复用 `--db` 同一个 sqlite 文件——OracleStore 自己 init schema，幂等；和
+    // EventStore 共存同一文件没问题（PRAGMA WAL 双方互不踩）。无 db 时走 :memory:
+    // 兜底——repl.rs 也起了一个 OracleStore，但 up.rs 是独立 daemon 进程，自己起。
+    let oracle = match args.db.as_ref() {
+        Some(path) => OracleStore::connect_file(path)
+            .await
+            .with_context(|| format!("打开策府 SQLite {}", path.display()))?,
+        None => OracleStore::connect_memory()
+            .await
+            .context("创建策府内存库")?,
+    };
     let sock_path = args.sock_path.clone().unwrap_or_else(ipc::socket_path);
+    // P2 召回入库钩子——daemon 持 oracle 是查询路径（--recall-task/role 时用），
+    // sink 是写入路径（dispatch pump Done 时落 task-<id> + role-<role>）。两条独立。
+    fuxi.set_recall_sink(Arc::new(crate::recall_sink::OracleRecallSink::new(
+        oracle.clone(),
+        fuxi.clone(),
+    )))
+    .await;
     let daemon = Daemon::new(
         fuxi.clone(),
         bus.clone(),
         sched_store.clone(),
         keeper.clone(),
+        oracle,
     );
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();

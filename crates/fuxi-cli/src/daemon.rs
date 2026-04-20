@@ -20,6 +20,7 @@ use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::AgentId;
 use fuxi_core::task::Task;
 use fuxi_events::EventBus;
+use fuxi_memory::OracleStore;
 use fuxi_orchestrator::{Fuxi, WorkerKind};
 use fuxi_scheduler::store::{FireCause, NewTrigger};
 use fuxi_scheduler::{Keeper, TriggerSpec, TriggerStore, new_trigger_id};
@@ -40,17 +41,27 @@ pub struct Daemon {
     pub store: TriggerStore,
     /// Keeper 句柄——给"手动 fire"路径用，和 cron tick 共用 `record_and_emit_fire`。
     pub keeper: Arc<Keeper>,
+    /// 策府——`Command::Spawn` 的 P2 召回 flag 走它查 `task-<id>` / `role-<role>`
+    /// 的 `session_id` fact，转给 cc `--resume`。
+    pub oracle: OracleStore,
     /// 发信号给 serve 循环的 abort——Command::Shutdown 触发。
     shutdown_signal: Arc<Notify>,
 }
 
 impl Daemon {
-    pub fn new(fuxi: Arc<Fuxi>, bus: EventBus, store: TriggerStore, keeper: Arc<Keeper>) -> Self {
+    pub fn new(
+        fuxi: Arc<Fuxi>,
+        bus: EventBus,
+        store: TriggerStore,
+        keeper: Arc<Keeper>,
+        oracle: OracleStore,
+    ) -> Self {
         Self {
             fuxi,
             bus,
             store,
             keeper,
+            oracle,
             shutdown_signal: Arc::new(Notify::new()),
         }
     }
@@ -76,6 +87,7 @@ impl Daemon {
         let store = self.store.clone();
         let keeper = self.keeper.clone();
         let bus = self.bus.clone();
+        let oracle = self.oracle.clone();
 
         loop {
             tokio::select! {
@@ -89,9 +101,10 @@ impl Daemon {
                     let store = store.clone();
                     let keeper = keeper.clone();
                     let bus = bus.clone();
+                    let oracle = oracle.clone();
                     let shutdown_hook = shutdown_hook.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, fuxi, bus, store, keeper, shutdown_hook).await {
+                        if let Err(e) = handle_conn(stream, fuxi, bus, store, keeper, oracle, shutdown_hook).await {
                             tracing::warn!(error = %e, "connection handler errored");
                         }
                     });
@@ -116,6 +129,7 @@ async fn handle_conn(
     bus: EventBus,
     store: TriggerStore,
     keeper: Arc<Keeper>,
+    oracle: OracleStore,
     shutdown_hook: Arc<Notify>,
 ) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
@@ -131,7 +145,7 @@ async fn handle_conn(
     }
 
     let resp = match serde_json::from_str::<Command>(trimmed) {
-        Ok(cmd) => dispatch_command(fuxi, bus, store, keeper, cmd, shutdown_hook).await,
+        Ok(cmd) => dispatch_command(fuxi, bus, store, keeper, oracle, cmd, shutdown_hook).await,
         Err(e) => Response::err(format!("解析命令失败: {e}")),
     };
     let out = serde_json::to_string(&resp)? + "\n";
@@ -145,16 +159,29 @@ async fn dispatch_command(
     bus: EventBus,
     store: TriggerStore,
     keeper: Arc<Keeper>,
+    oracle: OracleStore,
     cmd: Command,
     shutdown_hook: Arc<Notify>,
 ) -> Response {
     match cmd {
         Command::Ping => Response::Pong,
 
-        Command::Spawn { role, name } => match spawn_by_role(&fuxi, &role, name).await {
-            Ok(id) => Response::ok(serde_json::json!({"agent_id": id.to_string()})),
-            Err(e) => Response::err(e.to_string()),
-        },
+        Command::Spawn {
+            role,
+            name,
+            recall_task,
+            recall_role,
+        } => {
+            let resume_sid =
+                match resolve_recall_session_id(&oracle, recall_task, recall_role).await {
+                    Ok(s) => s,
+                    Err(resp) => return resp,
+                };
+            match spawn_by_role(&fuxi, &role, name, resume_sid).await {
+                Ok(id) => Response::ok(serde_json::json!({"agent_id": id.to_string()})),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
 
         Command::Dispatch {
             agent_id,
@@ -462,7 +489,15 @@ fn parse_task_id(s: &str) -> std::result::Result<fuxi_core::id::TaskId, String> 
 /// 1. 在 `WorkerKind::cli_tag` 加分支（保证 cli_tag 字符串可逆）；
 /// 2. 在这里加 match arm 选 LaunchConfig；
 /// 3. 写 `skills/<role>/SKILL.md` 把 `metadata.cli` 设成对应字符串。
-async fn spawn_by_role(fuxi: &Fuxi, role: &str, name_override: Option<String>) -> Result<AgentId> {
+///
+/// `resume_session_id`：P2 召回——非 None 时 cc 走 `--resume <id>`。
+/// codex 不支持 resume（exec 模式 spawn-per-dispatch），命中 codex 分支就 warn 后忽略。
+async fn spawn_by_role(
+    fuxi: &Fuxi,
+    role: &str,
+    name_override: Option<String>,
+    resume_session_id: Option<String>,
+) -> Result<AgentId> {
     let loaded =
         skill_loader::load(role).with_context(|| format!("加载 skills/{role}/SKILL.md"))?;
     let mut profile = loaded.profile;
@@ -478,6 +513,7 @@ async fn spawn_by_role(fuxi: &Fuxi, role: &str, name_override: Option<String>) -
                 Some(loaded.append_system_prompt)
             },
             allowed_tools: loaded.allowed_tools,
+            resume_session_id,
             ..Default::default()
         }),
         "codex" => {
@@ -485,6 +521,13 @@ async fn spawn_by_role(fuxi: &Fuxi, role: &str, name_override: Option<String>) -
             // SKILL.md body（系统提示）已被 spawn_codex 当作 prompt 上下文丢失——
             // 这是 codex exec 模式的 P2 限制（位置参数只有一个）。后续若引入 codex
             // conversation API 可恢复 system prompt 路径；当前先保证能跑起来。
+            if resume_session_id.is_some() {
+                tracing::warn!(
+                    role = %role,
+                    "codex 不支持 --resume（spawn-per-dispatch 无持久 session），\
+                     P2 召回 flag 已忽略，走普通 spawn"
+                );
+            }
             WorkerKind::Codex(CodexLaunchConfig::default())
         }
         other => {
@@ -498,6 +541,45 @@ async fn spawn_by_role(fuxi: &Fuxi, role: &str, name_override: Option<String>) -
     fuxi.spawn_worker(profile, kind)
         .await
         .map_err(|e| anyhow!(e.to_string()))
+}
+
+/// P2 召回：把 `--recall-task` / `--recall-role` 翻成 `resume_session_id`。
+///
+/// 抽出来纯函数化：daemon dispatch 只调它，单测可以脱离 Fuxi 直接验。返回
+/// `Result<Option<String>, Response>`——`Err` 是直接可以回客户端的错误响应。
+///
+/// 设计点（见 `docs/handoff/v1-session3.md` §4）：
+/// - **task_id 是入口、session_id 是值**。subject 形如 `task-<uuid>`。
+/// - **recall_role 查 `role-<role>`** —— 由 `OracleRecallSink`（主线另开）在
+///   每次 dispatch 完成时同时写 `task-<id>` 和 `role-<role>` 两条 fact，β 这边只读。
+/// - 两个 flag 互斥；没给则返 `Ok(None)`，daemon 走普通 spawn。
+pub(crate) async fn resolve_recall_session_id(
+    oracle: &OracleStore,
+    recall_task: Option<String>,
+    recall_role: Option<String>,
+) -> std::result::Result<Option<String>, Response> {
+    match (recall_task, recall_role) {
+        (Some(_), Some(_)) => Err(Response::err("recall_task / recall_role 互斥")),
+        (Some(task_raw), None) => {
+            // 容错：用户给 `task-<uuid>` 或裸 `<uuid>` 都能接，统一成 `task-<uuid>`。
+            let core = task_raw.strip_prefix("task-").unwrap_or(&task_raw);
+            let subject = format!("task-{core}");
+            match oracle.query_one(&subject, "session_id").await {
+                Ok(Some(fact)) => Ok(Some(fact.object)),
+                Ok(None) => Err(Response::err(format!("无召回记录：subject={subject}"))),
+                Err(e) => Err(Response::err(e.to_string())),
+            }
+        }
+        (None, Some(role_q)) => {
+            let subject = format!("role-{role_q}");
+            match oracle.query_one(&subject, "session_id").await {
+                Ok(Some(fact)) => Ok(Some(fact.object)),
+                Ok(None) => Err(Response::err(format!("无召回记录：subject={subject}"))),
+                Err(e) => Err(Response::err(e.to_string())),
+            }
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 /// 供测试：构造一个 socket 路径在临时目录下。
@@ -514,9 +596,10 @@ fn temp_sock_path() -> PathBuf {
 mod tests {
     use super::*;
     use crate::ipc::Command;
+    use fuxi_memory::NewFact;
 
     /// 不起真 Fuxi——用空壳子验 wire 行为（ping/invalid cmd）。
-    async fn mock_daemon_parts() -> (Arc<Fuxi>, EventBus, TriggerStore, Arc<Keeper>) {
+    async fn mock_daemon_parts() -> (Arc<Fuxi>, EventBus, TriggerStore, Arc<Keeper>, OracleStore) {
         use fuxi_orchestrator::FuxiConfig;
         use fuxi_scheduler::keeper::SystemClock;
         use fuxi_workspace::GitWorktreeWorkspace;
@@ -536,13 +619,14 @@ mod tests {
             bus.clone(),
             Arc::new(SystemClock),
         ));
-        (fuxi, bus, store, keeper)
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        (fuxi, bus, store, keeper, oracle)
     }
 
     #[tokio::test]
     async fn ping_pong_roundtrip() {
-        let (fuxi, bus, store, keeper) = mock_daemon_parts().await;
-        let daemon = Daemon::new(fuxi, bus, store, keeper);
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let daemon = Daemon::new(fuxi, bus, store, keeper, oracle);
         let sock = temp_sock_path();
 
         let sock_for_server = sock.clone();
@@ -580,8 +664,8 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_returns_parse_error() {
-        let (fuxi, bus, store, keeper) = mock_daemon_parts().await;
-        let daemon = Daemon::new(fuxi, bus, store, keeper);
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let daemon = Daemon::new(fuxi, bus, store, keeper, oracle);
         let sock = temp_sock_path();
         let shutdown = daemon.shutdown_handle();
 
@@ -604,5 +688,80 @@ mod tests {
         // cleanup
         shutdown.notify_waiters();
         server.await.ok();
+    }
+
+    // ── P2 召回（resolve_recall_session_id 纯函数测）──
+    //
+    // 为什么测纯函数而不是端到端串 spawn_by_role：spawn_by_role 真起 cc 进程
+    // 太重，而 P2 召回的全部"决策逻辑"集中在 resolve_recall_session_id 里。
+    // 这种切法和 session.rs::resolve_xuannv_session 的测策略一致。
+
+    /// `--recall-task task-abc` → oracle.query_one("task-abc","session_id") = "sess-xyz"。
+    /// 兼容裸 uuid（不带 `task-` 前缀）传入也要解析。
+    #[tokio::test]
+    async fn spawn_with_recall_task_resolves_session_id_from_oracle() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        oracle
+            .insert(NewFact::new("task-abc", "session_id", "sess-xyz"))
+            .await
+            .unwrap();
+
+        // 带前缀
+        let got = resolve_recall_session_id(&oracle, Some("task-abc".into()), None)
+            .await
+            .expect("Ok");
+        assert_eq!(got.as_deref(), Some("sess-xyz"));
+
+        // 裸 uuid 也接（subject 端拼回 task-<id>）
+        let got = resolve_recall_session_id(&oracle, Some("abc".into()), None)
+            .await
+            .expect("Ok");
+        assert_eq!(got.as_deref(), Some("sess-xyz"));
+    }
+
+    /// `--recall-role dev` → oracle.query_one("role-dev","session_id") 取
+    /// updated_at DESC 第一条。后插入的应覆盖前一条。
+    #[tokio::test]
+    async fn spawn_with_recall_role_picks_latest_session() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        oracle
+            .insert(NewFact::new("role-dev", "session_id", "old"))
+            .await
+            .unwrap();
+        // RFC3339 秒级精度下两条 insert 太快可能 updated_at 相等——隔 5ms 保排序。
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        oracle
+            .insert(NewFact::new("role-dev", "session_id", "new"))
+            .await
+            .unwrap();
+
+        let got = resolve_recall_session_id(&oracle, None, Some("dev".into()))
+            .await
+            .expect("Ok");
+        assert_eq!(got.as_deref(), Some("new"));
+    }
+
+    /// 都 None → 返 Ok(None)，daemon 走普通 spawn 不带 --resume。
+    #[tokio::test]
+    async fn spawn_with_no_recall_returns_none() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        let got = resolve_recall_session_id(&oracle, None, None)
+            .await
+            .expect("Ok");
+        assert!(got.is_none());
+    }
+
+    /// 同时给两个 flag → 返 Err Response（互斥）。CLI 层 clap 已挡，但 wire/IPC
+    /// 不走 CLI（`nc -U` 直发也算入口），所以 daemon 必须自己也守住。
+    #[tokio::test]
+    async fn spawn_with_both_recall_flags_errors() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        let err = resolve_recall_session_id(&oracle, Some("task-abc".into()), Some("dev".into()))
+            .await
+            .expect_err("应返 Err");
+        match err {
+            Response::Err { error } => assert!(error.contains("互斥"), "got: {error}"),
+            other => panic!("expected Err response, got {other:?}"),
+        }
     }
 }
