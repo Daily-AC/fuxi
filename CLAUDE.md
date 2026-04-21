@@ -116,7 +116,8 @@ fuxi/
 - `docs/architecture-v1.1-roadmap.md` — M2-M5 路线图（M2 已完，M3-M5 待推）
 - `docs/audit/cratewise-inventory.md` + `docs/audit/event-flow.md` — 审查基础材料
 - `docs/decisions/` — 9 份独立决策（01 并行 cc / 02 soul-first skill / 03 任务树 UI / 04 intervene 退化 / 05 让贤保留·被 08 override / 06 文化命名 / 07 P2 召回 scope / 08 让贤拆除 / **09 TUI 照抄 opencode 12 条**）
-- `docs/handoff/v1-session4.md` — **最新** 开工指引（M2/M3 全完；M4-REDUX 进行中）
+- `docs/handoff/v1-session5.md` — **最新** 开工指引（M4-REDUX 已 ship · Batch C 待开）
+- `docs/handoff/v1-session4.md` — 上一份（保留）
 - `docs/handoff/v1-session2.md` — 上一份（保留）
 - `docs/session-review-2026-04-*.md` — 过程性记录（为什么这么做 / 踩坑 / 否决方案）
 - `docs/superpowers/specs/2026-04-19-伏羲-design.md` — 最早的宏观设计
