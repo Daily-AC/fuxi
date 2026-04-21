@@ -142,13 +142,28 @@ impl Theme {
     }
 
     /// 用户输入的消息色（冷青，与 agent 的紫做冷暖对照）。
+    /// WHY 保留 teal 不切 sapphire：此 alias 用于事件流 narrate 色标
+    /// （`task_created` / `user_prompted` 等），换色会牵连整个事件面板。
+    /// 对话区首行锚点请用 `user_first_line()` —— 方案 A 降饱和度专用。
     pub fn user_message(&self) -> Color {
         self.teal
     }
 
     /// 玄女 / 门客消息色（紫，与 focus_border 同源 = 品牌色）。
+    /// 同上：此 alias 用于事件流色标；对话区首行请用 `agent_first_line()`。
     pub fn agent_message(&self) -> Color {
         self.mauve
+    }
+
+    /// 对话区「用户」首行锚点色（sapphire · 方案 A 降饱和度）。
+    /// `▍ HH:MM ` 竖条 + 时间戳用这个色；续行无前缀空白占位。
+    pub fn user_first_line(&self) -> Color {
+        self.sapphire
+    }
+
+    /// 对话区「玄女 / 门客」首行锚点色（lavender · 方案 A 降饱和度）。
+    pub fn agent_first_line(&self) -> Color {
+        self.lavender
     }
 
     /// 工具调用（黄，经典"注意"色）。
@@ -252,6 +267,8 @@ mod tests {
         assert_eq!(t.dim_border(), t.overlay0);
         assert_eq!(t.user_message(), t.teal);
         assert_eq!(t.agent_message(), t.mauve);
+        assert_eq!(t.user_first_line(), t.sapphire);
+        assert_eq!(t.agent_first_line(), t.lavender);
         assert_eq!(t.tool_call(), t.yellow);
         assert_eq!(t.thinking(), t.overlay2);
         assert_eq!(t.success(), t.green);
