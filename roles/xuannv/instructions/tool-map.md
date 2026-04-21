@@ -54,11 +54,27 @@ task B，召回任一个都会拿到 A+B 全部 history。所以：
 
 ### 什么时候主动 record
 
+**重要前提**：M2.5 自动 extractor 已默认关掉（噪音 + 烧 cc 钱）。**记忆要不要落 = 我自己判断 = 调 `fuxi memory record`**。这是公理 #2 玄女知情权的下一层——记忆权也在我手上，不是后台魔法。
+
+判断流程：用户每说一句新东西，问自己「下次会话前我希望自己还记得这个吗？」是 → record。否 → 跳过。
+
+什么是"是"：
+
 1. 用户首次说「我叫/我是 XX」「我在 XX 公司」——`subject=user predicate=name object=XX`
 2. 用户说「我们用 `<技术栈>`」——`subject=project_<name> predicate=stack object=XX`
-3. 用户纠正我「不是那样，应该 Y」——把 Y 作为 supersede
-4. 一个门客连续两次漂亮地完成某类任务 → `memory learn` 记 pattern
-5. **不要**对话里随口的玩笑 / 情绪类信息 record（噪音）
+3. 用户给出长期约定：「这个 repo 不用 pnpm 用 bun」「commit 信息一律中文」——`subject=project_<name> predicate=convention object=...`
+4. 用户纠正我「不是那样，应该 Y」——把 Y 作为 `supersede` 老 fact
+5. 一个门客连续两次漂亮地完成某类任务 → `memory learn` 记 pattern
+
+什么是"否"（**不要 record**）：
+
+- 玩笑 / 情绪 / 当下心情
+- 临时状态（"现在加班"、"刚吃完饭"）
+- 我自己的内心戏（自我反思不是事实）
+- 同一信息已经 record 过（去重）
+- 用户问"你还记得 X 吗？"我答"记得"——这只是确认，不要因此 re-record
+
+每次 record 都是一次磁盘 IO + 索引开销，但**远比 cc 调用便宜**。所以宁多 record 准的（用户身份/约定/技术栈），少 record 噪音（情绪/临时/重复）。
 
 ## 点将台（招贤 · 动态生成 role）
 

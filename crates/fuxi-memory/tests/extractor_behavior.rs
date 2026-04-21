@@ -8,6 +8,14 @@ use async_trait::async_trait;
 use fuxi_core::{AgentId, Event, EventKind, EventMeta, TaskId, TaskState};
 use fuxi_events::EventBus;
 use fuxi_memory::{Extractor, ExtractorConfig, FactExtractorSpawner, OracleStore, SpawnerResult};
+
+/// 测试用 cfg：默认 enabled=false（生产降噪），测试要走主路径必须显式开。
+fn enabled_cfg() -> ExtractorConfig {
+    ExtractorConfig {
+        enabled: true,
+        ..ExtractorConfig::default()
+    }
+}
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -122,11 +130,42 @@ where
     panic!("wait_until 超时");
 }
 
+/// 2026-04-21 翻转：自动抽取太烧 + 噪音 fact 多。默认 disabled——
+/// 玄女按 prompt 判断时机用 `fuxi memory record` 手工入是常态。
+/// 想恢复自动行为：`FUXI_EXTRACTOR_ENABLED=1`（fuxi-cli 的 hook 解析）。
+#[test]
+fn extractor_default_is_disabled() {
+    let cfg = ExtractorConfig::default();
+    assert!(!cfg.enabled, "默认必须 disabled，自动模式靠 env 显式开");
+}
+
+/// 默认 cfg → spawn() 不订阅事件，发再多 Done 也不触发抽取（噪音保护）。
+#[tokio::test]
+async fn extractor_disabled_default_skips_all_events() {
+    let (bus, oracle) = bus_and_oracle().await;
+    let spawner = MockSpawner::with_script(vec![Ok("[]".to_string())]);
+    let _handle = Extractor::new(
+        bus.clone(),
+        oracle.clone(),
+        spawner.clone(),
+        ExtractorConfig::default(), // disabled
+    )
+    .spawn();
+
+    let task = TaskId::new();
+    let agent = AgentId::new();
+    spawner.set_role(agent, "dev").await;
+    publish_task_transcript(&bus, task, Some(agent), "我爱冰美式", "记下了").await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(spawner.call_count(), 0, "disabled 时不应调 spawner");
+}
+
 #[tokio::test]
 async fn extractor_on_task_done_calls_spawner_with_transcript() {
     let (bus, oracle) = bus_and_oracle().await;
     let spawner = MockSpawner::with_script(vec![Ok("[]".to_string())]);
-    let cfg = ExtractorConfig::default();
+    let cfg = enabled_cfg();
     let _handle = Extractor::new(bus.clone(), oracle.clone(), spawner.clone(), cfg).spawn();
 
     let task = TaskId::new();
@@ -146,13 +185,8 @@ async fn extractor_parses_json_list_and_inserts_facts() {
     let (bus, oracle) = bus_and_oracle().await;
     let json = r#"[{"subject":"user","predicate":"name","object":"linda"}]"#;
     let spawner = MockSpawner::with_script(vec![Ok(json.to_string())]);
-    let _handle = Extractor::new(
-        bus.clone(),
-        oracle.clone(),
-        spawner.clone(),
-        ExtractorConfig::default(),
-    )
-    .spawn();
+    let _handle =
+        Extractor::new(bus.clone(), oracle.clone(), spawner.clone(), enabled_cfg()).spawn();
 
     let task = TaskId::new();
     let agent = AgentId::new();
@@ -187,13 +221,8 @@ async fn extractor_skips_extractor_own_role() {
     // 防递归：如果 Done 的 task 本身是 extractor 门客的产物，不能再抽。
     let (bus, oracle) = bus_and_oracle().await;
     let spawner = MockSpawner::with_script(vec![Ok("[]".to_string())]);
-    let _handle = Extractor::new(
-        bus.clone(),
-        oracle.clone(),
-        spawner.clone(),
-        ExtractorConfig::default(),
-    )
-    .spawn();
+    let _handle =
+        Extractor::new(bus.clone(), oracle.clone(), spawner.clone(), enabled_cfg()).spawn();
 
     let task = TaskId::new();
     let agent = AgentId::new();
@@ -219,7 +248,7 @@ async fn extractor_caps_facts_at_max_per_task() {
     let spawner = MockSpawner::with_script(vec![Ok(json)]);
     let cfg = ExtractorConfig {
         max_facts_per_task: 10,
-        ..ExtractorConfig::default()
+        ..enabled_cfg()
     };
     let _handle = Extractor::new(bus.clone(), oracle.clone(), spawner.clone(), cfg).spawn();
 
@@ -245,13 +274,8 @@ async fn extractor_caps_facts_at_max_per_task() {
 async fn extractor_handles_malformed_json_gracefully() {
     let (bus, oracle) = bus_and_oracle().await;
     let spawner = MockSpawner::with_script(vec![Ok("not json".to_string())]);
-    let _handle = Extractor::new(
-        bus.clone(),
-        oracle.clone(),
-        spawner.clone(),
-        ExtractorConfig::default(),
-    )
-    .spawn();
+    let _handle =
+        Extractor::new(bus.clone(), oracle.clone(), spawner.clone(), enabled_cfg()).spawn();
 
     let task = TaskId::new();
     let agent = AgentId::new();
