@@ -1583,21 +1583,29 @@ impl ReplApp {
         self.draw_toasts(f);
     }
 
-    /// 在 input_area 正上方渲染 SlashPopup。
+    /// 在 input_area 正上方渲染 SlashPopup，**anchor 到 input 左下对齐**向上生长。
     ///
-    /// 宽度取屏幕 40%~60%，位置贴 input 顶边向上浮（popup 高度 = 候选行数 + 2 边框
-    /// + 1 filter 展示行，最多占 15 行避免盖满对话）。
+    /// WHY 贴 input 而非居中浮在屏幕中央：2026-04-21 用户反馈——用户正在输入框
+    /// 键入 `/`，popup 在屏幕中心会让眼球跨越视觉重心两次（输入 → 中央 →
+    /// 回输入）。参考 VS Code autocomplete / fish shell 的 inline suggestion，
+    /// popup 应该**紧贴输入框**，宽度匹配输入框，眼球只在一条水平线上移动。
+    ///
+    /// 布局：
+    /// - `x = input_area.x`（和输入框左对齐）
+    /// - `width = input_area.width`（和输入框同宽）
+    /// - `height = min(候选数 + 2 边框, 12)`（不压到对话区超过半屏）
+    /// - `y = input_area.y - height`（贴 input 顶边向上浮）
+    ///
+    /// filter 文本不塞进 popup title——用户看到的 filter 实际是**输入框内**
+    /// 的 `/h█` 这种（textarea 已显示），popup 只展示候选。
     fn draw_popup(&self, f: &mut ratatui::Frame<'_>, input_area: Rect) {
         let t = theme();
         let lines = self.popup.render_lines(&t);
-        // 顶上加一行展示 filter，底下用候选——高度 = filter(1) + 边框(2) + 候选行数。
-        let desired_rows = (lines.len() as u16).min(12).saturating_add(3);
-
-        let screen = f.area();
-        let width = (screen.width.saturating_mul(55) / 100).clamp(30, screen.width);
-        let height = desired_rows.min(screen.height);
-        let x = screen.x + (screen.width.saturating_sub(width)) / 2;
-        // 贴 input 顶边向上——`input_area.y` 之上 `height` 行。
+        // 候选行数 + 边框 2；最多 12 行避免压过半屏。
+        let desired_rows = (lines.len() as u16).max(1).saturating_add(2);
+        let height = desired_rows.min(12).min(input_area.y); // 不能浮到负 y
+        let width = input_area.width;
+        let x = input_area.x;
         let y = input_area.y.saturating_sub(height);
         let rect = Rect {
             x,
@@ -1610,19 +1618,15 @@ impl ReplApp {
         use ratatui::widgets::{Block, Borders, Paragraph};
         f.render_widget(ratatui::widgets::Clear, rect);
 
-        let title = format!(" {} ", self.popup.display_input());
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(ratatui::style::Style::default().fg(t.focus_border()))
-            .title(title);
+            .border_style(ratatui::style::Style::default().fg(t.focus_border()));
 
-        // 第一行留给引导提示（空 Line 占位让外观更稳——如无候选时不至于坍缩）。
-        let mut body: Vec<Line<'_>> = Vec::with_capacity(lines.len() + 1);
-        if lines.is_empty() {
-            body.push(Line::from("（无匹配命令）"));
+        let body: Vec<Line<'_>> = if lines.is_empty() {
+            vec![Line::from("（无匹配命令）")]
         } else {
-            body.extend(lines);
-        }
+            lines
+        };
         let para = Paragraph::new(body).block(block);
         f.render_widget(para, rect);
     }

@@ -241,31 +241,69 @@
 
 **并行拆法**：agent team（TeamCreate），分 4 track——widgets / repl.rs pass 1 / repl.rs pass 2 / theme JSON。主线 review + 整合 commits。
 
+**✅ M4-REDUX 已 ship**（2026-04-21 · commit `56b5b26`）· 17/17 · workspace 524 passed。
+
+---
+
+### M4.5 · Batch C · cc 借鉴立即做（Decision 11）
+
+M4-REDUX 后用户手测发现仍有信噪比问题，调研 cc 源码提炼 12 条借鉴。按 ROI 拆三批，**Batch C** 进 v1.1 末尾：
+
+| # | 事 | 规模 |
+|---|---|---|
+| C1 | **TeammateSpinnerTree** · 并行门客独立 spinner + verb + token，`Ctrl+T` 展开折叠 | 大 |
+| C2 | **连续同类工具折叠** · Read/Grep/Glob 自动折一行 | 中 |
+| C3 | **Spinner 动词池** · 玄女思考中/推敲中/衡量中 随机抽 | 小 |
+| C4 | **Ctrl+C 双击窗口** · 第一次 interrupt + "再按一次退出"提示 | 小 |
+| C5 | **Tab/Enter 分工** · Tab 补全不提交，Enter 对有参命令留空格 | 小 |
+
+**popup 位置修**：输入框正上方贴 input 左沿向上生长（VS Code autocomplete 模式）——M4-REDUX 收尾补丁，已主线单独 fix。
+
 ---
 
 ## M5 · v1.2 大改（🟢）
 
-### M5.1 · D15 · 单栏 TUI + 事件嵌入对话
+### M5.1 · Batch D · Task-bound agent + 视觉层级（Decision 10 + 11）
+
+**目标**：换掉 role-bound lifecycle + 把对话区消息层级建起来（用户背景块 / assistant `●` / 工具折叠卡）。
+
+**子项**：
+- D1 · Task-bound agent lifecycle + 任务树 UI（Decision 10 主体）
+  - shelf 重构：`TaskNode.members: Vec<AgentId>` 取代 idle pool
+  - spawn 强制带 task_id；废除 `dispatch_to_any`
+  - UI：task-rooted 树 + `#N` 命名 + 子任务 desc（鲁班#4 · unit）
+- D2 · F4/F5 overlay → `/tree` `/meta` slash 收敛
+- D3 · 消息视觉层级：用户浅底 / assistant `●` / 工具独立卡片（Batch D 一起）
+- D4 · Slash popup 重构：`/` 入 textarea，popup 做观察副作用
+
+**影响面**：repl.rs ~500 行；orchestrator/shelf 重构；测试全扫一遍。
+
+**成本**：2-3 session。最大破坏性改动。
+
+### M5.2 · D15 · 单栏 TUI + 事件嵌入对话（原 D15，和 M5.1 部分重叠）
 
 **目标**：cc 风格 transcript，事件 + 消息 + 工具调用混在同一滚动区。
 
 **影响面**：
-- 左栏砍掉（任务树收进 `@` 命令面板 + 状态栏简短显示）
-- 右栏砍掉（任务元信息收进 `/task` slash 命令展开卡）
+- 左栏砍掉（任务树归 `/tree` slash 召唤）
+- 右栏砍掉（任务元信息归 `/meta`）
 - 中栏对话区 = 唯一主体，滚动历史 + 事件嵌入
 - ClickRegistry 重设计适配单栏
-- 对应 architecture-v1.md §M1.4 要 override 重写
 
-**成本**：2-3 session。最大破坏性改动。
+**注**：M5.1 的 D2（F4/F5 → slash）已经完成单栏化的第一步；M5.2 是"事件嵌入对话"细化。
 
-### M5.2 · D17 · 启动 ASCII art
+### M5.3 · Batch E · `@` mention / ghost text / frecency / session resume（Decision 11）
 
-- `fuxi` 启动 banner：`figlet` 风格"伏羲" / 三阳 / 卦象线条（用 Unicode block 字符）
-- 1 秒后淡出或 Enter 跳过
+| # | 事 | 规模 |
+|---|---|---|
+| E1 | `@agent` DM + `@file` 附件（file picker 后端就位后）| 中 |
+| E2 | 句中 mid-input `/foo` ghost text | 中 |
+| E3 | Slash frecency 排序（空 `/` 列最近用过）| 小 |
+| E4 | Session resume picker（`/session` fuzzy）| 中 |
 
-### M5.3 · D18 · Resume 真回放 dialogue
+### M5.4 · D18 · Resume 真回放 dialogue
 
-- 持久化 `dialogues: HashMap<ActiveTarget, VecDeque<DialogueLine>>` 到 SQLite
+- 持久化 `dialogues` 到 SQLite
 - 启动时按 xuannv_session_id 回放
 - 可能需要新 `dialogue_lines` 表
 
