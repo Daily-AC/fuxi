@@ -13,6 +13,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod banner;
 mod click_registry;
 mod client;
 mod daemon;
@@ -72,6 +73,9 @@ enum Command {
     /// 【玄女工具】更漏——trigger 管理（cron / once / fs / webhook）。
     #[command(subcommand)]
     Cron(CronCmd),
+    /// 【调试】打印启动 banner 后退出——给主人挑样式用。
+    #[command(hide = true)]
+    Banner,
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Resume(args)) => subcommands::run_resume(args).await,
         Some(Command::Skill(args)) => skill::run(args).await,
         Some(Command::Memory(args)) => memory_cmd::run(args).await,
+        Some(Command::Banner) => {
+            banner::print_to_stdout(&theme::from_env());
+            Ok(())
+        }
         Some(Command::Cron(c)) => match c {
             CronCmd::Add(args) => subcommands::run_cron_add(args).await,
             CronCmd::Once(args) => subcommands::run_cron_once(args).await,

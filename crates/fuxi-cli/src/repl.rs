@@ -16,6 +16,7 @@
 use crate::daemon::Daemon;
 use crate::ipc;
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Local};
 use clap::Args as ClapArgs;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -172,8 +173,27 @@ pub fn require_fuxi_in_path(name: &str, path_env: Option<&OsStr>) -> Result<Path
     ))
 }
 
+/// 启动时是否打印 banner：
+/// - `FUXI_BANNER=off`（任意大小写）→ 跳过
+/// - stdout 非 tty（被管道 / 重定向）→ 跳过（避免污染脚本输出）
+fn should_show_banner() -> bool {
+    use std::io::IsTerminal;
+    if let Ok(v) = std::env::var("FUXI_BANNER")
+        && (v.eq_ignore_ascii_case("off") || v == "0")
+    {
+        return false;
+    }
+    std::io::stdout().is_terminal()
+}
+
 pub async fn run(args: Args) -> Result<()> {
     require_fuxi_in_path("fuxi", std::env::var_os("PATH").as_deref())?;
+
+    // D17 · 启动 banner：进 TUI 之前打一下，alt-screen 会覆盖，但留 scrollback。
+    // FUXI_BANNER=off 可跳过；stdout 非 tty（pipe / script）也跳过。
+    if should_show_banner() {
+        crate::banner::print_to_stdout(&crate::theme::from_env());
+    }
 
     // M3.2 · ~/.fuxi/skills → ~/.fuxi/roles 一次性迁移（幂等；失败只 warn）
     if let Err(e) = fuxi_skills::migrate_user_dir() {
@@ -412,6 +432,36 @@ pub(crate) enum DialogueLine {
     System(String),
 }
 
+/// 对话区条目 = 时间戳 + 消息。
+///
+/// WHY 包一层：M4.1 方案 A 只给每条消息**首行**挂「`▍ HH:MM `」锚点，
+/// 续行空白占位。时间戳不能从 `DialogueLine` 里算（纯数据），必须在
+/// push 那一刻记下。
+#[derive(Debug, Clone)]
+pub(crate) struct DialogueEntry {
+    pub at: DateTime<Local>,
+    pub line: DialogueLine,
+}
+
+impl DialogueEntry {
+    pub fn new(line: DialogueLine) -> Self {
+        Self {
+            at: Local::now(),
+            line,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn at_fixed(line: DialogueLine, hour: u32, minute: u32) -> Self {
+        use chrono::TimeZone;
+        let at = Local
+            .with_ymd_and_hms(2026, 4, 21, hour, minute, 0)
+            .single()
+            .expect("test time");
+        Self { at, line }
+    }
+}
+
 /// 门客（roster 卡片）。
 #[derive(Debug, Clone)]
 pub(crate) struct RosterRow {
@@ -467,7 +517,7 @@ pub(crate) struct ReplApp {
 
     pub(crate) focus: Focus,
     pub(crate) active: ActiveTarget,
-    pub(crate) dialogues: HashMap<ActiveTarget, VecDeque<DialogueLine>>,
+    pub(crate) dialogues: HashMap<ActiveTarget, VecDeque<DialogueEntry>>,
 
     pub(crate) tasks: Vec<TaskNode>,
     pub(crate) idle_workers: Vec<RosterRow>,
@@ -555,11 +605,15 @@ impl ReplApp {
     }
 
     pub(crate) fn push_line(&mut self, target: ActiveTarget, line: DialogueLine) {
+        self.push_entry(target, DialogueEntry::new(line));
+    }
+
+    fn push_entry(&mut self, target: ActiveTarget, entry: DialogueEntry) {
         let bucket = self.dialogues.entry(target).or_default();
         if bucket.len() == DIALOGUE_CAP {
             bucket.pop_front();
         }
-        bucket.push_back(line);
+        bucket.push_back(entry);
     }
 
     /// 左栏扁平行——按 `Xuannv → tasks... → IdleHeader → idle_workers...` 顺序。
@@ -1182,7 +1236,7 @@ impl ReplApp {
             .enumerate()
             .map(|(i, row)| match row {
                 PaneRow::Xuannv => {
-                    let marker = status_marker(self.xuannv_status);
+                    let marker = status_marker_span(self.xuannv_status);
                     let active_mark =
                         if active_row_idx == i && matches!(self.active, ActiveTarget::Xuannv) {
                             "▶ "
@@ -1191,7 +1245,7 @@ impl ReplApp {
                         };
                     ListItem::new(Line::from(vec![
                         Span::raw(active_mark),
-                        Span::raw(marker),
+                        marker,
                         Span::raw(" "),
                         Span::styled(
                             "玄女",
@@ -1206,9 +1260,9 @@ impl ReplApp {
                 PaneRow::Task(idx) => {
                     let t = &self.tasks[*idx];
                     let marker = if t.prune_after.is_some() {
-                        "✓"
+                        Span::styled("✓", Style::default().fg(theme().success()))
                     } else {
-                        status_marker(task_state_to_shelf(t.state, t.thinking))
+                        status_marker_span(task_state_to_shelf(t.state, t.thinking))
                     };
                     let active_mark = if active_row_idx == i
                         && matches!(self.active, ActiveTarget::Worker(w) if w == t.worker)
@@ -1222,20 +1276,17 @@ impl ReplApp {
                     } else {
                         t.title.clone()
                     };
-                    let state_color = if t.prune_after.is_some() {
-                        Color::DarkGray
-                    } else {
-                        Color::White
-                    };
+                    let (icon, title_color) =
+                        task_icon_and_color(&t.title, t.prune_after.is_some());
                     ListItem::new(Line::from(vec![
                         Span::raw(active_mark),
-                        Span::raw("📁 "),
+                        Span::raw(icon),
                         Span::styled(
                             truncate_by_width(&title, 16),
-                            Style::default().fg(state_color),
+                            Style::default().fg(title_color),
                         ),
                         Span::raw("  "),
-                        Span::raw(marker),
+                        marker,
                         Span::raw(" "),
                         Span::styled(
                             truncate_by_width(&t.worker_role, 6),
@@ -1249,7 +1300,7 @@ impl ReplApp {
                 )])),
                 PaneRow::Idle(idx) => {
                     let r = &self.idle_workers[*idx];
-                    let marker = status_marker(r.status);
+                    let marker = status_marker_span(r.status);
                     let active_mark = if active_row_idx == i
                         && matches!(self.active, ActiveTarget::Worker(w) if w == r.id)
                     {
@@ -1264,7 +1315,7 @@ impl ReplApp {
                     };
                     ListItem::new(Line::from(vec![
                         Span::raw(active_mark),
-                        Span::raw(marker),
+                        marker,
                         Span::raw(" "),
                         Span::styled(truncate_by_width(&r.name, 8), style),
                         Span::raw(" "),
@@ -1506,50 +1557,73 @@ impl ReplApp {
     }
 }
 
-/// 对话渲染。
+/// 对话区首行锚点格式：「`▍ HH:MM `」= 竖条 1 + 空格 1 + 5 字 + 空格 1 = 8 宽。
+/// 续行用 8 个空格对齐，视觉上续行"挂"在首行内容下方。
+const ANCHOR_WIDTH: usize = 8;
+
+/// 对话渲染（M4.1 方案 A · 2026-04-21）。
 ///
-/// 2026-04-20 用户反馈：`● 玄女 ` 前缀 + 换行大缩进"左边空一大片"别扭；
-/// 输入框 "你 → 玄女" 已明示身份，对话区不必再重复名字。新策略：
-/// - **User**：每行左挂 `▍ ` teal 竖条
-/// - **Agent**：每行左挂 `▍ ` mauve 竖条（和 user 冷暖对照）——不显示名字，
-///   不缩进，多行消息自然左对齐
-/// - **System**：`· ` muted + italic，弱存在感
+/// 每条 entry（不论多少内部换行）只给**首行**挂锚点：
+/// ```
+/// ▍ 14:32 你好，可以帮我...
+///         继续这条消息的第二段   ← 续行空白占位对齐
+///         第三段
+///                                  ← entry 之间空行分隔
+/// ▍ 14:32 玄女：好的，...
+/// ```
 ///
-/// 只要对话区跟"你 → X"输入框相邻，X 是谁一目了然；同一 bucket 内不会混
-/// 多个 agent（每个 ActiveTarget 独立桶）。
+/// WHY 首行锚点：老版本每行挂 `▍` 视觉噪音大 —— 用户长对话下"一片竖条"
+/// 疲劳。方案 A 把锚点变稀，内容呼吸。时间戳帮助用户回溯。
+///
+/// WHY ANCHOR_WIDTH = 8：「▍」占 1 列 + 空格 + 「HH:MM」5 字 + 空格 = 8。
+/// 续行缩进 8 空格 = 续行首字恰在首行首字下方。
+///
+/// WHY 不做 visual wrap 的缩进：ratatui `Paragraph::wrap` 自动把超长行折回
+/// 最左列，伏羲不重写 wrap 层。hard newline 续行能对齐就够用，visual wrap
+/// 边缘情形接受 flush-left。
 fn render_dialogue_collapsed<'a, I>(iter: I) -> Vec<Line<'a>>
 where
-    I: IntoIterator<Item = &'a DialogueLine>,
+    I: IntoIterator<Item = &'a DialogueEntry>,
 {
     let th = theme();
     let mut out = Vec::new();
-    for line in iter {
-        match line {
+    let mut first_entry = true;
+    for entry in iter {
+        if !first_entry {
+            out.push(Line::from(""));
+        }
+        first_entry = false;
+
+        match &entry.line {
             DialogueLine::User(t) => {
-                for ln in t.lines() {
-                    out.push(Line::from(vec![
-                        Span::styled("▍ ", Style::default().fg(th.user_message())),
-                        Span::raw(ln.to_string()),
-                    ]));
-                }
+                push_anchored(
+                    &mut out,
+                    t,
+                    th.user_first_line(),
+                    false,
+                    entry.at,
+                    Style::default(),
+                );
             }
             DialogueLine::Agent { name: _, text } => {
-                for ln in text.lines() {
-                    out.push(Line::from(vec![
-                        Span::styled(
-                            "▍ ",
-                            Style::default()
-                                .fg(th.agent_message())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(ln.to_string()),
-                    ]));
-                }
+                push_anchored(
+                    &mut out,
+                    text,
+                    th.agent_first_line(),
+                    true,
+                    entry.at,
+                    Style::default(),
+                );
             }
             DialogueLine::System(t) => {
+                // System 消息弱存在感：锚点换成 `· ` muted，body italic warn。
+                // 不挂时间戳（系统事件用户不关心发生在几点几分）。
+                let mut first_line = true;
                 for ln in t.lines() {
+                    let prefix = if first_line { "· " } else { "  " };
+                    first_line = false;
                     out.push(Line::from(vec![
-                        Span::styled("· ", Style::default().fg(th.muted())),
+                        Span::styled(prefix.to_string(), Style::default().fg(th.muted())),
                         Span::styled(
                             ln.to_string(),
                             Style::default()
@@ -1562,6 +1636,52 @@ where
         }
     }
     out
+}
+
+/// 把多行 `text` 渲染为「首行锚点 + 续行缩进」的若干 `Line`。
+///
+/// - `anchor_color`: `▍` + 时间戳色
+/// - `bold`: agent 首行加粗（品牌色更醒目）；user 不加粗
+/// - `at`: 捕获 entry 的本地时间，打印 `HH:MM`
+/// - `body_style`: 正文 Span 的基础 Style（目前默认；留给将来染色接口）
+fn push_anchored<'a>(
+    out: &mut Vec<Line<'a>>,
+    text: &str,
+    anchor_color: Color,
+    bold: bool,
+    at: DateTime<Local>,
+    body_style: Style,
+) {
+    let anchor_text = format!("▍ {} ", at.format("%H:%M"));
+    let anchor_style = {
+        let mut s = Style::default().fg(anchor_color);
+        if bold {
+            s = s.add_modifier(Modifier::BOLD);
+        }
+        s
+    };
+    let mut first_line = true;
+    for ln in text.lines() {
+        if first_line {
+            out.push(Line::from(vec![
+                Span::styled(anchor_text.clone(), anchor_style),
+                Span::styled(ln.to_string(), body_style),
+            ]));
+            first_line = false;
+        } else {
+            out.push(Line::from(vec![
+                Span::raw(" ".repeat(ANCHOR_WIDTH)),
+                Span::styled(ln.to_string(), body_style),
+            ]));
+        }
+    }
+    // 单行（text 不含 \n）也要保证首行产生——上面循环对空串会跳过。
+    if first_line {
+        out.push(Line::from(vec![
+            Span::styled(anchor_text, anchor_style),
+            Span::styled(String::new(), body_style),
+        ]));
+    }
 }
 
 /// 估算一条逻辑 `Line` 在 `width` 宽度下被 `Paragraph.wrap` 后占用的屏幕行数。
@@ -1676,10 +1796,40 @@ fn task_state_to_shelf(state: TaskState, thinking: bool) -> ShelfStatus {
 
 fn status_marker(s: ShelfStatus) -> &'static str {
     match s {
-        ShelfStatus::Idle => "🟢",
-        ShelfStatus::Busy => "🔵",
-        ShelfStatus::Dead => "⚫",
+        ShelfStatus::Idle => "●", // 单宽黑圆
+        ShelfStatus::Busy => "◉", // 靶心
+        ShelfStatus::Dead => "✕", // 叉号
     }
+}
+
+/// 状态 marker + theme 语义色一次到位——调用方省去 match 二次上色。
+fn status_marker_span(s: ShelfStatus) -> Span<'static> {
+    let th = theme();
+    let color = match s {
+        ShelfStatus::Idle => th.success(),
+        ShelfStatus::Busy => th.info(),
+        ShelfStatus::Dead => th.muted(),
+    };
+    Span::styled(status_marker(s), Style::default().fg(color))
+}
+
+/// D13 · 任务树节点 icon + 标题色。
+///
+/// - **user-turn**（Decision 04 退化：用户↔agent 的即时对话轮）→ `·` + muted
+/// - **正式 task**（玄女派的活）→ `◇` + White（已完成则 muted）
+///
+/// WHY 这组 icon：`◇` 已是事件流 `task_created` 的 narrate icon，任务树
+/// 复用同字 = 视觉同一语言；`·` 极简 1 列宽，恰好表达"临时/轻量"。两者
+/// 都是单宽 ASCII/Unicode 非私用区字符，任何终端都不会豆腐。
+fn task_icon_and_color(title: &str, pruned: bool) -> (&'static str, Color) {
+    let is_user_turn = title == "user-turn";
+    let icon = if is_user_turn { "· " } else { "◇ " };
+    let color = if pruned || is_user_turn {
+        theme().muted()
+    } else {
+        Color::White
+    };
+    (icon, color)
 }
 
 /// 按字符数截断 / 右对齐。ASCII 场景 fallback——真正 CJK 场景用 truncate_by_width。
@@ -2404,52 +2554,99 @@ mod tests {
         assert!(app.dialogue_auto_scroll, "End 应该回 auto_scroll");
     }
 
-    // ───────── 多行折叠 ─────────
+    // ───────── 对话渲染 · M4.1 方案 A ─────────
 
+    /// 每 entry 只首行挂锚点，多 entry 之间插空 Line 分隔。
     #[test]
-    fn consecutive_same_speaker_collapses_prefix() {
-        let lines = [
-            DialogueLine::Agent {
-                name: "玄女".into(),
-                text: "line1".into(),
-            },
-            DialogueLine::Agent {
-                name: "玄女".into(),
-                text: "line2".into(),
-            },
+    fn render_dialogue_v2_each_entry_has_one_anchor() {
+        let entries = [
+            DialogueEntry::at_fixed(
+                DialogueLine::Agent {
+                    name: "玄女".into(),
+                    text: "line1".into(),
+                },
+                14,
+                32,
+            ),
+            DialogueEntry::at_fixed(
+                DialogueLine::Agent {
+                    name: "玄女".into(),
+                    text: "line2".into(),
+                },
+                14,
+                33,
+            ),
         ];
-        // 2026-04-20 改：Agent 前缀不再带名字，统一 `▍ ` mauve 竖条。
-        let rendered = render_dialogue_collapsed(lines.iter());
-        assert_eq!(rendered.len(), 2, "应生成两行");
-        for (i, ln) in rendered.iter().enumerate() {
-            let plain = line_to_plain(ln);
-            assert!(
-                plain.starts_with("▍ "),
-                "第 {i} 行应 `▍ ` 竖条开头: {plain:?}"
-            );
-        }
-        assert!(line_to_plain(&rendered[0]).contains("line1"));
-        assert!(line_to_plain(&rendered[1]).contains("line2"));
+        let rendered = render_dialogue_collapsed(entries.iter());
+        // 2 entry + 1 空行分隔 = 3 行
+        assert_eq!(rendered.len(), 3, "应 = 2 entry + 1 分隔 = 3");
+        assert!(line_to_plain(&rendered[0]).starts_with("▍ 14:32 "));
+        assert_eq!(line_to_plain(&rendered[1]), "", "entry 之间应 blank 分隔");
+        assert!(line_to_plain(&rendered[2]).starts_with("▍ 14:33 "));
     }
 
-    /// 不同 agent 的消息每行也只有 `▍ `——名字从对话区彻底移除（靠输入框标题明示身份）。
+    /// hard newline 续行：首行挂锚点，后续行 8 空格对齐，不重复挂 `▍`。
     #[test]
-    fn different_speakers_keep_prefix() {
-        let lines = [
+    fn render_dialogue_v2_first_line_prefix_only() {
+        let entries = [DialogueEntry::at_fixed(
+            DialogueLine::User("第一段\n第二段\n第三段".into()),
+            9,
+            5,
+        )];
+        let rendered = render_dialogue_collapsed(entries.iter());
+        assert_eq!(rendered.len(), 3);
+        assert!(line_to_plain(&rendered[0]).starts_with("▍ 09:05 "));
+        assert!(
+            !line_to_plain(&rendered[1]).contains('▍'),
+            "第 2 段不应重复竖条: {:?}",
+            line_to_plain(&rendered[1])
+        );
+        assert!(
+            line_to_plain(&rendered[1]).starts_with("        "),
+            "8 空格对齐"
+        );
+        assert!(line_to_plain(&rendered[2]).starts_with("        "));
+    }
+
+    /// CJK 宽度：首行锚点固定 8 宽，不随内容 CJK 膨胀。
+    #[test]
+    fn render_dialogue_v2_cjk_width() {
+        let entries = [DialogueEntry::at_fixed(
+            DialogueLine::User("你好世界\n续行内容".into()),
+            0,
+            0,
+        )];
+        let rendered = render_dialogue_collapsed(entries.iter());
+        // 首行前缀按 unicode-width 应为 `▍ 00:00 ` = 1 + 1 + 5 + 1 = 8 cells
+        let first_prefix_width = UnicodeWidthStr::width("▍ 00:00 ");
+        assert_eq!(first_prefix_width, 8, "锚点宽度 = 8");
+        // 续行 8 空格
+        let second = line_to_plain(&rendered[1]);
+        let leading_spaces: usize = second.chars().take_while(|c| *c == ' ').count();
+        assert_eq!(leading_spaces, 8, "续行缩进 8 = 和锚点同宽");
+    }
+
+    /// 续行首字与首行首字同列——视觉"挂"在首行内容下方。
+    #[test]
+    fn render_dialogue_v2_indent_alignment() {
+        let entries = [DialogueEntry::at_fixed(
             DialogueLine::Agent {
-                name: "玄女".into(),
-                text: "A".into(),
+                name: "".into(),
+                text: "A\nB".into(),
             },
-            DialogueLine::Agent {
-                name: "鲁班".into(),
-                text: "B".into(),
-            },
-        ];
-        let rendered = render_dialogue_collapsed(lines.iter());
-        assert!(line_to_plain(&rendered[0]).starts_with("▍ "));
-        assert!(line_to_plain(&rendered[1]).starts_with("▍ "));
-        assert!(!line_to_plain(&rendered[0]).contains("玄女"));
-        assert!(!line_to_plain(&rendered[1]).contains("鲁班"));
+            12,
+            0,
+        )];
+        let rendered = render_dialogue_collapsed(entries.iter());
+        let first = line_to_plain(&rendered[0]);
+        let second = line_to_plain(&rendered[1]);
+        // 首行 A 的列 = 锚点宽度后第一字符位置
+        let first_content_col = UnicodeWidthStr::width(&first[..first.find('A').unwrap()]);
+        let second_content_col = UnicodeWidthStr::width(&second[..second.find('B').unwrap()]);
+        assert_eq!(
+            first_content_col, second_content_col,
+            "续行首字应与首行首字同列"
+        );
     }
 
     fn line_to_plain(line: &Line) -> String {
@@ -2529,7 +2726,7 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(w_bucket.len(), 1);
-        assert!(matches!(w_bucket[0], DialogueLine::User(_)));
+        assert!(matches!(w_bucket[0].line, DialogueLine::User(_)));
     }
 
     /// AgentDead 事件 → 该 worker 的任务进 prune 队列，idle 桶移除。
@@ -2673,6 +2870,26 @@ mod tests {
         assert_eq!(truncate_by_width("伏羲", 4), "伏羲");
         // max_width=3 → 只够放 "伏"(2)+"…"
         assert_eq!(truncate_by_width("伏羲", 3), "伏…");
+    }
+
+    /// D13：user-turn title 的 task 节点用 `·` + muted。
+    #[test]
+    fn user_turn_task_uses_dim_dot() {
+        let (icon, color) = task_icon_and_color("user-turn", false);
+        assert_eq!(icon, "· ");
+        assert_eq!(color, theme().muted());
+    }
+
+    /// D13：正经 task 用 `◇` + White；prune 后降 muted。
+    #[test]
+    fn regular_task_uses_diamond() {
+        let (icon, color) = task_icon_and_color("修 bug", false);
+        assert_eq!(icon, "◇ ");
+        assert_eq!(color, Color::White);
+
+        let (icon2, color2) = task_icon_and_color("修 bug", true);
+        assert_eq!(icon2, "◇ ", "prune 不变 icon");
+        assert_eq!(color2, theme().muted(), "prune 后 muted");
     }
 
     /// 事件面板噪声过滤：cc_system_ / thinking 不进面板。
