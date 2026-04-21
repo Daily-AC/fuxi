@@ -67,8 +67,11 @@ pub struct ExtractorConfig {
 
 impl Default for ExtractorConfig {
     fn default() -> Self {
+        // 2026-04-21 翻转默认：自动每 task 抽取太烧 cc API + 噪音 fact 多。
+        // 改让玄女按 prompt 判断时机直接用 `fuxi memory record` 手工入。
+        // 想恢复自动行为：`FUXI_EXTRACTOR_ENABLED=1`。
         Self {
-            enabled: true,
+            enabled: false,
             timeout: Duration::from_secs(60),
             max_facts_per_task: 10,
             prompt_template: DEFAULT_PROMPT_TEMPLATE.to_string(),

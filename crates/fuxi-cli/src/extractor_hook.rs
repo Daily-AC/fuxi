@@ -144,14 +144,17 @@ pub fn load_extractor_launch() -> anyhow::Result<(AgentProfile, CcLaunchConfig)>
     Ok((loaded.profile, cc_cfg))
 }
 
-/// 从 env 读 ExtractorConfig。`FUXI_EXTRACTOR_ENABLED=0` 关；其他参数暂用默认。
+/// 从 env 读 ExtractorConfig。
+///
+/// 2026-04-21 翻转默认：默认 disabled——`FUXI_EXTRACTOR_ENABLED=1` 才开启自动抽取。
+/// 玄女按 prompt 判断时机用 `fuxi memory record` 手工入策府是常态路径。
 pub fn extractor_cfg_from_env() -> fuxi_memory::ExtractorConfig {
     let mut cfg = fuxi_memory::ExtractorConfig::default();
     if matches!(
         std::env::var("FUXI_EXTRACTOR_ENABLED").as_deref(),
-        Ok("0") | Ok("false")
+        Ok("1") | Ok("true")
     ) {
-        cfg.enabled = false;
+        cfg.enabled = true;
     }
     cfg
 }
