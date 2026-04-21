@@ -686,11 +686,6 @@ impl ReplApp {
                     }
                 }
             }
-            EventKind::ConversationHandoffRequested { to, .. } => {
-                self.active = tgt(xuannv, *to);
-                self.focus = Focus::Input;
-                self.resync_roster_selection();
-            }
             _ => {}
         }
     }
@@ -1617,9 +1612,6 @@ fn narrate_event(r: &EventRow) -> (&'static str, Color, String) {
         "agent_interrupted" => ("⎋", t.warn(), format!("打断 · {summary}")),
         "task_intervention_applied" => ("✎", t.warn(), format!("追加 · {summary}")),
         "orchestrator_cc_received" => ("📣", t.info(), format!("抄送 · {summary}")),
-        "conversation_handoff_requested" => ("⇄", t.agent_message(), format!("让贤 · {summary}")),
-        "conversation_transferred" => ("⇄", t.agent_message(), format!("已让贤 · {summary}")),
-        "conversation_returned" => ("↩", t.agent_message(), format!("回席 · {summary}")),
         "trigger_registered" => ("⏰", t.info(), format!("更漏登记 · {summary}")),
         "trigger_fired" => ("⏰", t.info(), format!("更漏响 · {summary}")),
         "trigger_dispatched" => ("→", t.info(), format!("更漏派活 · {summary}")),
@@ -2057,12 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn narrate_event_covers_handoff_and_cc() {
-        assert!(
-            narrate_event(&mk_row("conversation_handoff_requested", "a→b"))
-                .2
-                .contains("让贤")
-        );
+    fn narrate_event_covers_cc() {
         assert!(
             narrate_event(&mk_row("orchestrator_cc_received", "luban"))
                 .2
@@ -2568,33 +2555,6 @@ mod tests {
         // tick 后 task 应清理
         app.tick(Instant::now() + Duration::from_millis(50));
         assert!(app.tasks.is_empty());
-    }
-
-    #[test]
-    fn handoff_event_switches_active_target() {
-        let xid = AgentId::new();
-        let mut app = ReplApp::new(xid);
-        let pm = AgentId::new();
-        app.ingest(&mk_ev(
-            Some(pm),
-            EventKind::AgentSpawning {
-                role: "pm".into(),
-                cli: "cc".into(),
-            },
-        ));
-
-        assert_eq!(app.active, ActiveTarget::Xuannv);
-        app.ingest(&mk_ev(
-            Some(xid),
-            EventKind::ConversationHandoffRequested {
-                from: xid,
-                to: pm,
-                reason: "澄清需求".into(),
-                brief: None,
-            },
-        ));
-        assert_eq!(app.active, ActiveTarget::Worker(pm));
-        assert_eq!(app.focus, Focus::Input);
     }
 
     // ───────── 三栏 snapshot ─────────

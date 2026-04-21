@@ -135,7 +135,7 @@
 | D11 | 孤儿事件清理（6+9 个） | G1, G2 |
 | D12 | `fuxi kill --id` / `fuxi events` 补洞 | N9, N10 |
 | D13 | intervention 退化 task title | G6（UI 侧小修即可） |
-| D14 | 让贤 wire 是否拆除还是激活 | G7（Decision 05 说 v1.1 决定） |
+| D14 | ~~让贤 wire 是否拆除还是激活~~ ✅ 已拆（Decision 08 · 2026-04-21） | G7（原 Decision 05 说 v1.1 决定） |
 
 ### 🟢 Nice to have（体验）
 

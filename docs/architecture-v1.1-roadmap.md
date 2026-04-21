@@ -24,7 +24,7 @@
 | **M2** ✅ | 地基修复（已完成） | D1-D5 | 1.5 session（实际 1.5） | 无 | 消息不丢 / codex 能起 / 玄女订阅事件 / 门客 GC / 策府自动抽 fact |
 | **P2** ✅ | 召回（task_id + role 双入口） | — | 1 session | M2 完 | trait 通用化 + worktree 复用，cross-restart e2e 闭环（Decision 07） |
 | **M3** ✅ | 命名规整 + CLI charter | D6-D12 | 1 session（实际 1） | 可与 M2 并行局部 | rename 合一次、孤儿事件清零、kill/events 补洞、CLI charter 落档 |
-| **M4** | 体验升级 | D13-D14, D16, U1 | 1 session | M2 完（命令面板 要正确事件订阅） | slash 命令、/help、让贤决策、intervention 视觉差异、U1 视觉方案 A |
+| **M4** | 体验升级 | D13-D14, D16, U1 | 1 session | M2 完（命令面板 要正确事件订阅） | slash 命令、/help、让贤拆除（D14 · Decision 08）、intervention 视觉差异、U1 视觉方案 A |
 | **M5** | v1.2 大改 | D15, D17, D18 | 2-3 session | M2-M4 稳 | 单栏 TUI（cc 风格）+ ASCII art + Resume 真回放 |
 
 **v1.1 = M2 + M3 + M4**（ship 条件：三者全绿 + 用户验收通过）。M5 = v1.2 独立里程碑。
@@ -178,7 +178,7 @@
 ### M3.6 · D11 · 孤儿事件清理
 
 - 6 个 publisher-orphan：要么补发布点（`AgentSpawning` / `AgentShuttingDown` 在 M2.4 补了），其余（`TaskDelivered` / `TaskCancelled` / `MessageSent` / `MessageReceived`）要么删（YAGNI）要么补实装
-- 9 个 subscriber-orphan：`TriggerDispatched` 应被 bridge/TUI 订阅；`AgentInterrupted` 应 TUI 显示；`ConversationTransferred/Returned` 看 D14 决定
+- 9 个 subscriber-orphan：`TriggerDispatched` 应被 bridge/TUI 订阅；`AgentInterrupted` 应 TUI 显示；`ConversationTransferred/Returned` 已随 D14 拆除（Decision 08）
 
 ### M3.7 · D12 · kill --id + events 子命令
 
@@ -203,13 +203,11 @@
 
 - Decision 04 退化方案保留，但 TUI 侧 task title == "intervention" 的 node 用不同 icon（`💬` 代替 `📁`）+ dim 色，和正式 task 区分
 
-### M4.3 · D14 · 让贤决策（拆 or 激活）
+### M4.3 · D14 · 让贤决策 ✅ 拆（Decision 08 · 2026-04-21）
 
-**拍板**：
-- **激活**：铸牒司接管 skill 创建时临时让贤；写 `fuxi handoff` CLI + 玄女 skill 教她
-- **拆除**：删 ConversationHandoffRequested/Transferred/Returned 三个 EventKind + 相关测试
+**已拍**：拆。理由：intervene + 抄送 + `@agent` 切 active 已覆盖所有场景；v1.1 无能主动让贤的门客（铸牒司/pm 都空位）；激活 = dead code 换形式不换本质。v1.2 真需要时重新设计 API。
 
-**推荐激活**（铸牒司场景真实有用；vs v1.1 删了 v2 再加也是浪费）。
+详见 `docs/decisions/08-conversation-switch-removed.md`。
 
 ### M4.4 · D16 · slash/@ 命令面板 + /help
 
@@ -276,7 +274,7 @@
 
 ### 延后候选（v2+）
 
-- G7 让贤完全激活 → 若 M4.3 拍板"拆"则彻底延
+- ~~G7 让贤完全激活~~ → M4.3 拍板"拆"，已移除（Decision 08）。v1.2 如有铸牒司场景再重新设计
 - G4 A2A 双 AgentCard 合并 → 若 A2A 不成为主通信路则延
 - M5.3 Resume 回放 → 需要新表 + 性能考量，可 v2
 

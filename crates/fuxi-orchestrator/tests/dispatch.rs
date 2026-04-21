@@ -1026,28 +1026,6 @@ async fn agent_dead_event_flips_shelf_status_to_dead() {
 }
 
 #[tokio::test]
-async fn conversation_handoff_requested_event_serializes() {
-    // 让贤 wire format 基线——只测结构 + serde tag 存在。
-    let k = EventKind::ConversationHandoffRequested {
-        from: AgentId::new(),
-        to: AgentId::new(),
-        reason: "pm 接管需求澄清".into(),
-        brief: Some("用户需要更多上下文".into()),
-    };
-    let s = serde_json::to_string(&k).expect("serialize");
-    assert!(
-        s.contains("\"type\":\"conversation_handoff_requested\""),
-        "serde tag 错: {s}"
-    );
-    // roundtrip
-    let back: EventKind = serde_json::from_str(&s).expect("deserialize");
-    assert!(matches!(
-        back,
-        EventKind::ConversationHandoffRequested { .. }
-    ));
-}
-
-#[tokio::test]
 async fn orchestrator_cc_received_carries_original_intervention_id() {
     // OrchestratorCcReceived 应携带 original_intervention_id 字段，方便 TUI 关联到源事件。
     let bus = EventBus::with_memory_store().await.unwrap();

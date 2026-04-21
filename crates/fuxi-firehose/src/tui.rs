@@ -399,33 +399,6 @@ fn summarize(k: &EventKind) -> String {
             short_id(&from_user_to.to_string()),
             one_line(text, 40)
         ),
-        ConversationTransferred { from, to, reason } => format!(
-            "{}→{} reason={}",
-            short_id(&from.to_string()),
-            short_id(&to.to_string()),
-            reason
-        ),
-        ConversationHandoffRequested {
-            from,
-            to,
-            reason,
-            brief,
-        } => format!(
-            "让贤 {}→{} reason={} {}",
-            short_id(&from.to_string()),
-            short_id(&to.to_string()),
-            reason,
-            brief
-                .as_deref()
-                .map(|s| one_line(s, 30))
-                .unwrap_or_default()
-        ),
-        ConversationReturned { from, to, brief } => format!(
-            "{}→{} {}",
-            short_id(&from.to_string()),
-            short_id(&to.to_string()),
-            brief.clone().unwrap_or_default()
-        ),
         TriggerRegistered { id, kind, .. } => format!("trigger+ {kind}:{id}"),
         TriggerFired { id, cause, .. } => format!("trigger! {id} [{cause}]"),
         TriggerDispatched { id, to_agent } => {
@@ -483,10 +456,7 @@ fn color_for(k: &EventKind) -> Color {
 
         UserInterventionSent { .. }
         | TaskInterventionApplied { .. }
-        | OrchestratorCcReceived { .. }
-        | ConversationTransferred { .. }
-        | ConversationHandoffRequested { .. }
-        | ConversationReturned { .. } => Color::Yellow,
+        | OrchestratorCcReceived { .. } => Color::Yellow,
 
         // 招贤一族 —— 醒目的红，因为是"生新 role"的高权限动作。
         SkillStaged { .. }
