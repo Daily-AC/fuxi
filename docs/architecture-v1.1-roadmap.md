@@ -1,8 +1,9 @@
 # v1.1 重构路线图
 
-> **进度 · 2026-04-20**：M2 地基批 ✅ 完成 5/5（commit 至 `1e6db4e`，371 tests 绿）。
-> 下一步：P2 召回（task_id + role 双入口），设计已拍板见 `docs/handoff/v1-session3.md §3-4`。
-> M3 / M4 / M5 未开。
+> **进度 · 2026-04-21**：M2 ✅（5/5）+ P2 召回 L2 ✅（commit `d5a8e02` e2e 闭环）+
+> M3 命名规整 ✅（7/7，commit 至 `8be9ed1`）+ extractor 改 prompt 驱动（`f2142c5`）。
+> **406 tests 绿**。下一步：M4 体验升级 + 用户验收 v1.1。
+> 接手细节看 `docs/handoff/v1-session4.md`。M5 留 v1.2。
 >
 > 基于 `docs/architecture-audit-v1.md` 的 D1-D18 debt 列表，分 4 个 milestone 推进到 v1.1 ship。
 >
@@ -21,7 +22,8 @@
 | # | 名字 | debt | 时间 | 前置 | 产出 |
 |---|---|---|---|---|---|
 | **M2** ✅ | 地基修复（已完成） | D1-D5 | 1.5 session（实际 1.5） | 无 | 消息不丢 / codex 能起 / 玄女订阅事件 / 门客 GC / 策府自动抽 fact |
-| **M3** | 命名规整 + CLI charter | D6-D12 | 1 session | 可与 M2 并行局部 | 破坏性 rename 合一次、孤儿事件清零、kill/events 补洞 |
+| **P2** ✅ | 召回（task_id + role 双入口） | — | 1 session | M2 完 | trait 通用化 + worktree 复用，cross-restart e2e 闭环（Decision 07） |
+| **M3** ✅ | 命名规整 + CLI charter | D6-D12 | 1 session（实际 1） | 可与 M2 并行局部 | rename 合一次、孤儿事件清零、kill/events 补洞、CLI charter 落档 |
 | **M4** | 体验升级 | D13-D14, D16, U1 | 1 session | M2 完（命令面板 要正确事件订阅） | slash 命令、/help、让贤决策、intervention 视觉差异、U1 视觉方案 A |
 | **M5** | v1.2 大改 | D15, D17, D18 | 2-3 session | M2-M4 稳 | 单栏 TUI（cc 风格）+ ASCII art + Resume 真回放 |
 
