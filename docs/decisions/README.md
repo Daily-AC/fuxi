@@ -8,8 +8,10 @@
 | 02 | `02-soul-first-skill.md` | Skill 是角色包（不止 SKILL.md）；body 首段必须是 soul |
 | 03 | `03-tui-task-tree-override.md` | TUI 左栏任务树（不是 agent roster）—— override C2 初版 |
 | 04 | `04-intervene-idle-degrade.md` | intervene Idle 门客自动退化 dispatch（反玄女推荐的 short-term） |
-| 05 | `05-conversation-switch-keep-wire.md` | 让贤 wire 保留不删（反 T2 reviewer）；发起源延 v1.1 |
+| 05 | `05-conversation-switch-keep-wire.md` | ~~让贤 wire 保留不删（反 T2 reviewer）；发起源延 v1.1~~ — **已被 08 override** |
 | 06 | `06-cultural-naming-scheme.md` | 文化底蕴命名总表（策府/甲骨/点将台/更漏/铸牒司/让贤等） |
+| 07 | `07-recall-scope.md` | P2 召回 = 整个工作环境（worktree + cli session）；通用 wire + cc 特化层 |
+| 08 | `08-conversation-switch-removed.md` | 让贤（ConversationSwitch）拆除 · override 05 · M4.3 兑现 |
 
 ## 写新 decision 怎么做
 

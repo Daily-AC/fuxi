@@ -155,28 +155,6 @@ impl Fuxi {
         self.shelf.clone()
     }
 
-    /// 发一条让贤（主对话权转交）请求——TUI 订阅后自动切 active。
-    /// 不走门客 agent.send_message；只是事件广播，FIRE-AND-FORGET。
-    pub fn request_handoff(
-        &self,
-        from: AgentId,
-        to: AgentId,
-        reason: String,
-        brief: Option<String>,
-    ) {
-        let mut meta = EventMeta::now();
-        meta.agent = Some(from);
-        let _ = self.bus.publish(Event {
-            meta,
-            kind: EventKind::ConversationHandoffRequested {
-                from,
-                to,
-                reason,
-                brief,
-            },
-        });
-    }
-
     /// 查一个门客当前的 shelf 状态（Idle/Busy/Dead）；不存在返回 None。
     pub async fn status_of(&self, id: AgentId) -> Option<ShelfStatus> {
         self.shelf.status_of(id).await

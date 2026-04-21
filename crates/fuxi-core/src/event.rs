@@ -137,26 +137,6 @@ pub enum EventKind {
         text: String,
         original_intervention_id: Uuid,
     },
-    ConversationTransferred {
-        from: AgentId,
-        to: AgentId,
-        reason: String,
-    },
-    /// 让贤（主对话权移交请求）：from 请求把主对话切到 to。
-    /// 参照 langgraph `Command(goto, payload)`。TUI 订阅到此事件后把
-    /// active target 切到 to；不阻塞 from。`brief` 是可选简报/交接上下文。
-    ConversationHandoffRequested {
-        from: AgentId,
-        to: AgentId,
-        reason: String,
-        brief: Option<String>,
-    },
-    ConversationReturned {
-        from: AgentId,
-        to: AgentId,
-        brief: Option<String>,
-    },
-
     // ── scheduling / triggers（更漏 M1.3）──────────────────
     /// 新 trigger 入库——候簿上登记了一条新条目。
     TriggerRegistered {
