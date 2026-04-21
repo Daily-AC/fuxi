@@ -12,6 +12,7 @@
 | 06 | `06-cultural-naming-scheme.md` | 文化底蕴命名总表（策府/甲骨/点将台/更漏/铸牒司/让贤等） |
 | 07 | `07-recall-scope.md` | P2 召回 = 整个工作环境（worktree + cli session）；通用 wire + cc 特化层 |
 | 08 | `08-conversation-switch-removed.md` | 让贤（ConversationSwitch）拆除 · override 05 · M4.3 兑现 |
+| 09 | `09-tui-opencode-learnings.md` | TUI 12 条系统性借鉴 opencode · M4-REDUX 一批全做 |
 
 ## 写新 decision 怎么做
 

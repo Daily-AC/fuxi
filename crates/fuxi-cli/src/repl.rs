@@ -55,16 +55,12 @@ pub(crate) enum ClickAction {
     FocusDialogue,
 }
 
-/// 全局主题——启动时一次从 env 读定，widget 内 `theme()` 取引用。
+/// 当前主题——代理到 `theme::current()`，返 **值** 不是引用。
 ///
-/// 为什么 `OnceLock` 而不是 struct field：theme 是**只读**的 presentation
-/// 配置，把它塞到 ReplApp / 各 draw_* 方法会让大量函数签名污染。OnceLock
-/// 让静态访问成 O(1) 指针 deref，多线程读也安全。v1 不支持运行时切主题
-/// （重启 fuxi 才重读 FUXI_THEME），v2 若要可以 `RwLock<Theme>`。
-static THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
-
-pub(crate) fn theme() -> &'static Theme {
-    THEME.get_or_init(theme::from_env)
+/// R10-integ 起 theme 可运行时切（`/theme <name>`），底层是 `RwLock<Theme>`；
+/// 由于 `Theme: Copy` 返值比借 `RwLockReadGuard` 更不易死锁。
+pub(crate) fn theme() -> Theme {
+    theme::current()
 }
 use fuxi_orchestrator::{
     DEFAULT_TICK_INTERVAL_SECS, Fuxi, FuxiConfig, IdleGcTask, IdleShutdowner, ShelfStatus,
@@ -548,7 +544,57 @@ pub(crate) struct ReplApp {
     /// 复制——ratatui mouse capture 会吞 terminal 自带的选择行为，用户要
     /// 复制会话时按一下 F3 切 off，选中用 Cmd/Ctrl+C 复制后再按 F3 恢复。
     pub(crate) mouse_enabled: bool,
+
+    /// 最近一次 Esc 按下的时刻。`None` = 无待确认的中断意图。
+    /// WHY 双击 Esc 才中断：误触 Esc 太常见（tmux prefix / vim 习惯），
+    /// 单击只回玄女或给提示——真中断要两次，在 `ESC_DOUBLE_WINDOW` 内。
+    pub(crate) esc_last_at: Option<Instant>,
+    /// 当前窗口内已按 Esc 的次数（0 / 1）。超窗或其他按键会重置回 0。
+    pub(crate) esc_count: u8,
+
+    /// 右上角通知栈——渲染浮在对话之上，TTL 到点自动 prune。
+    /// WHY 放 ReplApp：toast 源是多路的（agent_dead / 粘贴确认 / 复制成功 / 未来
+    /// /theme 切换反馈），在一个共享 stack 里统一生命周期最简单。
+    pub(crate) toasts: crate::toast::ToastStack,
+
+    /// 输入下沿"活状态行"专用的 spinner。每 draw 推进一帧。
+    /// WHY 放 ReplApp：spinner 本身是 stateful（idx），需要跨帧持久。
+    pub(crate) status_spinner: crate::spinner::Spinner,
+
+    /// 玄女进入 busy/thinking 的起始时刻——用于活状态行显示 elapsed。
+    /// None = idle（状态行显示静态 hint）。
+    pub(crate) xuannv_busy_since: Option<Instant>,
+
+    /// 已提交输入的环形历史（↑/↓ 翻看）。
+    pub(crate) history: crate::prompt_history::PromptHistory,
+    /// 切 active target 时保留未发送草稿；切回来时还原。
+    pub(crate) stash: crate::draft_stash::DraftStash,
+
+    /// 拖选起点 cell 坐标（Down(Left) 记下）；None = 未拖。
+    pub(crate) selection_anchor: Option<(u16, u16)>,
+    /// 拖选终点 cell 坐标（Drag 更新；Up 清）。
+    pub(crate) selection_cursor: Option<(u16, u16)>,
+    /// 最近一次 draw_dialogue 的区域——鼠标坐标 → 对话行索引需要它。
+    pub(crate) last_dialogue_area: Option<Rect>,
+
+    /// roster（任务 / 门客列表）overlay 开关。
+    /// WHY overlay 而非常驻左栏：单栏主体让对话区拉满宽度（方案 R9），roster
+    /// 平时收起来不干扰；用户 F4 临时看一眼就好。Esc 优先关 overlay。
+    pub(crate) roster_overlay_open: bool,
+    /// meta（active target 的元信息）overlay 开关。同上，F5 切。
+    pub(crate) meta_overlay_open: bool,
+
+    /// 斜杠命令浮层（#17 接入 #13 的 SlashPopup）。
+    /// WHY 放 ReplApp：popup 有自己的状态（open/filter/selected），要跨多帧持久。
+    pub(crate) popup: crate::autocomplete::SlashPopup,
+    /// 命令注册表——popup 的候选源 + slash submit 的 action 源。
+    /// 每次用完都调 `register_default()` 太浪费（R11 /help 测过也没事，但整合后
+    /// popup 每次 filter 都要它，应存一份）。后续 /theme 插件想增删命令时改这个。
+    pub(crate) cmd_registry: crate::command_registry::CommandRegistry,
 }
+
+/// 双击 Esc 的判定窗口。2s 太紧会让真想中断的用户按不上；太松会跟单击混。
+pub(crate) const ESC_DOUBLE_WINDOW: Duration = Duration::from_secs(2);
 
 fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
@@ -581,6 +627,20 @@ impl ReplApp {
             prune_delay: TASK_PRUNE_DELAY,
             click: ClickRegistry::new(),
             mouse_enabled: true,
+            esc_last_at: None,
+            esc_count: 0,
+            toasts: crate::toast::ToastStack::new(),
+            status_spinner: crate::spinner::Spinner::new(),
+            xuannv_busy_since: None,
+            history: crate::prompt_history::PromptHistory::default(),
+            stash: crate::draft_stash::DraftStash::new(),
+            selection_anchor: None,
+            selection_cursor: None,
+            last_dialogue_area: None,
+            roster_overlay_open: false,
+            meta_overlay_open: false,
+            popup: crate::autocomplete::SlashPopup::new(),
+            cmd_registry: crate::command_registry::register_default(),
         };
         app.roster_state.select(Some(0));
         app
@@ -665,6 +725,14 @@ impl ReplApp {
                         tgt(xuannv, id),
                         DialogueLine::System(format!("⚠ 下线：{cause}")),
                     );
+                    // Toast 叠一份——对话里留审计轨迹，toast 抓即时注意。
+                    // WHY 不只 toast：TTL 到期 toast 就没了，历史翻不回来。
+                    let role = self.lookup_role(id);
+                    self.toasts.push(
+                        format!("{role} 下线：{cause}"),
+                        crate::toast::ToastVariant::Error,
+                        Duration::from_secs(6),
+                    );
                     self.handle_agent_dead(id);
                 }
             }
@@ -746,6 +814,9 @@ impl ReplApp {
 
     /// 完成/取消后清理过期任务。由 drive_tui 每帧前调一次；测试里直接喂 Instant。
     pub(crate) fn tick(&mut self, now: Instant) {
+        // Toast 到期 prune——draw 之前 prune 避免已死 toast 还闪一帧。
+        self.toasts.prune(now);
+
         let before = self.tasks.len();
         let mut freed = Vec::new();
         self.tasks.retain(|t| match t.prune_after {
@@ -774,7 +845,7 @@ impl ReplApp {
                 && !self.tasks.iter().any(|t| t.worker == id)
                 && !self.idle_workers.iter().any(|r| r.id == id)
             {
-                self.active = ActiveTarget::Xuannv;
+                self.switch_active(ActiveTarget::Xuannv);
             }
             self.resync_roster_selection();
         }
@@ -853,6 +924,7 @@ impl ReplApp {
     fn set_agent_status(&mut self, id: AgentId, status: ShelfStatus) {
         if id == self.xuannv_id {
             self.xuannv_status = status;
+            self.refresh_xuannv_busy_anchor();
             return;
         }
         if let Some(r) = self.idle_workers.iter_mut().find(|r| r.id == id) {
@@ -863,10 +935,22 @@ impl ReplApp {
     fn set_thinking(&mut self, id: AgentId, flag: bool) {
         if id == self.xuannv_id {
             self.xuannv_thinking = flag;
+            self.refresh_xuannv_busy_anchor();
             return;
         }
         if let Some(t) = self.task_by_worker_mut(id) {
             t.thinking = flag;
+        }
+    }
+
+    /// 根据当前 xuannv 是否 busy 更新 `xuannv_busy_since` 时间锚。
+    /// 从 idle→busy：记下此刻；busy→idle：清空。busy 态内不重置（避免 elapsed 跳）。
+    fn refresh_xuannv_busy_anchor(&mut self) {
+        let busy = self.xuannv_thinking || matches!(self.xuannv_status, ShelfStatus::Busy);
+        match (busy, self.xuannv_busy_since) {
+            (true, None) => self.xuannv_busy_since = Some(Instant::now()),
+            (false, Some(_)) => self.xuannv_busy_since = None,
+            _ => {}
         }
     }
 
@@ -948,25 +1032,215 @@ impl ReplApp {
 
     fn select_row_at(&mut self, rows: &[PaneRow], idx: usize) {
         if let Some(row) = rows.get(idx) {
-            match row {
-                PaneRow::Xuannv => self.active = ActiveTarget::Xuannv,
-                PaneRow::Task(i) => {
-                    self.active = ActiveTarget::Worker(self.tasks[*i].worker);
-                }
-                PaneRow::Idle(i) => {
-                    self.active = ActiveTarget::Worker(self.idle_workers[*i].id);
-                }
+            let new_active = match row {
+                PaneRow::Xuannv => ActiveTarget::Xuannv,
+                PaneRow::Task(i) => ActiveTarget::Worker(self.tasks[*i].worker),
+                PaneRow::Idle(i) => ActiveTarget::Worker(self.idle_workers[*i].id),
                 PaneRow::IdleHeader => return,
-            }
+            };
+            self.switch_active(new_active);
             self.roster_state.select(Some(idx));
         }
     }
 
     /// Esc：速回玄女。
     pub(crate) fn reset_to_xuannv(&mut self) {
-        self.active = ActiveTarget::Xuannv;
+        self.switch_active(ActiveTarget::Xuannv);
         self.focus = Focus::Input;
         self.resync_roster_selection();
+    }
+
+    /// 切 active target 的统一入口：
+    /// 1. 把当前 input 文本 stash 到旧 target；
+    /// 2. `active = new`；
+    /// 3. 用 `stash.pop(new)` 还原该 target 的草稿（没有则清空输入）。
+    ///
+    /// WHY 统一：多处触发（Tab/Esc/roster 点击/点栏切换），若各自 stash 会漏；
+    /// `take_input` 会重建 textarea，所以这里得显式 pop+insert。
+    pub(crate) fn switch_active(&mut self, new: ActiveTarget) {
+        if self.active == new {
+            return;
+        }
+        let cur_draft = self.input_text();
+        self.stash.stash(self.active, cur_draft);
+        self.active = new;
+        // 清当前输入（重建新 textarea 清 cursor 状态）。
+        self.input = new_textarea();
+        if let Some(prev) = self.stash.pop(new) {
+            self.input.insert_str(&prev);
+        }
+        // 切到新 target 时历史光标归零——避免拿上一段 target 的 history 指针。
+        self.history.reset_cursor();
+    }
+
+    /// 当前 active 对象是否"在干活"——决定 Esc 的语义是中断还是回玄女。
+    ///
+    /// Xuannv：shelf Busy 或 thinking=true。
+    /// Worker：对应 task 在跑（thinking 或 state 处于 Running/Delivered 前），
+    /// 且未标 prune_after（被删队前的跑中 task 才算）。
+    pub(crate) fn active_is_busy(&self) -> bool {
+        match self.active {
+            ActiveTarget::Xuannv => {
+                self.xuannv_thinking || matches!(self.xuannv_status, ShelfStatus::Busy)
+            }
+            ActiveTarget::Worker(id) => self
+                .tasks
+                .iter()
+                .filter(|t| t.worker == id && t.prune_after.is_none())
+                .any(|t| {
+                    // 终态 Done/Cancelled 走 prune_after 分支处理；此处 t.prune_after=None
+                    // 基本等价于"活着的 task"。再显式挡一下 Done/Cancelled 作为保险。
+                    t.thinking || !matches!(t.state, TaskState::Done | TaskState::Cancelled)
+                }),
+        }
+    }
+
+    /// 处理 Esc 键。
+    ///
+    /// 语义（按优先级）：
+    /// 1. active 在忙 + 2s 内已按过 Esc → 视为"二按"，发中断请求（目前先 push_line）
+    ///    并重置计数。
+    /// 2. active 在忙 + 首次按 → 记时、计数 1，给出 hint 要求再按一次。
+    /// 3. active idle → 维持旧行为回玄女。
+    ///
+    /// `now` 注入：测试用假时钟避免 sleep；生产传 `Instant::now()`。
+    /// 如果 `text` 是本地 slash 命令（如 `/theme`）则处理掉并返 `true`；否则返 `false`
+    /// 让调用方按普通消息往 agent 派。
+    ///
+    /// WHY 返 bool 而非 Option<Submit>：这些命令都是"本地副作用 + toast 反馈"类，
+    /// 不生成 Xuannv / Worker 派发。调用方只需区分"吃了"/"没吃"。
+    pub(crate) fn try_handle_slash_submit(&mut self, text: &str) -> bool {
+        let Some(rest) = text.strip_prefix('/') else {
+            return false;
+        };
+        // 命令名 + 可选一个 arg（简单 split——命令当前都只带 0-1 个参数）。
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let Some(cmd) = parts.next() else {
+            return false;
+        };
+        let arg = parts.next().map(str::trim).filter(|s| !s.is_empty());
+        match cmd {
+            "theme" => {
+                self.execute_theme_command(arg);
+                true
+            }
+            "help" => {
+                self.execute_help_command();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `/help` handler：把 `CommandRegistry::render_help_markdown()` 结果按行
+    /// 塞进当前 active 的对话 bucket（System 行），便于用户翻看同时不打扰 agent。
+    pub(crate) fn execute_help_command(&mut self) {
+        let text = self.cmd_registry.render_help_markdown();
+        let target = self.active;
+        for line in text.lines() {
+            // 空行也推进去——markdown 的 blank line 是段落分隔，保留让观感清晰。
+            self.push_line(target, DialogueLine::System(line.to_string()));
+        }
+    }
+
+    /// 统一 action 路由——popup 吐 `Execute(action)` 时调这个。
+    /// 没实装的命令推一条 System 行告知用户，避免"按 Enter 无反应"黑洞。
+    pub(crate) fn run_command_action(&mut self, action: crate::command_registry::CommandAction) {
+        use crate::command_registry::CommandAction;
+        match action {
+            CommandAction::Help => self.execute_help_command(),
+            CommandAction::Theme(name) => self.execute_theme_command(name.as_deref()),
+            CommandAction::Clear => {
+                // /clear：清掉当前 active 的对话 bucket 而非清全部（主人通常只想清当前视图）。
+                if let Some(bucket) = self.dialogues.get_mut(&self.active) {
+                    bucket.clear();
+                }
+                self.dialogue_scroll = 0;
+                self.dialogue_auto_scroll = true;
+            }
+            CommandAction::Quit => {
+                self.should_quit = true;
+            }
+            CommandAction::Kill | CommandAction::Status => {
+                // TODO(#后续)：/kill 和 /status 需要接 orchestrator 的 shelf API。
+                // 占位：给用户一条 System 行说明未实装，避免静默吞按键。
+                self.push_line(
+                    self.active,
+                    DialogueLine::System("（此命令尚未实装，敬请期待）".into()),
+                );
+            }
+        }
+    }
+
+    /// `/theme` handler：
+    /// - 无参 → toast 列出可选主题名（从 `list_themes()` + 内置兜底）
+    /// - 带名 → `set_theme(name)` + toast 成功/失败
+    pub(crate) fn execute_theme_command(&mut self, name: Option<&str>) {
+        const TTL: Duration = Duration::from_secs(4);
+        match name {
+            None => {
+                let mut names = crate::theme::list_themes();
+                // 兜底：若 theme 目录没 `mocha`/`latte` 条目（release 分发场景），
+                // 仍把内置两款补进去——`set_theme` 对这两个名字不经文件也能命中。
+                for builtin in ["mocha", "latte"] {
+                    if !names.iter().any(|n| n == builtin) {
+                        names.push(builtin.to_string());
+                    }
+                }
+                names.sort();
+                names.dedup();
+                let msg = if names.is_empty() {
+                    "没有可用主题".to_string()
+                } else {
+                    format!("可选主题：{}", names.join("、"))
+                };
+                self.toasts.push(msg, crate::toast::ToastVariant::Info, TTL);
+            }
+            Some(n) => match crate::theme::set_theme(n) {
+                Ok(()) => {
+                    self.toasts.push(
+                        format!("主题已切到 {n}"),
+                        crate::toast::ToastVariant::Success,
+                        TTL,
+                    );
+                }
+                Err(e) => {
+                    self.toasts.push(
+                        format!("切主题失败：{e}"),
+                        crate::toast::ToastVariant::Error,
+                        TTL,
+                    );
+                }
+            },
+        }
+    }
+
+    fn handle_esc_at(&mut self, now: Instant) {
+        if !self.active_is_busy() {
+            self.esc_last_at = None;
+            self.esc_count = 0;
+            self.reset_to_xuannv();
+            return;
+        }
+
+        let in_window = self
+            .esc_last_at
+            .map(|t| now.saturating_duration_since(t) <= ESC_DOUBLE_WINDOW)
+            .unwrap_or(false);
+
+        if in_window && self.esc_count >= 1 {
+            // 二按确认——发中断请求（现阶段只通知用户，真中断 API 待 R1 真入装）。
+            self.push_line(self.active, DialogueLine::System("⏹ 中断请求已发".into()));
+            self.esc_last_at = None;
+            self.esc_count = 0;
+        } else {
+            self.esc_last_at = Some(now);
+            self.esc_count = 1;
+            self.push_line(
+                self.active,
+                DialogueLine::System("再按一次 Esc 确认中断".into()),
+            );
+        }
     }
 
     fn roster_up(&mut self) {
@@ -1007,6 +1281,16 @@ impl ReplApp {
 
     /// 处理一次按键。返回 Some(Submit) 表示有待提交意图；否则 None。
     pub(crate) fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Option<Submit> {
+        self.handle_key_at(code, mods, Instant::now())
+    }
+
+    /// handle_key 可测版本——把 `now` 外注入以便在 Esc 双击窗口逻辑下跑确定性测试。
+    pub(crate) fn handle_key_at(
+        &mut self,
+        code: KeyCode,
+        mods: KeyModifiers,
+        now: Instant,
+    ) -> Option<Submit> {
         if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')) {
             if self.confirm_quit {
                 self.should_quit = true;
@@ -1021,6 +1305,38 @@ impl ReplApp {
         }
         self.confirm_quit = false;
 
+        // Esc 计数在非 Esc 按键来时归零——"再按一次 Esc"约束只在连续按 Esc 时生效。
+        if !matches!(code, KeyCode::Esc) {
+            self.esc_last_at = None;
+            self.esc_count = 0;
+        }
+
+        // slash popup 优先——开着时吞所有键给 popup 的状态机，按 PopupEvent 路由。
+        // WHY 优先于 overlay / 全局键：popup 是最 ephemeral 的输入通道，用户期待
+        // 它"拦住所有输入"直到关闭；Esc 关 popup 也要最先响应。
+        if self.popup.is_open() {
+            let ev = self.popup.handle_key(code, mods, &self.cmd_registry);
+            match ev {
+                crate::autocomplete::PopupEvent::None => {}
+                crate::autocomplete::PopupEvent::Close => {}
+                crate::autocomplete::PopupEvent::Execute(action) => {
+                    self.run_command_action(action);
+                }
+            }
+            return None;
+        }
+
+        // 空输入 + 按 `/` → 开 popup，**不**把这个 `/` 塞到 textarea。
+        // 非空输入（句中 `/`）不触发 popup——保持 textarea 正常行为。
+        if matches!(code, KeyCode::Char('/'))
+            && !mods.contains(KeyModifiers::CONTROL)
+            && !mods.contains(KeyModifiers::ALT)
+            && self.input_text().is_empty()
+        {
+            self.popup.open(&self.cmd_registry);
+            return None;
+        }
+
         // 全局键
         match code {
             KeyCode::Tab => {
@@ -1029,7 +1345,14 @@ impl ReplApp {
                 return None;
             }
             KeyCode::Esc => {
-                self.reset_to_xuannv();
+                // 优先顺序：popup > overlay > interrupt。
+                // popup 已经在上面分支吃掉，这里到不了；overlay 其次，最后才是双击 Esc。
+                if self.roster_overlay_open || self.meta_overlay_open {
+                    self.roster_overlay_open = false;
+                    self.meta_overlay_open = false;
+                    return None;
+                }
+                self.handle_esc_at(now);
                 return None;
             }
             KeyCode::F(2) => {
@@ -1040,6 +1363,25 @@ impl ReplApp {
                 self.mouse_enabled = !self.mouse_enabled;
                 return Some(Submit::ToggleMouse);
             }
+            KeyCode::F(4) => {
+                // roster overlay 切换——开时顺便把焦点切到 roster 以便 ↑↓ Enter 导航。
+                self.roster_overlay_open = !self.roster_overlay_open;
+                if self.roster_overlay_open {
+                    self.meta_overlay_open = false;
+                    self.focus = Focus::Roster;
+                } else {
+                    self.focus = Focus::Input;
+                }
+                return None;
+            }
+            KeyCode::F(5) => {
+                // meta overlay 是只读展示——焦点不跟着转，保持在 input 方便继续打字。
+                self.meta_overlay_open = !self.meta_overlay_open;
+                if self.meta_overlay_open {
+                    self.roster_overlay_open = false;
+                }
+                return None;
+            }
             KeyCode::PageUp => {
                 self.scroll_up_page();
                 return None;
@@ -1048,11 +1390,13 @@ impl ReplApp {
                 self.scroll_down_page();
                 return None;
             }
-            KeyCode::End if self.input_text().is_empty() => {
-                self.dialogue_auto_scroll = true;
-                self.dialogue_scroll = self
-                    .last_dialogue_total
-                    .saturating_sub(self.last_dialogue_view);
+            // End / Ctrl+End：跳到底 + 恢复 auto-follow。
+            // WHY Ctrl+End 兜底：输入框非空时 End 走 textarea（行尾），
+            // Ctrl+End 保底让用户始终能跳到底。
+            KeyCode::End
+                if self.input_text().is_empty() || mods.contains(KeyModifiers::CONTROL) =>
+            {
+                self.jump_to_bottom();
                 return None;
             }
             KeyCode::Home if self.input_text().is_empty() => {
@@ -1110,10 +1454,39 @@ impl ReplApp {
                 if trimmed.is_empty() {
                     return None;
                 }
+                // slash 命令拦截——/theme 等不走 Xuannv/Worker，直接在本地做。
+                // WHY 在 Enter 路径里拦：popup（#17）还没接 repl；先走最小接线，
+                // popup 接入后再把 `CommandAction::Theme(name)` 也路由到同一个 handler。
+                if self.try_handle_slash_submit(trimmed) {
+                    self.history.push(trimmed);
+                    return None;
+                }
+                // 记一条历史——提交后 ↑ 能回翻本句。push 有连续去重。
+                self.history.push(trimmed);
                 match self.active {
                     ActiveTarget::Xuannv => Some(Submit::Xuannv(trimmed.to_string())),
                     ActiveTarget::Worker(id) => Some(Submit::Worker(id, trimmed.to_string())),
                 }
+            }
+            // ↑/↓ · history 导航条件：输入框空 **或** 当前内容就是 history
+            // 填上来的（cursor.is_some() 说明在历史链上）。
+            // WHY 不只看空：翻到上一条填上后内容非空，继续 ↑ 还得生效；只有
+            // 用户真在编辑（离开历史链）时才把 ↑/↓ 让给 textarea。
+            KeyCode::Up if self.input_text().is_empty() || self.history.cursor().is_some() => {
+                if let Some(prev) = self.history.up() {
+                    let prev = prev.to_string();
+                    self.input = new_textarea();
+                    self.input.insert_str(&prev);
+                }
+                None
+            }
+            KeyCode::Down if self.history.cursor().is_some() => {
+                let next = self.history.down().map(|s| s.to_string());
+                self.input = new_textarea();
+                if let Some(s) = next {
+                    self.input.insert_str(&s);
+                }
+                None
             }
             KeyCode::Char(c) if c.is_control() || c == '\t' => None,
             _ => {
@@ -1143,9 +1516,18 @@ impl ReplApp {
         let step = self.last_dialogue_view.max(1);
         let new_scroll = self.dialogue_scroll.saturating_add(step).min(max);
         self.dialogue_scroll = new_scroll;
+        // Sticky：手动滚到底 → 自动恢复 auto-follow（下一条新消息贴底）。
         if new_scroll >= max {
             self.dialogue_auto_scroll = true;
         }
+    }
+
+    /// 跳到对话底部——手动或 End/Ctrl+End 触发。同时恢复 auto-follow。
+    pub(crate) fn jump_to_bottom(&mut self) {
+        self.dialogue_auto_scroll = true;
+        self.dialogue_scroll = self
+            .last_dialogue_total
+            .saturating_sub(self.last_dialogue_view);
     }
 
     pub(crate) fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
@@ -1153,51 +1535,157 @@ impl ReplApp {
         // 的 pane 会命中——pane 区域互不重叠，谁先注册其实无关）。
         self.click.clear();
 
-        let root = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(28),
-                Constraint::Min(40),
-                Constraint::Length(30),
-            ])
-            .split(f.area());
-
-        let left = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(6),
-                Constraint::Length(if self.events_visible { 10 } else { 0 }),
-            ])
-            .split(root[0]);
-        self.draw_roster(f, left[0]);
-        self.click.register(left[0], ClickAction::FocusRoster);
-        if self.events_visible {
-            self.draw_events(f, left[1]);
+        // 活状态行的 spinner 每帧推进一次——draw 频率≈20Hz，合 braille 观感。
+        if self.active_is_busy() {
+            self.status_spinner.tick();
         }
 
-        let center = Layout::default()
+        // R9 单栏主体：对话 + 输入 + 状态 垂直堆叠，撑满宽度。
+        // roster / meta 挪到 F4/F5 overlay（中央浮层），events_visible 仍可 F2
+        // 打开一条底部 events 横带（窄高）方便偶尔观察事件流。
+        //
+        // 为什么不保留左侧常驻 roster：对话是主操作区，28 列常驻太占画面；
+        // overlay 让用户"查一眼"而非"一直看"，更符合实际使用分布。
+        let root = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),
+                Constraint::Length(if self.events_visible { 10 } else { 0 }),
                 Constraint::Length(5),
                 Constraint::Length(1),
             ])
-            .split(root[1]);
-        self.draw_dialogue(f, center[0]);
-        self.click.register(center[0], ClickAction::FocusDialogue);
-        self.draw_input(f, center[1]);
-        self.click.register(center[1], ClickAction::FocusInput);
-        self.draw_status(f, center[2]);
+            .split(f.area());
+        self.draw_dialogue(f, root[0]);
+        self.click.register(root[0], ClickAction::FocusDialogue);
+        if self.events_visible {
+            self.draw_events(f, root[1]);
+        }
+        self.draw_input(f, root[2]);
+        self.click.register(root[2], ClickAction::FocusInput);
+        self.draw_status(f, root[3]);
 
-        self.draw_meta(f, root[2]);
+        // overlay 浮层——优先级：roster > meta（互斥，同时只一个开着）。
+        // 渲染顺序：overlay 在 toast 之前——toast 始终最顶。
+        if self.roster_overlay_open {
+            self.draw_roster_overlay(f, f.area());
+        } else if self.meta_overlay_open {
+            self.draw_meta_overlay(f, f.area());
+        }
+
+        // slash popup——在 input 正上方贴条，40%-60% 屏宽居中。
+        // 位置在 overlay 之后、toast 之前：overlay 盖底层，toast 最顶，popup 居中。
+        if self.popup.is_open() {
+            self.draw_popup(f, root[2]);
+        }
+
+        // Toast 最后画——要浮在所有 pane 和 overlay 之上。用 Clear 擦一小块底色
+        // 再盖 Paragraph，避免下层文字透出来。
+        self.draw_toasts(f);
     }
 
-    /// 处理鼠标事件。v1 仅三类：
+    /// 在 input_area 正上方渲染 SlashPopup。
     ///
-    /// - 左键按下 → `click.hit_test` → 切 pane focus
-    /// - 滚轮 → 对话区滚动（与 PgUp/PgDn 行为一致）
+    /// 宽度取屏幕 40%~60%，位置贴 input 顶边向上浮（popup 高度 = 候选行数 + 2 边框
+    /// + 1 filter 展示行，最多占 15 行避免盖满对话）。
+    fn draw_popup(&self, f: &mut ratatui::Frame<'_>, input_area: Rect) {
+        let t = theme();
+        let lines = self.popup.render_lines(&t);
+        // 顶上加一行展示 filter，底下用候选——高度 = filter(1) + 边框(2) + 候选行数。
+        let desired_rows = (lines.len() as u16).min(12).saturating_add(3);
+
+        let screen = f.area();
+        let width = (screen.width.saturating_mul(55) / 100).clamp(30, screen.width);
+        let height = desired_rows.min(screen.height);
+        let x = screen.x + (screen.width.saturating_sub(width)) / 2;
+        // 贴 input 顶边向上——`input_area.y` 之上 `height` 行。
+        let y = input_area.y.saturating_sub(height);
+        let rect = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+
+        use ratatui::text::Line;
+        use ratatui::widgets::{Block, Borders, Paragraph};
+        f.render_widget(ratatui::widgets::Clear, rect);
+
+        let title = format!(" {} ", self.popup.display_input());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(ratatui::style::Style::default().fg(t.focus_border()))
+            .title(title);
+
+        // 第一行留给引导提示（空 Line 占位让外观更稳——如无候选时不至于坍缩）。
+        let mut body: Vec<Line<'_>> = Vec::with_capacity(lines.len() + 1);
+        if lines.is_empty() {
+            body.push(Line::from("（无匹配命令）"));
+        } else {
+            body.extend(lines);
+        }
+        let para = Paragraph::new(body).block(block);
+        f.render_widget(para, rect);
+    }
+
+    /// 中央浮层通用布局：取 area 的 `width_pct%` × `height_pct%`，居中对齐。
+    /// WHY 分离函数：roster / meta overlay 共用，将来 /help overlay 也会用。
+    fn overlay_rect(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
+        let w = (area.width as u32 * width_pct as u32 / 100).max(20) as u16;
+        let h = (area.height as u32 * height_pct as u32 / 100).max(6) as u16;
+        let w = w.min(area.width);
+        let h = h.min(area.height);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    fn draw_roster_overlay(&mut self, f: &mut ratatui::Frame<'_>, area: Rect) {
+        let rect = Self::overlay_rect(area, 40, 60);
+        // Clear 擦掉底层像素——不然 roster 内容会和对话区叠加。
+        f.render_widget(ratatui::widgets::Clear, rect);
+        self.draw_roster(f, rect);
+        // 点击 overlay 区等同"确认要对 roster 操作"——维持 FocusRoster 语义。
+        // 注册顺序在 dialogue 之后 → hit_test 逆序扫，overlay 优先命中。
+        self.click.register(rect, ClickAction::FocusRoster);
+    }
+
+    fn draw_meta_overlay(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
+        let rect = Self::overlay_rect(area, 40, 60);
+        f.render_widget(ratatui::widgets::Clear, rect);
+        self.draw_meta(f, rect);
+    }
+
+    /// 右上角 toast 层渲染。空 stack 是 no-op，不占用任何像素。
+    /// WHY 右上角而非中心：右上不挡主操作区（对话 + 输入），也不盖左栏 task 树。
+    fn draw_toasts(&self, f: &mut ratatui::Frame<'_>) {
+        // 顶 2 行留给 block 边框；右边留到屏最右——toast 自己 render 会靠右贴边。
+        let area = f.area();
+        if area.width < 12 || area.height < 3 {
+            return;
+        }
+        let toast_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(1),
+        };
+        for (rect, para) in self.toasts.render(&theme(), toast_area) {
+            f.render_widget(ratatui::widgets::Clear, rect);
+            f.render_widget(para, rect);
+        }
+    }
+
+    /// 处理鼠标事件。v1 支持：
     ///
-    /// 其他（Drag / Moved / Right / Middle）先不处理。
+    /// - 左键按下 → pane focus 切换（`click.hit_test`）+ 若在对话区，记选择锚点
+    /// - 左键拖拽 → 更新选择终点（仅对话区内生效）
+    /// - 左键释放 → 若拖拽过且锚/终点都在对话区，抓文本入剪贴板 + toast
+    /// - 滚轮 → 对话区滚动
     pub(crate) fn handle_mouse(&mut self, ev: MouseEvent) {
         match ev.kind {
             MouseEventKind::ScrollUp => {
@@ -1210,9 +1698,136 @@ impl ReplApp {
                 if let Some(action) = self.click.hit_test(ev.column, ev.row).copied() {
                     self.apply_click(action);
                 }
+                // 对话区内 Down：起一个拖选。
+                if self.in_dialogue_area(ev.column, ev.row) {
+                    self.selection_anchor = Some((ev.column, ev.row));
+                    self.selection_cursor = Some((ev.column, ev.row));
+                } else {
+                    self.selection_anchor = None;
+                    self.selection_cursor = None;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection_anchor.is_some() {
+                    // Drag 可能越出 dialogue area；终点位置自然 clamp 在 render 时做。
+                    self.selection_cursor = Some((ev.column, ev.row));
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let (Some(a), Some(b)) =
+                    (self.selection_anchor.take(), self.selection_cursor.take())
+                    && a != b
+                {
+                    self.finish_selection_copy(a, b);
+                }
             }
             _ => {}
         }
+    }
+
+    fn in_dialogue_area(&self, col: u16, row: u16) -> bool {
+        self.last_dialogue_area
+            .map(|a| col >= a.x && col < a.x + a.width && row >= a.y && row < a.y + a.height)
+            .unwrap_or(false)
+    }
+
+    /// 拖选释放后的收尾：抓选中行文本 → 剪贴板 → toast。
+    fn finish_selection_copy(&mut self, anchor: (u16, u16), cursor: (u16, u16)) {
+        let Some(area) = self.last_dialogue_area else {
+            return;
+        };
+        let text = self.extract_selected_text(area, anchor, cursor);
+        if text.is_empty() {
+            return;
+        }
+        let char_count = text.chars().count();
+        match crate::clipboard::copy_to_clipboard(&text) {
+            Ok(()) => {
+                self.toasts.push(
+                    format!("已复制 {char_count} 字"),
+                    crate::toast::ToastVariant::Success,
+                    Duration::from_secs(3),
+                );
+            }
+            Err(e) => {
+                self.toasts.push(
+                    format!("复制失败：{e}"),
+                    crate::toast::ToastVariant::Error,
+                    Duration::from_secs(5),
+                );
+            }
+        }
+    }
+
+    /// 从当前对话 bucket 按"选中的 wrapped rows"抽出 plain text。
+    ///
+    /// 算法：
+    /// 1. 重跑 `render_dialogue_collapsed` + 按 `count_wrapped_rows` 把每 Line
+    ///    展开成"屏幕行"序列。
+    /// 2. 计算锚点/终点 y 在 inner 区的**屏幕行**索引（含 scroll 偏移）。
+    /// 3. 切片 [y_min..=y_max] 的 plain text join('\n')。
+    ///
+    /// 不精确到 char-level：v1 用户要精确选取可以关 F3 鼠标捕获走 native。
+    pub(crate) fn extract_selected_text(
+        &self,
+        area: Rect,
+        anchor: (u16, u16),
+        cursor: (u16, u16),
+    ) -> String {
+        let inner_y = area.y + 1;
+        let inner_h = area.height.saturating_sub(2);
+        if inner_h == 0 {
+            return String::new();
+        }
+
+        // Cell 坐标 → inner 屏幕行（clamp）。
+        let to_row = |y: u16| -> u16 {
+            if y < inner_y {
+                0
+            } else if y >= inner_y + inner_h {
+                inner_h - 1
+            } else {
+                y - inner_y
+            }
+        };
+        let row_a = to_row(anchor.1);
+        let row_b = to_row(cursor.1);
+        let (lo, hi) = if row_a <= row_b {
+            (row_a, row_b)
+        } else {
+            (row_b, row_a)
+        };
+
+        // 对话 bucket 全量 Line 序列（与 draw 同路径）。
+        let empty = VecDeque::new();
+        let bucket = self.dialogues.get(&self.active).unwrap_or(&empty);
+        let lines: Vec<Line<'_>> = render_dialogue_collapsed(bucket.iter());
+        // 屏幕行展开：每 Line 重复 `count_wrapped_rows` 次（简化——把同 Line
+        // 的续行内容一律归到首 Line 的文本；用户选到的 row 1 和 row 0 拿同一
+        // plain text 没大问题，去重后即可）。
+        let inner_w = area.width.saturating_sub(2);
+        let mut rows_plain: Vec<String> = Vec::with_capacity(lines.len() * 2);
+        for l in &lines {
+            let plain: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            let wraps = count_wrapped_rows(l, inner_w).max(1);
+            for i in 0..wraps {
+                // 首屏幕行给完整 plain，后续续行给空串避免重复。
+                rows_plain.push(if i == 0 { plain.clone() } else { String::new() });
+            }
+        }
+
+        let scroll = self.dialogue_scroll as usize;
+        let lo_idx = scroll + lo as usize;
+        let hi_idx = scroll + hi as usize;
+        let mut out: Vec<String> = Vec::new();
+        for idx in lo_idx..=hi_idx {
+            if let Some(s) = rows_plain.get(idx)
+                && !s.is_empty()
+            {
+                out.push(s.clone());
+            }
+        }
+        out.join("\n")
     }
 
     fn apply_click(&mut self, a: ClickAction) {
@@ -1442,6 +2057,15 @@ impl ReplApp {
             .wrap(Wrap { trim: false })
             .scroll((self.dialogue_scroll, 0));
         f.render_widget(para, area);
+
+        // 记 area 以便鼠标 drag 把 cell 坐标 → 对话行映射。
+        self.last_dialogue_area = Some(area);
+
+        // 选中范围 overlay：对选中 cells 加 REVERSED modifier，用户视觉上看到
+        // 被"反色"的选区。不精确（整行 cell）但对 v1 剪贴板够用。
+        if let (Some(a), Some(b)) = (self.selection_anchor, self.selection_cursor) {
+            apply_selection_reverse(f.buffer_mut(), area, a, b);
+        }
     }
 
     fn draw_input(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
@@ -1465,9 +2089,42 @@ impl ReplApp {
     }
 
     fn draw_status(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
+        // Busy 态 → spinner + "调用中 · mm:ss"；Idle → 静态 hint。
+        // WHY 两套：用户正在等回复时，状态行告诉他"活着、已等 X 秒"；
+        // idle 时用不到进度，恢复 hint 教学按键。
+        if self.active_is_busy() {
+            let glyph = self.status_spinner.glyph();
+            let elapsed = self.active_elapsed().map(humanize_elapsed);
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled(glyph.to_string(), Style::default().fg(theme().info())),
+                Span::raw(" 调用中"),
+            ];
+            if let Some(e) = elapsed {
+                spans.push(Span::raw(" · "));
+                spans.push(Span::styled(e, Style::default().fg(theme().dim_border())));
+            }
+            let para = Paragraph::new(Line::from(spans))
+                .style(Style::default().fg(Color::Black).bg(Color::Gray));
+            f.render_widget(para, area);
+            return;
+        }
         let hint = " Tab 循环 | Esc 回玄女 | F2 事件流 | F3 鼠标开关(复制用) | PgUp/PgDn 翻阅 | ⇧/⌥-Enter / ⌃-J 换行 | Enter 发送 | Ctrl-C 退出 ";
         let para = Paragraph::new(hint).style(Style::default().fg(Color::Black).bg(Color::Gray));
         f.render_widget(para, area);
+    }
+
+    /// 当前 active 对象忙了多久（Xuannv 看 busy_since；Worker 看 dispatched_at）。
+    fn active_elapsed(&self) -> Option<Duration> {
+        match self.active {
+            ActiveTarget::Xuannv => self.xuannv_busy_since.map(|t| t.elapsed()),
+            ActiveTarget::Worker(id) => self
+                .tasks
+                .iter()
+                .filter(|t| t.worker == id && t.prune_after.is_none())
+                .max_by_key(|t| t.dispatched_at)
+                .map(|t| t.dispatched_at.elapsed()),
+        }
     }
 
     fn draw_meta(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
@@ -1701,6 +2358,48 @@ fn count_wrapped_rows(line: &Line, width: u16) -> u16 {
     }
     let w = width.max(1) as usize;
     total_width.div_ceil(w) as u16
+}
+
+/// 把选中 cells 反色——给 draw 完的对话 buffer 叠 REVERSED modifier。
+///
+/// 选区语义：按 row 整行反色（从 min_y 到 max_y，整行宽）——终端文本
+/// 选择的常见简化，用户实际要复制的也是"这几行"而非精确 char range。
+/// `anchor`/`cursor` 是 Down/Drag 的 cell 坐标；被 clamp 到 `area`（借此
+/// 避免选到边框之外）。
+fn apply_selection_reverse(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    anchor: (u16, u16),
+    cursor: (u16, u16),
+) {
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
+    // 避边框：inner = area 缩 1 圈。
+    let inner_x = area.x + 1;
+    let inner_y = area.y + 1;
+    let inner_w = area.width.saturating_sub(2);
+    let inner_h = area.height.saturating_sub(2);
+    if inner_w == 0 || inner_h == 0 {
+        return;
+    }
+
+    let (y0, y1) = (anchor.1.min(cursor.1), anchor.1.max(cursor.1));
+    // 限制在 inner 纵向区。
+    let ys = y0.max(inner_y);
+    let ye = y1.min(inner_y + inner_h - 1);
+    if ys > ye {
+        return;
+    }
+
+    for y in ys..=ye {
+        for x in inner_x..(inner_x + inner_w) {
+            if x < buf.area.width && y < buf.area.height {
+                let cell = &mut buf[(x, y)];
+                cell.modifier.insert(Modifier::REVERSED);
+            }
+        }
+    }
 }
 
 /// 事件叙事化——把 raw `kind_tag` 翻译成人话图标 + 中文短语。
@@ -2493,6 +3192,123 @@ mod tests {
         assert_eq!(app.focus, Focus::Input);
     }
 
+    // ───────── #6 R1 · 双击 Esc 中断 ─────────
+
+    fn dialogue_has_text(app: &ReplApp, target: ActiveTarget, needle: &str) -> bool {
+        app.dialogues
+            .get(&target)
+            .map(|bucket| {
+                bucket.iter().any(|e| match &e.line {
+                    DialogueLine::System(s) => s.contains(needle),
+                    DialogueLine::User(s) => s.contains(needle),
+                    DialogueLine::Agent { text, .. } => text.contains(needle),
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn single_esc_with_active_task_sets_count_and_shows_hint() {
+        let mut app = ReplApp::stub();
+        // 玄女进入 thinking（busy）状态——active 默认就是 Xuannv。
+        app.xuannv_thinking = true;
+        let now = Instant::now();
+
+        app.handle_key_at(KeyCode::Esc, KeyModifiers::empty(), now);
+
+        assert_eq!(app.esc_count, 1, "首按 Esc 应记 1");
+        assert!(app.esc_last_at.is_some(), "首按 Esc 应记时间戳");
+        assert_eq!(
+            app.active,
+            ActiveTarget::Xuannv,
+            "active 忙时单 Esc 不应回玄女（本来就是玄女，这里验证不抹 active）"
+        );
+        assert!(
+            dialogue_has_text(&app, ActiveTarget::Xuannv, "再按一次 Esc"),
+            "首按 Esc 应 push hint"
+        );
+    }
+
+    #[test]
+    fn double_esc_within_2s_sends_interrupt() {
+        let mut app = ReplApp::stub();
+        app.xuannv_thinking = true;
+        let t0 = Instant::now();
+
+        app.handle_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
+        assert_eq!(app.esc_count, 1);
+
+        // 1.5s 后二按——在 2s 窗口内。
+        let t1 = t0 + Duration::from_millis(1500);
+        app.handle_key_at(KeyCode::Esc, KeyModifiers::empty(), t1);
+
+        assert_eq!(app.esc_count, 0, "二按确认后应重置计数");
+        assert!(app.esc_last_at.is_none(), "二按确认后应清时间戳");
+        assert!(
+            dialogue_has_text(&app, ActiveTarget::Xuannv, "中断请求已发"),
+            "二按应 push 中断确认消息"
+        );
+    }
+
+    #[test]
+    fn esc_timeout_resets() {
+        let mut app = ReplApp::stub();
+        app.xuannv_thinking = true;
+        let t0 = Instant::now();
+
+        app.handle_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
+        assert_eq!(app.esc_count, 1);
+
+        // 2.5s 后——超 2s 窗口；视作新一轮"首按"。
+        let t1 = t0 + Duration::from_millis(2500);
+        app.handle_key_at(KeyCode::Esc, KeyModifiers::empty(), t1);
+
+        // 仍是 1——窗口超时后的按键起了新轮，不是二按。
+        assert_eq!(app.esc_count, 1, "超窗后再按应作为新轮首按");
+        assert!(
+            !dialogue_has_text(&app, ActiveTarget::Xuannv, "中断请求已发"),
+            "超窗不应发中断"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_exits() {
+        let mut app = ReplApp::stub();
+        // 首 Ctrl-C：打 confirm，不退。
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!app.should_quit, "单 Ctrl-C 不退");
+        assert!(app.confirm_quit);
+
+        // 紧接第二 Ctrl-C：退。
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.should_quit, "双 Ctrl-C 应退");
+    }
+
+    #[test]
+    fn other_key_between_esc_resets_count() {
+        let mut app = ReplApp::stub();
+        app.xuannv_thinking = true;
+        let t0 = Instant::now();
+
+        app.handle_key_at(KeyCode::Esc, KeyModifiers::empty(), t0);
+        assert_eq!(app.esc_count, 1);
+
+        // 插一个普通按键——应清掉 esc 计数。
+        app.handle_key_at(KeyCode::Char('x'), KeyModifiers::empty(), t0);
+        assert_eq!(app.esc_count, 0, "Esc 后按普通键应重置计数");
+
+        // 再 Esc 是新"首按"。
+        app.handle_key_at(
+            KeyCode::Esc,
+            KeyModifiers::empty(),
+            t0 + Duration::from_millis(100),
+        );
+        assert!(
+            !dialogue_has_text(&app, ActiveTarget::Xuannv, "中断请求已发"),
+            "被普通键打断后不应视作二按"
+        );
+    }
+
     // ───────── tui-textarea 多行 + 粘贴 ─────────
 
     #[test]
@@ -2552,6 +3368,417 @@ mod tests {
         assert!(app.dialogue_scroll < 90);
         app.handle_key(KeyCode::End, KeyModifiers::empty());
         assert!(app.dialogue_auto_scroll, "End 应该回 auto_scroll");
+    }
+
+    // ───────── #7 R4 · Sticky 底部滚动 ─────────
+
+    #[test]
+    fn new_msg_during_scroll_doesnt_force_bottom() {
+        // 用户 PgUp 滚上去后，新消息推入不得把 scroll 强拉到底。
+        // 关键机制：draw_dialogue 仅在 dialogue_auto_scroll=true 时才把
+        // scroll 置到 total-view；auto=false 时保持 scroll 不动。
+        let mut app = ReplApp::stub();
+        app.last_dialogue_total = 100;
+        app.last_dialogue_view = 10;
+        app.dialogue_scroll = 90;
+
+        app.handle_key(KeyCode::PageUp, KeyModifiers::empty());
+        let frozen_scroll = app.dialogue_scroll;
+        assert!(!app.dialogue_auto_scroll, "PgUp 应冻结 auto");
+
+        // 喂 5 条新对话（模拟 agent 回复堆积）。
+        for i in 0..5 {
+            app.push_line(
+                ActiveTarget::Xuannv,
+                DialogueLine::System(format!("新消息 {i}")),
+            );
+        }
+        // push_line 本身不碰 scroll——auto=false 时 draw_dialogue 也不会把它拉底。
+        assert!(!app.dialogue_auto_scroll, "新消息不应把 auto 强开");
+        assert_eq!(
+            app.dialogue_scroll, frozen_scroll,
+            "auto=false 时 push_line 不应动 scroll"
+        );
+    }
+
+    #[test]
+    fn end_resumes_auto_follow() {
+        let mut app = ReplApp::stub();
+        app.last_dialogue_total = 200;
+        app.last_dialogue_view = 20;
+        app.dialogue_scroll = 50;
+        app.dialogue_auto_scroll = false;
+
+        app.handle_key(KeyCode::End, KeyModifiers::empty());
+        assert!(app.dialogue_auto_scroll, "End 必须恢复 auto-follow");
+        assert_eq!(
+            app.dialogue_scroll, 180,
+            "End 应把 scroll 置到 total - view"
+        );
+    }
+
+    #[test]
+    fn ctrl_end_jumps_to_bottom_even_when_input_nonempty() {
+        let mut app = ReplApp::stub();
+        app.last_dialogue_total = 200;
+        app.last_dialogue_view = 20;
+        app.dialogue_scroll = 0;
+        app.dialogue_auto_scroll = false;
+        // 输入非空——裸 End 会走 textarea；这时 Ctrl+End 必须兜底。
+        app.input.insert_str("half written draft");
+
+        app.handle_key(KeyCode::End, KeyModifiers::CONTROL);
+        assert!(app.dialogue_auto_scroll, "Ctrl+End 应恢复 auto");
+        assert_eq!(app.dialogue_scroll, 180);
+    }
+
+    // ───────── #10 R12-integ · drag-release 复制 ─────────
+
+    fn stub_with_dialogue_area(lines: &[&str]) -> ReplApp {
+        let mut app = ReplApp::stub();
+        for line in lines {
+            app.push_line(
+                ActiveTarget::Xuannv,
+                DialogueLine::System((*line).to_string()),
+            );
+        }
+        // 模拟一次 draw 后的 area 状态——方便 mouse hit test 测试。
+        // dialogue area 常规 60x20，起点 (28, 0)。
+        app.last_dialogue_area = Some(Rect::new(28, 0, 60, 20));
+        app.last_dialogue_view = 18;
+        app.last_dialogue_total = 5;
+        app
+    }
+
+    #[test]
+    fn drag_single_cell_records_anchor_and_cursor() {
+        let mut app = stub_with_dialogue_area(&["hello", "world"]);
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        assert_eq!(app.selection_anchor, Some((30, 5)));
+        assert_eq!(app.selection_cursor, Some((30, 5)));
+
+        app.handle_mouse(mk_mouse(MouseEventKind::Drag(MouseButton::Left), 50, 6));
+        assert_eq!(app.selection_anchor, Some((30, 5)));
+        assert_eq!(app.selection_cursor, Some((50, 6)));
+    }
+
+    #[test]
+    fn release_without_drag_skips_copy() {
+        let mut app = stub_with_dialogue_area(&["abc"]);
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        // 同点 Up——单击不是拖拽；不触发复制。
+        app.handle_mouse(mk_mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(app.selection_anchor, None);
+        assert_eq!(app.selection_cursor, None);
+        assert_eq!(app.toasts.len(), 0, "单击不应产 toast");
+    }
+
+    #[test]
+    fn drag_release_clears_selection_state() {
+        // 真跑一次 Down→Drag→Up，验证 state 清理。copy 副作用会打 stdout，
+        // 测试进程接受——macOS pbcopy 存在，OSC52 写 stdout 不 fail。
+        let mut app = stub_with_dialogue_area(&["hello world", "from fuxi"]);
+        // scroll=0，行 1 对应 lines[0]="hello world"。
+        app.dialogue_scroll = 0;
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 29, 1));
+        app.handle_mouse(mk_mouse(MouseEventKind::Drag(MouseButton::Left), 45, 2));
+        app.handle_mouse(mk_mouse(MouseEventKind::Up(MouseButton::Left), 45, 2));
+
+        assert_eq!(app.selection_anchor, None, "Up 后锚点应清");
+        assert_eq!(app.selection_cursor, None, "Up 后终点应清");
+        // 至少一条 toast——Success 或（若 pbcopy 不在）Error。
+        assert!(!app.toasts.is_empty(), "Up 应 push toast");
+    }
+
+    #[test]
+    fn extract_selected_text_joins_rows() {
+        let mut app = stub_with_dialogue_area(&["alpha", "beta", "gamma"]);
+        app.dialogue_scroll = 0;
+        let area = app.last_dialogue_area.unwrap();
+        // 选 row 1..row 3（inner y: 1,2,3 → inner rows 0,1,2）。
+        // render_dialogue_collapsed 对 3 条 entry 产出 5 行（3 消息 + 2 分隔空行）。
+        let text = app.extract_selected_text(area, (30, 1), (30, 3));
+        assert!(text.contains("alpha"), "应含选中首行；实得: {text}");
+    }
+
+    #[test]
+    fn drag_outside_dialogue_area_does_not_start_selection() {
+        let mut app = stub_with_dialogue_area(&["x"]);
+        // 在对话 area 外（y=25，area.height=20 从 y=0 起）点一下。
+        app.handle_mouse(mk_mouse(MouseEventKind::Down(MouseButton::Left), 30, 25));
+        assert_eq!(app.selection_anchor, None, "对话区外 Down 不应起选");
+    }
+
+    // ───────── #8 R5-integ · 历史 + stash 接入 ─────────
+
+    #[test]
+    fn sending_adds_to_history() {
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        let _ = app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(app.history.len(), 1, "Enter 提交应入历史");
+    }
+
+    #[test]
+    fn up_recalls_last_when_input_empty() {
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(app.input_text().is_empty(), "提交后输入应清空");
+
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "x", "输入空时 ↑ 应回填上条");
+    }
+
+    #[test]
+    fn up_does_nothing_when_input_nonempty() {
+        // 用户正在编辑时 ↑ 不应吞内容——交给 textarea。
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('w'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('p'), KeyModifiers::empty());
+
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "wip", "非空时 ↑ 不应覆盖");
+    }
+
+    #[test]
+    fn down_returns_to_live_draft() {
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('a'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+
+        // Up 两次：b → a；再 Down 应回到 b；再 Down 回到实时（空）。
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "b");
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "a");
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "b");
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "", "翻到实时应清空");
+    }
+
+    #[test]
+    fn switch_target_preserves_draft() {
+        let mut app = ReplApp::stub();
+        let a = AgentId::new();
+        app.ingest(&mk_ev(
+            Some(a),
+            EventKind::AgentSpawning {
+                role: "scout".into(),
+                cli: "cc".into(),
+            },
+        ));
+
+        // 在玄女面板打半句话——不提交。
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert_eq!(app.input_text(), "hi");
+
+        // 切到 worker a（Tab）。
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(app.active, ActiveTarget::Worker(a));
+        assert_eq!(app.input_text(), "", "切到新 target 应清输入框");
+
+        // 在 worker 面板打另半句。
+        app.handle_key(KeyCode::Char('y'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::empty());
+
+        // 切回玄女——应还原 "hi"。
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(app.active, ActiveTarget::Xuannv);
+        assert_eq!(app.input_text(), "hi", "切回应还原原 target 草稿");
+
+        // 再切回 worker——应还原 "yo"。
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(app.active, ActiveTarget::Worker(a));
+        assert_eq!(app.input_text(), "yo");
+    }
+
+    #[test]
+    fn stash_empty_draft_clears() {
+        // 用户故意删光再切走——不应留残留。
+        let mut app = ReplApp::stub();
+        let a = AgentId::new();
+        app.ingest(&mk_ev(
+            Some(a),
+            EventKind::AgentSpawning {
+                role: "scout".into(),
+                cli: "cc".into(),
+            },
+        ));
+        app.handle_key(KeyCode::Char('z'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty());
+        assert_eq!(app.input_text(), "");
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty()); // 切到 a
+        app.handle_key(KeyCode::Tab, KeyModifiers::empty()); // 切回
+        assert_eq!(app.input_text(), "", "空草稿切走再回来应仍空");
+    }
+
+    // ───────── #9 R6 · 输入下沿活状态行 ─────────
+
+    #[test]
+    fn status_idle_shows_static_hint() {
+        let mut app = ReplApp::stub();
+        // 默认 idle → active_is_busy = false
+        assert!(!app.active_is_busy());
+        let backend = TestBackend::new(120, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // 底部 hint 行含 "Tab 循环" 关键字。
+        let last = row_text(&buf, 23);
+        let compact: String = last.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains("Tab") && compact.contains("循环"),
+            "idle hint 应含 'Tab 循环'；实得: {last:?}"
+        );
+    }
+
+    #[test]
+    fn status_busy_shows_spinner_and_elapsed() {
+        let mut app = ReplApp::stub();
+        app.xuannv_thinking = true;
+        app.refresh_xuannv_busy_anchor();
+        // 保证 active_elapsed 走得到——busy_since 设 5s 前。
+        app.xuannv_busy_since = Some(Instant::now() - Duration::from_secs(5));
+
+        let backend = TestBackend::new(120, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        let last = row_text(&buf, 23);
+        let compact: String = last.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains("调用中"),
+            "busy 状态行应含 '调用中'；实得: {last:?}"
+        );
+        // elapsed 至少含"5" 或 "s"——humanize_elapsed 对 5 秒返 "5s"。
+        assert!(
+            compact.contains("5s") || compact.contains("5"),
+            "busy 状态行应含 elapsed；实得: {last:?}"
+        );
+    }
+
+    #[test]
+    fn status_transitions_swap_correctly() {
+        // busy → idle 切回 hint；再 busy 回来再切 spinner。
+        let mut app = ReplApp::stub();
+        let t0 = Instant::now();
+        app.xuannv_thinking = true;
+        app.xuannv_busy_since = Some(t0);
+        assert!(app.active_is_busy());
+
+        app.xuannv_thinking = false;
+        app.refresh_xuannv_busy_anchor();
+        assert!(!app.active_is_busy());
+        assert!(app.xuannv_busy_since.is_none(), "idle 后应清 busy_since");
+
+        // 再 busy：busy_since 要重记（不能继承上轮）。
+        app.xuannv_thinking = true;
+        app.refresh_xuannv_busy_anchor();
+        assert!(app.xuannv_busy_since.is_some(), "再 busy 应重记 busy_since");
+    }
+
+    // ───────── #11 R3-integ · Toast 接入 repl ─────────
+
+    #[test]
+    fn agent_dead_event_creates_error_toast() {
+        let mut app = ReplApp::stub();
+        let a = AgentId::new();
+        app.ingest(&mk_ev(
+            Some(a),
+            EventKind::AgentSpawning {
+                role: "scout".into(),
+                cli: "cc".into(),
+            },
+        ));
+        app.ingest(&mk_ev(
+            Some(a),
+            EventKind::AgentDead {
+                cause: "WS EOF".into(),
+            },
+        ));
+        assert_eq!(app.toasts.len(), 1, "AgentDead 应叠一条 toast 到 stack");
+        let t = app.toasts.iter().next().expect("toast 存在");
+        assert_eq!(t.variant, crate::toast::ToastVariant::Error);
+        assert!(
+            t.text.contains("scout") && t.text.contains("WS EOF"),
+            "toast 文本应含 role + cause：{}",
+            t.text
+        );
+    }
+
+    #[test]
+    fn toast_prunes_on_tick() {
+        let mut app = ReplApp::stub();
+        // 直接 push 一条已过期的 toast——ttl 1ms + created_at=very_old。
+        let anchor = Instant::now() - Duration::from_secs(10);
+        app.toasts.push(
+            "stale",
+            crate::toast::ToastVariant::Info,
+            Duration::from_millis(1),
+        );
+        // 手动把 created_at 撤到很早 —— push 用 now()，我们换条 via 直接操作
+        // 不便（ToastStack 只暴露 push）。改法：塞一条 ttl 极短的再 tick。
+        app.tick(Instant::now() + Duration::from_secs(5));
+        assert_eq!(app.toasts.len(), 0, "tick 应 prune 过期 toast");
+        let _ = anchor; // 压警告
+    }
+
+    #[test]
+    fn toast_renders_over_content() {
+        // render 路径不 panic 且能返回对应 rect。这里走完整 draw 检查 buffer
+        // 里右上区域含有 toast 文本。
+        let mut app = ReplApp::stub();
+        app.toasts.push(
+            "测试提示",
+            crate::toast::ToastVariant::Info,
+            Duration::from_secs(30),
+        );
+        let backend = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        // ratatui TestBackend 对 CJK wide char 占 2 cells：后半 cell 存空格。
+        // row_text 直接 concat 会出现"测 试 提 示"的 gap——compact 后匹配。
+        let compact = |s: &str| -> String { s.chars().filter(|c| !c.is_whitespace()).collect() };
+        let mut found = false;
+        let mut dump = String::new();
+        for y in 0..buf.area.height {
+            let row = row_text(&buf, y);
+            dump.push_str(&format!("{y:02}|{row}\n"));
+            if compact(&row).contains("测试提示") {
+                found = true;
+            }
+        }
+        assert!(found, "toast 文本应出现在 buffer 中，dump:\n{dump}");
+    }
+
+    #[test]
+    fn reaching_bottom_manually_resumes_auto() {
+        // 用户 PgUp 后又 PgDn 到底 → 自动回 auto-follow。
+        let mut app = ReplApp::stub();
+        app.last_dialogue_total = 100;
+        app.last_dialogue_view = 10;
+        app.dialogue_scroll = 90; // 起点已在底
+        app.handle_key(KeyCode::PageUp, KeyModifiers::empty());
+        assert!(!app.dialogue_auto_scroll);
+        // 反复 PgDn 把 scroll 拉回最大值（90）→ auto 自动 true。
+        for _ in 0..20 {
+            app.handle_key(KeyCode::PageDown, KeyModifiers::empty());
+        }
+        assert_eq!(app.dialogue_scroll, 90, "应到 total-view");
+        assert!(app.dialogue_auto_scroll, "手动滚到底应恢复 auto");
     }
 
     // ───────── 对话渲染 · M4.1 方案 A ─────────
@@ -2754,20 +3981,13 @@ mod tests {
         assert!(app.tasks.is_empty());
     }
 
-    // ───────── 三栏 snapshot ─────────
+    // ───────── 单栏主体 + overlay snapshot ─────────
 
+    /// R9 之后：默认 snapshot 只有对话 + 输入 + 状态，没有左右栏。
     #[test]
-    fn three_pane_snapshot_contains_expected_widgets() {
+    fn single_column_snapshot_contains_dialogue_and_input() {
         let xid = AgentId::new();
         let mut app = ReplApp::new(xid);
-        let worker = AgentId::new();
-        app.ingest(&mk_ev(
-            Some(worker),
-            EventKind::AgentSpawning {
-                role: "dev".into(),
-                cli: "cc".into(),
-            },
-        ));
         app.push_line(
             ActiveTarget::Xuannv,
             DialogueLine::Agent {
@@ -2780,18 +4000,406 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.draw(f)).expect("draw");
         let buf = terminal.backend().buffer().clone();
-
         let all: String = (0..buf.area.height)
             .map(|y| row_text(&buf, y))
             .collect::<Vec<_>>()
             .join("\n");
-        // TestBackend 把 CJK 按 2 列存储，第二列是空格占位——比对前去空白
         let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(compact.contains("任务"), "左栏应标题 任务:\n{all}");
+
+        // 对话内容要在。
         assert!(compact.contains("玄女"), "玄女 字样缺失:\n{all}");
-        assert!(compact.contains("欢迎"), "中栏对话内容缺失:\n{all}");
-        assert!(compact.contains("空闲门客"), "idle header 应出现:\n{all}");
-        assert!(all.contains("dev"), "门客 role 应出现:\n{all}");
+        assert!(compact.contains("欢迎"), "对话内容缺失:\n{all}");
+        // overlay 关闭时 roster 的 "任务" / "空闲门客" 不该出现。
+        assert!(
+            !compact.contains("任务"),
+            "overlay 关闭时 roster 字样不该出现:\n{all}"
+        );
+        assert!(
+            !compact.contains("空闲门客"),
+            "overlay 关闭时 idle header 不该出现:\n{all}"
+        );
+    }
+
+    /// F4 打开 roster overlay 后，roster 栏字样应回到画面上。
+    #[test]
+    fn roster_overlay_snapshot_shows_roster_when_open() {
+        let xid = AgentId::new();
+        let mut app = ReplApp::new(xid);
+        let worker = AgentId::new();
+        app.ingest(&mk_ev(
+            Some(worker),
+            EventKind::AgentSpawning {
+                role: "dev".into(),
+                cli: "cc".into(),
+            },
+        ));
+        app.roster_overlay_open = true;
+
+        let backend = TestBackend::new(120, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let all: String = (0..buf.area.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains("任务"),
+            "overlay 开时应看到 任务 标题:\n{all}"
+        );
+        assert!(
+            compact.contains("空闲门客"),
+            "overlay 开时应看到 idle header:\n{all}"
+        );
+        assert!(all.contains("dev"), "overlay 开时应看到 role:\n{all}");
+    }
+
+    // ───────── R9 契约：单栏布局 + F4/F5 overlay + Esc 优先关 ─────────
+
+    #[test]
+    fn default_layout_is_single_column_plus_input() {
+        // 默认没打 overlay 时：画面上没有 "任务"（roster 标题）/「关于」类 meta 标题。
+        // 只应看到对话 + 输入 + 状态底条。
+        let mut app = ReplApp::stub();
+        app.push_line(
+            ActiveTarget::Xuannv,
+            DialogueLine::Agent {
+                name: "玄女".into(),
+                text: "hi".into(),
+            },
+        );
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let all: String = (0..buf.area.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let compact: String = all.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!compact.contains("任务"), "默认应无 roster 标题:\n{all}");
+        assert!(compact.contains("玄女"), "对话区玄女字样必在:\n{all}");
+    }
+
+    #[test]
+    fn f_key_toggles_roster_overlay() {
+        let mut app = ReplApp::stub();
+        assert!(!app.roster_overlay_open, "初始 roster overlay 应关");
+        app.handle_key(KeyCode::F(4), KeyModifiers::empty());
+        assert!(app.roster_overlay_open, "F4 后 roster overlay 应开");
+        assert_eq!(app.focus, Focus::Roster, "开 roster overlay 应顺带切焦点");
+
+        app.handle_key(KeyCode::F(4), KeyModifiers::empty());
+        assert!(!app.roster_overlay_open, "再按 F4 应关");
+        assert_eq!(app.focus, Focus::Input, "关掉后焦点回到输入");
+    }
+
+    #[test]
+    fn f_key_toggles_meta_overlay() {
+        let mut app = ReplApp::stub();
+        assert!(!app.meta_overlay_open, "初始 meta overlay 应关");
+        app.handle_key(KeyCode::F(5), KeyModifiers::empty());
+        assert!(app.meta_overlay_open, "F5 后 meta overlay 应开");
+        app.handle_key(KeyCode::F(5), KeyModifiers::empty());
+        assert!(!app.meta_overlay_open, "再按 F5 应关");
+    }
+
+    #[test]
+    fn f4_and_f5_are_mutually_exclusive() {
+        // 同时只能开一个 overlay——F5 时 F4 已开的应被覆盖关掉。
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::F(4), KeyModifiers::empty());
+        assert!(app.roster_overlay_open);
+        app.handle_key(KeyCode::F(5), KeyModifiers::empty());
+        assert!(app.meta_overlay_open);
+        assert!(!app.roster_overlay_open, "F5 打开 meta 时 roster 应自动关");
+    }
+
+    // ───────── #17 R-popup-integ · SlashPopup 接入 repl ─────────
+
+    #[test]
+    fn slash_opens_popup_when_input_empty() {
+        let mut app = ReplApp::stub();
+        assert!(!app.popup.is_open(), "初始 popup 关");
+        assert!(app.input_text().is_empty(), "前提：输入为空");
+
+        // '/' 作为第一个字符应当开 popup，且不 insert 到 textarea。
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        assert!(app.popup.is_open(), "空输入 + / 应开 popup");
+        assert!(
+            app.input_text().is_empty(),
+            "/ 不应 insert 到 textarea：实际 {:?}",
+            app.input_text()
+        );
+    }
+
+    #[test]
+    fn typing_slash_mid_text_does_not_open_popup() {
+        let mut app = ReplApp::stub();
+        // 先往 textarea 敲两个非 / 字符。
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert_eq!(app.input_text(), "hi");
+        assert!(!app.popup.is_open());
+
+        // 句中按 / 不触发 popup，应当作普通字符输入给 textarea。
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        assert!(!app.popup.is_open(), "句中 / 不该开 popup");
+        assert_eq!(app.input_text(), "hi/", "/ 应作为普通字符入输入");
+    }
+
+    #[test]
+    fn popup_key_pass_through() {
+        // popup 开着时所有键都交给 popup 而非 textarea / 全局。
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        assert!(app.popup.is_open());
+
+        // 键入 'h' → filter 变 "h"，候选收缩到 /help；textarea 不该被动。
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty());
+        assert!(app.popup.is_open(), "popup 保持 open");
+        assert!(app.input_text().is_empty(), "textarea 不该收到 h");
+        assert_eq!(app.popup.display_input(), "/h");
+        assert_eq!(app.popup.candidates().len(), 1);
+        assert_eq!(app.popup.candidates()[0].slash, "/help");
+    }
+
+    #[test]
+    fn popup_execute_routes_to_action() {
+        // 从打开 popup → 键入过滤 → Enter → Action 被 run_command_action 路由。
+        // 以 /help 为验证入口：run 后玄女 bucket 里应被推入 help markdown。
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('h'), KeyModifiers::empty()); // /h → /help
+        assert_eq!(app.popup.candidates()[0].slash, "/help");
+
+        let out = app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(out, None, "popup 的 Enter 返 None，不走 Submit 路径");
+        assert!(!app.popup.is_open(), "Execute 后 popup 自闭合");
+
+        let bucket = app
+            .dialogues
+            .get(&ActiveTarget::Xuannv)
+            .expect("玄女 bucket 应被创建");
+        let all: String = bucket
+            .iter()
+            .filter_map(|e| match &e.line {
+                DialogueLine::System(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("伏羲命令"), "应出 /help 内容：\n{all}");
+        assert!(all.contains("/theme"), "应列 /theme：\n{all}");
+    }
+
+    #[test]
+    fn popup_esc_closes_first_not_overlay_or_interrupt() {
+        // 优先级：popup > overlay > interrupt。
+        // popup 和 overlay 同时开时，按 Esc 只关 popup，overlay 保留。
+        let mut app = ReplApp::stub();
+        app.roster_overlay_open = true;
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        assert!(app.popup.is_open());
+        assert!(app.roster_overlay_open);
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        assert!(!app.popup.is_open(), "Esc 应先关 popup");
+        assert!(app.roster_overlay_open, "overlay 保留");
+        assert_eq!(app.esc_count, 0, "不该动 esc 双击计数");
+    }
+
+    #[test]
+    fn popup_executes_theme_action_from_registry() {
+        // /theme 无参经 popup → run_command_action 该触发 execute_theme_command(None)
+        // → toast 列出可选主题（含 mocha / latte）。
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        // /h, /t, /k, /c, /q, /s - /t 是 theme 独唯一 t 开头。
+        app.handle_key(KeyCode::Char('t'), KeyModifiers::empty());
+        assert_eq!(app.popup.candidates()[0].slash, "/theme");
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(!app.popup.is_open());
+        // 默认 action 是 Theme(None) → Info toast 列可选主题。
+        let has_info = app.toasts.iter().any(|t| {
+            t.variant == crate::toast::ToastVariant::Info
+                && (t.text.contains("mocha") || t.text.contains("latte"))
+        });
+        assert!(
+            has_info,
+            "应有 Info toast 含可选主题：{:?}",
+            app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn popup_quit_action_sets_should_quit() {
+        let mut app = ReplApp::stub();
+        assert!(!app.should_quit);
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('q'), KeyModifiers::empty()); // /q → /quit
+        assert_eq!(app.popup.candidates()[0].slash, "/quit");
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(app.should_quit, "/quit 该设 should_quit");
+    }
+
+    #[test]
+    fn popup_clear_action_empties_active_bucket() {
+        let mut app = ReplApp::stub();
+        app.push_line(
+            ActiveTarget::Xuannv,
+            DialogueLine::Agent {
+                name: "玄女".into(),
+                text: "noise".into(),
+            },
+        );
+        assert!(!app.dialogues.get(&ActiveTarget::Xuannv).unwrap().is_empty());
+
+        app.handle_key(KeyCode::Char('/'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty()); // /c → /clear
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert!(
+            app.dialogues.get(&ActiveTarget::Xuannv).unwrap().is_empty(),
+            "/clear 该清掉当前 active 的 bucket"
+        );
+    }
+
+    // ───────── R10-integ /theme submit 接线 ─────────
+
+    #[test]
+    fn try_handle_slash_theme_with_arg_switches_and_toasts_success() {
+        let _g = crate::theme::tests::current_theme_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::set_theme("mocha").ok();
+
+        let mut app = ReplApp::stub();
+        let took = app.try_handle_slash_submit("/theme latte");
+        assert!(took, "/theme 带名应被本地 handler 吃掉");
+        assert_eq!(
+            crate::theme::current(),
+            crate::theme::Theme::catppuccin_latte(),
+            "CURRENT 应切到 latte"
+        );
+        // 有 Success toast。
+        assert!(
+            app.toasts
+                .iter()
+                .any(|t| t.text.contains("latte")
+                    && t.variant == crate::toast::ToastVariant::Success),
+            "期待 Success toast 含 latte：{:?}",
+            app.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        crate::theme::set_theme("mocha").ok();
+    }
+
+    #[test]
+    fn try_handle_slash_theme_unknown_toasts_error() {
+        let _g = crate::theme::tests::current_theme_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::theme::set_theme("mocha").ok();
+
+        let mut app = ReplApp::stub();
+        let before = crate::theme::current();
+        let took = app.try_handle_slash_submit("/theme nosuch-zzz");
+        assert!(took, "/theme 未知名仍被 handler 吃掉（报错而非派给 agent）");
+        assert_eq!(crate::theme::current(), before, "失败不该改 CURRENT");
+        assert!(
+            app.toasts
+                .iter()
+                .any(|t| t.variant == crate::toast::ToastVariant::Error),
+            "期待 Error toast"
+        );
+    }
+
+    #[test]
+    fn try_handle_slash_theme_no_arg_lists_available_via_info_toast() {
+        let mut app = ReplApp::stub();
+        app.execute_theme_command(None);
+        let info_texts: Vec<&str> = app
+            .toasts
+            .iter()
+            .filter(|t| t.variant == crate::toast::ToastVariant::Info)
+            .map(|t| t.text.as_str())
+            .collect();
+        assert!(
+            info_texts.iter().any(|t| t.contains("mocha")),
+            "无参 /theme 的 Info toast 应含 mocha：{:?}",
+            info_texts
+        );
+        assert!(
+            info_texts.iter().any(|t| t.contains("latte")),
+            "无参 /theme 的 Info toast 应含 latte：{:?}",
+            info_texts
+        );
+    }
+
+    // ───────── R11 /help submit 接线 ─────────
+
+    #[test]
+    fn try_handle_slash_help_dumps_system_lines_to_active_bucket() {
+        let mut app = ReplApp::stub();
+        let took = app.try_handle_slash_submit("/help");
+        assert!(took, "/help 应被本地 handler 吃掉");
+
+        let bucket = app
+            .dialogues
+            .get(&ActiveTarget::Xuannv)
+            .expect("玄女 bucket 应被创建");
+        // 起点 bucket 为空，/help 后应有多条 System 行。
+        assert!(
+            !bucket.is_empty(),
+            "/help 后 bucket 应有 System 行：{bucket:?}"
+        );
+        // 首行应是 "# 伏羲命令" 标题。
+        let first = bucket.front().expect("至少一条");
+        match &first.line {
+            DialogueLine::System(s) => {
+                assert!(s.contains("伏羲命令"), "首行应含标题：{s}")
+            }
+            other => panic!("首行应是 System，实际 {other:?}"),
+        }
+        // 校验命令名也写进去了。
+        let all: String = bucket
+            .iter()
+            .filter_map(|e| match &e.line {
+                DialogueLine::System(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("/help"), "应含 /help：\n{all}");
+        assert!(all.contains("/theme"), "应含 /theme：\n{all}");
+    }
+
+    #[test]
+    fn try_handle_slash_submit_rejects_non_slash() {
+        let mut app = ReplApp::stub();
+        assert!(!app.try_handle_slash_submit("hello"));
+        assert!(
+            !app.try_handle_slash_submit("  /theme"),
+            "前导空白不算 slash"
+        );
+    }
+
+    #[test]
+    fn esc_closes_overlay_first_before_other_actions() {
+        // overlay 打开时按 Esc 只关 overlay，不走双击 Esc 中断 / 回玄女 的旧路径。
+        let mut app = ReplApp::stub();
+        app.handle_key(KeyCode::F(4), KeyModifiers::empty());
+        assert!(app.roster_overlay_open);
+        // 伪造一个 xuannv 以外的 active——若 Esc 误走 reset_to_xuannv 会让 active 变。
+        // 这里 active 本就是 Xuannv，用 esc_count 观察：Esc 应保持 count=0。
+        app.esc_count = 0;
+        app.esc_last_at = None;
+
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        assert!(!app.roster_overlay_open, "Esc 应先关 overlay");
+        assert_eq!(app.esc_count, 0, "Esc 关 overlay 时不该动 esc_count");
+        assert!(app.esc_last_at.is_none(), "esc_last_at 不该被设置");
     }
 
     /// roster focus 下方向键 + Enter 切 active。

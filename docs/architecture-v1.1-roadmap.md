@@ -209,11 +209,37 @@
 
 详见 `docs/decisions/08-conversation-switch-removed.md`。
 
-### M4.4 · D16 · slash/@ 命令面板 + /help
+### M4.4 · M4-REDUX · 照抄 opencode TUI 交互（2026-04-21 scope 扩张）
 
-- 输入框首字符 `/` 弹浮层列 slash commands（help/clear/mouse/theme/kill/status 等）
-- `@` 弹浮层列门客（@xuannv/@luban/...），选中切 active target
-- **对应 N6 REPL 无 /help** + 部分替代左栏 agent 列表（M5 单栏化铺路）
+**背景**：用户反馈"tui 很多交互很乱"。调研 opencode / claw-code 后发现差距不在单点，**在系统性交互基线**。12 条借鉴全上。详见 Decision 09。
+
+原 M4.4（slash+@）被这个大批次包住。
+
+**12 条（全做，打包一批 ship）**：
+
+| # | 事 | 规模 | 依赖 |
+|---|---|---|---|
+| R1 | 双击 Esc 中断 / Ctrl+C 才退（不直接 kill TUI） | 小 | — |
+| R2 | Spinner 小部件（10 帧 braille + ✔/✘ 三态） | 小 | — |
+| R3 | Toast 通知栈（右上角 overlay + auto-expire） | 小 | — |
+| R4 | Sticky 底部滚动（脱离底部停止 auto-follow） | 小 | — |
+| R5 | Prompt history（↑↓ 翻历史 + session 切换 stash） | 小 | — |
+| R6 | 输入下沿活状态行（spinner + status + usage） | 小 | R2 |
+| R7 | CommandRegistry（命令 + 键绑 + slash 三合一） | 中 | — |
+| R8 | `/` slash 浮层（autocomplete + fuzzy filter） | 大 | R7 |
+| R9 | 单栏主体 + overlay 侧栏（F2/F4 召唤） | 中 | — |
+| R10 | JSON 多主题 + `/theme` 运行时切 | 中 | R7 |
+| R11 | `/help` 从 registry 自动生成 | 小 | R7 |
+| R12 | Drag-release 自动复制（OSC52 + pbcopy） | 大 | — |
+
+**明确延后**（v1.2）：
+- `@` mention 门客 / 文件（需要 file picker 后端）
+- extmark 受保护虚拟文本（ratatui 无等价物，v1 用纯字符）
+- session timeline / fork-from（opencode 有但 demo 性）
+
+**TDD**：每条要最少 1 单测 + 1 集成断言。总计 ≈ 20-30 新测试。
+
+**并行拆法**：agent team（TeamCreate），分 4 track——widgets / repl.rs pass 1 / repl.rs pass 2 / theme JSON。主线 review + 整合 commits。
 
 ---
 
