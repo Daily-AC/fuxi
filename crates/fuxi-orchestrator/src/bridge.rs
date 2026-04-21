@@ -35,6 +35,18 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+/// 内部 role 白名单：这些门客的生命周期事件**不抄送**给玄女。
+///
+/// 为什么：extractor 是 M2.5 自动后台跑的"幕后工"——每个 task Done 都
+/// spawn 一个 extractor → extractor 自己 Done 又被桥抄送给玄女 → 玄女被
+/// 自递归噪音淹没（2026-04-20 用户实测发现，玄女自己在 transcript 里诊
+/// 断出"bridge 过滤漏洞"）。这类 role 玄女不需要逐个知道完成。
+const INTERNAL_ROLES: &[&str] = &["extractor"];
+
+fn is_internal_role(role: &str) -> bool {
+    INTERNAL_ROLES.contains(&role)
+}
+
 /// 桥需要的 orchestrator 能力——仅 `intervene` + `role_of`，方便测试用 Mock。
 ///
 /// 生产实装由 [`Fuxi`] 提供；单测里用一个小 struct 覆盖即可。
@@ -165,6 +177,12 @@ async fn handle_event(
                 .role_of(agent_id)
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
+            // 内部 role（如 extractor）的死亡事件不抄给玄女——是后台自动管理的，
+            // 噪音 > 价值。日志里仍记，便于排错。
+            if is_internal_role(&role) {
+                debug!(%agent_id, %role, "AgentDead 内部 role，跳过抄送");
+                return;
+            }
             let prompt = build_death_prompt(agent_id, &role, &cause);
             if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
                 warn!(error = %e, "bridge: intervene(AgentDead) 失败");
@@ -197,6 +215,12 @@ async fn handle_event(
                 .role_of(agent_id)
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
+            // 内部 role（如 extractor）的 Task Done 不抄玄女——自动后台工作，
+            // 每轮抄送会递归淹没她（2026-04-20 用户实测 + 玄女自诊）。
+            if is_internal_role(&role) {
+                debug!(%agent_id, %role, ?ev.meta.task, "TaskStateChanged 内部 role，跳过抄送");
+                return;
+            }
             let prompt = build_task_done_prompt(agent_id, &role, done);
             if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
                 warn!(error = %e, "bridge: intervene(TaskDone) 失败");
@@ -557,6 +581,69 @@ mod tests {
         assert!(
             calls.iter().any(|(_, _, t)| t.contains("late but real")),
             "Lag 后桥仍应处理 AgentDead: {calls:?}"
+        );
+    }
+
+    /// 内部 role（extractor）的 Task Done **不**触发 intervene。
+    /// 修 2026-04-21 雪崩：M2.5 extractor 自递归 → 玄女 transcript 被噪音淹没。
+    #[tokio::test]
+    async fn extractor_task_done_is_not_copied_to_xuannv() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let extractor = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(extractor, "extractor").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(extractor);
+        meta.task = Some(fuxi_core::id::TaskId::new());
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::Delivering,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "extractor Done 不应抄送给玄女（自递归保护）"
+        );
+    }
+
+    /// 内部 role（extractor）AgentDead 也**不**触发——后台自管理生命周期。
+    #[tokio::test]
+    async fn extractor_agent_dead_is_not_copied_to_xuannv() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let extractor = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(extractor, "extractor").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(extractor);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "fuxi shutdown".into(),
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "extractor 死不应抄送给玄女"
         );
     }
 }
