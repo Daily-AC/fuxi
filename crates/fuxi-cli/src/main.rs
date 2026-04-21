@@ -13,20 +13,27 @@
 
 use clap::{Parser, Subcommand};
 
+mod autocomplete;
 mod banner;
 mod click_registry;
 mod client;
+mod clipboard;
+mod command_registry;
 mod daemon;
 mod demo;
+mod draft_stash;
 mod extractor_hook;
 mod ipc;
 mod memory_cmd;
+mod prompt_history;
 mod recall_sink;
 mod repl;
 mod session;
 mod skill;
+mod spinner;
 mod subcommands;
 mod theme;
+mod toast;
 mod up;
 mod watch;
 
@@ -116,6 +123,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     init_tracing();
+    // 进程启动期把主题初始化为 FUXI_THEME 指定值——后续 REPL draw 全部走
+    // theme::current()，/theme 命令可运行时热切。
+    theme::init_from_env();
     match cli.cmd {
         None => repl::run(Default::default()).await,
         Some(Command::Demo(args)) => demo::run(args).await,

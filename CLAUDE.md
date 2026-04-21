@@ -59,6 +59,22 @@ fuxi/
 4. **CLI 是工具层的唯一形态。** Agent 调用工具直接 shell，不用 MCP。
 5. **SQLite 是单一真相源**（WAL 模式 + append-only 事件）。文件系统只是执行快照。
 6. **借鉴 ComposioHQ 的设计智慧，不借它的代码路径。** 语言不同天然隔离。
+7. **毕设不是 DDL，是顺带。** 伏羲是个人 AI agent 平台，长期用品。不要为毕设答辩时间压缩做动作；也不要把"毕设 demo 够用"当验收标准。日常使用体验才是第一目标。
+
+## 并行工作：agent team，不是 subagent
+
+**用 `TeamCreate` + `Agent(team_name=..., name=...)` + `SendMessage`**，不用单纯 `Agent(subagent_type=...)` 零散 spawn。
+
+- subagent 无共享 TaskList + 无互相通信 + 主线难协调进度 → 过时模式
+- agent team = `~/.claude/teams/<name>/config.json` + 共享 `~/.claude/tasks/<name>/` + teammates 用 SendMessage 互通 + 自动 idle 通知
+- 典型场景：
+  - 拆独立文件 / 独立模块的并行实装
+  - 一人 TDD 红一人 TDD 绿（review 循环）
+  - 调研 + 实装 + doc 三路并行
+- 用 `TaskUpdate owner=<name>` 分派；teammate 完成 `TaskUpdate status=completed` 并 `SendMessage` 给 team-lead
+- 完工后 `SendMessage shutdown_request` 到每个 teammate，再 `TeamDelete` 清残留
+
+**决策 01**（2026-04-19 起子 cc 并行）升级为 agent team 模式——用 team 工具而非手工 tmux。
 
 ## 工程规范
 
@@ -99,8 +115,8 @@ fuxi/
 - `docs/architecture-audit-v1.md` — v1.1 审查：架构现状 + Gap 矩阵 + Debt D1-D18
 - `docs/architecture-v1.1-roadmap.md` — M2-M5 路线图（M2 已完，M3-M5 待推）
 - `docs/audit/cratewise-inventory.md` + `docs/audit/event-flow.md` — 审查基础材料
-- `docs/decisions/` — 6 份独立决策（01 并行 cc / 02 soul-first skill / 03 任务树 UI / 04 intervene 退化 / 05 让贤保留 / 06 文化命名）
-- `docs/handoff/v1-session3.md` — **最新** 开工指引（P2 召回设计已拍板未实装）
+- `docs/decisions/` — 9 份独立决策（01 并行 cc / 02 soul-first skill / 03 任务树 UI / 04 intervene 退化 / 05 让贤保留·被 08 override / 06 文化命名 / 07 P2 召回 scope / 08 让贤拆除 / **09 TUI 照抄 opencode 12 条**）
+- `docs/handoff/v1-session4.md` — **最新** 开工指引（M2/M3 全完；M4-REDUX 进行中）
 - `docs/handoff/v1-session2.md` — 上一份（保留）
 - `docs/session-review-2026-04-*.md` — 过程性记录（为什么这么做 / 踩坑 / 否决方案）
 - `docs/superpowers/specs/2026-04-19-伏羲-design.md` — 最早的宏观设计

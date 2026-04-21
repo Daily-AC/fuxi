@@ -40,6 +40,8 @@ uuid = { workspace = true }
 tui-textarea = { version = "0.7", default-features = false, features = ["ratatui", "crossterm"] }
 # CJK 宽度正确计算——str.len() 会把中文当 3 字节，chars().count() 不懂东亚宽字符
 unicode-width = "0.2"
+# OSC52 clipboard escape 序列需要 base64（payload = base64(text)）
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
