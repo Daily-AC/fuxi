@@ -51,26 +51,28 @@ impl FuxiExtractorSpawner {
 #[async_trait]
 impl FactExtractorSpawner for FuxiExtractorSpawner {
     async fn spawn_and_run(&self, prompt: String, timeout: Duration) -> SpawnerResult<String> {
-        // 1. spawn extractor 门客（会命中 M2.4 去重复用已有 idle）
-        let agent_id = self
-            .fuxi
-            .spawn_worker(self.profile.clone(), WorkerKind::Cc(self.cc_cfg.clone()))
-            .await
-            .map_err(|e| Box::new(e) as SpawnerError)?;
-
-        // 2. 订阅 bus 等该 agent+task 的 AgentResponded 累积文本
-        //    订阅必须在 dispatch 之前——否则 broadcast 漏发给未订阅者
+        // 1. 订阅 bus——必须在 dispatch_to_any 之前，否则 broadcast 漏发。
         let mut sub = self.bus.subscribe();
 
-        // 3. dispatch 抽取任务
+        // 2. 派活：dispatch_to_any 原子地"找 idle 同 role 复用 / 否则 spawn 新的"。
+        //    旧实装是 spawn_worker + dispatch，但 commit fbba2ec 把 spawn_worker 的
+        //    去重拆掉了（spawn = 新建语义；复用职责挪到这里）。每次抽取真起一个
+        //    extractor 进程，几轮就堆几个 idle 在 shelf 上等 GC——浪费 + 让玄女
+        //    `fuxi list` 看到一堆"空闲门客"误以为有事在做。
         let task = Task::new("extract", &prompt);
         let task_id = task.id;
-        self.fuxi
-            .dispatch(agent_id, task)
+        let agent_id = self
+            .fuxi
+            .dispatch_to_any(
+                &self.profile.role,
+                task,
+                self.profile.clone(),
+                WorkerKind::Cc(self.cc_cfg.clone()),
+            )
             .await
             .map_err(|e| Box::new(e) as SpawnerError)?;
 
-        // 4. 带 timeout 等 Done
+        // 3. 带 timeout 等 Done
         let wait = tokio::time::timeout(timeout, async {
             let mut accumulated = String::new();
             while let Some(Ok(ev)) = sub.next().await {
