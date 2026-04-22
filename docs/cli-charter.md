@@ -28,7 +28,7 @@ CLAUDE.md 公理 #4：CLI 是工具层的唯一形态。Agent 调工具直接 sh
 | 命令 | 用途 |
 |---|---|
 | `fuxi spawn --role <r>` | 起新门客（[+召回 flag](#召回-flag)） |
-| `fuxi dispatch --to <id> <msg>` | 派活 |
+| `fuxi dispatch --to <id> [--task <task-id>] [--title <title>] [--print-task-id] <msg>` | 派活（可复用父任务 / 只回 task_id） |
 | `fuxi intervene --to <id> --mode <m> <msg>` | 介入（append/interrupt） |
 | `fuxi status [--id <id>]` | 看门客状态 |
 | `fuxi list` | 列所有门客 |
@@ -69,6 +69,7 @@ CLAUDE.md 公理 #4：CLI 是工具层的唯一形态。Agent 调工具直接 sh
 | `--to <agent-id>` | 消息 / 任务的目的门客 | `fuxi dispatch --to agent-abc 'msg'` / `fuxi intervene --to ...` |
 | `--role <role-name>` | spawn 时指定门客角色 | `fuxi spawn --role luban` |
 | `--task <task-id>` | 选定 task | `fuxi block --task task-x` / `fuxi task unblock --task task-y` |
+| `--print-task-id` | 只打印 dispatch 返回的 task_id | `TID=$(fuxi dispatch --to ... --print-task-id '...')` |
 | `--db <path>` | SQLite 路径覆盖 | `fuxi memory list --db /tmp/x.db` / `fuxi events --db ...` |
 | `--tail <N>` / `--follow` | 流式输出参数 | `fuxi events --tail 100 --follow` |
 | `--filter <s>` | 过滤（前缀匹配） | `fuxi events --filter agent-abc` |
