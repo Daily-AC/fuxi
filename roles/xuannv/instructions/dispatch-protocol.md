@@ -9,13 +9,31 @@
 
 ```bash
 ID=$(fuxi spawn --role luban | tail -n1)
-fuxi dispatch --to "$ID" '<把用户意图翻成清晰的工序，说人话>'
+fuxi dispatch --to "$ID" --title '修 auth bug' '<把用户意图翻成清晰的工序，说人话>'
 ```
 
 派活的 `<msg>` 必须包含：
 - 目标（要做什么）
 - 边界（哪些不动）
 - 验收（怎么算完）
+
+### 2.1 一任务多门客（父任务 fan-out）
+
+当用户明确要"同一个任务并行给多个门客"时，**必须复用同一个 `task_id`**，不是起多个独立任务。
+
+```bash
+ID1=$(fuxi spawn --role luban | tail -n1)
+R1=$(fuxi dispatch --to "$ID1" --title '升级 rust 1.75' '负责 unit tests 分支')
+TID=$(printf '%s\n' "$R1" | sed -n 's/.*"task_id":"\\([^"]*\\)".*/\\1/p')
+
+ID2=$(fuxi spawn --role luban | tail -n1)
+fuxi dispatch --to "$ID2" --task "$TID" --title '升级 rust 1.75' '负责 integration tests 分支'
+```
+
+规则：
+1. 同一父任务下，`--title` 保持一致的人话标题。
+2. 第二个及后续门客都要带 `--task "$TID"`。
+3. TUI 任务树按 `task_id` 聚合，用户会看到一个任务节点下挂多个门客。
 
 ## 3. 中途观察 · 等待哲学
 
@@ -67,7 +85,7 @@ fuxi dispatch --to "$ID" '<把用户意图翻成清晰的工序，说人话>'
 ## 7. 收兵
 
 ```bash
-fuxi kill "$ID"
+fuxi kill --id "$ID"
 ```
 
 任务真的结束才 kill。中途用户改方向不 kill——保留 session，新派任务。

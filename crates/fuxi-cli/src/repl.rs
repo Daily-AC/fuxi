@@ -1034,8 +1034,8 @@ impl ReplApp {
             if Self::is_hidden_tree_task(&title) {
                 continue;
             }
-            // task-rooted：同标题的并行任务在树上合并为一个父节点。
-            let key = title.clone();
+            // task-rooted：按 task_id 聚类，禁止同标题不同 task 被错误合并。
+            let key = task.task_id.to_string();
             if let Some((_, _, members)) = groups.iter_mut().find(|(k, _, _)| *k == key) {
                 members.push(idx);
             } else {
@@ -1399,7 +1399,7 @@ impl ReplApp {
                         .tasks
                         .iter()
                         .position(|t| t.worker == id && t.worker != self.xuannv_id)?;
-                    let key = Self::display_task_title(&self.tasks[t_idx].title);
+                    let key = self.tasks[t_idx].task_id.to_string();
                     rows.iter().position(|r| match r {
                         PaneRow::GroupHeader(gidx) => groups
                             .get(*gidx)
@@ -1455,7 +1455,7 @@ impl ReplApp {
                         .tasks
                         .iter()
                         .position(|t| t.worker == id && t.worker != self.xuannv_id)?;
-                    let key = Self::display_task_title(&self.tasks[t_idx].title);
+                    let key = self.tasks[t_idx].task_id.to_string();
                     rows.iter().position(|r| match r {
                         PaneRow::GroupHeader(gidx) => groups
                             .get(*gidx)
@@ -2093,10 +2093,11 @@ impl ReplApp {
         // 避免状态事件顺序造成的锚点漏记/残留：每帧按当前 busy 态重整一次。
         self.refresh_xuannv_busy_anchor();
 
-        // 活状态行的 spinner 每帧推进一次——draw 频率≈20Hz，合 braille 观感。
+        // 活状态行 spinner 节流：20Hz 主循环下 3 帧推进一次，约 6~7fps，
+        // 比 4fps 更有活力，又不会像每帧跳动那样制造焦虑感。
         if self.active_is_busy() {
             self.spinner_tick_gate = self.spinner_tick_gate.wrapping_add(1);
-            if self.spinner_tick_gate % 5 == 0 {
+            if self.spinner_tick_gate % 3 == 0 {
                 self.status_spinner.tick();
             }
         } else {
@@ -2642,51 +2643,29 @@ impl ReplApp {
     }
 
     #[cfg(test)]
-    fn distinct_task_title_count(&self, tasks: &[&TaskNode]) -> usize {
-        let mut titles = Vec::new();
-        for t in tasks {
-            let title = if t.title.is_empty() {
-                "任务".to_string()
-            } else {
-                t.title.clone()
-            };
-            if !titles.iter().any(|x| x == &title) {
-                titles.push(title);
-            }
-        }
-        titles.len()
-    }
-
-    #[cfg(test)]
     fn teammate_task_tree_lines(&self, tasks: &[&TaskNode]) -> Vec<String> {
         if tasks.is_empty() {
             return Vec::new();
         }
 
-        // 按 task title 归组：伏羲是 task-rooted 视角，不是 agent-flat。
-        let mut groups: Vec<(String, Vec<&TaskNode>)> = Vec::new();
+        // 按 task_id 归组：同标题不同任务必须分开。
+        let mut groups: Vec<(String, String, Vec<&TaskNode>)> = Vec::new();
         for t in tasks {
+            let key = t.task_id.to_string();
             let title = if t.title.is_empty() {
                 "任务".to_string()
             } else {
                 t.title.clone()
             };
-            if let Some((_, members)) = groups.iter_mut().find(|(k, _)| *k == title) {
+            if let Some((_, _, members)) = groups.iter_mut().find(|(k, _, _)| *k == key) {
                 members.push(*t);
             } else {
-                groups.push((title, vec![*t]));
+                groups.push((key, title, vec![*t]));
             }
         }
 
-        // 同 role 多实例命名：鲁班 / 鲁班#2 / 鲁班#3（按遍历顺序稳定递增）。
-        let mut role_total: HashMap<String, usize> = HashMap::new();
-        for t in tasks {
-            *role_total.entry(t.worker_role.clone()).or_insert(0) += 1;
-        }
-        let mut role_seen: HashMap<String, usize> = HashMap::new();
-
         let mut out = Vec::new();
-        for (gidx, (title, members)) in groups.iter().enumerate() {
+        for (gidx, (_, title, members)) in groups.iter().enumerate() {
             let elapsed = members
                 .iter()
                 .map(|t| t.dispatched_at.elapsed())
@@ -2699,6 +2678,11 @@ impl ReplApp {
                 truncate_by_width(title, 20),
                 elapsed
             ));
+            let mut role_total: HashMap<String, usize> = HashMap::new();
+            for t in members {
+                *role_total.entry(t.worker_role.clone()).or_insert(0) += 1;
+            }
+            let mut role_seen: HashMap<String, usize> = HashMap::new();
             for (midx, t) in members.iter().enumerate() {
                 let nth = role_seen.entry(t.worker_role.clone()).or_insert(0);
                 *nth += 1;
@@ -2788,9 +2772,14 @@ impl ReplApp {
         self.last_dialogue_wrapped_rows = collect_wrapped_plain_rows(&lines, inner.width);
 
         let inner_h = inner.height;
-        // 屏幕行总数统一按 wrapped rows 计算，避免和 copy/选区使用的行模型不一致
-        // 造成"滚不到最新"或"下滑展示不全"。
-        let total: u16 = (self.last_dialogue_wrapped_rows.len() as u16).max(1);
+        // 滚动总行数按同一 wrapped 规则统一计算，避免逻辑行和屏幕行模型混用。
+        let total = lines
+            .iter()
+            .fold(0u32, |acc, line| {
+                acc.saturating_add(count_wrapped_rows(line, inner.width) as u32)
+            })
+            .max(1)
+            .min(u16::MAX as u32) as u16;
         self.last_dialogue_total = total;
         self.last_dialogue_view = inner_h;
         if self.dialogue_auto_scroll {
@@ -3255,7 +3244,6 @@ fn push_anchored<'a>(
 /// 下 `y` 按**屏幕行**算，但我们之前直接 `dialogue_scroll = lines.len() - inner_h`
 /// 用逻辑行算，CJK/长消息被 wrap 后屏幕行>逻辑行 → 底部被切，用户看不见最新。
 /// 按 unicode-width 算总宽再 ceil-div 屏宽，空行算 1（ratatui 不吃 0 行）。
-#[cfg(test)]
 fn count_wrapped_rows(line: &Line, width: u16) -> u16 {
     let total_width: usize = line
         .spans
@@ -5799,7 +5787,7 @@ mod tests {
         app.roster_state.select(Some(0)); // 父任务头
 
         app.handle_key(KeyCode::Enter, KeyModifiers::empty()); // collapse
-        let k = "修 auth bug".to_string();
+        let k = tid.to_string();
         assert!(app.collapsed_task_groups.contains(&k));
         assert_eq!(app.active, ActiveTarget::Xuannv, "折叠不应改 active");
 
@@ -5904,7 +5892,7 @@ mod tests {
     }
 
     #[test]
-    fn teammate_tree_groups_same_title_and_shows_role_suffix() {
+    fn teammate_tree_separates_same_title_different_task_ids() {
         let xid = AgentId::new();
         let mut app = ReplApp::new(xid);
         let w1 = AgentId::new();
@@ -5932,13 +5920,18 @@ mod tests {
             t.description = "integ".to_string();
         }
         let busy = app.busy_tasks();
-        assert_eq!(app.distinct_task_title_count(&busy), 1);
-        let lines = app.teammate_task_tree_lines(&busy).join("\n");
-        assert!(lines.contains("跑全量测试"));
-        assert!(lines.contains("鲁班"));
-        assert!(lines.contains("鲁班#2"));
-        assert!(lines.contains("unit"));
-        assert!(lines.contains("integ"));
+        let lines = app.teammate_task_tree_lines(&busy);
+        let merged = lines.join("\n");
+        let root_count = lines
+            .iter()
+            .filter(|line| line.starts_with("▾ "))
+            .count();
+        assert_eq!(root_count, 2, "同标题不同 task_id 不应合并");
+        assert!(merged.contains("跑全量测试"));
+        assert!(merged.contains("鲁班"));
+        assert!(!merged.contains("鲁班#2"), "跨任务不应追加 role #N");
+        assert!(merged.contains("unit"));
+        assert!(merged.contains("integ"));
     }
 
     #[test]
