@@ -11,7 +11,7 @@
 - [x] 锁定本轮代码白名单（只改 orchestrator/cli/repl + tests）
 - [x] 收口 legacy 派工语义（`dispatch_to_any`）
 - [x] 基线门禁一次性跑通（fmt/clippy/test）
-- [ ] 生成收敛报告（改了什么/证据/剩余1条）
+- [x] 生成收敛报告（改了什么/证据/剩余1条）
 
 ## 执行规则（强约束）
 1. 不做“仅状态同步”的提交。
