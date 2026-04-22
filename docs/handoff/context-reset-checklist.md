@@ -21,3 +21,6 @@
    - 改动文件
    - 验证证据
    - 剩余项（仅 1 条）
+5. 提交前执行白名单检查：
+   - 全量改动：`scripts/check-whitelist.sh`
+   - 仅暂存区：`scripts/check-whitelist.sh --staged`
