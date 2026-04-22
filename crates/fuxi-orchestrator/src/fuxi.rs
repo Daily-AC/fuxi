@@ -4,7 +4,9 @@
 //! 1. `Fuxi::new(bus, workspace)` 零门客启动。
 //! 2. `spawn_worker(profile, WorkerKind::Cc(cfg))` 拉起具体门客，返回 `AgentId`。
 //! 3. `dispatch(id, task)` 把 task 丢给指定门客——事件自动 republish 到 bus。
-//! 4. `dispatch_to_any(role, task)` 按角色找空闲门客或拉起新的。
+//! 4. `dispatch_to_any(role, task)` 按角色找空闲门客或拉起新的；
+//!    `dispatch_to_any_in_task(role, task_id, ...)` 则始终显式 spawn 新实例，再绑定
+//!    同一 `task_id`。
 //! 5. `shutdown()` 关停所有门客进程；**不**销毁 worktree（保留供 P2 召回，
 //!    见 Decision 07）——物理清理留给 `fuxi worktree clean`（v1.2）。
 //!
@@ -708,7 +710,11 @@ impl Fuxi {
         Ok(chosen)
     }
 
-    /// `dispatch_to_any` 的同 task_id 版本：复用父任务 id 派给指定 role 的任一门客。
+    /// `dispatch_to_any` 的 task-bound 版本：**不复用 idle**，而是显式 spawn 一个
+    /// 新门客，再把它绑定到同一个父 task_id。
+    ///
+    /// 这条路径是“严格 task-bound 派工”：适合一个 task 下并行派出多个门客的
+    /// 场景，语义上和 `dispatch_to_any` 分开，避免旧 idle 语义污染 task 归属。
     pub async fn dispatch_to_any_in_task(
         &self,
         role: &str,
@@ -718,10 +724,12 @@ impl Fuxi {
         profile_template: AgentProfile,
         kind_for_spawn: WorkerKind,
     ) -> Result<AgentId> {
-        let mut task = Task::new(title, description);
-        task.id = task_id;
-        self.dispatch_to_any(role, task, profile_template, kind_for_spawn)
-            .await
+        let mut p = profile_template;
+        p.role = role.to_string();
+        let chosen = self.spawn_worker(p, kind_for_spawn).await?;
+        self.dispatch_in_task(chosen, task_id, title, description)
+            .await?;
+        Ok(chosen)
     }
 
     /// 停掉单个门客——M2.4 idle GC 的落地钩子。
