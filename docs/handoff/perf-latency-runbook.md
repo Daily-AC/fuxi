@@ -14,6 +14,12 @@
 3. 连续触发门客任务 + 在玄女侧持续输入，模拟“玄女 busy”
 4. 退出后生成报告：`scripts/bridge-lag-report.sh /tmp/fuxi.log`
 
+## 对比模式（推荐）
+1. 跑一轮基线（默认参数），保存日志为 `/tmp/fuxi-baseline.log`
+2. 跑一轮调参（例如开启打断），保存日志为 `/tmp/fuxi-tuned.log`
+3. 直接对比：  
+   `scripts/bridge-lag-report.sh --compare /tmp/fuxi-baseline.log /tmp/fuxi-tuned.log`
+
 ## 结果解读
 - `bridge_forward_events`：桥层实际转发次数（门客终态/下线 -> 玄女）。
 - `busy_enqueue_events`：玄女在 busy 状态被追加入队次数（值越高，主观等待感越强）。
