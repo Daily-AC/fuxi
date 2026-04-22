@@ -33,7 +33,7 @@ use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// 内部 role 白名单：这些门客的生命周期事件**不抄送**给玄女。
 ///
@@ -45,6 +45,38 @@ const INTERNAL_ROLES: &[&str] = &["extractor"];
 
 fn is_internal_role(role: &str) -> bool {
     INTERNAL_ROLES.contains(&role)
+}
+
+const BRIDGE_INTERRUPT_LAG_MS_DEFAULT: u64 = 3000;
+
+fn parse_bool_token(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| parse_bool_token(&v))
+        .unwrap_or(false)
+}
+
+fn bridge_interrupt_worker_reports() -> bool {
+    env_flag("FUXI_BRIDGE_INTERRUPT_WORKER_REPORTS")
+}
+
+fn bridge_interrupt_lag_ms() -> u64 {
+    std::env::var("FUXI_BRIDGE_INTERRUPT_LAG_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(BRIDGE_INTERRUPT_LAG_MS_DEFAULT)
+}
+
+fn bridge_delivery_lag_ms(at: DateTime<Utc>) -> u64 {
+    let ms = Utc::now().signed_duration_since(at).num_milliseconds();
+    ms.max(0) as u64
 }
 
 /// 桥需要的 orchestrator 能力——仅 `intervene` + `role_of`，方便测试用 Mock。
@@ -183,8 +215,21 @@ async fn handle_event(
                 debug!(%agent_id, %role, "AgentDead 内部 role，跳过抄送");
                 return;
             }
+            let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
+            let interrupt_first =
+                bridge_interrupt_worker_reports() && lag_ms >= bridge_interrupt_lag_ms();
+            info!(
+                %agent_id,
+                %role,
+                lag_ms,
+                interrupt_first,
+                "bridge: 转发门客下线回报到玄女"
+            );
             let prompt = build_death_prompt(agent_id, &role, &cause);
-            if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
+            if let Err(e) = intervener
+                .intervene(xuannv_id, interrupt_first, &prompt)
+                .await
+            {
                 warn!(error = %e, "bridge: intervene(AgentDead) 失败");
             }
         }
@@ -221,8 +266,23 @@ async fn handle_event(
                 debug!(%agent_id, %role, ?ev.meta.task, "TaskStateChanged 内部 role，跳过抄送");
                 return;
             }
+            let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
+            let interrupt_first =
+                bridge_interrupt_worker_reports() && lag_ms >= bridge_interrupt_lag_ms();
+            info!(
+                %agent_id,
+                %role,
+                task = ?ev.meta.task,
+                done,
+                lag_ms,
+                interrupt_first,
+                "bridge: 转发门客任务终态回报到玄女"
+            );
             let prompt = build_task_done_prompt(agent_id, &role, done);
-            if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
+            if let Err(e) = intervener
+                .intervene(xuannv_id, interrupt_first, &prompt)
+                .await
+            {
                 warn!(error = %e, "bridge: intervene(TaskDone) 失败");
             }
         }
@@ -265,6 +325,24 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn parse_bool_token_recognizes_common_truthy_values() {
+        assert!(parse_bool_token("1"));
+        assert!(parse_bool_token("true"));
+        assert!(parse_bool_token("YES"));
+        assert!(parse_bool_token(" on "));
+        assert!(!parse_bool_token("0"));
+        assert!(!parse_bool_token("false"));
+        assert!(!parse_bool_token("no"));
+        assert!(!parse_bool_token(""));
+    }
+
+    #[test]
+    fn bridge_delivery_lag_ms_never_negative() {
+        let future = Utc::now() + chrono::Duration::seconds(1);
+        assert_eq!(bridge_delivery_lag_ms(future), 0);
+    }
 
     // ─── mock intervener ─────────────────────────────────────
 
