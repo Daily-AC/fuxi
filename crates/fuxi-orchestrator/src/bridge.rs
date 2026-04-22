@@ -92,7 +92,7 @@ fn build_death_prompt(agent_id: AgentId, role: &str, cause: &str) -> String {
 fn build_task_done_prompt(agent_id: AgentId, role: &str, done: bool) -> String {
     let verb = if done { "完成" } else { "被取消" };
     format!(
-        "门客 {agent_id}（role={role}）任务已{verb}。请汇报用户或派新活。可用 `fuxi status` 查当前情况。"
+        "门客 {agent_id}（role={role}）任务已{verb}。请直接向用户汇报结果或派新活，不要额外轮询状态。"
     )
 }
 
