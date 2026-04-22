@@ -1090,12 +1090,18 @@ impl ReplApp {
             EventKind::AgentSpawning { role, .. } => {
                 if let Some(id) = who {
                     self.roles_by_agent.insert(id, role.clone());
-                    self.upsert_idle(id, role.clone(), ShelfStatus::Idle);
+                    if id == self.xuannv_id {
+                        self.xuannv_status = ShelfStatus::Idle;
+                        self.refresh_xuannv_busy_anchor();
+                    }
                 }
             }
             EventKind::AgentReady { .. } => {
                 if let Some(id) = who {
-                    self.set_agent_status(id, ShelfStatus::Idle);
+                    if id == self.xuannv_id {
+                        self.xuannv_status = ShelfStatus::Idle;
+                        self.refresh_xuannv_busy_anchor();
+                    }
                 }
             }
             EventKind::AgentDead { cause } => {
@@ -1333,44 +1339,6 @@ impl ReplApp {
         // 玄女自己接 task 不影响 idle 桶；门客挂了 task 从空闲移走
         if worker != self.xuannv_id {
             self.idle_workers.retain(|r| r.id != worker);
-        }
-    }
-
-    fn upsert_idle(&mut self, id: AgentId, role: String, status: ShelfStatus) {
-        if id == self.xuannv_id {
-            self.xuannv_status = status;
-            self.refresh_xuannv_busy_anchor();
-            return;
-        }
-        self.roles_by_agent.insert(id, role.clone());
-        // 已挂任务就不加到空闲桶（task_dispatched 优先）
-        if self
-            .tasks
-            .iter()
-            .any(|t| t.worker == id && t.prune_after.is_none())
-        {
-            return;
-        }
-        if let Some(r) = self.idle_workers.iter_mut().find(|r| r.id == id) {
-            r.role = role;
-            r.status = status;
-        } else {
-            self.idle_workers.push(RosterRow {
-                id,
-                role: role.clone(),
-                status,
-            });
-        }
-    }
-
-    fn set_agent_status(&mut self, id: AgentId, status: ShelfStatus) {
-        if id == self.xuannv_id {
-            self.xuannv_status = status;
-            self.refresh_xuannv_busy_anchor();
-            return;
-        }
-        if let Some(r) = self.idle_workers.iter_mut().find(|r| r.id == id) {
-            r.status = status;
         }
     }
 
@@ -3898,10 +3866,6 @@ async fn sync_worker_state(
             .insert(card.id, card.profile.role.clone());
         if card.id == app.xuannv_id {
             app.xuannv_status = status;
-        } else if !app.tasks.iter().any(|t| t.worker == card.id) {
-            app.upsert_idle(card.id, card.profile.role.clone(), status);
-        } else if let Some(r) = app.idle_workers.iter_mut().find(|r| r.id == card.id) {
-            r.status = status;
         }
         // worktree 挂到对应 task
         let worktree = shelf.worktree_of(card.id).await;
@@ -4220,7 +4184,7 @@ mod tests {
 
     // ───────── 任务树：核心 Fix-D 断言 ─────────
 
-    /// `TaskDispatched` 事件把门客从 idle 搬进任务列表。
+    /// `TaskDispatched` 事件创建 task 节点，并沿用最近角色信息。
     #[test]
     fn task_dispatched_event_appends_task_node() {
         let xid = AgentId::new();
@@ -4233,7 +4197,7 @@ mod tests {
                 cli: "cc".into(),
             },
         ));
-        assert!(app.idle_workers.iter().any(|r| r.id == w));
+        assert_eq!(app.lookup_role(w), "dev");
 
         let tid = TaskId::new();
         app.ingest(&mk_task_ev(
@@ -4244,10 +4208,6 @@ mod tests {
         assert_eq!(app.tasks.len(), 1, "应有一个 task 节点");
         assert_eq!(app.tasks[0].worker, w);
         assert_eq!(app.tasks[0].worker_role, "dev");
-        assert!(
-            !app.idle_workers.iter().any(|r| r.id == w),
-            "门客应从空闲桶移走"
-        );
     }
 
     #[test]
@@ -4388,9 +4348,9 @@ mod tests {
         assert!(app.tasks.is_empty(), "到期应清除 task");
     }
 
-    /// AgentSpawning 的门客进入空闲桶。
+    /// AgentSpawning 会登记 role（不再要求进入 idle 桶）。
     #[test]
-    fn idle_worker_shows_in_idle_bucket() {
+    fn agent_spawning_records_role_mapping() {
         let mut app = ReplApp::stub();
         let w = AgentId::new();
         app.ingest(&mk_ev(
@@ -4400,8 +4360,7 @@ mod tests {
                 cli: "cc".into(),
             },
         ));
-        assert_eq!(app.idle_workers.len(), 1);
-        assert_eq!(app.idle_workers[0].role, "luban");
+        assert_eq!(app.lookup_role(w), "luban");
     }
 
     /// Tab 循环：只在任务门客间切换；Esc 回玄女。
