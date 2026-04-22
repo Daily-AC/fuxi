@@ -14,7 +14,8 @@ use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
 use fuxi_core::{CoreError, Result};
 use fuxi_events::{EventBus, ReplayCursor};
-use fuxi_orchestrator::Fuxi;
+use fuxi_orchestrator::{Fuxi, FuxiConfig, WorkerKind};
+use fuxi_agent_codex::CodexLaunchConfig;
 use fuxi_workspace::GitWorktreeWorkspace;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -221,6 +222,124 @@ async fn dispatch_republishes_events_and_marks_idle_on_done() {
     assert!(saw_response, "应通过 bus 看到 AgentResponded");
     assert!(saw_done, "应通过 bus 看到终结事件");
     assert_eq!(stub.dispatches(), 1);
+}
+
+#[tokio::test]
+async fn dispatch_in_task_can_fan_out_same_parent_task_to_multiple_workers() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let a = StubAgent::new("dev", happy_script());
+    let b = StubAgent::new("dev", happy_script());
+    let aid = fuxi.insert_agent(a, None).await;
+    let bid = fuxi.insert_agent(b, None).await;
+    let parent = TaskId::new();
+
+    let mut sub = bus.subscribe();
+    fuxi.dispatch_in_task(aid, parent, "修 auth bug", "A").await.unwrap();
+    fuxi.dispatch_in_task(bid, parent, "修 auth bug", "B").await.unwrap();
+
+    let mut seen_dispatch_to_a = false;
+    let mut seen_dispatch_to_b = false;
+    for _ in 0..40 {
+        let Ok(Some(Ok(ev))) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), sub.next()).await
+        else {
+            break;
+        };
+        if ev.meta.task != Some(parent) {
+            continue;
+        }
+        if let EventKind::TaskDispatched { to } = ev.kind {
+            if to == aid {
+                seen_dispatch_to_a = true;
+            }
+            if to == bid {
+                seen_dispatch_to_b = true;
+            }
+            if seen_dispatch_to_a && seen_dispatch_to_b {
+                break;
+            }
+        }
+    }
+    assert!(seen_dispatch_to_a, "同父任务应派发到门客 A");
+    assert!(seen_dispatch_to_b, "同父任务应派发到门客 B");
+}
+
+#[tokio::test]
+async fn dispatch_to_any_in_task_spawns_new_worker_even_when_idle_exists() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::with_config(
+        bus.clone(),
+        ws,
+        FuxiConfig {
+            allocate_worktree: false,
+            ..Default::default()
+        },
+    );
+
+    let idle = StubAgent::new("dev", happy_script());
+    let idle_id = fuxi.insert_agent(idle.clone(), None).await;
+
+    let profile_template = AgentProfile {
+        name: "spawned".into(),
+        role: "placeholder".into(),
+        cli: "codex".into(),
+        system_prompt: String::new(),
+        tags: vec![],
+        extra: Default::default(),
+    };
+    let kind_for_spawn = WorkerKind::Codex(CodexLaunchConfig {
+        binary: "/usr/bin/true".into(),
+        model: String::new(),
+        cwd: None,
+        full_auto: true,
+        bypass_approvals: true,
+        extra_args: vec![],
+    });
+    let parent = TaskId::new();
+
+    let mut sub = bus.subscribe();
+    let chosen = fuxi
+        .dispatch_to_any_in_task(
+            "dev",
+            parent,
+            "修 auth bug",
+            "严格 task-bound path",
+            profile_template,
+            kind_for_spawn,
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        chosen, idle_id,
+        "严格 task-bound 派工不应复用现有 idle 门客"
+    );
+    assert_eq!(idle.dispatches(), 0, "现有 idle 不应被派工复用");
+    assert_eq!(fuxi.worker_count().await, 2, "应显式 spawn 出第二个门客");
+
+    let mut saw_task_dispatch = false;
+    for _ in 0..20 {
+        let Ok(Some(Ok(ev))) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), sub.next()).await
+        else {
+            break;
+        };
+        if let EventKind::TaskDispatched { to } = ev.kind
+            && to == chosen
+            && ev.meta.task == Some(parent)
+        {
+            saw_task_dispatch = true;
+            break;
+        }
+    }
+    assert!(
+        saw_task_dispatch,
+        "严格 task-bound 派工应把同一 task_id 绑定到新 spawn 的门客上"
+    );
 }
 
 #[tokio::test]
