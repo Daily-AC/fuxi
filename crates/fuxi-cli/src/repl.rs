@@ -515,6 +515,8 @@ pub(crate) struct ReplApp {
     pub(crate) dialogues: HashMap<ActiveTarget, VecDeque<DialogueEntry>>,
 
     pub(crate) tasks: Vec<TaskNode>,
+    /// 角色真相源（agent_id -> role）。用于 task-bound 过渡期去除对 idle 桶的语义依赖。
+    pub(crate) roles_by_agent: HashMap<AgentId, String>,
     pub(crate) idle_workers: Vec<RosterRow>,
 
     pub(crate) roster_state: ListState,
@@ -734,6 +736,7 @@ impl ReplApp {
             active: ActiveTarget::Xuannv,
             dialogues: HashMap::new(),
             tasks: Vec::new(),
+            roles_by_agent: HashMap::new(),
             idle_workers: Vec::new(),
             roster_state: ListState::default(),
             events_visible: false,
@@ -1086,6 +1089,7 @@ impl ReplApp {
         match &ev.kind {
             EventKind::AgentSpawning { role, .. } => {
                 if let Some(id) = who {
+                    self.roles_by_agent.insert(id, role.clone());
                     self.upsert_idle(id, role.clone(), ShelfStatus::Idle);
                 }
             }
@@ -1161,6 +1165,7 @@ impl ReplApp {
             EventKind::TaskDispatched { to } => {
                 if let Some(tid) = ev.meta.task {
                     let role = self.lookup_role(*to);
+                    self.roles_by_agent.insert(*to, role.clone());
                     self.upsert_task(tid, *to, role);
                 }
             }
@@ -1168,6 +1173,7 @@ impl ReplApp {
                 if let (Some(id), Some(tid)) = (who, ev.meta.task) {
                     if id != self.xuannv_id {
                         let role = self.lookup_role(id);
+                        self.roles_by_agent.insert(id, role.clone());
                         self.upsert_task(tid, id, role);
                     }
                     for t in self.tasks.iter_mut().filter(|t| t.task_id == tid) {
@@ -1257,7 +1263,6 @@ impl ReplApp {
         if before != self.tasks.len() {
             if let ActiveTarget::Worker(id) = self.active
                 && !self.tasks.iter().any(|t| t.worker == id)
-                && !self.idle_workers.iter().any(|r| r.id == id)
             {
                 self.switch_active(ActiveTarget::Xuannv);
             }
@@ -1299,6 +1304,7 @@ impl ReplApp {
             let mut cloned = existing;
             cloned.worker = worker;
             cloned.worker_role = role;
+            self.roles_by_agent.insert(worker, cloned.worker_role.clone());
             cloned.dispatched_at = Instant::now();
             cloned.prune_after = None;
             cloned.thinking = false;
@@ -1322,6 +1328,7 @@ impl ReplApp {
             worktree: None,
             recent_tools: VecDeque::with_capacity(RECENT_TOOLS_CAP),
         };
+        self.roles_by_agent.insert(worker, node.worker_role.clone());
         self.tasks.push(node);
         // 玄女自己接 task 不影响 idle 桶；门客挂了 task 从空闲移走
         if worker != self.xuannv_id {
@@ -1335,6 +1342,7 @@ impl ReplApp {
             self.refresh_xuannv_busy_anchor();
             return;
         }
+        self.roles_by_agent.insert(id, role.clone());
         // 已挂任务就不加到空闲桶（task_dispatched 优先）
         if self
             .tasks
@@ -1398,6 +1406,9 @@ impl ReplApp {
     fn lookup_role(&self, id: AgentId) -> String {
         if id == self.xuannv_id {
             return "xuannv".into();
+        }
+        if let Some(role) = self.roles_by_agent.get(&id) {
+            return role.clone();
         }
         if let Some(r) = self.idle_workers.iter().find(|r| r.id == id) {
             return r.role.clone();
@@ -3026,10 +3037,15 @@ impl ReplApp {
                     }
                     (lines, " 任务 · 元信息 ")
                 } else if let Some(r) = self.idle_workers.iter().find(|r| r.id == id) {
+                    let role = self
+                        .roles_by_agent
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| r.role.clone());
                     (
                         vec![
                             Line::from(format!("worker   {}", short_id_of(r.id))),
-                            Line::from(format!("role     {}", truncate_by_width(&r.role, 16))),
+                            Line::from(format!("role     {}", truncate_by_width(&role, 16))),
                             Line::from(format!("status   {:?}", r.status)),
                             Line::from(Span::styled(
                                 "（未绑定任务）",
@@ -3878,6 +3894,8 @@ async fn sync_worker_state(
 ) {
     for card in cards {
         let status = shelf.status_of(card.id).await.unwrap_or(ShelfStatus::Dead);
+        app.roles_by_agent
+            .insert(card.id, card.profile.role.clone());
         if card.id == app.xuannv_id {
             app.xuannv_status = status;
         } else if !app.tasks.iter().any(|t| t.worker == card.id) {
