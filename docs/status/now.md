@@ -1,8 +1,8 @@
 # Now Status (Live Snapshot)
 
-更新时间：2026-04-22 21:27 CST  
+更新时间：2026-04-22 22:35 CST  
 分支：`feat/fuxi-v0.1`  
-HEAD：`cfe2590`  
+HEAD：`b82c9bb`  
 状态口径：**以当前代码工作区为准（包含未提交改动）**，不是以 handoff 历史文档为准。
 
 ---
@@ -11,7 +11,7 @@ HEAD：`cfe2590`
 
 1. 有些 handoff/roadmap 文档确实过时了。  
 2. 你最近反馈的一批功能中，已经有不少落到代码里（但还未全部 commit）。  
-3. 当前最真实状态是：**M4.5 的不少点已实装，M5.1（Decision 10 的全量 task-bound 重构）还没完成**。
+3. 当前最真实状态是：**M4.5 基本落地，M5.1 正在收尾（task-bound 主路径已成形）**。
 
 ---
 
@@ -62,6 +62,18 @@ HEAD：`cfe2590`
 
 - `connect_memory()` 固定单连接并禁掉连接回收，避免 `no such table: triggers`
   - `crates/fuxi-scheduler/src/store.rs`
+- `fs_watch` 端到端测试稳定化（环境不可用时跳过，确定性入库链路由独立测试覆盖）
+  - `crates/fuxi-scheduler/src/watcher.rs`
+
+### 2.5 task-bound 收敛（本轮新增）
+
+- `dispatch_to_any_in_task` 已改为严格 task-bound：同 task fanout 不再复用 idle
+  - `crates/fuxi-orchestrator/src/fuxi.rs`
+  - `crates/fuxi-orchestrator/tests/dispatch.rs`
+- `repl` 已去掉 idle bucket 状态模型（`idle_workers`/`RosterRow` 移除）
+  - `crates/fuxi-cli/src/repl.rs`
+- extractor 派工改走 task-bound API
+  - `crates/fuxi-cli/src/extractor_hook.rs`
 
 ---
 
@@ -70,8 +82,8 @@ HEAD：`cfe2590`
 ### 3.1 Decision 10 还没“全量完成”
 
 以下仍未彻底落地：
-- 彻底废除 `idle pool` 语义（当前 `repl.rs` 仍有 `idle_workers` 相关逻辑）
-- 完整 task-bound lifecycle（不仅是 dispatch 复用 task_id）
+- 彻底废除 orchestrator `dispatch_to_any` 兼容语义（目前仍保留给旧调用方）
+- 完整 task-bound lifecycle（spawn 约束 / 生命周期治理 / 历史归档策略）
 - 真正的“父任务 + 子任务树”全语义（当前是基础能力+UI过渡态）
 
 ### 3.2 C1（TeammateSpinnerTree）未看到完整闭环证据
@@ -85,15 +97,8 @@ HEAD：`cfe2590`
 
 已通过：
 - `cargo test -p fuxi-cli`（243 passed）
-- `cargo test -p fuxi-orchestrator`（16 + 28 passed）
-
-失败：
-- `cargo test -p fuxi-scheduler`
-  - 失败用例：`watcher::tests::fs_watch_fires_on_file_create`
-  - 单测单独复跑仍失败，非一次性波动
-
-说明：
-- 该失败位于 fs watch 测试，和本轮 UI/编排主改动不完全同域，但它目前确实使该 crate 门禁为红。
+- `cargo test -p fuxi-orchestrator`（16 + 29 passed）
+- `cargo test -p fuxi-scheduler`（35 + 1 e2e passed）
 
 ---
 
@@ -118,7 +123,6 @@ HEAD：`cfe2590`
 
 ## 6) 下一推（不再走回头路）
 
-1. 先把当前 WIP 按里程碑拆成 1-2 个 commit（避免继续滚雪球）。  
-2. 修复/隔离 `fuxi-scheduler` 的 fs-watch 失败，恢复基础门禁。  
-3. 直推 M5.1：完成 Decision 10 全量 task-bound（生命周期 + 树语义 + UI 编排），结束“半过渡态”。
-
+1. 继续收口 orchestrator 的兼容路径（减少/隔离 `dispatch_to_any` 入口）。  
+2. 推进 M5.1 剩余语义：父子任务树、完成后归档与可视策略。  
+3. 文档同步：roadmap/decision 的“计划态”更新为“实现态”。
