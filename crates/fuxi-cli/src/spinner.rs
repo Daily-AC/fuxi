@@ -14,6 +14,34 @@ use crate::theme::Theme;
 
 /// Braille 旋转帧——与 ora / yoctospinner 同序，视觉连贯不跳。
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const VERBS_XUANNV: [&str; 4] = ["思考中", "推敲中", "衡量中", "筹谋中"];
+
+pub fn verbs_xuannv() -> &'static [&'static str] {
+    &VERBS_XUANNV
+}
+
+pub fn xuannv_verb_by_tick(tick: u64) -> &'static str {
+    let pool = verbs_xuannv();
+    pool[(tick as usize) % pool.len()]
+}
+
+/// 将文案拆成 shimmer 三段：before / glow / after。
+///
+/// phase 每次 +1，glow 窗口沿字符串循环移动。
+#[allow(dead_code)] // 当前主线 loading 已迁到输入标题，暂未启用 shimmer 片段渲染。
+pub fn shimmer_segments(text: &str, phase: u64) -> (String, String, String) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return (String::new(), String::new(), String::new());
+    }
+    let len = chars.len();
+    let idx = (phase as usize) % len;
+    let next = (idx + 1).min(len);
+    let before: String = chars[..idx].iter().collect();
+    let glow: String = chars[idx..next].iter().collect();
+    let after: String = chars[next..].iter().collect();
+    (before, glow, after)
+}
 
 /// Spinner 三态。
 ///
@@ -162,5 +190,26 @@ mod tests {
         let mut s3 = Spinner::new();
         s3.mark_fail();
         assert_eq!(s3.render(&theme).style.fg, Some(theme.error()));
+    }
+
+    #[test]
+    fn xuannv_verb_pool_non_empty_and_deterministic() {
+        let pool = verbs_xuannv();
+        assert!(!pool.is_empty(), "动词池不能为空");
+        assert!(pool.iter().all(|v| !v.trim().is_empty()));
+        assert_eq!(xuannv_verb_by_tick(0), pool[0]);
+        assert_eq!(xuannv_verb_by_tick(pool.len() as u64), pool[0]);
+    }
+
+    #[test]
+    fn shimmer_segments_walks_through_text() {
+        let (b0, g0, a0) = shimmer_segments("思考中", 0);
+        assert_eq!(b0, "");
+        assert_eq!(g0.chars().count(), 1);
+        assert_eq!(format!("{b0}{g0}{a0}"), "思考中");
+
+        let (b1, g1, a1) = shimmer_segments("思考中", 1);
+        assert_eq!(format!("{b1}{g1}{a1}"), "思考中");
+        assert_ne!(g0, g1, "phase 变化后 glow 字符应移动");
     }
 }

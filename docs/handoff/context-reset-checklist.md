@@ -8,9 +8,9 @@
 - [x] 建立唯一入口：`docs/handoff/now.md`
 - [x] 旧 handoff 标记 `stale`
 - [x] 可逆停放历史脏改动（stash）
-- [ ] 锁定本轮代码白名单（只改 orchestrator/cli/repl + tests）
-- [ ] 收口 legacy 派工语义（`dispatch_to_any`）
-- [ ] 基线门禁一次性跑通（fmt/clippy/test）
+- [x] 锁定本轮代码白名单（只改 orchestrator/cli/repl + tests）
+- [x] 收口 legacy 派工语义（`dispatch_to_any`）
+- [x] 基线门禁一次性跑通（fmt/clippy/test）
 - [ ] 生成收敛报告（改了什么/证据/剩余1条）
 
 ## 执行规则（强约束）

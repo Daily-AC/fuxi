@@ -582,7 +582,9 @@ mod tests {
         let resp = Response::Ok {
             data: serde_json::json!({"foo":"bar"}),
         };
-        let err = dispatch_task_id_from_response(resp).unwrap_err().to_string();
+        let err = dispatch_task_id_from_response(resp)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("缺 task_id"), "unexpected err: {err}");
     }
 

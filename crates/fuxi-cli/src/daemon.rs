@@ -184,16 +184,30 @@ async fn dispatch_command(
 
         Command::Dispatch {
             agent_id,
+            task_id,
             title,
             body,
         } => match parse_agent_id(&agent_id) {
             Err(e) => Response::err(e),
             Ok(id) => {
-                let task = Task::new(&title, body.as_deref().unwrap_or(""));
-                let task_id = task.id;
-                match fuxi.dispatch(id, task).await {
-                    Ok(()) => Response::ok(serde_json::json!({"task_id": task_id.to_string()})),
-                    Err(e) => Response::err(e.to_string()),
+                let desc = body.as_deref().unwrap_or("");
+                if let Some(parent_raw) = task_id {
+                    match parse_task_id(&parent_raw) {
+                        Err(e) => Response::err(e),
+                        Ok(parent) => match fuxi.dispatch_in_task(id, parent, &title, desc).await {
+                            Ok(()) => {
+                                Response::ok(serde_json::json!({"task_id": parent.to_string()}))
+                            }
+                            Err(e) => Response::err(e.to_string()),
+                        },
+                    }
+                } else {
+                    let task = Task::new(&title, desc);
+                    let task_id = task.id;
+                    match fuxi.dispatch(id, task).await {
+                        Ok(()) => Response::ok(serde_json::json!({"task_id": task_id.to_string()})),
+                        Err(e) => Response::err(e.to_string()),
+                    }
                 }
             }
         },
