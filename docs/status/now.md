@@ -83,6 +83,10 @@ HEAD：`4d87cff`
   - `crates/fuxi-orchestrator/src/fuxi.rs`
 - dispatch pump terminal drain 默认窗口从 120ms 下调到 80ms（可用 env 覆盖）
   - `crates/fuxi-orchestrator/src/fuxi.rs`
+- `dispatch` 新增 `--print-task-id`，fan-out 脚本可直接捕获 task_id（不再 sed JSON）
+  - `crates/fuxi-cli/src/subcommands.rs`
+- 新增长消息 wrap 场景的 auto-follow 回归测试（防止“底部看不全”回归）
+  - `crates/fuxi-cli/src/repl.rs`
 
 ---
 
