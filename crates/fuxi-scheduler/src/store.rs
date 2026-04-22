@@ -116,9 +116,22 @@ pub struct TriggerStore {
 impl TriggerStore {
     /// 测试专用：`:memory:` 单连接。
     pub async fn connect_memory() -> Result<Self> {
+        // 用“唯一名字 + shared-cache”的内存库：
+        // - 防“新连接=新库”导致 schema 丢失
+        // - 防并行测试串到同一个 `file::memory` 命名空间
+        let dsn = format!(
+            "sqlite:file:fuxi_sched_{}?mode=memory&cache=shared",
+            uuid::Uuid::new_v4()
+        );
+        let opts = SqliteConnectOptions::from_str(&dsn)?;
         let pool = SqlitePoolOptions::new()
+            .min_connections(1)
             .max_connections(1)
-            .connect_with(SqliteConnectOptions::from_str("sqlite::memory:")?)
+            // in-memory sqlite 一旦连接被池回收，后续重连会变成全新空库。
+            // Keeper 长跑场景下要禁掉 idle/max_lifetime 回收，避免「no such table: triggers」。
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(opts)
             .await?;
         let store = Self { pool };
         store.init_schema().await?;

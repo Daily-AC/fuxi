@@ -214,29 +214,22 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         fs::write(&target, b"hello-2").await.expect("rewrite");
 
-        // 等 TriggerFired cause=fs。优先看总线；若总线时序抖动，DB fire 记录也算触发成功。
+        // 等 TriggerFired cause=fs。这里只看总线事件：
+        // - DB 入库由 `consume_loop_records_and_emits_fire_for_fs_hit` 覆盖
+        // - 本用例专注验证“文件事件 -> fire 信号”链路
         let mut saw_bus = false;
-        let mut saw_db = false;
         for _ in 0..40 {
             if let Ok(Some(Ok(ev))) = timeout(Duration::from_millis(250), sub.next()).await
                 && let FuxiKind::TriggerFired { cause, .. } = &ev.kind
                 && cause == "fs"
             {
                 saw_bus = true;
-            }
-
-            let fires = store.list_fires(&trigger_id).await.expect("fires");
-            if !fires.is_empty() {
-                saw_db = true;
-            }
-
-            if saw_bus || saw_db {
                 break;
             }
         }
         // 清理
         rig.join.abort();
-        if !(saw_bus || saw_db) {
+        if !saw_bus {
             // 某些 CI / 沙箱环境里底层文件事件不可用（或被策略拦截），
             // 这里不把环境限制当作实现回归。
             eprintln!("skip: runtime fs notify unavailable in this environment");
