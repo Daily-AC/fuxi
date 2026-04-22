@@ -463,14 +463,6 @@ impl DialogueEntry {
     }
 }
 
-/// 门客（roster 卡片）。
-#[derive(Debug, Clone)]
-pub(crate) struct RosterRow {
-    pub id: AgentId,
-    pub role: String,
-    pub status: ShelfStatus,
-}
-
 /// 任务节点——左栏任务树的基本单位。
 #[derive(Debug, Clone)]
 pub(crate) struct TaskNode {
@@ -517,7 +509,6 @@ pub(crate) struct ReplApp {
     pub(crate) tasks: Vec<TaskNode>,
     /// 角色真相源（agent_id -> role）。用于 task-bound 过渡期去除对 idle 桶的语义依赖。
     pub(crate) roles_by_agent: HashMap<AgentId, String>,
-    pub(crate) idle_workers: Vec<RosterRow>,
 
     pub(crate) roster_state: ListState,
     pub(crate) events_visible: bool,
@@ -737,7 +728,6 @@ impl ReplApp {
             dialogues: HashMap::new(),
             tasks: Vec::new(),
             roles_by_agent: HashMap::new(),
-            idle_workers: Vec::new(),
             roster_state: ListState::default(),
             events_visible: false,
             events: FirehoseApp::new(),
@@ -1283,8 +1273,6 @@ impl ReplApp {
             self.xuannv_busy_since = None;
             return;
         }
-        // 从空闲桶移除
-        self.idle_workers.retain(|r| r.id != id);
         // 门客死亡后下帧 prune（tick 在 draw 前跑，用户几乎看不到残留）。
         let now = Instant::now();
         for t in self.tasks.iter_mut().filter(|t| t.worker == id) {
@@ -1316,9 +1304,6 @@ impl ReplApp {
             cloned.thinking = false;
             cloned.recent_tools.clear();
             self.tasks.push(cloned);
-            if worker != self.xuannv_id {
-                self.idle_workers.retain(|r| r.id != worker);
-            }
             return;
         }
         let node = TaskNode {
@@ -1336,10 +1321,6 @@ impl ReplApp {
         };
         self.roles_by_agent.insert(worker, node.worker_role.clone());
         self.tasks.push(node);
-        // 玄女自己接 task 不影响 idle 桶；门客挂了 task 从空闲移走
-        if worker != self.xuannv_id {
-            self.idle_workers.retain(|r| r.id != worker);
-        }
     }
 
     fn set_thinking(&mut self, id: AgentId, flag: bool) {
@@ -1377,9 +1358,6 @@ impl ReplApp {
         }
         if let Some(role) = self.roles_by_agent.get(&id) {
             return role.clone();
-        }
-        if let Some(r) = self.idle_workers.iter().find(|r| r.id == id) {
-            return r.role.clone();
         }
         if let Some(t) = self.tasks.iter().find(|t| t.worker == id) {
             return t.worker_role.clone();
@@ -3004,17 +2982,11 @@ impl ReplApp {
                         }
                     }
                     (lines, " 任务 · 元信息 ")
-                } else if let Some(r) = self.idle_workers.iter().find(|r| r.id == id) {
-                    let role = self
-                        .roles_by_agent
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| r.role.clone());
+                } else if let Some(role) = self.roles_by_agent.get(&id) {
                     (
                         vec![
-                            Line::from(format!("worker   {}", short_id_of(r.id))),
+                            Line::from(format!("worker   {}", short_id_of(id))),
                             Line::from(format!("role     {}", truncate_by_width(&role, 16))),
-                            Line::from(format!("status   {:?}", r.status)),
                             Line::from(Span::styled(
                                 "（未绑定任务）",
                                 Style::default().fg(Color::DarkGray),
