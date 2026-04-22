@@ -20,7 +20,7 @@ use fuxi_agent_cc::{CcAgent, CcLaunchConfig};
 use fuxi_agent_codex::{CodexAgent, CodexLaunchConfig};
 use fuxi_core::agent::{Agent, AgentProfile};
 use fuxi_core::event::{Event, EventKind, EventMeta};
-use fuxi_core::id::AgentId;
+use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::Task;
 use fuxi_core::workspace::Workspace;
 use fuxi_events::EventBus;
@@ -29,6 +29,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+const TERMINAL_DRAIN_GRACE_MS_DEFAULT: u64 = 120;
+
+fn terminal_drain_grace_ms() -> u64 {
+    std::env::var("FUXI_TERMINAL_DRAIN_GRACE_MS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(TERMINAL_DRAIN_GRACE_MS_DEFAULT)
+}
 
 /// `Fuxi` 的可调参数。
 #[derive(Debug, Clone)]
@@ -408,18 +417,22 @@ impl Fuxi {
             // 那些事件需要继续走 rx→bus。break 早了 rx drop，pending drain 的
             // 新响应无 receiver。
             //
-            // 新逻辑：terminal 后不立即 break，用 500ms timeout 等新事件；
+            // 新逻辑：terminal 后不立即 break，用短暂 grace timeout 等新事件；
             // 超时仍无 → 真 idle 退。这给 agent pump drain 一个窗口触发新 turn。
             let mut saw_terminal = false;
+            let drain_grace_ms = terminal_drain_grace_ms();
             loop {
                 let ev_opt = if saw_terminal {
-                    match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(drain_grace_ms),
+                        rx.recv(),
+                    )
                         .await
                     {
                         Ok(Some(ev)) => Some(ev),
                         Ok(None) => None, // rx 被 agent 关闭
                         Err(_) => {
-                            // terminal 后 500ms 无新事件——agent 真 idle
+                            // terminal 后 grace 窗口内无新事件——agent 真 idle
                             break;
                         }
                     }
@@ -481,6 +494,22 @@ impl Fuxi {
         });
 
         Ok(())
+    }
+
+    /// 给指定门客派活，但复用一个已有 task_id（父任务 fan-out 场景）。
+    ///
+    /// 用法：先拿到一个父任务 id，再把同 id 派给多个门客。事件流里这些门客会共享
+    /// 同一个 `meta.task`，TUI 可按 task-rooted 聚合。
+    pub async fn dispatch_in_task(
+        &self,
+        agent_id: AgentId,
+        task_id: TaskId,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<()> {
+        let mut task = Task::new(title, description);
+        task.id = task_id;
+        self.dispatch(agent_id, task).await
     }
 
     /// 介入——向某个门客发话。
@@ -677,6 +706,22 @@ impl Fuxi {
         };
         self.dispatch(chosen, task).await?;
         Ok(chosen)
+    }
+
+    /// `dispatch_to_any` 的同 task_id 版本：复用父任务 id 派给指定 role 的任一门客。
+    pub async fn dispatch_to_any_in_task(
+        &self,
+        role: &str,
+        task_id: TaskId,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        profile_template: AgentProfile,
+        kind_for_spawn: WorkerKind,
+    ) -> Result<AgentId> {
+        let mut task = Task::new(title, description);
+        task.id = task_id;
+        self.dispatch_to_any(role, task, profile_template, kind_for_spawn)
+            .await
     }
 
     /// 停掉单个门客——M2.4 idle GC 的落地钩子。
