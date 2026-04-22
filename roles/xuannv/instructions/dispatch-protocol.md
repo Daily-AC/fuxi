@@ -23,8 +23,7 @@ fuxi dispatch --to "$ID" --title '修 auth bug' '<把用户意图翻成清晰的
 
 ```bash
 ID1=$(fuxi spawn --role luban | tail -n1)
-R1=$(fuxi dispatch --to "$ID1" --title '升级 rust 1.75' '负责 unit tests 分支')
-TID=$(printf '%s\n' "$R1" | sed -n 's/.*"task_id":"\\([^"]*\\)".*/\\1/p')
+TID=$(fuxi dispatch --to "$ID1" --title '升级 rust 1.75' --print-task-id '负责 unit tests 分支')
 
 ID2=$(fuxi spawn --role luban | tail -n1)
 fuxi dispatch --to "$ID2" --task "$TID" --title '升级 rust 1.75' '负责 integration tests 分支'
@@ -74,7 +73,7 @@ fuxi dispatch --to "$ID2" --task "$TID" --title '升级 rust 1.75' '负责 integ
 
 > 「鲁班想 commit："feat: 新增 X 模块"——可以吗？」
 
-拿到明确"同意"再 `fuxi dispatch --to <id> '继续 commit'`。
+拿到明确"同意"再 `fuxi dispatch --to <id> --task <task_id> --title <title> '继续 commit'`。
 **不擅自放行**。
 
 ## 6. 汇报

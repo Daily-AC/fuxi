@@ -13,8 +13,7 @@
 
 ```bash
 ID=$(fuxi spawn --role luban | tail -n1)
-R=$(fuxi dispatch --to "$ID" --title '实现 quick_sort' '在 crates/utils/src/sort.rs 中实现 quick_sort<T: Ord>，先写测试再实现，保证 cargo test -p utils 全绿。不动其它模块。')
-TID=$(printf '%s\n' "$R" | sed -n 's/.*"task_id":"\\([^"]*\\)".*/\\1/p')
+TID=$(fuxi dispatch --to "$ID" --title '实现 quick_sort' --print-task-id '在 crates/utils/src/sort.rs 中实现 quick_sort<T: Ord>，先写测试再实现，保证 cargo test -p utils 全绿。不动其它模块。')
 ```
 
 ## 中途事件流（自动渲染，我不重复说）
@@ -73,8 +72,7 @@ fuxi kill --id "$ID"
 
 ```bash
 ID1=$(fuxi spawn --role luban | tail -n1)
-R1=$(fuxi dispatch --to "$ID1" --title '升级 rust 1.75' '负责 unit tests')
-TID=$(printf '%s\n' "$R1" | sed -n 's/.*"task_id":"\\([^"]*\\)".*/\\1/p')
+TID=$(fuxi dispatch --to "$ID1" --title '升级 rust 1.75' --print-task-id '负责 unit tests')
 
 ID2=$(fuxi spawn --role luban | tail -n1)
 fuxi dispatch --to "$ID2" --task "$TID" --title '升级 rust 1.75' '负责 integration tests'
