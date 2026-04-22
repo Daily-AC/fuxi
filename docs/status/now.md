@@ -1,8 +1,8 @@
 # Now Status (Live Snapshot)
 
-更新时间：2026-04-22 22:35 CST  
+更新时间：2026-04-22 23:30 CST  
 分支：`feat/fuxi-v0.1`  
-HEAD：`b82c9bb`  
+HEAD：`4d87cff`  
 状态口径：**以当前代码工作区为准（包含未提交改动）**，不是以 handoff 历史文档为准。
 
 ---
@@ -12,6 +12,7 @@ HEAD：`b82c9bb`
 1. 有些 handoff/roadmap 文档确实过时了。  
 2. 你最近反馈的一批功能中，已经有不少落到代码里（但还未全部 commit）。  
 3. 当前最真实状态是：**M4.5 基本落地，M5.1 正在收尾（task-bound 主路径已成形）**。
+4. 本轮新增收敛：**任务树按 `task_id` 聚合、任务完成保留默认 120s、legacy 派工路径显式告警、dispatch 尾延迟默认窗口下调到 80ms**。
 
 ---
 
@@ -74,6 +75,14 @@ HEAD：`b82c9bb`
   - `crates/fuxi-cli/src/repl.rs`
 - extractor 派工改走 task-bound API
   - `crates/fuxi-cli/src/extractor_hook.rs`
+- 任务树按 `task_id` 聚合（不再把同标题不同任务错误合并）
+  - `crates/fuxi-cli/src/repl.rs`
+- 任务完成后保留窗口改为默认 120s，支持 `FUXI_TASK_PRUNE_SECS`
+  - `crates/fuxi-cli/src/repl.rs`
+- `dispatch_to_any` 明确为 legacy 通道，并在调用时 `warn` 迁移到 task-bound API
+  - `crates/fuxi-orchestrator/src/fuxi.rs`
+- dispatch pump terminal drain 默认窗口从 120ms 下调到 80ms（可用 env 覆盖）
+  - `crates/fuxi-orchestrator/src/fuxi.rs`
 
 ---
 
