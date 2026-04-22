@@ -1,5 +1,9 @@
 # Handoff · v1 · Session 3 开工指引
 
+> [!WARNING]
+> `stale`：此文档为历史快照，不再作为当前执行入口。
+> 当前唯一入口：`docs/handoff/now.md`。
+
 > 上一 session（2026-04-20，v1-session2 续作）把 M2 地基批彻底收完 + γ 架构审查
 > 交付 + 一堆体感 bug 修完。本 session 开头，context 高，让下个 session 接手。
 >

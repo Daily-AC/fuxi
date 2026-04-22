@@ -1,5 +1,9 @@
 # Handoff · v1 · Session 4 开工指引
 
+> [!WARNING]
+> `stale`：此文档为历史快照，不再作为当前执行入口。
+> 当前唯一入口：`docs/handoff/now.md`。
+
 > 上一 session（2026-04-20 ~ 04-21）把 P2 召回 L2 闭环、M3 命名规整批全做完、
 > 修了 M2.5 extractor 的雪崩 + 实例堆积。406 tests 全绿。
 >
