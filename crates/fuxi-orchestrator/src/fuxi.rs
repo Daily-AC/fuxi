@@ -686,10 +686,12 @@ impl Fuxi {
         Ok(())
     }
 
-    /// 按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
+    /// 兼容路径：按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
     ///
     /// 使用 `claim_idle_by_role` 原子地"找+占"，防止并发 `dispatch_to_any`
     /// 把同一个空闲门客派两次（TOCTOU）。
+    ///
+    /// 新代码应优先使用 `dispatch_to_any_in_task`（严格 task-bound，不复用 idle）。
     pub async fn dispatch_to_any(
         &self,
         role: &str,
@@ -697,6 +699,11 @@ impl Fuxi {
         profile_template: AgentProfile,
         kind_for_spawn: WorkerKind,
     ) -> Result<AgentId> {
+        debug!(
+            role = %role,
+            task = %task.id,
+            "dispatch_to_any 走兼容路径（优先复用 idle）；建议迁移到 dispatch_to_any_in_task"
+        );
         let chosen = if let Some(id) = self.shelf.claim_idle_by_role(role).await {
             debug!(agent = %id, role, "原子复用空闲门客");
             id
