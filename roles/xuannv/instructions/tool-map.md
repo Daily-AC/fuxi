@@ -11,7 +11,8 @@
   续写 cc 上次跑这个 task 时的对话线（cc 端的全部 history 都在）。
 - `fuxi spawn --role <role> --recall-role <role>` — **召回该 role 最近一次完成的 session**。
   比 `--recall-task` 省事——不用记 task_id，但只能拿到那个 role 最近的 session。
-- `fuxi dispatch --to <id> <msg>` — 派任务（**单引号包 msg**，避免 shell 转义）。
+- `fuxi dispatch --to <id> --title <title> <msg>` — 派任务（**单引号包 msg**，避免 shell 转义）。
+- `fuxi dispatch --to <id> --task <task_id> --title <title> <msg>` — 把门客挂到已有父任务（同一 task 多门客并行）。
 
 ### 召回的语义（必懂，否则会误用）
 
@@ -22,6 +23,14 @@ task B，召回任一个都会拿到 A+B 全部 history。所以：
 - 用户说"召回鲁班" / "把刚才那个鲁班叫回来" → `--recall-role luban`（取最新 session）。
 - 用户说"我让鲁班接着之前 #abc 的活干" → 必须用 `--recall-task abc`（精准定位）。
 - **codex 门客不支持召回**——它是 spawn-per-dispatch 无持久 session。给 `--recall-*` 只会被忽略并 warn。
+
+### 父任务 fan-out（重点）
+
+同一个任务要并行两个门客时，必须复用同一 `task_id`：
+
+1. 第一次 `dispatch` 拿到返回 JSON 里的 `task_id`
+2. 后续门客 `dispatch` 都带 `--task <task_id>`
+3. 不要起两个独立 task 再口头说"这算一个任务"（TUI 会分成两棵）
 
 ## 介入 / 追加
 
@@ -37,7 +46,7 @@ task B，召回任一个都会拿到 A+B 全部 history。所以：
 
 ## 请示 / 解锁
 
-- `fuxi block --to <id> --reason <text>` — 标记任务为 Blocked，等待用户授权。
+- `fuxi block --task <task_id> --reason <text>` — 标记任务为 Blocked，等待用户授权。
 - `fuxi task unblock --task <id>` — 用户授权通过后解锁任务。**老入口** `fuxi resume` 仍可用但已弃用，下版本删除——别再写 `resume`。
 
 ## 策府（长期记忆 · 甲骨 + 河图洛书）
