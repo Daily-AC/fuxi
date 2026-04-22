@@ -51,23 +51,44 @@ pub struct DispatchArgs {
     /// 目标门客 id（UUID）。
     #[arg(long = "to")]
     pub agent_id: String,
+    /// 复用已有任务 id（可选）。同一个 task_id 可派给多个门客。
+    #[arg(long = "task")]
+    pub task_id: Option<String>,
     /// 任务标题。
     #[arg(long, default_value = "ad-hoc")]
     pub title: String,
     /// 任务正文（prompt）。位置参数——剩余参数拼起来。
     #[arg(trailing_var_arg = true, required = true)]
     pub body: Vec<String>,
+    /// 只打印 task_id（便于 shell capture 做同 task fan-out）。
+    #[arg(long, default_value_t = false)]
+    pub print_task_id: bool,
 }
 
 pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
     let body = args.body.join(" ");
     let resp = client::send(Command::Dispatch {
         agent_id: args.agent_id,
+        task_id: args.task_id,
         title: args.title,
         body: if body.is_empty() { None } else { Some(body) },
     })
     .await?;
-    print_response(resp)
+    if !args.print_task_id {
+        return print_response(resp);
+    }
+    match resp {
+        Response::Ok { data } => {
+            if let Some(task_id) = data.get("task_id").and_then(|v| v.as_str()) {
+                println!("{task_id}");
+                Ok(())
+            } else {
+                Err(anyhow!("dispatch 响应缺 task_id 字段: {data}"))
+            }
+        }
+        Response::Pong => Err(anyhow!("dispatch 返回 pong，响应类型异常")),
+        Response::Err { error } => Err(anyhow!(error)),
+    }
 }
 
 // ── intervene ──
@@ -518,6 +539,30 @@ mod tests {
         assert_eq!(w.a.input.as_deref(), Some("ok"));
         // ResumeArgs 是 TaskUnblockArgs 的 type alias——同一类型同一行为。
         let _: ResumeArgs = w.a;
+    }
+
+    /// `dispatch --print-task-id` 应由 clap 正确解析，且不影响原有位置参数 body。
+    #[test]
+    fn dispatch_args_parse_print_task_id_flag() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: DispatchArgs,
+        }
+        let w = W::try_parse_from([
+            "w",
+            "--to",
+            "agent-123",
+            "--title",
+            "修 auth bug",
+            "--print-task-id",
+            "请先跑测试",
+        ])
+        .unwrap();
+        assert_eq!(w.a.agent_id, "agent-123");
+        assert!(w.a.print_task_id);
+        assert_eq!(w.a.body, vec!["请先跑测试"]);
     }
 
     /// `format_event_line` 渲染：含 kind_tag 标签 + agent/task 字段；

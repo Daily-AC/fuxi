@@ -13,6 +13,7 @@
   比 `--recall-task` 省事——不用记 task_id，但只能拿到那个 role 最近的 session。
 - `fuxi dispatch --to <id> --title <title> <msg>` — 派任务（**单引号包 msg**，避免 shell 转义）。
 - `fuxi dispatch --to <id> --task <task_id> --title <title> <msg>` — 把门客挂到已有父任务（同一 task 多门客并行）。
+- `fuxi dispatch --to <id> --title <title> --print-task-id <msg>` — 只打印 task_id（便于 shell 变量捕获）。
 
 ### 召回的语义（必懂，否则会误用）
 
@@ -28,7 +29,7 @@ task B，召回任一个都会拿到 A+B 全部 history。所以：
 
 同一个任务要并行两个门客时，必须复用同一 `task_id`：
 
-1. 第一次 `dispatch` 拿到返回 JSON 里的 `task_id`
+1. 第一次 `dispatch` 用 `--print-task-id` 直接拿到 `task_id`
 2. 后续门客 `dispatch` 都带 `--task <task_id>`
 3. 不要起两个独立 task 再口头说"这算一个任务"（TUI 会分成两棵）
 
