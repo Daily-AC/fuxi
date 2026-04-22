@@ -77,15 +77,18 @@ pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
     if !args.print_task_id {
         return print_response(resp);
     }
+    let task_id = dispatch_task_id_from_response(resp)?;
+    println!("{task_id}");
+    Ok(())
+}
+
+fn dispatch_task_id_from_response(resp: Response) -> Result<String> {
     match resp {
-        Response::Ok { data } => {
-            if let Some(task_id) = data.get("task_id").and_then(|v| v.as_str()) {
-                println!("{task_id}");
-                Ok(())
-            } else {
-                Err(anyhow!("dispatch 响应缺 task_id 字段: {data}"))
-            }
-        }
+        Response::Ok { data } => data
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| anyhow!("dispatch 响应缺 task_id 字段: {data}")),
         Response::Pong => Err(anyhow!("dispatch 返回 pong，响应类型异常")),
         Response::Err { error } => Err(anyhow!(error)),
     }
@@ -563,6 +566,24 @@ mod tests {
         assert_eq!(w.a.agent_id, "agent-123");
         assert!(w.a.print_task_id);
         assert_eq!(w.a.body, vec!["请先跑测试"]);
+    }
+
+    #[test]
+    fn dispatch_task_id_from_response_ok() {
+        let resp = Response::Ok {
+            data: serde_json::json!({"task_id":"task-123"}),
+        };
+        let got = dispatch_task_id_from_response(resp).unwrap();
+        assert_eq!(got, "task-123");
+    }
+
+    #[test]
+    fn dispatch_task_id_from_response_missing_field_errors() {
+        let resp = Response::Ok {
+            data: serde_json::json!({"foo":"bar"}),
+        };
+        let err = dispatch_task_id_from_response(resp).unwrap_err().to_string();
+        assert!(err.contains("缺 task_id"), "unexpected err: {err}");
     }
 
     /// `format_event_line` 渲染：含 kind_tag 标签 + agent/task 字段；
