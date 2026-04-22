@@ -1,5 +1,9 @@
 # Handoff · v1 · Session 5 开工指引
 
+> [!WARNING]
+> `stale`：此文档为历史快照，不再作为当前执行入口。
+> 当前唯一入口：`docs/handoff/now.md`。
+
 > 上一 session（2026-04-21）是 PM 驱动的大动静：拆让贤 (D14) · M4.1/M4.2/D17 ·
 > agent team 并发推 M4-REDUX 12 条 · 用户实测后反馈"tui 很乱" · 第二轮调研 cc
 > 源码 · 立 Decision 10 (task-bound agents) + Decision 11 (cc 借鉴 v2)。

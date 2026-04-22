@@ -1,5 +1,9 @@
 # Handoff · v1 · Session 2 开工指引
 
+> [!WARNING]
+> `stale`：此文档为历史快照，不再作为当前执行入口。
+> 当前唯一入口：`docs/handoff/now.md`。
+
 > 给下一个 Claude Code session 接手人。上一个 session (2026-04-19 → 2026-04-20) context 超长，大量决策和踩坑记录在 `docs/decisions/` 和 `docs/session-review-2026-04-20.md`。本文是**10 分钟开工**指引。
 
 ---

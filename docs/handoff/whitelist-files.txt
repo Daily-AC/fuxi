@@ -1,0 +1,6 @@
+# 本轮代码白名单（上下文清理后）
+crates/fuxi-orchestrator/src/fuxi.rs
+crates/fuxi-cli/src/daemon.rs
+crates/fuxi-cli/src/repl.rs
+crates/fuxi-orchestrator/tests/dispatch.rs
+crates/fuxi-cli/tests/
