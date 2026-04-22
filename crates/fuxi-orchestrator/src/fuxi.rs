@@ -4,8 +4,8 @@
 //! 1. `Fuxi::new(bus, workspace)` 零门客启动。
 //! 2. `spawn_worker(profile, WorkerKind::Cc(cfg))` 拉起具体门客，返回 `AgentId`。
 //! 3. `dispatch(id, task)` 把 task 丢给指定门客——事件自动 republish 到 bus。
-//! 4. `dispatch_to_any(role, task)` 是 **legacy 兼容通道**（优先复用 idle，必要时
-//!    spawn）；新代码应迁移到 task-bound API：
+//! 4. `dispatch_to_any(role, task)` 是 **legacy 兼容壳**（内部转 task-bound）；
+//!    新代码应直接使用 task-bound API：
 //!    `dispatch_to_any_in_task(role, task_id, ...)` / `dispatch_in_task(...)`。
 //! 5. `shutdown()` 关停所有门客进程；**不**销毁 worktree（保留供 P2 召回，
 //!    见 Decision 07）——物理清理留给 `fuxi worktree clean`（v1.2）。
@@ -431,7 +431,7 @@ impl Fuxi {
                         std::time::Duration::from_millis(drain_grace_ms),
                         rx.recv(),
                     )
-                        .await
+                    .await
                     {
                         Ok(Some(ev)) => Some(ev),
                         Ok(None) => None, // rx 被 agent 关闭
@@ -688,13 +688,10 @@ impl Fuxi {
         Ok(())
     }
 
-    /// legacy 兼容通道：按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
+    /// legacy 兼容壳：保留旧签名，但内部统一转到 task-bound 语义。
     ///
-    /// 使用 `claim_idle_by_role` 原子地"找+占"，防止并发 `dispatch_to_any`
-    /// 把同一个空闲门客派两次（TOCTOU）。
-    ///
-    /// 新代码应迁移到 task-bound API：`dispatch_to_any_in_task` 或 `dispatch_in_task`
-    ///（按已有门客显式绑定到父 task）。
+    /// WHY：避免新旧派工语义并存导致的认知分叉（idle 复用 vs task 归属）。
+    /// 旧调用方不改签名也能跑，但行为与 `dispatch_to_any_in_task` 对齐。
     pub async fn dispatch_to_any(
         &self,
         role: &str,
@@ -705,19 +702,17 @@ impl Fuxi {
         warn!(
             role = %role,
             task = %task.id,
-            "dispatch_to_any: legacy 兼容通道（优先复用 idle）；建议迁移到 task-bound API（dispatch_to_any_in_task/dispatch_in_task）"
+            "dispatch_to_any: legacy 兼容壳（内部转 task-bound）；建议迁移到 dispatch_to_any_in_task/dispatch_in_task"
         );
-        let chosen = if let Some(id) = self.shelf.claim_idle_by_role(role).await {
-            debug!(agent = %id, role, "原子复用空闲门客");
-            id
-        } else {
-            debug!(role, "无空闲门客，spawn 新的");
-            let mut p = profile_template;
-            p.role = role.to_string();
-            self.spawn_worker(p, kind_for_spawn).await?
-        };
-        self.dispatch(chosen, task).await?;
-        Ok(chosen)
+        self.dispatch_to_any_in_task(
+            role,
+            task.id,
+            task.title,
+            task.description,
+            profile_template,
+            kind_for_spawn,
+        )
+        .await
     }
 
     /// `dispatch_to_any` 的 task-bound 版本：**不复用 idle**，而是显式 spawn 一个

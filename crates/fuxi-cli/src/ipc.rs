@@ -44,6 +44,8 @@ pub enum Command {
     /// 给指定门客派个任务。
     Dispatch {
         agent_id: String,
+        /// 复用父任务 id（可选）：同一个 task_id 可派给多个门客。
+        task_id: Option<String>,
         title: String,
         body: Option<String>,
     },

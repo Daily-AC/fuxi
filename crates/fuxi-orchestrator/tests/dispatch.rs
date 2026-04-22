@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use fuxi_agent_codex::CodexLaunchConfig;
 use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
@@ -15,7 +16,6 @@ use fuxi_core::task::{Task, TaskState};
 use fuxi_core::{CoreError, Result};
 use fuxi_events::{EventBus, ReplayCursor};
 use fuxi_orchestrator::{Fuxi, FuxiConfig, WorkerKind};
-use fuxi_agent_codex::CodexLaunchConfig;
 use fuxi_workspace::GitWorktreeWorkspace;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -237,8 +237,12 @@ async fn dispatch_in_task_can_fan_out_same_parent_task_to_multiple_workers() {
     let parent = TaskId::new();
 
     let mut sub = bus.subscribe();
-    fuxi.dispatch_in_task(aid, parent, "修 auth bug", "A").await.unwrap();
-    fuxi.dispatch_in_task(bid, parent, "修 auth bug", "B").await.unwrap();
+    fuxi.dispatch_in_task(aid, parent, "修 auth bug", "A")
+        .await
+        .unwrap();
+    fuxi.dispatch_in_task(bid, parent, "修 auth bug", "B")
+        .await
+        .unwrap();
 
     let mut seen_dispatch_to_a = false;
     let mut seen_dispatch_to_b = false;
@@ -343,35 +347,50 @@ async fn dispatch_to_any_in_task_spawns_new_worker_even_when_idle_exists() {
 }
 
 #[tokio::test]
-async fn dispatch_to_any_reuses_idle_worker() {
+async fn dispatch_to_any_is_legacy_shell_and_spawns_task_bound_worker() {
     let bus = EventBus::with_memory_store().await.unwrap();
     let (_dir, ws) = make_workspace().await;
-    let fuxi = Fuxi::new(bus, ws);
+    let fuxi = Fuxi::with_config(
+        bus.clone(),
+        ws,
+        FuxiConfig {
+            allocate_worktree: false,
+            ..Default::default()
+        },
+    );
 
     let stub = StubAgent::new("dev", happy_script());
-    let id = fuxi.insert_agent(stub.clone(), None).await;
+    let idle_id = fuxi.insert_agent(stub.clone(), None).await;
 
-    // 第一次 dispatch：stub 应被复用（不是 spawn 新的）——因为 role=dev 已存在一个 idle。
     let profile_template = AgentProfile {
         name: "ignored".into(),
         role: "will-be-overwritten".into(),
-        cli: "claude-code".into(),
+        cli: "codex".into(),
         system_prompt: String::new(),
         tags: vec![],
         extra: Default::default(),
     };
-    let kind_for_spawn =
-        fuxi_orchestrator::WorkerKind::Cc(fuxi_agent_cc::CcLaunchConfig::default());
+    let kind_for_spawn = WorkerKind::Codex(CodexLaunchConfig {
+        binary: "/usr/bin/true".into(),
+        model: String::new(),
+        cwd: None,
+        full_auto: true,
+        bypass_approvals: true,
+        extra_args: vec![],
+    });
 
     let chosen = fuxi
         .dispatch_to_any("dev", Task::new("t", "d"), profile_template, kind_for_spawn)
         .await
         .unwrap();
 
-    assert_eq!(chosen, id, "dispatch_to_any 应复用已有 idle 门客");
-    // 等 pump 吃完事件。
+    assert_ne!(
+        chosen, idle_id,
+        "legacy 壳应统一到 task-bound，不再复用 idle"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert_eq!(fuxi.worker_count().await, 1, "不应 spawn 新门客");
+    assert_eq!(stub.dispatches(), 0, "旧 idle 门客不应被 legacy 壳复用");
+    assert_eq!(fuxi.worker_count().await, 2, "应 spawn 新门客并绑定 task");
 }
 
 #[tokio::test]
@@ -547,38 +566,39 @@ async fn blocked_event_does_not_terminate_pump() {
 }
 
 #[tokio::test]
-async fn concurrent_dispatch_to_any_does_not_double_book() {
-    // 回归（code review S3）：并发两个 dispatch_to_any 打同一 role，
-    // 应**不会**挑到同一个 idle agent（会 spawn 新的 —— 但测试里 workspace
-    // 指向真实 repo，spawn CcAgent 会去找 claude binary；所以我们只注入一个
-    // idle stub，然后并发两个 dispatch_to_any："原子 claim" 保证只有一个能
-    // 拿到那个 idle，另一个应该走 spawn 路径（我们这里让 spawn 路径因为没有
-    // WorkerKind 可靠 spawn 而失败，验证第二个调用**没**拿到第一个 agent 即可）。
-    //
-    // 更干净的做法：只断言两次 dispatch_to_any 返回的 id 不相同——若相同说明
-    // TOCTOU race 发生，同一个 agent 被派了两个 task。
+async fn concurrent_dispatch_to_any_spawns_distinct_task_bound_workers() {
     let bus = EventBus::with_memory_store().await.unwrap();
     let (_dir, ws) = make_workspace().await;
-    let fuxi = std::sync::Arc::new(Fuxi::new(bus, ws));
+    let fuxi = std::sync::Arc::new(Fuxi::with_config(
+        bus,
+        ws,
+        FuxiConfig {
+            allocate_worktree: false,
+            ..Default::default()
+        },
+    ));
 
-    // 放两个 idle dev：不并发的话两次 dispatch_to_any 会复用同一个（先
-    // 找到的那个）；真 race 的话两次都可能挑到同一个。这里确保两个 idle
-    // 存在，让原子 claim 有两个可选目标。
     let s1 = StubAgent::new("dev", happy_script());
     let s2 = StubAgent::new("dev", happy_script());
-    let id1 = fuxi.insert_agent(s1, None).await;
-    let id2 = fuxi.insert_agent(s2, None).await;
-    assert_ne!(id1, id2);
+    fuxi.insert_agent(s1, None).await;
+    fuxi.insert_agent(s2, None).await;
 
     let profile_template = AgentProfile {
         name: "ignored".into(),
         role: "will-be-overwritten".into(),
-        cli: "claude-code".into(),
+        cli: "codex".into(),
         system_prompt: String::new(),
         tags: vec![],
         extra: Default::default(),
     };
-    let kind = fuxi_orchestrator::WorkerKind::Cc(fuxi_agent_cc::CcLaunchConfig::default());
+    let kind = WorkerKind::Codex(CodexLaunchConfig {
+        binary: "/usr/bin/true".into(),
+        model: String::new(),
+        cwd: None,
+        full_auto: true,
+        bypass_approvals: true,
+        extra_args: vec![],
+    });
 
     let (f1, f2) = (fuxi.clone(), fuxi.clone());
     let (p1, p2) = (profile_template.clone(), profile_template.clone());
@@ -593,10 +613,9 @@ async fn concurrent_dispatch_to_any_does_not_double_book() {
 
     assert_ne!(
         a, b,
-        "并发 dispatch_to_any 选到同一个 idle agent——TOCTOU race 存在"
+        "legacy 壳并发派工应各自 spawn 新门客，不能返回相同 id"
     );
-    assert!([id1, id2].contains(&a));
-    assert!([id1, id2].contains(&b));
+    assert_eq!(fuxi.worker_count().await, 4, "两个旧 idle + 两个新 spawn");
 }
 
 #[tokio::test]

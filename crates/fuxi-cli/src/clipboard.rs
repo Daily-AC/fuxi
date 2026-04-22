@@ -36,6 +36,50 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// 从系统剪贴板读取文本。
+///
+/// 返回：
+/// - `Ok(Some(text))`：读到文本（可能为空串）
+/// - `Ok(None)`：当前平台无可用读取命令
+/// - `Err`：命令存在但执行失败
+pub fn read_text_from_clipboard() -> Result<Option<String>> {
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbpaste", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("powershell", &["-NoProfile", "-Command", "Get-Clipboard"])]
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &[
+            ("wl-paste", &["-n"]),
+            ("xclip", &["-selection", "clipboard", "-o"]),
+        ]
+    } else {
+        &[
+            ("xclip", &["-selection", "clipboard", "-o"]),
+            ("wl-paste", &["-n"]),
+        ]
+    };
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for (cmd, args) in candidates {
+        match Command::new(cmd).args(*args).output() {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout).to_string();
+                return Ok(Some(text));
+            }
+            Ok(out) => {
+                last_err = Some(anyhow::anyhow!("{cmd} 退出码 {}", out.status));
+            }
+            Err(e) => {
+                last_err = Some(anyhow::Error::new(e).context(format!("启动 {cmd} 失败")));
+            }
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(None),
+    }
+}
+
 /// 构造 OSC52 escape 序列——`ESC ] 52 ; c ; {base64} BEL`。
 ///
 /// 单独拎出来供测试无副作用地校验。

@@ -39,6 +39,8 @@ pub enum PopupEvent {
     Close,
     /// 请宿主执行选中命令的 action，并同时把 popup 关掉。
     Execute(CommandAction),
+    /// 请宿主把输入框替换为补全后的 slash 文本（如 `/theme` 或 `/theme `）。
+    CompleteInput(String),
 }
 
 /// 斜杠命令浮层。
@@ -104,7 +106,8 @@ impl SlashPopup {
     /// - `Esc` → `Close`
     /// - `Up` / `Ctrl+P` → 向上导航（在 [0, len) 回环）
     /// - `Down` / `Ctrl+N` → 向下导航
-    /// - `Enter` → 选中时 `Execute(action)`，无候选时 `Close`
+    /// - `Tab` → 选中时补全命令名（不执行）
+    /// - `Enter` → 无参命令执行；有参命令补全为 `"/cmd "` 等用户继续输入参数
     /// - 可打印字符（`KeyCode::Char(c)` 且 `c != '/'`）→ 追加到 filter，重刷
     /// - `Backspace` → filter 非空则删末字符重刷；filter 已空 → `Close`
     /// - 其他按键 → `None`（宿主自行决定是否吃掉）
@@ -141,12 +144,25 @@ impl SlashPopup {
                 PopupEvent::None
             }
             KeyCode::Enter => {
-                if let Some(cmd) = self.candidates.get(self.selected) {
-                    let action = cmd.action.clone();
+                if let Some(cmd) = self.candidates.get(self.selected).cloned() {
                     self.close();
-                    PopupEvent::Execute(action)
+                    if cmd.arg_names.is_empty() {
+                        PopupEvent::Execute(cmd.action.clone())
+                    } else {
+                        PopupEvent::CompleteInput(format!("{} ", cmd.slash))
+                    }
                 } else {
                     // 没候选按 Enter = 放弃——闭合浮层让宿主把原文当普通输入处理。
+                    self.close();
+                    PopupEvent::Close
+                }
+            }
+            KeyCode::Tab => {
+                if let Some(cmd) = self.candidates.get(self.selected).cloned() {
+                    let slash = cmd.slash.to_string();
+                    self.close();
+                    PopupEvent::CompleteInput(slash)
+                } else {
                     self.close();
                     PopupEvent::Close
                 }
@@ -486,6 +502,28 @@ mod tests {
         assert!(!p.is_open());
         assert_eq!(p.display_input(), "/");
         assert!(p.candidates().is_empty());
+    }
+
+    #[test]
+    fn tab_completes_selected_command_without_execute() {
+        let r = reg();
+        let mut p = SlashPopup::new();
+        p.open(&r);
+        p.handle_key(KeyCode::Char('t'), KeyModifiers::NONE, &r); // /theme
+        let ev = p.handle_key(KeyCode::Tab, KeyModifiers::NONE, &r);
+        assert_eq!(ev, PopupEvent::CompleteInput("/theme".to_string()));
+        assert!(!p.is_open(), "Tab 完成后应关闭 popup");
+    }
+
+    #[test]
+    fn enter_on_command_with_args_completes_with_trailing_space() {
+        let r = reg();
+        let mut p = SlashPopup::new();
+        p.open(&r);
+        p.handle_key(KeyCode::Char('t'), KeyModifiers::NONE, &r); // /theme
+        let ev = p.handle_key(KeyCode::Enter, KeyModifiers::NONE, &r);
+        assert_eq!(ev, PopupEvent::CompleteInput("/theme ".to_string()));
+        assert!(!p.is_open(), "Enter 补全后应关闭 popup");
     }
 
     #[test]

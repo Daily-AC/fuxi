@@ -1317,7 +1317,8 @@ impl ReplApp {
             let mut cloned = existing;
             cloned.worker = worker;
             cloned.worker_role = role;
-            self.roles_by_agent.insert(worker, cloned.worker_role.clone());
+            self.roles_by_agent
+                .insert(worker, cloned.worker_role.clone());
             cloned.dispatched_at = Instant::now();
             cloned.prune_after = None;
             cloned.thinking = false;
@@ -1797,7 +1798,8 @@ impl ReplApp {
             return;
         }
         let cur = self.roster_state.selected().unwrap_or(0);
-        self.roster_state.select(Some((cur + 1).min(rows.len() - 1)));
+        self.roster_state
+            .select(Some((cur + 1).min(rows.len() - 1)));
     }
 
     fn roster_enter(&mut self) {
@@ -2593,10 +2595,7 @@ impl ReplApp {
                         "  "
                     };
                     ListItem::new(Line::from(vec![
-                        Span::styled(
-                            active_mark,
-                            Style::default().fg(theme().focus_border()),
-                        ),
+                        Span::styled(active_mark, Style::default().fg(theme().focus_border())),
                         Span::styled(branch, Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             truncate_by_width(&role_with_desc, 14),
@@ -2605,10 +2604,7 @@ impl ReplApp {
                         Span::raw("  "),
                         marker,
                         Span::raw(" · "),
-                        Span::styled(
-                            recent,
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(recent, Style::default().fg(Color::DarkGray)),
                     ]))
                 }
             })
@@ -2643,11 +2639,8 @@ impl ReplApp {
         } else {
             items
         };
-        let list = List::new(list_items).highlight_style(
-            Style::default()
-                .bg(theme().surface0)
-                .fg(theme().text),
-        );
+        let list = List::new(list_items)
+            .highlight_style(Style::default().bg(theme().surface0).fg(theme().text));
         let _ = selected;
         f.render_stateful_widget(list, inner, &mut self.roster_state);
     }
@@ -2874,15 +2867,13 @@ impl ReplApp {
         }
 
         let mut ta_widget = self.input.clone();
-        ta_widget.set_block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(if self.focus == Focus::Input {
-                    theme().focus_border()
-                } else {
-                    theme().dim_border()
-                })),
-        );
+        ta_widget.set_block(Block::default().borders(Borders::TOP).border_style(
+            Style::default().fg(if self.focus == Focus::Input {
+                theme().focus_border()
+            } else {
+                theme().dim_border()
+            }),
+        ));
         f.render_widget(&ta_widget, chunks[1]);
     }
 
@@ -3112,16 +3103,13 @@ where
                 let (anchor, anchor_color, body_style) = if agent_err {
                     ("✕ ", th.error(), Style::default().fg(th.error()))
                 } else {
-                    ("● ", th.agent_first_line(), Style::default().fg(th.subtext1))
+                    (
+                        "● ",
+                        th.agent_first_line(),
+                        Style::default().fg(th.subtext1),
+                    )
                 };
-                push_anchored(
-                    &mut out,
-                    &merged,
-                    anchor,
-                    anchor_color,
-                    true,
-                    body_style,
-                );
+                push_anchored(&mut out, &merged, anchor, anchor_color, true, body_style);
                 i = j;
                 continue;
             }
@@ -3932,7 +3920,10 @@ mod tests {
             task_prune_delay_from_raw(Some("not-a-number")),
             TASK_PRUNE_DELAY_DEFAULT
         );
-        assert_eq!(task_prune_delay_from_raw(Some("  ")), TASK_PRUNE_DELAY_DEFAULT);
+        assert_eq!(
+            task_prune_delay_from_raw(Some("  ")),
+            TASK_PRUNE_DELAY_DEFAULT
+        );
         assert_eq!(task_prune_delay_from_raw(None), TASK_PRUNE_DELAY_DEFAULT);
     }
 
@@ -4694,7 +4685,9 @@ mod tests {
                 ActiveTarget::Xuannv,
                 DialogueLine::Agent {
                     name: "玄女".into(),
-                    text: format!("第{i}条：这是一个很长很长很长很长很长很长很长的消息，用来触发换行。"),
+                    text: format!(
+                        "第{i}条：这是一个很长很长很长很长很长很长很长的消息，用来触发换行。"
+                    ),
                 },
             );
         }
@@ -5156,10 +5149,7 @@ mod tests {
             "第 2 段不应重复竖条: {:?}",
             line_to_plain(&rendered[1])
         );
-        assert!(
-            line_to_plain(&rendered[1]).starts_with("  "),
-            "2 空格对齐"
-        );
+        assert!(line_to_plain(&rendered[1]).starts_with("  "), "2 空格对齐");
         assert!(line_to_plain(&rendered[2]).starts_with("  "));
     }
 
@@ -5234,7 +5224,11 @@ mod tests {
         ];
         let rendered = render_dialogue_collapsed(entries.iter());
         assert_eq!(rendered.len(), 2, "连续工具消息应折叠成主行+次行");
-        let plain = format!("{}\n{}", line_to_plain(&rendered[0]), line_to_plain(&rendered[1]));
+        let plain = format!(
+            "{}\n{}",
+            line_to_plain(&rendered[0]),
+            line_to_plain(&rendered[1])
+        );
         assert!(plain.contains("Read(a.rs)"));
         assert!(plain.contains("Read(b.rs)"));
         assert!(plain.contains("(+1 more)"));
@@ -5478,7 +5472,10 @@ mod tests {
             compact.contains("任务"),
             "overlay 开时应看到 任务 标题:\n{all}"
         );
-        assert!(!compact.contains("空闲门客"), "任务树不应展示空闲门客:\n{all}");
+        assert!(
+            !compact.contains("空闲门客"),
+            "任务树不应展示空闲门客:\n{all}"
+        );
         assert!(all.contains("dev"), "overlay 开时应看到 role:\n{all}");
     }
 
@@ -5992,10 +5989,7 @@ mod tests {
         let busy = app.busy_tasks();
         let lines = app.teammate_task_tree_lines(&busy);
         let merged = lines.join("\n");
-        let root_count = lines
-            .iter()
-            .filter(|line| line.starts_with("▾ "))
-            .count();
+        let root_count = lines.iter().filter(|line| line.starts_with("▾ ")).count();
         assert_eq!(root_count, 2, "同标题不同 task_id 不应合并");
         assert!(merged.contains("跑全量测试"));
         assert!(merged.contains("鲁班"));
@@ -6071,7 +6065,11 @@ mod tests {
             EventKind::TaskDispatched { to: w },
         ));
         let anchored = Instant::now() - Duration::from_secs(5);
-        if let Some(t) = app.tasks.iter_mut().find(|t| t.task_id == tid && t.worker == w) {
+        if let Some(t) = app
+            .tasks
+            .iter_mut()
+            .find(|t| t.task_id == tid && t.worker == w)
+        {
             t.dispatched_at = anchored;
         }
 

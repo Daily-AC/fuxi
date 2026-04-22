@@ -52,6 +52,7 @@ pub enum CommandAction {
     Help,
     Clear,
     Quit,
+    Tree,
     /// `/theme` 无参时展示主题列表 / 循环切换；带名字则直接切过去。
     /// 具体语义由 γ 第二波决定，这里只传原始 `Option<String>`。
     Theme(Option<String>),
@@ -73,6 +74,8 @@ pub struct Command {
     pub slash: &'static str,
     pub keybind: Option<&'static str>,
     pub description: &'static str,
+    /// 参数名列表。空 = 无参命令；非空 = 至少需要用户补参数。
+    pub arg_names: Vec<String>,
     pub category: CommandCategory,
     pub action: CommandAction,
 }
@@ -187,7 +190,7 @@ impl CommandRegistry {
             "Tab 切 active · Shift+Tab 反向",
             "↑ / ↓ 翻 prompt 历史（输入框空时）",
             "Esc 双击中断 active · Ctrl+C 退出",
-            "F2 事件流 · F3 鼠标开关 · F4 任务列表 · F5 元信息",
+            "F2 事件流 · F4 任务列表 · F5 元信息",
         ] {
             out.push_str(&format!("- {tip}\n"));
         }
@@ -204,6 +207,7 @@ pub fn register_default() -> CommandRegistry {
         slash: "/help",
         keybind: None,
         description: "列出全部命令",
+        arg_names: vec![],
         category: CommandCategory::Navigation,
         action: CommandAction::Help,
     });
@@ -211,6 +215,7 @@ pub fn register_default() -> CommandRegistry {
         slash: "/clear",
         keybind: Some("Ctrl+L"),
         description: "清空滚屏",
+        arg_names: vec![],
         category: CommandCategory::Navigation,
         action: CommandAction::Clear,
     });
@@ -218,6 +223,7 @@ pub fn register_default() -> CommandRegistry {
         slash: "/quit",
         keybind: None,
         description: "退出 REPL",
+        arg_names: vec![],
         category: CommandCategory::Navigation,
         action: CommandAction::Quit,
     });
@@ -225,13 +231,23 @@ pub fn register_default() -> CommandRegistry {
         slash: "/theme",
         keybind: None,
         description: "切换主题（可带名字，不带则循环）",
+        arg_names: vec!["name".to_string()],
         category: CommandCategory::Appearance,
         action: CommandAction::Theme(None),
+    });
+    reg.register(Command {
+        slash: "/tree",
+        keybind: None,
+        description: "配置左侧任务树（on/off/toggle）",
+        arg_names: vec!["on|off|toggle".to_string()],
+        category: CommandCategory::Navigation,
+        action: CommandAction::Tree,
     });
     reg.register(Command {
         slash: "/kill",
         keybind: None,
         description: "关掉指定门客",
+        arg_names: vec![],
         category: CommandCategory::Agent,
         action: CommandAction::Kill,
     });
@@ -239,6 +255,7 @@ pub fn register_default() -> CommandRegistry {
         slash: "/status",
         keybind: None,
         description: "展示门客状态",
+        arg_names: vec![],
         category: CommandCategory::Agent,
         action: CommandAction::Status,
     });
@@ -338,6 +355,7 @@ mod tests {
             slash: "/help",
             keybind: Some("F1"),
             description: "改过的 help",
+            arg_names: vec![],
             category: CommandCategory::Navigation,
             action: CommandAction::Help,
         });
@@ -352,7 +370,9 @@ mod tests {
     #[test]
     fn default_registry_covers_required_commands() {
         let reg = register_default();
-        for slash in ["/help", "/clear", "/quit", "/theme", "/kill", "/status"] {
+        for slash in [
+            "/help", "/clear", "/quit", "/theme", "/tree", "/kill", "/status",
+        ] {
             assert!(
                 reg.find_by_slash(slash).is_some(),
                 "默认 registry 缺 {}",
@@ -367,6 +387,13 @@ mod tests {
         let reg = register_default();
         let theme = reg.find_by_slash("/theme").unwrap();
         assert_eq!(theme.action, CommandAction::Theme(None));
+    }
+
+    #[test]
+    fn theme_command_exposes_arg_names_metadata() {
+        let reg = register_default();
+        let theme = reg.find_by_slash("/theme").expect("应有 /theme");
+        assert_eq!(theme.arg_names, vec!["name".to_string()]);
     }
 
     // ───────── R11 /help 自动生成 ─────────
