@@ -4687,6 +4687,39 @@ mod tests {
     }
 
     #[test]
+    fn auto_follow_uses_wrapped_row_total_not_logical_line_count() {
+        let mut app = ReplApp::stub();
+        for i in 0..10 {
+            app.push_line(
+                ActiveTarget::Xuannv,
+                DialogueLine::Agent {
+                    name: "玄女".into(),
+                    text: format!("第{i}条：这是一个很长很长很长很长很长很长很长的消息，用来触发换行。"),
+                },
+            );
+        }
+
+        let backend = TestBackend::new(28, 10);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+
+        let bucket = app.dialogues.get(&ActiveTarget::Xuannv).unwrap();
+        let logical_lines = render_dialogue_collapsed(bucket.iter()).len() as u16;
+        assert!(
+            app.last_dialogue_total > logical_lines,
+            "总行数应按 wrap 后屏幕行计，而非逻辑行；total={}, logical={}",
+            app.last_dialogue_total,
+            logical_lines
+        );
+        assert_eq!(
+            app.dialogue_scroll,
+            app.last_dialogue_total
+                .saturating_sub(app.last_dialogue_view),
+            "auto-follow 下应始终贴底"
+        );
+    }
+
+    #[test]
     fn ctrl_end_jumps_to_bottom_even_when_input_nonempty() {
         let mut app = ReplApp::stub();
         app.last_dialogue_total = 200;
