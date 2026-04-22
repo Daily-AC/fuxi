@@ -56,15 +56,13 @@ fn parse_bool_token(raw: &str) -> bool {
     )
 }
 
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
+fn bridge_interrupt_worker_reports() -> bool {
+    // 默认开启：门客终态回报是高优先级信号，不应长期卡在玄女 busy 队列。
+    // 若要回退追加式，可显式设 0/false/off。
+    std::env::var("FUXI_BRIDGE_INTERRUPT_WORKER_REPORTS")
         .ok()
         .map(|v| parse_bool_token(&v))
-        .unwrap_or(false)
-}
-
-fn bridge_interrupt_worker_reports() -> bool {
-    env_flag("FUXI_BRIDGE_INTERRUPT_WORKER_REPORTS")
+        .unwrap_or(true)
 }
 
 fn bridge_interrupt_lag_ms() -> u64 {

@@ -5,7 +5,7 @@
 
 ## 开关
 - `FUXI_TERMINAL_DRAIN_GRACE_MS`：dispatch terminal 后等待窗口（默认 50ms）。
-- `FUXI_BRIDGE_INTERRUPT_WORKER_REPORTS`：是否允许慢回报打断玄女（`1/true` 开启，默认关闭）。
+- `FUXI_BRIDGE_INTERRUPT_WORKER_REPORTS`：是否允许慢回报打断玄女（`1/true` 开启，**默认开启**；`0/false` 关闭）。
 - `FUXI_BRIDGE_INTERRUPT_LAG_MS`：开启打断后触发阈值（默认 `3000` ms）。
 
 ## 手测步骤
