@@ -23,8 +23,8 @@ use std::time::Duration;
 /// 把 `Arc<Fuxi>` 包成 `FactExtractorSpawner` 的 adapter。
 ///
 /// 持有 extractor role 的 profile + cc 启动配置（启动时一次加载）；每次
-/// `spawn_and_run` 复用它们做 spawn。spawn_worker 自带 idle 去重（M2.4）
-/// 所以反复抽取不会堆 cc 子进程。
+/// `spawn_and_run` 复用它们做 spawn。这里走严格 task-bound 派工路径，
+/// 每次抽取都挂在一个明确 task_id 下，避免隐式 idle 复用语义。
 pub struct FuxiExtractorSpawner {
     fuxi: Arc<Fuxi>,
     bus: EventBus,
@@ -54,18 +54,19 @@ impl FactExtractorSpawner for FuxiExtractorSpawner {
         // 1. 订阅 bus——必须在 dispatch_to_any 之前，否则 broadcast 漏发。
         let mut sub = self.bus.subscribe();
 
-        // 2. 派活：dispatch_to_any 原子地"找 idle 同 role 复用 / 否则 spawn 新的"。
-        //    旧实装是 spawn_worker + dispatch，但 commit fbba2ec 把 spawn_worker 的
-        //    去重拆掉了（spawn = 新建语义；复用职责挪到这里）。每次抽取真起一个
-        //    extractor 进程，几轮就堆几个 idle 在 shelf 上等 GC——浪费 + 让玄女
-        //    `fuxi list` 看到一堆"空闲门客"误以为有事在做。
+        // 2. 派活：走 dispatch_to_any_in_task（严格 task-bound）：
+        //    - task_id 是该次抽取任务的稳定锚点
+        //    - role 选人策略不复用 idle（由 orchestrator 明确 spawn 新实例）
+        //    这样行为和 Decision 10 的“门客归任务”方向一致。
         let task = Task::new("extract", &prompt);
         let task_id = task.id;
         let agent_id = self
             .fuxi
-            .dispatch_to_any(
+            .dispatch_to_any_in_task(
                 &self.profile.role,
-                task,
+                task_id,
+                "extract",
+                &prompt,
                 self.profile.clone(),
                 WorkerKind::Cc(self.cc_cfg.clone()),
             )
