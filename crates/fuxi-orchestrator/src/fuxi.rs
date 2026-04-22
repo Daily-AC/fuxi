@@ -4,9 +4,9 @@
 //! 1. `Fuxi::new(bus, workspace)` 零门客启动。
 //! 2. `spawn_worker(profile, WorkerKind::Cc(cfg))` 拉起具体门客，返回 `AgentId`。
 //! 3. `dispatch(id, task)` 把 task 丢给指定门客——事件自动 republish 到 bus。
-//! 4. `dispatch_to_any(role, task)` 按角色找空闲门客或拉起新的；
-//!    `dispatch_to_any_in_task(role, task_id, ...)` 则始终显式 spawn 新实例，再绑定
-//!    同一 `task_id`。
+//! 4. `dispatch_to_any(role, task)` 是 **legacy 兼容通道**（优先复用 idle，必要时
+//!    spawn）；新代码应迁移到 task-bound API：
+//!    `dispatch_to_any_in_task(role, task_id, ...)` / `dispatch_in_task(...)`。
 //! 5. `shutdown()` 关停所有门客进程；**不**销毁 worktree（保留供 P2 召回，
 //!    见 Decision 07）——物理清理留给 `fuxi worktree clean`（v1.2）。
 //!
@@ -686,12 +686,13 @@ impl Fuxi {
         Ok(())
     }
 
-    /// 兼容路径：按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
+    /// legacy 兼容通道：按角色挑一个空闲门客派任务；没空闲就先 spawn 一个再派。
     ///
     /// 使用 `claim_idle_by_role` 原子地"找+占"，防止并发 `dispatch_to_any`
     /// 把同一个空闲门客派两次（TOCTOU）。
     ///
-    /// 新代码应优先使用 `dispatch_to_any_in_task`（严格 task-bound，不复用 idle）。
+    /// 新代码应迁移到 task-bound API：`dispatch_to_any_in_task` 或 `dispatch_in_task`
+    ///（按已有门客显式绑定到父 task）。
     pub async fn dispatch_to_any(
         &self,
         role: &str,
@@ -699,10 +700,10 @@ impl Fuxi {
         profile_template: AgentProfile,
         kind_for_spawn: WorkerKind,
     ) -> Result<AgentId> {
-        debug!(
+        warn!(
             role = %role,
             task = %task.id,
-            "dispatch_to_any 走兼容路径（优先复用 idle）；建议迁移到 dispatch_to_any_in_task"
+            "dispatch_to_any: legacy 兼容通道（优先复用 idle）；建议迁移到 task-bound API（dispatch_to_any_in_task/dispatch_in_task）"
         );
         let chosen = if let Some(id) = self.shelf.claim_idle_by_role(role).await {
             debug!(agent = %id, role, "原子复用空闲门客");

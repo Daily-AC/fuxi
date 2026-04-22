@@ -91,7 +91,9 @@ const DIALOGUE_CAP: usize = 500;
 /// 每秒刷 UI 的键盘 poll 窗口。
 const KEY_POLL: Duration = Duration::from_millis(50);
 /// Done/Cancelled/Failed 后保留多少时间让用户看得到「完成」再 prune。
-const TASK_PRUNE_DELAY: Duration = Duration::from_secs(5);
+const TASK_PRUNE_DELAY_DEFAULT: Duration = Duration::from_secs(120);
+/// 可选环境变量覆盖：`FUXI_TASK_PRUNE_SECS=<u64>`。
+const TASK_PRUNE_DELAY_ENV: &str = "FUXI_TASK_PRUNE_SECS";
 /// 右栏最近工具调用最多保留几条。
 const RECENT_TOOLS_CAP: usize = 5;
 
@@ -473,7 +475,7 @@ pub(crate) struct TaskNode {
     pub worker: AgentId,
     pub worker_role: String,
     pub dispatched_at: Instant,
-    /// 完成/取消/失败后 5s prune；None 代表仍活跃。
+    /// 完成/取消/失败后按 `prune_delay` 定时 prune；None 代表仍活跃。
     pub prune_after: Option<Instant>,
     pub thinking: bool,
     pub worktree: Option<PathBuf>,
@@ -717,6 +719,23 @@ fn new_textarea() -> TextArea<'static> {
     ta
 }
 
+/// 解析任务 prune 延迟（秒）。环境变量非法时回退默认值。
+///
+/// WHY 不让非法配置炸进程：这是 UX 参数，不是核心一致性参数。
+fn task_prune_delay_from_raw(raw_secs: Option<&str>) -> Duration {
+    let default_secs = TASK_PRUNE_DELAY_DEFAULT.as_secs();
+    let secs = raw_secs
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
+fn task_prune_delay_from_env() -> Duration {
+    task_prune_delay_from_raw(std::env::var(TASK_PRUNE_DELAY_ENV).ok().as_deref())
+}
+
 impl ReplApp {
     pub(crate) fn new(xuannv_id: AgentId) -> Self {
         let mut app = Self {
@@ -739,7 +758,7 @@ impl ReplApp {
             should_quit: false,
             ctrl_c_last_at: None,
             ctrl_c_count: 0,
-            prune_delay: TASK_PRUNE_DELAY,
+            prune_delay: task_prune_delay_from_env(),
             click: ClickRegistry::new(),
             esc_last_at: None,
             esc_count: 0,
@@ -3897,6 +3916,24 @@ mod tests {
             color: Color::Reset,
             ingested_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn task_prune_delay_env_override_parses_seconds() {
+        assert_eq!(
+            task_prune_delay_from_raw(Some("180")),
+            Duration::from_secs(180)
+        );
+    }
+
+    #[test]
+    fn task_prune_delay_env_invalid_falls_back_default() {
+        assert_eq!(
+            task_prune_delay_from_raw(Some("not-a-number")),
+            TASK_PRUNE_DELAY_DEFAULT
+        );
+        assert_eq!(task_prune_delay_from_raw(Some("  ")), TASK_PRUNE_DELAY_DEFAULT);
+        assert_eq!(task_prune_delay_from_raw(None), TASK_PRUNE_DELAY_DEFAULT);
     }
 
     #[test]
