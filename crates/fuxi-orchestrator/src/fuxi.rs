@@ -33,8 +33,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 // turn 终态后给 pending-drain 新事件的宽限窗口。过大体感会慢，过小会丢尾包。
-// 默认 80ms，必要时可用 FUXI_TERMINAL_DRAIN_GRACE_MS 覆盖。
-const TERMINAL_DRAIN_GRACE_MS_DEFAULT: u64 = 80;
+// 默认 50ms，必要时可用 FUXI_TERMINAL_DRAIN_GRACE_MS 覆盖。
+const TERMINAL_DRAIN_GRACE_MS_DEFAULT: u64 = 50;
 
 fn terminal_drain_grace_ms() -> u64 {
     std::env::var("FUXI_TERMINAL_DRAIN_GRACE_MS")
