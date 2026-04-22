@@ -4,3 +4,6 @@ crates/fuxi-cli/src/daemon.rs
 crates/fuxi-cli/src/repl.rs
 crates/fuxi-orchestrator/tests/dispatch.rs
 crates/fuxi-cli/tests/
+scripts/check-whitelist.sh
+docs/handoff/context-reset-checklist.md
+docs/handoff/whitelist-files.txt
