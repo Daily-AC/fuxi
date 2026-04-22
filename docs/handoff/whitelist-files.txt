@@ -6,5 +6,7 @@ crates/fuxi-cli/src/repl.rs
 crates/fuxi-orchestrator/tests/dispatch.rs
 crates/fuxi-cli/tests/
 scripts/check-whitelist.sh
+scripts/bridge-lag-report.sh
 docs/handoff/context-reset-checklist.md
 docs/handoff/whitelist-files.txt
+docs/handoff/perf-latency-runbook.md
