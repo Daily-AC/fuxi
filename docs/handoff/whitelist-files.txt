@@ -1,6 +1,8 @@
 # 本轮代码白名单（上下文清理后）
 crates/fuxi-orchestrator/src/fuxi.rs
 crates/fuxi-orchestrator/src/bridge.rs
+crates/fuxi-orchestrator/src/lib.rs
+crates/fuxi-orchestrator/src/registry.rs
 crates/fuxi-agent-cc/src/config.rs
 crates/fuxi-agent-codex/src/config.rs
 crates/fuxi-cli/src/daemon.rs
@@ -9,6 +11,8 @@ crates/fuxi-cli/src/main.rs
 crates/fuxi-cli/src/up.rs
 crates/fuxi-cli/src/dist.rs
 crates/fuxi-cli/Cargo.toml
+crates/fuxi-scheduler/src/keeper.rs
+crates/fuxi-scheduler/Cargo.toml
 crates/fuxi-orchestrator/tests/dispatch.rs
 crates/fuxi-cli/tests/
 scripts/check-whitelist.sh

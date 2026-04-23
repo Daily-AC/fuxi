@@ -1338,6 +1338,22 @@ impl ReplApp {
             .max_by_key(|t| t.dispatched_at)
     }
 
+    /// 取某 worker 当前最相关的 task id：优先最近一个未终态任务；若都终态，退到最近任务。
+    fn latest_task_id_for_worker(&self, id: AgentId) -> Option<TaskId> {
+        let pick = self
+            .tasks
+            .iter()
+            .filter(|t| t.worker == id && !matches!(t.state, TaskState::Done | TaskState::Cancelled))
+            .max_by_key(|t| t.dispatched_at)
+            .or_else(|| {
+                self.tasks
+                    .iter()
+                    .filter(|t| t.worker == id)
+                    .max_by_key(|t| t.dispatched_at)
+            })?;
+        Some(pick.task_id)
+    }
+
     fn lookup_role(&self, id: AgentId) -> String {
         if id == self.xuannv_id {
             return "xuannv".into();
@@ -3743,6 +3759,13 @@ async fn drive_tui(
                                     });
                                 }
                                 Some(Submit::Worker(id, text)) => {
+                                    let mut meta = EventMeta::now();
+                                    meta.agent = Some(id);
+                                    meta.task = app.latest_task_id_for_worker(id);
+                                    let _ = bus.publish(Event {
+                                        meta,
+                                        kind: EventKind::UserPrompted { text: text.clone() },
+                                    });
                                     let fuxi_cl = fuxi.clone();
                                     let send_text = app.expand_image_refs_for_submit(&text);
                                     tokio::spawn(async move {
@@ -4287,6 +4310,34 @@ mod tests {
             },
         ));
         assert!(app.tasks.is_empty(), "门客 dead 后应移除其任务节点");
+    }
+
+    #[test]
+    fn latest_task_id_for_worker_prefers_non_terminal() {
+        let xid = AgentId::new();
+        let mut app = ReplApp::new(xid);
+        let w = AgentId::new();
+        let tid_done = TaskId::new();
+        let tid_active = TaskId::new();
+        app.ingest(&mk_task_ev(
+            Some(xid),
+            tid_done,
+            EventKind::TaskDispatched { to: w },
+        ));
+        app.ingest(&mk_task_ev(
+            Some(w),
+            tid_done,
+            EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Done,
+            },
+        ));
+        app.ingest(&mk_task_ev(
+            Some(xid),
+            tid_active,
+            EventKind::TaskDispatched { to: w },
+        ));
+        assert_eq!(app.latest_task_id_for_worker(w), Some(tid_active));
     }
 
     /// AgentSpawning 会登记 role（不再要求进入 idle 桶）。

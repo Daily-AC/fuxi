@@ -10,14 +10,13 @@
 //!   平台事件（`AgentSpawning` / `AgentReady`）发到 EventBus。
 //! - **dispatch**：拿到某门客、给它发 task；启动 pump 把 agent.dispatch
 //!   返回的事件流 republish 到 EventBus（所有订阅者自动看到）。
-//! - **dispatch_to_any**：按角色挑选（或拉起）一个空闲门客并派活。
+//! - **dispatch_to_any**：legacy 兼容壳（内部转 task-bound spawn 语义）。
 //!
 //! **尚未做（留给 P2.5 / P3）**：
 //! - 玄女自己作为一个 A2A server 暴露对外接口；
 //! - 抄送式介入（InterventionProxy）；
 //! - 主对话权转交（ConversationSwitch）；
-//! - codex / gemini / opencode 适配器纳入（fuxi-agent-codex 完成后把它加到
-//!   `spawn_worker` 的 match 分支即可）。
+//! - gemini / opencode 适配器纳入（codex 已接入）。
 
 pub mod bridge;
 pub mod error;
