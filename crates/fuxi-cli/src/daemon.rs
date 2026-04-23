@@ -14,22 +14,25 @@
 use crate::ipc::{Command, InterveneMode, Response};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
+use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
 use fuxi_agent_cc::CcLaunchConfig;
 use fuxi_agent_codex::CodexLaunchConfig;
 use fuxi_core::event::{Event, EventKind, EventMeta};
-use fuxi_core::id::AgentId;
-use fuxi_core::task::Task;
+use fuxi_core::id::{AgentId, TaskId};
+use fuxi_core::task::{Task, TaskState};
 use fuxi_events::EventBus;
 use fuxi_memory::OracleStore;
 use fuxi_orchestrator::{Fuxi, WorkerKind};
 use fuxi_scheduler::store::{FireCause, NewTrigger};
 use fuxi_scheduler::{Keeper, TriggerSpec, TriggerStore, new_trigger_id};
+use reqwest::Client;
 use fuxi_skills as skill_loader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// daemon 运行所需的所有状态。
@@ -513,6 +516,195 @@ pub(crate) struct RecallHandle {
     pub worktree: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct DistGatewayConfig {
+    controller: String,
+    node_id: String,
+    token: String,
+    poll_ms: u64,
+}
+
+/// 远端网关门客：把 dispatch 转成 `/dist/enqueue`，再轮询 `/dist/job` 回传结果。
+///
+/// 这让玄女保持现有 spawn/dispatch 心智，底层可把 codex 执行下沉到公网网关节点。
+struct DistGatewayAgent {
+    card: AgentCard,
+    cfg: DistGatewayConfig,
+}
+
+impl DistGatewayAgent {
+    fn new(id: AgentId, profile: AgentProfile, cfg: DistGatewayConfig) -> Self {
+        Self {
+            card: AgentCard {
+                id,
+                profile,
+                endpoint: format!("dist://{}@{}", cfg.node_id, cfg.controller),
+                status: AgentStatus::Idle,
+            },
+            cfg,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Agent for DistGatewayAgent {
+    fn card(&self) -> &AgentCard {
+        &self.card
+    }
+
+    async fn dispatch(&self, task: Task) -> fuxi_core::Result<mpsc::Receiver<Event>> {
+        let (tx, rx) = mpsc::channel::<Event>(32);
+        let cfg = self.cfg.clone();
+        let aid = self.card.id;
+        tokio::spawn(async move {
+            let client = Client::new();
+            let controller = cfg.controller.trim_end_matches('/').to_string();
+            let body = if task.description.trim().is_empty() {
+                task.title.clone()
+            } else {
+                task.description.clone()
+            };
+            let enqueue_url = format!("{controller}/dist/enqueue");
+            let enq = client
+                .post(enqueue_url)
+                .json(&crate::dist::DistEnqueueReq {
+                    token: cfg.token.clone(),
+                    node_id: cfg.node_id.clone(),
+                    title: task.title.clone(),
+                    body,
+                })
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status);
+
+            let job_id = match enq {
+                Ok(resp) => match resp.json::<crate::dist::DistEnqueueResp>().await {
+                    Ok(v) => v.job_id,
+                    Err(e) => {
+                        let _ = emit_terminal_error(&tx, aid, task.id, format!("dist enqueue decode failed: {e}")).await;
+                        return;
+                    }
+                },
+                Err(e) => {
+                    let _ = emit_terminal_error(&tx, aid, task.id, format!("dist enqueue failed: {e}")).await;
+                    return;
+                }
+            };
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(cfg.poll_ms)).await;
+                let poll = client
+                    .get(format!("{controller}/dist/job"))
+                    .query(&[("token", cfg.token.as_str()), ("job_id", job_id.as_str())])
+                    .send()
+                    .await
+                    .and_then(reqwest::Response::error_for_status);
+                let resp = match poll {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let status = match resp.json::<crate::dist::DistJobStatusResp>().await {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if !status.done {
+                    continue;
+                }
+                let output = status
+                    .output
+                    .unwrap_or_else(|| "dist worker returned empty output".to_string());
+                let ok = status.ok.unwrap_or(false);
+                let _ = emit_event(
+                    &tx,
+                    aid,
+                    task.id,
+                    EventKind::TaskStateChanged {
+                        from: TaskState::InProgress,
+                        to: TaskState::Delivering,
+                    },
+                )
+                .await;
+                let _ = emit_event(
+                    &tx,
+                    aid,
+                    task.id,
+                    EventKind::AgentResponded { text: output },
+                )
+                .await;
+                let terminal = if ok {
+                    EventKind::TaskStateChanged {
+                        from: TaskState::Delivering,
+                        to: TaskState::Done,
+                    }
+                } else {
+                    EventKind::TaskStateChanged {
+                        from: TaskState::InProgress,
+                        to: TaskState::Cancelled,
+                    }
+                };
+                let _ = emit_event(&tx, aid, task.id, terminal).await;
+                return;
+            }
+        });
+        Ok(rx)
+    }
+
+    async fn send_message(&self, _task_id: TaskId, _text: &str) -> fuxi_core::Result<()> {
+        Err(fuxi_core::CoreError::Other(
+            "dist gateway worker does not support send_message yet".into(),
+        ))
+    }
+
+    async fn cancel(&self, _task_id: TaskId) -> fuxi_core::Result<()> {
+        Err(fuxi_core::CoreError::Other(
+            "dist gateway worker does not support cancel yet".into(),
+        ))
+    }
+
+    async fn shutdown(&self) -> fuxi_core::Result<()> {
+        Ok(())
+    }
+}
+
+async fn emit_event(
+    tx: &mpsc::Sender<Event>,
+    agent_id: AgentId,
+    task_id: fuxi_core::TaskId,
+    kind: EventKind,
+) -> std::result::Result<(), ()> {
+    let mut meta = EventMeta::now();
+    meta.agent = Some(agent_id);
+    meta.task = Some(task_id);
+    tx.send(Event { meta, kind }).await.map_err(|_| ())
+}
+
+async fn emit_terminal_error(
+    tx: &mpsc::Sender<Event>,
+    agent_id: AgentId,
+    task_id: fuxi_core::TaskId,
+    msg: String,
+) -> std::result::Result<(), ()> {
+    emit_event(
+        tx,
+        agent_id,
+        task_id,
+        EventKind::AgentResponded {
+            text: format!("远端网关执行失败：{msg}"),
+        },
+    )
+    .await?;
+    emit_event(
+        tx,
+        agent_id,
+        task_id,
+        EventKind::TaskStateChanged {
+            from: TaskState::InProgress,
+            to: TaskState::Cancelled,
+        },
+    )
+    .await
+}
+
 /// 根据 role 读 Skill → 构造 AgentProfile + 对应 LaunchConfig → 丢给 Fuxi.spawn_worker
 /// 或 spawn_worker_in_worktree（有召回 worktree 时）。
 ///
@@ -531,6 +723,20 @@ async fn spawn_by_role(
     let metadata_json =
         serde_json::to_value(&loaded.frontmatter.metadata).unwrap_or(serde_json::Value::Null);
     let remote_host = metadata_string(&metadata_json, "remote_host");
+    let dist_controller = metadata_string(&metadata_json, "dist_controller");
+
+    if profile.cli == "codex" && dist_controller.is_some() {
+        if recall.resume_session_id.is_some() || recall.worktree.is_some() {
+            tracing::warn!(
+                role = %role,
+                "dist gateway codex 暂不支持 recall；忽略 recall_task/recall_role"
+            );
+        }
+        let cfg = build_dist_gateway_config(&metadata_json)?;
+        let id = AgentId::new();
+        let agent = Arc::new(DistGatewayAgent::new(id, profile, cfg)) as Arc<dyn Agent>;
+        return Ok(fuxi.insert_agent(agent, None).await);
+    }
 
     let kind: WorkerKind = match profile.cli.as_str() {
         "claude-code" => {
@@ -632,6 +838,28 @@ fn build_codex_launch_config(
     cfg
 }
 
+fn build_dist_gateway_config(metadata: &serde_json::Value) -> Result<DistGatewayConfig> {
+    let controller = metadata_string(metadata, "dist_controller")
+        .ok_or_else(|| anyhow!("缺 metadata.dist_controller（例如 https://home.qmledmq.cn）"))?;
+    let node_id = metadata_string(metadata, "dist_node")
+        .ok_or_else(|| anyhow!("缺 metadata.dist_node（例如 home）"))?;
+    let token = metadata_string(metadata, "dist_token")
+        .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "缺 dist token：请在 role metadata.dist_token 填写，或设置 ${}",
+                crate::dist::DIST_TOKEN_ENV
+            )
+        })?;
+    let poll_ms = metadata_u64(metadata, "dist_poll_ms").unwrap_or(1000);
+    Ok(DistGatewayConfig {
+        controller,
+        node_id,
+        token,
+        poll_ms,
+    })
+}
+
 fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
     metadata
         .as_object()
@@ -640,6 +868,13 @@ fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn metadata_u64(metadata: &serde_json::Value, key: &str) -> Option<u64> {
+    metadata
+        .as_object()
+        .and_then(|m| m.get(key))
+        .and_then(serde_json::Value::as_u64)
 }
 
 fn metadata_string_list(metadata: &serde_json::Value, key: &str) -> Option<Vec<String>> {
@@ -964,6 +1199,21 @@ mod tests {
                 "/usr/local/bin/codex".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn build_dist_gateway_config_reads_metadata() {
+        let metadata = serde_json::json!({
+            "dist_controller": "https://home.qmledmq.cn",
+            "dist_node": "home",
+            "dist_token": "t-123",
+            "dist_poll_ms": 250
+        });
+        let cfg = build_dist_gateway_config(&metadata).expect("ok");
+        assert_eq!(cfg.controller, "https://home.qmledmq.cn");
+        assert_eq!(cfg.node_id, "home");
+        assert_eq!(cfg.token, "t-123");
+        assert_eq!(cfg.poll_ms, 250);
     }
 
     // ── M3.7 · `Command::Kill` 实装 ──
