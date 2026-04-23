@@ -90,10 +90,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const DIALOGUE_CAP: usize = 500;
 /// 每秒刷 UI 的键盘 poll 窗口。
 const KEY_POLL: Duration = Duration::from_millis(50);
-/// Done/Cancelled/Failed 后保留多少时间让用户看得到「完成」再 prune。
-const TASK_PRUNE_DELAY_DEFAULT: Duration = Duration::from_secs(120);
-/// 可选环境变量覆盖：`FUXI_TASK_PRUNE_SECS=<u64>`。
-const TASK_PRUNE_DELAY_ENV: &str = "FUXI_TASK_PRUNE_SECS";
 /// 右栏最近工具调用最多保留几条。
 const RECENT_TOOLS_CAP: usize = 5;
 
@@ -474,9 +470,8 @@ pub(crate) struct TaskNode {
     pub state: TaskState,
     pub worker: AgentId,
     pub worker_role: String,
+    /// 任务首次派发时刻。Done 后保留用于审计，不再驱动 TTL 清理。
     pub dispatched_at: Instant,
-    /// 完成/取消/失败后按 `prune_delay` 定时 prune；None 代表仍活跃。
-    pub prune_after: Option<Instant>,
     pub thinking: bool,
     pub worktree: Option<PathBuf>,
     /// 最近工具调用摘要 `tool=args前40字`，右栏展示。
@@ -527,9 +522,6 @@ pub(crate) struct ReplApp {
     pub(crate) should_quit: bool,
     pub(crate) ctrl_c_last_at: Option<Instant>,
     pub(crate) ctrl_c_count: u8,
-
-    /// 任务 prune 延迟——测试里可调短。
-    pub(crate) prune_delay: Duration,
 
     /// 鼠标点击区注册表。每帧 `draw()` 开头 `clear()`，各 draw_*
     /// 末尾 `register(area, ClickAction::Xxx)`。mouse 事件 hit_test 分派。
@@ -719,23 +711,6 @@ fn new_textarea() -> TextArea<'static> {
     ta
 }
 
-/// 解析任务 prune 延迟（秒）。环境变量非法时回退默认值。
-///
-/// WHY 不让非法配置炸进程：这是 UX 参数，不是核心一致性参数。
-fn task_prune_delay_from_raw(raw_secs: Option<&str>) -> Duration {
-    let default_secs = TASK_PRUNE_DELAY_DEFAULT.as_secs();
-    let secs = raw_secs
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(default_secs);
-    Duration::from_secs(secs)
-}
-
-fn task_prune_delay_from_env() -> Duration {
-    task_prune_delay_from_raw(std::env::var(TASK_PRUNE_DELAY_ENV).ok().as_deref())
-}
-
 impl ReplApp {
     pub(crate) fn new(xuannv_id: AgentId) -> Self {
         let mut app = Self {
@@ -758,7 +733,6 @@ impl ReplApp {
             should_quit: false,
             ctrl_c_last_at: None,
             ctrl_c_count: 0,
-            prune_delay: task_prune_delay_from_env(),
             click: ClickRegistry::new(),
             esc_last_at: None,
             esc_count: 0,
@@ -1220,16 +1194,12 @@ impl ReplApp {
                             DialogueLine::System(format!("{role} {done_verb}：{title}")),
                         );
                     }
-                    let delay = self.prune_delay;
                     let target_agent = who;
                     let mut matched = false;
                     for t in self.tasks.iter_mut().filter(|t| {
                         t.task_id == tid && target_agent.is_some_and(|aid| t.worker == aid)
                     }) {
                         t.state = *to;
-                        if matches!(to, TaskState::Done | TaskState::Cancelled) {
-                            t.prune_after = Some(Instant::now() + delay);
-                        }
                         matched = true;
                     }
                     if matched {
@@ -1237,15 +1207,12 @@ impl ReplApp {
                     }
                     for t in self.tasks.iter_mut().filter(|t| t.task_id == tid) {
                         t.state = *to;
-                        if matches!(to, TaskState::Done | TaskState::Cancelled) {
-                            t.prune_after = Some(Instant::now() + delay);
-                        }
                     }
                 }
             }
             // WHY 删除 TaskDelivered/TaskCancelled 分支（M3.6）：
             // 这俩孤儿变体已从 EventKind 移除——终态走上面 TaskStateChanged 分支
-            // 中的 Done|Cancelled 已经处理了 prune_after。
+            // 中的 Done|Cancelled 已经在同一 task node 上更新状态。
             EventKind::ToolCallStarted { tool, args } => {
                 if let Some(id) = who {
                     self.last_tool_label_by_agent
@@ -1269,20 +1236,6 @@ impl ReplApp {
     pub(crate) fn tick(&mut self, now: Instant) {
         // Toast 到期 prune——draw 之前 prune 避免已死 toast 还闪一帧。
         self.toasts.prune(now);
-
-        let before = self.tasks.len();
-        self.tasks.retain(|t| match t.prune_after {
-            Some(after) if now >= after => false,
-            _ => true,
-        });
-        if before != self.tasks.len() {
-            if let ActiveTarget::Worker(id) = self.active
-                && !self.tasks.iter().any(|t| t.worker == id)
-            {
-                self.switch_active(ActiveTarget::Xuannv);
-            }
-            self.resync_roster_selection();
-        }
     }
 
     fn handle_agent_dead(&mut self, id: AgentId) {
@@ -1292,11 +1245,12 @@ impl ReplApp {
             self.xuannv_busy_since = None;
             return;
         }
-        // 门客死亡后下帧 prune（tick 在 draw 前跑，用户几乎看不到残留）。
-        let now = Instant::now();
-        for t in self.tasks.iter_mut().filter(|t| t.worker == id) {
-            t.prune_after = Some(now);
+        self.tasks.retain(|t| t.worker != id);
+        self.roles_by_agent.remove(&id);
+        if matches!(self.active, ActiveTarget::Worker(w) if w == id) {
+            self.switch_active(ActiveTarget::Xuannv);
         }
+        self.resync_roster_selection();
     }
 
     fn upsert_task(&mut self, task_id: TaskId, worker: AgentId, role: String) {
@@ -1307,10 +1261,10 @@ impl ReplApp {
         {
             t.worker_role = role;
             // 重复派发同一 task_id 给同一门客时，不应重置 elapsed 计时。
-            if t.prune_after.is_some() {
+            // 但若该门客此前处于终态，重新派活应重置起始时刻。
+            if matches!(t.state, TaskState::Done | TaskState::Cancelled) {
                 t.dispatched_at = Instant::now();
             }
-            t.prune_after = None;
             return;
         }
         if let Some(existing) = self.tasks.iter().find(|t| t.task_id == task_id).cloned() {
@@ -1320,7 +1274,6 @@ impl ReplApp {
             self.roles_by_agent
                 .insert(worker, cloned.worker_role.clone());
             cloned.dispatched_at = Instant::now();
-            cloned.prune_after = None;
             cloned.thinking = false;
             cloned.recent_tools.clear();
             self.tasks.push(cloned);
@@ -1334,7 +1287,6 @@ impl ReplApp {
             worker,
             worker_role: role,
             dispatched_at: Instant::now(),
-            prune_after: None,
             thinking: false,
             worktree: None,
             recent_tools: VecDeque::with_capacity(RECENT_TOOLS_CAP),
@@ -1368,7 +1320,7 @@ impl ReplApp {
     fn task_by_worker_mut(&mut self, id: AgentId) -> Option<&mut TaskNode> {
         self.tasks
             .iter_mut()
-            .filter(|t| t.worker == id && t.prune_after.is_none())
+            .filter(|t| t.worker == id)
             .max_by_key(|t| t.dispatched_at)
     }
 
@@ -1541,22 +1493,17 @@ impl ReplApp {
     /// 当前 active 对象是否"在干活"——决定 Esc 的语义是中断还是回玄女。
     ///
     /// Xuannv：shelf Busy 或 thinking=true。
-    /// Worker：对应 task 在跑（thinking 或 state 处于 Running/Delivered 前），
-    /// 且未标 prune_after（被删队前的跑中 task 才算）。
+    /// Worker：对应 task 在跑（thinking 或 state 非终态）。
     pub(crate) fn active_is_busy(&self) -> bool {
         match self.active {
             ActiveTarget::Xuannv => {
                 self.xuannv_thinking || matches!(self.xuannv_status, ShelfStatus::Busy)
             }
-            ActiveTarget::Worker(id) => self
-                .tasks
-                .iter()
-                .filter(|t| t.worker == id && t.prune_after.is_none())
-                .any(|t| {
-                    // 终态 Done/Cancelled 走 prune_after 分支处理；此处 t.prune_after=None
-                    // 基本等价于"活着的 task"。再显式挡一下 Done/Cancelled 作为保险。
+            ActiveTarget::Worker(id) => {
+                self.tasks.iter().filter(|t| t.worker == id).any(|t| {
                     t.thinking || !matches!(t.state, TaskState::Done | TaskState::Cancelled)
-                }),
+                })
+            }
         }
     }
 
@@ -2124,9 +2071,11 @@ impl ReplApp {
         } else {
             self.spinner_tick_gate = 0;
         }
-        if self.tasks.iter().any(|t| {
-            t.prune_after.is_none() && task_state_to_shelf(t.state, t.thinking) == ShelfStatus::Busy
-        }) {
+        if self
+            .tasks
+            .iter()
+            .any(|t| task_state_to_shelf(t.state, t.thinking) == ShelfStatus::Busy)
+        {
             self.teammate_tree_tick = self.teammate_tree_tick.wrapping_add(1);
         }
 
@@ -2498,12 +2447,21 @@ impl ReplApp {
                             ShelfStatus::Dead => 1,
                         })
                         .unwrap_or(ShelfStatus::Idle);
-                    let elapsed = members
-                        .iter()
-                        .map(|idx| self.tasks[*idx].dispatched_at.elapsed())
-                        .max()
-                        .map(humanize_elapsed)
-                        .unwrap_or_else(|| "0s".to_string());
+                    let rhs = if members.iter().all(|idx| {
+                        matches!(
+                            self.tasks[*idx].state,
+                            TaskState::Done | TaskState::Cancelled
+                        )
+                    }) {
+                        "已完".to_string()
+                    } else {
+                        members
+                            .iter()
+                            .map(|idx| self.tasks[*idx].dispatched_at.elapsed())
+                            .max()
+                            .map(humanize_elapsed)
+                            .unwrap_or_else(|| "0s".to_string())
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             if collapsed { "▸ " } else { "▾ " },
@@ -2517,14 +2475,14 @@ impl ReplApp {
                         ),
                         Span::raw("  "),
                         Span::styled(
-                            format!("{}门客 · {}", members.len(), elapsed),
+                            format!("{}门客 · {}", members.len(), rhs),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]))
                 }
                 PaneRow::Task(idx) => {
                     let t = &self.tasks[*idx];
-                    let marker = if t.prune_after.is_some() {
+                    let marker = if matches!(t.state, TaskState::Done | TaskState::Cancelled) {
                         Span::styled("✓", Style::default().fg(theme().success()))
                     } else {
                         status_marker_span(task_state_to_shelf(t.state, t.thinking))
@@ -2536,7 +2494,7 @@ impl ReplApp {
                     } else {
                         "  "
                     };
-                    let role_color = if t.prune_after.is_some() {
+                    let role_color = if matches!(t.state, TaskState::Done | TaskState::Cancelled) {
                         theme().muted()
                     } else {
                         theme().subtext0
@@ -2649,7 +2607,6 @@ impl ReplApp {
     fn busy_tasks(&self) -> Vec<&TaskNode> {
         self.tasks
             .iter()
-            .filter(|t| t.prune_after.is_none())
             .filter(|t| task_state_to_shelf(t.state, t.thinking) == ShelfStatus::Busy)
             .collect()
     }
@@ -2892,7 +2849,6 @@ impl ReplApp {
         let total_busy = self
             .tasks
             .iter()
-            .filter(|task| task.prune_after.is_none())
             .filter(|task| task_state_to_shelf(task.state, task.thinking) == ShelfStatus::Busy)
             .count();
         let active_busy = self.active_is_busy();
@@ -2900,7 +2856,6 @@ impl ReplApp {
             ActiveTarget::Worker(id) if active_busy => self
                 .tasks
                 .iter()
-                .filter(|task| task.prune_after.is_none())
                 .filter(|task| task.worker != id)
                 .filter(|task| task_state_to_shelf(task.state, task.thinking) == ShelfStatus::Busy)
                 .count(),
@@ -2916,7 +2871,8 @@ impl ReplApp {
             ActiveTarget::Worker(id) => self
                 .tasks
                 .iter()
-                .filter(|t| t.worker == id && t.prune_after.is_none())
+                .filter(|t| t.worker == id)
+                .filter(|t| !matches!(t.state, TaskState::Done | TaskState::Cancelled))
                 .max_by_key(|t| t.dispatched_at)
                 .map(|t| t.dispatched_at.elapsed()),
         }
@@ -2925,15 +2881,12 @@ impl ReplApp {
     fn draw_meta(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
         let (lines, title) = match self.active {
             ActiveTarget::Xuannv => {
-                let task_line = if let Some(t) = self
-                    .tasks
-                    .iter()
-                    .find(|t| t.worker == self.xuannv_id && t.prune_after.is_none())
-                {
-                    t.title.clone()
-                } else {
-                    "-".into()
-                };
+                let task_line =
+                    if let Some(t) = self.tasks.iter().find(|t| t.worker == self.xuannv_id) {
+                        t.title.clone()
+                    } else {
+                        "-".into()
+                    };
                 (
                     vec![
                         Line::from(format!("agent    {}", short_id_of(self.xuannv_id))),
@@ -2960,7 +2913,11 @@ impl ReplApp {
                         Line::from(format!("state    {:?}", t.state)),
                         Line::from(format!(
                             "elapsed  {}",
-                            humanize_elapsed(t.dispatched_at.elapsed())
+                            if matches!(t.state, TaskState::Done | TaskState::Cancelled) {
+                                "-".to_string()
+                            } else {
+                                humanize_elapsed(t.dispatched_at.elapsed())
+                            }
                         )),
                         Line::from(format!(
                             "worktree {}",
@@ -3907,27 +3864,6 @@ mod tests {
     }
 
     #[test]
-    fn task_prune_delay_env_override_parses_seconds() {
-        assert_eq!(
-            task_prune_delay_from_raw(Some("180")),
-            Duration::from_secs(180)
-        );
-    }
-
-    #[test]
-    fn task_prune_delay_env_invalid_falls_back_default() {
-        assert_eq!(
-            task_prune_delay_from_raw(Some("not-a-number")),
-            TASK_PRUNE_DELAY_DEFAULT
-        );
-        assert_eq!(
-            task_prune_delay_from_raw(Some("  ")),
-            TASK_PRUNE_DELAY_DEFAULT
-        );
-        assert_eq!(task_prune_delay_from_raw(None), TASK_PRUNE_DELAY_DEFAULT);
-    }
-
-    #[test]
     fn narrate_event_translates_agent_lifecycle() {
         let ready = mk_row("agent_ready", "endpoint=session:abc");
         let (icon, _, text) = narrate_event(&ready);
@@ -4305,12 +4241,11 @@ mod tests {
         assert_ne!(tb.state, TaskState::Done, "B 不应被 A 的事件连带完成");
     }
 
-    /// Done 后延迟 prune；tick 前还在，tick 后没了。
+    /// Done 后仍保留在任务树，等待门客死亡再移除。
     #[test]
-    fn task_done_prunes_after_delay() {
+    fn task_done_keeps_node_until_worker_dead() {
         let xid = AgentId::new();
         let mut app = ReplApp::new(xid);
-        app.prune_delay = Duration::from_millis(5);
         let w = AgentId::new();
         let tid = TaskId::new();
         app.ingest(&mk_task_ev(
@@ -4327,13 +4262,17 @@ mod tests {
                 to: TaskState::Done,
             },
         ));
-        assert!(app.tasks[0].prune_after.is_some(), "Done 应触发 prune 定时");
-        // 还没到期
+        assert_eq!(app.tasks[0].state, TaskState::Done, "Done 应更新状态");
+        // tick 不应删除 done 节点
         app.tick(Instant::now());
-        assert_eq!(app.tasks.len(), 1, "未到期不能 prune");
-        // 到期
-        app.tick(Instant::now() + Duration::from_millis(50));
-        assert!(app.tasks.is_empty(), "到期应清除 task");
+        assert_eq!(app.tasks.len(), 1, "done 节点应保留");
+        app.ingest(&mk_ev(
+            Some(w),
+            EventKind::AgentDead {
+                cause: "ws closed".into(),
+            },
+        ));
+        assert!(app.tasks.is_empty(), "门客 dead 后应移除其任务节点");
     }
 
     /// AgentSpawning 会登记 role（不再要求进入 idle 桶）。
@@ -5374,12 +5313,11 @@ mod tests {
         }
     }
 
-    /// AgentDead 事件 → 该 worker 的任务进 prune 队列，idle 桶移除。
+    /// AgentDead 事件 → 该 worker 的任务立即移除。
     #[test]
-    fn agent_dead_event_marks_tasks_for_prune() {
+    fn agent_dead_event_removes_worker_tasks() {
         let xid = AgentId::new();
         let mut app = ReplApp::new(xid);
-        app.prune_delay = Duration::from_millis(5);
         let w = AgentId::new();
         let tid = TaskId::new();
         app.ingest(&mk_task_ev(
@@ -5393,9 +5331,6 @@ mod tests {
                 cause: "ws closed".into(),
             },
         ));
-        assert!(app.tasks[0].prune_after.is_some());
-        // tick 后 task 应清理
-        app.tick(Instant::now() + Duration::from_millis(50));
         assert!(app.tasks.is_empty());
     }
 
