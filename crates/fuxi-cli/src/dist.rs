@@ -65,6 +65,21 @@ pub struct DistReportResp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistJobStatusQuery {
+    pub token: String,
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistJobStatusResp {
+    pub done: bool,
+    pub ok: Option<bool>,
+    pub output: Option<String>,
+    pub duration_ms: Option<u128>,
+    pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistRegisterReq {
     pub token: String,
     pub node_id: String,
@@ -90,6 +105,7 @@ pub struct NodeRuntimeInfo {
 struct DistInner {
     queues: HashMap<String, VecDeque<DistJob>>,
     inflight: HashMap<String, DistJob>,
+    finished: HashMap<String, DistReportReq>,
     nodes: HashMap<String, NodeRuntimeInfo>,
 }
 
@@ -166,6 +182,7 @@ impl DistController {
             .or_default()
             .last_seen = Some(Instant::now());
         let existed = g.inflight.remove(&req.job_id).is_some();
+        g.finished.insert(req.job_id.clone(), req.clone());
         drop(g);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
@@ -184,6 +201,26 @@ impl DistController {
             },
         });
         existed
+    }
+
+    pub async fn job_status(&self, job_id: &str) -> DistJobStatusResp {
+        let g = self.inner.lock().await;
+        if let Some(done) = g.finished.get(job_id) {
+            return DistJobStatusResp {
+                done: true,
+                ok: Some(done.ok),
+                output: Some(done.output.clone()),
+                duration_ms: Some(done.duration_ms),
+                node_id: Some(done.node_id.clone()),
+            };
+        }
+        DistJobStatusResp {
+            done: false,
+            ok: None,
+            output: None,
+            duration_ms: None,
+            node_id: None,
+        }
     }
 }
 
@@ -241,12 +278,23 @@ async fn report_handler(
     Json(DistReportResp { accepted }).into_response()
 }
 
+async fn job_status_handler(
+    State(ctrl): State<Arc<DistController>>,
+    Query(q): Query<DistJobStatusQuery>,
+) -> impl IntoResponse {
+    if q.token != ctrl.token() {
+        return unauthorized().into_response();
+    }
+    Json(ctrl.job_status(&q.job_id).await).into_response()
+}
+
 pub fn router(ctrl: Arc<DistController>) -> Router {
     Router::new()
         .route("/dist/register", post(register_handler))
         .route("/dist/enqueue", post(enqueue_handler))
         .route("/dist/pull", get(pull_handler))
         .route("/dist/report", post(report_handler))
+        .route("/dist/job", get(job_status_handler))
         .with_state(ctrl)
 }
 
