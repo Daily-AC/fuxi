@@ -14,9 +14,9 @@
 use crate::ipc::{Command, InterveneMode, Response};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
 use fuxi_agent_cc::CcLaunchConfig;
 use fuxi_agent_codex::CodexLaunchConfig;
+use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
@@ -25,8 +25,8 @@ use fuxi_memory::OracleStore;
 use fuxi_orchestrator::{Fuxi, WorkerKind};
 use fuxi_scheduler::store::{FireCause, NewTrigger};
 use fuxi_scheduler::{Keeper, TriggerSpec, TriggerStore, new_trigger_id};
-use reqwest::Client;
 use fuxi_skills as skill_loader;
+use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -172,6 +172,8 @@ async fn dispatch_command(
         Command::Spawn {
             role,
             name,
+            node,
+            cli,
             recall_task,
             recall_role,
         } => {
@@ -179,7 +181,7 @@ async fn dispatch_command(
                 Ok(h) => h,
                 Err(resp) => return resp,
             };
-            match spawn_by_role(&fuxi, &role, name, recall).await {
+            match spawn_by_role(&fuxi, &role, name, node, cli, recall).await {
                 Ok(id) => Response::ok(serde_json::json!({"agent_id": id.to_string()})),
                 Err(e) => Response::err(e.to_string()),
             }
@@ -581,12 +583,20 @@ impl Agent for DistGatewayAgent {
                 Ok(resp) => match resp.json::<crate::dist::DistEnqueueResp>().await {
                     Ok(v) => v.job_id,
                     Err(e) => {
-                        let _ = emit_terminal_error(&tx, aid, task.id, format!("dist enqueue decode failed: {e}")).await;
+                        let _ = emit_terminal_error(
+                            &tx,
+                            aid,
+                            task.id,
+                            format!("dist enqueue decode failed: {e}"),
+                        )
+                        .await;
                         return;
                     }
                 },
                 Err(e) => {
-                    let _ = emit_terminal_error(&tx, aid, task.id, format!("dist enqueue failed: {e}")).await;
+                    let _ =
+                        emit_terminal_error(&tx, aid, task.id, format!("dist enqueue failed: {e}"))
+                            .await;
                     return;
                 }
             };
@@ -713,6 +723,8 @@ async fn spawn_by_role(
     fuxi: &Fuxi,
     role: &str,
     name_override: Option<String>,
+    node_override: Option<String>,
+    cli_override: Option<String>,
     recall: RecallHandle,
 ) -> Result<AgentId> {
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
@@ -722,23 +734,36 @@ async fn spawn_by_role(
     }
     let metadata_json =
         serde_json::to_value(&loaded.frontmatter.metadata).unwrap_or(serde_json::Value::Null);
-    let remote_host = metadata_string(&metadata_json, "remote_host");
-    let dist_controller = metadata_string(&metadata_json, "dist_controller");
+    let requested_node = normalize_node(node_override);
+    let requested_cli = normalize_cli(cli_override)?;
+    let cli = requested_cli.unwrap_or_else(|| profile.cli.clone());
+    profile.cli = cli.clone();
 
-    if profile.cli == "codex" && dist_controller.is_some() {
+    if requested_node.as_deref().is_some_and(|n| n != "local") && cli != "codex" {
+        return Err(anyhow!(
+            "--node 远端节点当前只支持 codex；当前 cli={cli}（role={role}）"
+        ));
+    }
+
+    let force_local = requested_node.as_deref().is_some_and(|n| n == "local");
+    if cli == "codex"
+        && !force_local
+        && let Some(cfg) = build_dist_gateway_config(&metadata_json, requested_node.as_deref())?
+    {
         if recall.resume_session_id.is_some() || recall.worktree.is_some() {
             tracing::warn!(
                 role = %role,
                 "dist gateway codex 暂不支持 recall；忽略 recall_task/recall_role"
             );
         }
-        let cfg = build_dist_gateway_config(&metadata_json)?;
         let id = AgentId::new();
         let agent = Arc::new(DistGatewayAgent::new(id, profile, cfg)) as Arc<dyn Agent>;
         return Ok(fuxi.insert_agent(agent, None).await);
     }
 
-    let kind: WorkerKind = match profile.cli.as_str() {
+    let remote_host = metadata_string(&metadata_json, "remote_host");
+
+    let kind: WorkerKind = match cli.as_str() {
         "claude-code" => {
             if let Some(host) = remote_host.as_deref() {
                 return Err(anyhow!(
@@ -778,11 +803,7 @@ async fn spawn_by_role(
                     "codex 不支持 session resume；worktree 仍会复用（如有）"
                 );
             }
-            WorkerKind::Codex(build_codex_launch_config(
-                role,
-                remote_host,
-                &metadata_json,
-            ))
+            WorkerKind::Codex(build_codex_launch_config(role, remote_host, &metadata_json))
         }
         other => {
             return Err(anyhow!(
@@ -838,26 +859,102 @@ fn build_codex_launch_config(
     cfg
 }
 
-fn build_dist_gateway_config(metadata: &serde_json::Value) -> Result<DistGatewayConfig> {
-    let controller = metadata_string(metadata, "dist_controller")
-        .ok_or_else(|| anyhow!("缺 metadata.dist_controller（例如 https://home.qmledmq.cn）"))?;
-    let node_id = metadata_string(metadata, "dist_node")
-        .ok_or_else(|| anyhow!("缺 metadata.dist_node（例如 home）"))?;
+fn build_dist_gateway_config(
+    metadata: &serde_json::Value,
+    node_override: Option<&str>,
+) -> Result<Option<DistGatewayConfig>> {
+    let metadata_controller = metadata_string(metadata, "dist_controller");
+    let env_controller = std::env::var("FUXI_DIST_CONTROLLER").ok();
+    let controller = metadata_controller.or(env_controller);
+
+    let node_id = node_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| metadata_string(metadata, "dist_node"))
+        .or_else(|| std::env::var("FUXI_DIST_NODE").ok());
+
+    let wants_dist = node_override.is_some()
+        || controller.is_some()
+        || metadata_string(metadata, "dist_node").is_some();
+    if !wants_dist {
+        return Ok(None);
+    }
+
+    let controller = controller.ok_or_else(|| {
+        anyhow!("缺 dist controller：请配置 metadata.dist_controller 或 $FUXI_DIST_CONTROLLER")
+    })?;
+    let node_id = node_id.ok_or_else(|| {
+        anyhow!("缺 dist node：请配置 metadata.dist_node 或 --node / $FUXI_DIST_NODE")
+    })?;
+
     let token = metadata_string(metadata, "dist_token")
+        .or_else(|| node_scoped_dist_token_env(&node_id).and_then(read_env))
         .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok())
         .ok_or_else(|| {
+            let scoped = node_scoped_dist_token_env(&node_id)
+                .unwrap_or_else(|| "FUXI_DIST_<NODE>_TOKEN".to_string());
             anyhow!(
-                "缺 dist token：请在 role metadata.dist_token 填写，或设置 ${}",
+                "缺 dist token：请配置 metadata.dist_token 或 ${} 或 ${scoped}",
                 crate::dist::DIST_TOKEN_ENV
             )
         })?;
     let poll_ms = metadata_u64(metadata, "dist_poll_ms").unwrap_or(1000);
-    Ok(DistGatewayConfig {
+    Ok(Some(DistGatewayConfig {
         controller,
         node_id,
         token,
         poll_ms,
+    }))
+}
+
+fn normalize_node(node: Option<String>) -> Option<String> {
+    node.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
     })
+}
+
+fn normalize_cli(cli: Option<String>) -> Result<Option<String>> {
+    let Some(raw) = cli else {
+        return Ok(None);
+    };
+    let v = raw.trim().to_string();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    match v.as_str() {
+        "claude-code" | "codex" => Ok(Some(v)),
+        other => Err(anyhow!(
+            "未知 CLI 覆写 '{other}'；当前支持 claude-code | codex"
+        )),
+    }
+}
+
+fn node_scoped_dist_token_env(node_id: &str) -> Option<String> {
+    let key = node_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if key.is_empty() {
+        None
+    } else {
+        Some(format!("FUXI_DIST_{key}_TOKEN"))
+    }
+}
+
+fn read_env(key: String) -> Option<String> {
+    std::env::var(key).ok()
 }
 
 fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
@@ -1209,11 +1306,63 @@ mod tests {
             "dist_token": "t-123",
             "dist_poll_ms": 250
         });
-        let cfg = build_dist_gateway_config(&metadata).expect("ok");
+        let cfg = build_dist_gateway_config(&metadata, None)
+            .expect("ok")
+            .expect("some");
         assert_eq!(cfg.controller, "https://home.qmledmq.cn");
         assert_eq!(cfg.node_id, "home");
         assert_eq!(cfg.token, "t-123");
         assert_eq!(cfg.poll_ms, 250);
+    }
+
+    #[test]
+    fn build_dist_gateway_config_returns_none_without_inputs() {
+        let metadata = serde_json::json!({});
+        unsafe {
+            std::env::remove_var("FUXI_DIST_CONTROLLER");
+            std::env::remove_var("FUXI_DIST_NODE");
+            std::env::remove_var(crate::dist::DIST_TOKEN_ENV);
+        }
+        let cfg = build_dist_gateway_config(&metadata, None).expect("ok");
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn build_dist_gateway_config_node_override_wins_over_metadata_node() {
+        let metadata = serde_json::json!({
+            "dist_controller": "https://home.qmledmq.cn",
+            "dist_node": "other",
+            "dist_token": "t-123"
+        });
+        let cfg = build_dist_gateway_config(&metadata, Some("home"))
+            .expect("ok")
+            .expect("some");
+        assert_eq!(cfg.controller, "https://home.qmledmq.cn");
+        assert_eq!(cfg.node_id, "home");
+        assert_eq!(cfg.token, "t-123");
+    }
+
+    #[test]
+    fn normalize_cli_rejects_unknown() {
+        let err = normalize_cli(Some("foo".into())).expect_err("invalid cli should fail");
+        assert!(err.to_string().contains("未知 CLI 覆写"));
+    }
+
+    #[test]
+    fn normalize_node_trims_and_drops_empty() {
+        assert_eq!(
+            normalize_node(Some(" home ".into())).as_deref(),
+            Some("home")
+        );
+        assert!(normalize_node(Some("   ".into())).is_none());
+    }
+
+    #[test]
+    fn node_scoped_dist_token_env_normalizes_key() {
+        assert_eq!(
+            node_scoped_dist_token_env("home-prod").as_deref(),
+            Some("FUXI_DIST_HOME_PROD_TOKEN")
+        );
     }
 
     // ── M3.7 · `Command::Kill` 实装 ──

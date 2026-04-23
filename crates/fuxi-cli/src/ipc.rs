@@ -34,6 +34,10 @@ pub enum Command {
         role: String,
         /// 可选门客名（默认走 role-N）。
         name: Option<String>,
+        /// 可选执行节点。`local` 表示强制本机；其他值（如 `home`）表示远端节点。
+        node: Option<String>,
+        /// 可选 CLI 覆写（`claude-code` / `codex`）。
+        cli: Option<String>,
         /// P2 召回：把 `task-<id>` 在策府里的 session_id 装到
         /// `CcLaunchConfig.resume_session_id`。和 `recall_role` 互斥。
         recall_task: Option<String>,
@@ -204,6 +208,8 @@ mod tests {
         let cmd = Command::Spawn {
             role: "dev".into(),
             name: None,
+            node: None,
+            cli: None,
             recall_task: None,
             recall_role: None,
         };
@@ -222,6 +228,8 @@ mod tests {
         let cmd = Command::Spawn {
             role: "dev".into(),
             name: None,
+            node: Some("home".into()),
+            cli: Some("codex".into()),
             recall_task: Some("task-abc".into()),
             recall_role: None,
         };
@@ -229,10 +237,14 @@ mod tests {
         let back: Command = serde_json::from_str(&s).unwrap();
         match back {
             Command::Spawn {
+                node,
+                cli,
                 recall_task,
                 recall_role,
                 ..
             } => {
+                assert_eq!(node.as_deref(), Some("home"));
+                assert_eq!(cli.as_deref(), Some("codex"));
                 assert_eq!(recall_task.as_deref(), Some("task-abc"));
                 assert!(recall_role.is_none());
             }
