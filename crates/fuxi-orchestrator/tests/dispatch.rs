@@ -296,6 +296,7 @@ async fn dispatch_to_any_in_task_spawns_new_worker_even_when_idle_exists() {
         extra: Default::default(),
     };
     let kind_for_spawn = WorkerKind::Codex(CodexLaunchConfig {
+        argv_prefix: vec![],
         binary: "/usr/bin/true".into(),
         model: String::new(),
         cwd: None,
@@ -371,6 +372,7 @@ async fn dispatch_to_any_is_legacy_shell_and_spawns_task_bound_worker() {
         extra: Default::default(),
     };
     let kind_for_spawn = WorkerKind::Codex(CodexLaunchConfig {
+        argv_prefix: vec![],
         binary: "/usr/bin/true".into(),
         model: String::new(),
         cwd: None,
@@ -592,6 +594,7 @@ async fn concurrent_dispatch_to_any_spawns_distinct_task_bound_workers() {
         extra: Default::default(),
     };
     let kind = WorkerKind::Codex(CodexLaunchConfig {
+        argv_prefix: vec![],
         binary: "/usr/bin/true".into(),
         model: String::new(),
         cwd: None,
