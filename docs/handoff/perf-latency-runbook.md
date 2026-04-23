@@ -6,6 +6,7 @@
 ## 开关
 - `FUXI_TERMINAL_DRAIN_GRACE_MS`：dispatch terminal 后等待窗口（默认 50ms）。
 - `FUXI_BRIDGE_INTERRUPT_WORKER_REPORTS`：是否允许慢回报打断玄女（`1/true` 开启，**默认开启**；`0/false` 关闭）。
+- `FUXI_BRIDGE_INTERRUPT_MODE`：`always`（默认）或 `lag`。
 - `FUXI_BRIDGE_INTERRUPT_LAG_MS`：开启打断后触发阈值（默认 `3000` ms）。
 
 ## 手测步骤
@@ -30,6 +31,9 @@
 - `lag_ms_avg` 低但 `busy_enqueue_events` 高：慢点在玄女 busy 队列，不在 bridge。
 - `lag_ms_avg` 高且 `busy_enqueue_events` 低：慢点在 bridge/事件流。
 - 两者都高：链路两端都拥塞，需要同时调参。
+
+默认 `FUXI_BRIDGE_INTERRUPT_MODE=always`，优先解决“玄女 busy 队列”导致的晚回报体感。
+若你想降低打断频率，再切回 `lag` 模式。
 
 ## 建议阈值
 - 日常目标：`lag_ms_avg < 300ms`

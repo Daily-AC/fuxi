@@ -48,6 +48,7 @@ fn is_internal_role(role: &str) -> bool {
 }
 
 const BRIDGE_INTERRUPT_LAG_MS_DEFAULT: u64 = 3000;
+const BRIDGE_INTERRUPT_MODE_DEFAULT: &str = "always";
 
 fn parse_bool_token(raw: &str) -> bool {
     matches!(
@@ -63,6 +64,25 @@ fn bridge_interrupt_worker_reports() -> bool {
         .ok()
         .map(|v| parse_bool_token(&v))
         .unwrap_or(true)
+}
+
+fn bridge_interrupt_mode() -> String {
+    std::env::var("FUXI_BRIDGE_INTERRUPT_MODE")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| BRIDGE_INTERRUPT_MODE_DEFAULT.to_string())
+}
+
+fn should_interrupt_worker_report(lag_ms: u64) -> bool {
+    if !bridge_interrupt_worker_reports() {
+        return false;
+    }
+    match bridge_interrupt_mode().as_str() {
+        "lag" => lag_ms >= bridge_interrupt_lag_ms(),
+        // 默认或未知值都按 always：门客终态回报优先于玄女当前忙碌对话
+        _ => true,
+    }
 }
 
 fn bridge_interrupt_lag_ms() -> u64 {
@@ -214,8 +234,7 @@ async fn handle_event(
                 return;
             }
             let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
-            let interrupt_first =
-                bridge_interrupt_worker_reports() && lag_ms >= bridge_interrupt_lag_ms();
+            let interrupt_first = should_interrupt_worker_report(lag_ms);
             info!(
                 %agent_id,
                 %role,
@@ -265,8 +284,7 @@ async fn handle_event(
                 return;
             }
             let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
-            let interrupt_first =
-                bridge_interrupt_worker_reports() && lag_ms >= bridge_interrupt_lag_ms();
+            let interrupt_first = should_interrupt_worker_report(lag_ms);
             info!(
                 %agent_id,
                 %role,
@@ -442,7 +460,7 @@ mod tests {
         assert_eq!(calls.len(), 1, "应且仅 intervene 一次");
         let (target, interrupt_first, text) = &calls[0];
         assert_eq!(*target, xuannv);
-        assert!(!*interrupt_first, "追加式，不要打断玄女");
+        assert!(*interrupt_first, "默认应打断玄女以优先投递门客回报");
         assert!(text.contains("下线"), "prompt 含下线: {text}");
         assert!(text.contains("codex-coder"), "prompt 含 role: {text}");
         assert!(text.contains("cc stream closed"), "prompt 含 cause: {text}");
