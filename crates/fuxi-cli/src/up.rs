@@ -47,6 +47,9 @@ pub struct Args {
     /// 门客是否分配 worktree（demo 场景可以关掉）。
     #[arg(long, default_value_t = true)]
     pub allocate_worktree: bool,
+    /// 分布式 controller token（worker/enqueue 都要带）；不填则读 `$FUXI_DIST_TOKEN`。
+    #[arg(long = "dist-token")]
+    pub dist_token: Option<String>,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -110,6 +113,19 @@ pub async fn run(args: Args) -> Result<()> {
     // 4. Firehose Hub + webhook router，合并成同一 app
     let hub = Arc::new(Hub::new(bus.clone()));
     let firehose_router = fuxi_firehose::hub::router(hub);
+    let dist_token = args
+        .dist_token
+        .clone()
+        .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok());
+    let firehose_router = if let Some(token) = dist_token {
+        let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
+        firehose_router.merge(crate::dist::router(dist_ctrl))
+    } else {
+        tracing::warn!(
+            "分布式 controller 未启用：缺 --dist-token / $FUXI_DIST_TOKEN（将不会挂载 /dist/* 路由）"
+        );
+        firehose_router
+    };
     let webhook_router = fuxi_scheduler::webhook::router(WebhookState {
         store: sched_store.clone(),
         keeper: keeper.clone(),

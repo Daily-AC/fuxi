@@ -110,6 +110,9 @@ pub struct Args {
     /// 玄女的 role（roles/<role>/ROLE.md，兼容旧 skills/.../SKILL.md）。默认 `xuannv`。
     #[arg(long, default_value = "xuannv")]
     pub xuannv_role: String,
+    /// 分布式 controller token（worker/enqueue 都要带）；不填则读 `$FUXI_DIST_TOKEN`。
+    #[arg(long = "dist-token")]
+    pub dist_token: Option<String>,
 }
 
 impl Default for Args {
@@ -123,6 +126,7 @@ impl Default for Args {
             workspace_root: PathBuf::from("."),
             allocate_worktree: false,
             xuannv_role: "xuannv".to_string(),
+            dist_token: None,
         }
     }
 }
@@ -221,6 +225,16 @@ pub async fn run(args: Args) -> Result<()> {
 
     let hub = Arc::new(Hub::new(bus.clone()));
     let app_router = fuxi_firehose::hub::router(hub);
+    let dist_token = args
+        .dist_token
+        .clone()
+        .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok());
+    let app_router = if let Some(token) = dist_token {
+        let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
+        app_router.merge(crate::dist::router(dist_ctrl))
+    } else {
+        app_router
+    };
     let hub_listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("bind {} 失败", args.bind))?;

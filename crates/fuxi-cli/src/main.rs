@@ -21,6 +21,7 @@ mod clipboard;
 mod command_registry;
 mod daemon;
 mod demo;
+mod dist;
 mod draft_stash;
 mod extractor_hook;
 mod ipc;
@@ -75,6 +76,9 @@ enum Command {
     Resume(subcommands::ResumeArgs),
     /// 点将台管理：list / stage / approve / reject / activate。
     Skill(skill::SkillArgs),
+    /// 分布式节点：controller 入队 / worker 拉活回传（codex）
+    #[command(subcommand)]
+    Dist(dist::DistCmd),
     /// 【玄女工具】策府记忆存取（甲骨 + 河图洛书）。
     Memory(memory_cmd::MemoryArgs),
     /// 【玄女工具】更漏——trigger 管理（cron / once / fs / webhook）。
@@ -144,6 +148,10 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Command::Resume(args)) => subcommands::run_resume(args).await,
         Some(Command::Skill(args)) => skill::run(args).await,
+        Some(Command::Dist(cmd)) => match cmd {
+            dist::DistCmd::Enqueue(args) => dist::run_enqueue(args).await,
+            dist::DistCmd::Worker(args) => dist::run_worker(args).await,
+        },
         Some(Command::Memory(args)) => memory_cmd::run(args).await,
         Some(Command::Banner) => {
             banner::print_to_stdout(&theme::from_env());
