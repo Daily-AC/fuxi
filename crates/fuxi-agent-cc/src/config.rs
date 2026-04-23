@@ -8,13 +8,11 @@
 
 use std::path::PathBuf;
 
-/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置**不传**
-/// `--model`，让 `claude` 用它自身的默认（当前 2.1.114 默认 opus-4-7）。
+/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置默认 `haiku`。
 ///
-/// 为什么不再硬编码 fallback：P1 写 "haiku" 是为省 API 成本——但这伤产品体
-/// 验（玄女是规划层，重思考，haiku 明显不够）。用户明确指示："默认就 cc 的
-/// 默认 opus-4-7"。如果测试要降档，set `FUXI_CC_MODEL=haiku` 即可。
+/// WHY：当前阶段以成本优先，先用 haiku 跑门客回路；后续可按场景切回更强模型。
 pub const DEFAULT_MODEL_ENV: &str = "FUXI_CC_MODEL";
+pub const DEFAULT_MODEL_FALLBACK: &str = "haiku";
 
 /// `claude` headless 启动参数。任何字段都可以不填——`Default` 给出最
 /// 稳定的一套（见 `reference_cc_stream_json.md`）。
@@ -152,11 +150,12 @@ impl CcLaunchConfig {
     }
 }
 
-/// 读 `FUXI_CC_MODEL`；未设返回 `None`——caller 要据此不传 `--model` flag。
+/// 读 `FUXI_CC_MODEL`；未设回退到 `haiku`。
 pub fn resolve_default_model() -> Option<String> {
     std::env::var(DEFAULT_MODEL_ENV)
         .ok()
         .filter(|s| !s.is_empty())
+        .or_else(|| Some(DEFAULT_MODEL_FALLBACK.to_string()))
 }
 
 #[cfg(test)]
@@ -378,20 +377,23 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--session-id"));
     }
 
-    /// 用户明确指示：默认走 cc 自身默认（目前 opus-4-7），未设 FUXI_CC_MODEL
-    /// 时**不传** `--model` flag。
+    /// 未设 FUXI_CC_MODEL 时，默认回落到 haiku 并显式透传 `--model`。
     #[test]
-    fn default_omits_model_flag_when_none() {
+    fn default_uses_haiku_when_env_absent() {
         // 保守清掉 env 避免干扰
         unsafe {
             std::env::remove_var(DEFAULT_MODEL_ENV);
         }
         let cfg = CcLaunchConfig::default();
-        assert!(cfg.model.is_none());
+        assert_eq!(cfg.model.as_deref(), Some(DEFAULT_MODEL_FALLBACK));
         let args = cfg.build_args();
+        let idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("expected --model flag");
         assert!(
-            !args.iter().any(|a| a == "--model"),
-            "expected no --model, got: {args:?}"
+            args.get(idx + 1).is_some_and(|v| v == DEFAULT_MODEL_FALLBACK),
+            "expected fallback model {DEFAULT_MODEL_FALLBACK}, got: {args:?}"
         );
     }
 }
