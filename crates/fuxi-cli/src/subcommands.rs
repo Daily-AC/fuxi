@@ -24,6 +24,12 @@ pub struct SpawnArgs {
     /// 可选名字（默认 role-N）。
     #[arg(long)]
     pub name: Option<String>,
+    /// 可选执行节点。`local` 强制本机；例如 `home` 走分布式网关节点。
+    #[arg(long)]
+    pub node: Option<String>,
+    /// 可选 CLI 覆写（`claude-code` / `codex`）。
+    #[arg(long)]
+    pub cli: Option<String>,
     /// P2 召回：续写指定 task 的 cc session（与 --recall-role 互斥）。
     /// 接受 `task-<uuid>` 或裸 `<uuid>`——daemon 端会标准化成 `task-<uuid>`。
     #[arg(long = "recall-task", conflicts_with = "recall_role")]
@@ -37,6 +43,8 @@ pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
     let resp = client::send(Command::Spawn {
         role: args.role,
         name: args.name,
+        node: args.node,
+        cli: args.cli,
         recall_task: args.recall_task,
         recall_role: args.recall_role,
     })
@@ -595,6 +603,20 @@ mod tests {
         let w = W::try_parse_from(["w", "--role", "dev", "--recall-task", "task-abc"]).unwrap();
         assert_eq!(w.a.recall_task.as_deref(), Some("task-abc"));
         assert!(w.a.recall_role.is_none());
+    }
+
+    #[test]
+    fn spawn_args_parse_node_and_cli_override() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: SpawnArgs,
+        }
+        let w = W::try_parse_from(["w", "--role", "luban", "--node", "home", "--cli", "codex"])
+            .unwrap();
+        assert_eq!(w.a.node.as_deref(), Some("home"));
+        assert_eq!(w.a.cli.as_deref(), Some("codex"));
     }
 
     /// M3.1 · `fuxi task unblock` 和 `fuxi resume`（alias）共享 TaskUnblockArgs：
