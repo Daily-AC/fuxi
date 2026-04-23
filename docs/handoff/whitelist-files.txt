@@ -2,6 +2,7 @@
 crates/fuxi-orchestrator/src/fuxi.rs
 crates/fuxi-orchestrator/src/bridge.rs
 crates/fuxi-agent-cc/src/config.rs
+crates/fuxi-agent-codex/src/config.rs
 crates/fuxi-cli/src/daemon.rs
 crates/fuxi-cli/src/repl.rs
 crates/fuxi-orchestrator/tests/dispatch.rs

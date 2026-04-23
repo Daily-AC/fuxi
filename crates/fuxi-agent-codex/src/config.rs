@@ -25,6 +25,11 @@ pub const DEFAULT_MODEL_FALLBACK: &str = "";
 /// 它由 `CodexAgent::dispatch` 从 Task 里组装，spawn 时作为 argv 尾部追加。
 #[derive(Debug, Clone)]
 pub struct CodexLaunchConfig {
+    /// 可选 argv 前缀。
+    ///
+    /// 典型远端用法：`binary="ssh"` + `argv_prefix=["home-server","--","codex"]`，
+    /// 最终命令：`ssh home-server -- codex exec --json ...`
+    pub argv_prefix: Vec<String>,
     /// `-m <model>`。空字符串意味着「使用 codex 默认」——不传 `-m` flag。
     pub model: String,
     /// `-C <dir>` 启动 cwd。门客跑起来后应指向 worktree。
@@ -45,6 +50,7 @@ pub struct CodexLaunchConfig {
 impl Default for CodexLaunchConfig {
     fn default() -> Self {
         Self {
+            argv_prefix: Vec::new(),
             model: resolve_default_model(),
             cwd: None,
             full_auto: true,
@@ -65,7 +71,8 @@ impl CodexLaunchConfig {
     /// 互斥处理：`full_auto` 与 `bypass_approvals` 同真时，后者优先；
     /// 这是 codex-cli 的 argparse 约束，不是我们的策略选择。
     pub fn build_args(&self) -> Vec<String> {
-        let mut args: Vec<String> = vec!["exec".to_string(), "--json".to_string()];
+        let mut args: Vec<String> = self.argv_prefix.clone();
+        args.extend(["exec".to_string(), "--json".to_string()]);
 
         if self.bypass_approvals {
             args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -198,5 +205,19 @@ mod tests {
                 .iter()
                 .any(|a| a == "--dangerously-bypass-approvals-and-sandbox")
         );
+    }
+
+    #[test]
+    fn argv_prefix_is_prepended() {
+        let cfg = CodexLaunchConfig {
+            argv_prefix: vec!["home".into(), "--".into(), "codex".into()],
+            model: "m".into(),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        assert_eq!(args[0], "home");
+        assert_eq!(args[1], "--");
+        assert_eq!(args[2], "codex");
+        assert_eq!(args[3], "exec");
     }
 }
