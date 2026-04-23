@@ -338,13 +338,83 @@ pub(crate) fn format_event_line(ev: &fuxi_core::Event, filter: Option<&str>) -> 
         .task
         .map(|t| t.to_string())
         .unwrap_or_else(|| "-".into());
+    let summary = event_summary(&ev.kind);
+    let suffix = if summary.is_empty() {
+        String::new()
+    } else {
+        format!(" · {summary}")
+    };
     Some(format!(
-        "{} {} agent={} task={}",
+        "{} {} agent={} task={}{}",
         ev.meta.at.format("%H:%M:%S"),
         kind_tag,
         agent,
-        task
+        task,
+        suffix
     ))
+}
+
+fn event_summary(kind: &fuxi_core::EventKind) -> String {
+    use fuxi_core::EventKind::*;
+    match kind {
+        AgentSpawning { role, cli } => format!("role={role} cli={cli}"),
+        AgentReady { endpoint } => format!("endpoint={endpoint}"),
+        AgentDead { cause } => truncate_preview(cause, 120),
+        TaskCreated { title, .. } => truncate_preview(title, 120),
+        TaskStateChanged { from, to } => format!("{from:?} -> {to:?}"),
+        TaskBlocked { reason } => truncate_preview(reason, 120),
+        TaskResumed { input } => input
+            .as_deref()
+            .map(|s| truncate_preview(s, 120))
+            .unwrap_or_else(|| "resumed".to_string()),
+        UserPrompted { text } | AgentResponded { text } => truncate_preview(text, 160),
+        ToolCallStarted { tool, .. } => format!("{tool} started"),
+        ToolCallFinished {
+            tool,
+            ok,
+            output_preview,
+        } => {
+            let state = if *ok { "ok" } else { "failed" };
+            format!("{tool} {state}: {}", truncate_preview(output_preview, 100))
+        }
+        UserInterventionSent { mode, text, .. } => {
+            format!("{mode}: {}", truncate_preview(text, 120))
+        }
+        AgentInterrupted { reason } => truncate_preview(reason, 120),
+        TaskInterventionApplied { mode } => format!("mode={mode}"),
+        OrchestratorCcReceived { text, .. } => truncate_preview(text, 120),
+        TriggerRegistered { id, kind, .. } => format!("{id} ({kind})"),
+        TriggerFired { id, cause, .. } => format!("{id} cause={cause}"),
+        TriggerDispatched { id, to_agent } => format!("{id} -> {to_agent}"),
+        TriggerSkipped { id, reason } => format!("{id}: {}", truncate_preview(reason, 100)),
+        TriggerFailed { id, error } => format!("{id}: {}", truncate_preview(error, 100)),
+        PlatformStarted { version } => format!("v{version}"),
+        SkillStaged { role, template, .. } => format!("{role} ({template})"),
+        SkillApproved { role } => role.clone(),
+        SkillRejected { role, reason } => format!("{role}: {}", truncate_preview(reason, 100)),
+        SkillActivated { role } => role.clone(),
+        NoRoleMatched { need } => truncate_preview(need, 120),
+        Custom { label, payload } => {
+            format!("{label}: {}", truncate_preview(&payload.to_string(), 100))
+        }
+        PlatformStopping => "stopping".to_string(),
+        AgentShuttingDown { reason } => truncate_preview(reason, 120),
+        TaskDispatched { to } => format!("to={to}"),
+        ThinkingStarted => "thinking".to_string(),
+        ThinkingFinished => "thinking done".to_string(),
+    }
+}
+
+fn truncate_preview(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for ch in s.chars().take(max.saturating_sub(1)) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 // ── 更漏（cron / triggers） ──
@@ -630,5 +700,19 @@ mod tests {
         assert!(format_event_line(&ev, Some(&id_str)).is_some());
         // 不命中 → None（救急 ops 看到 grep 输出和 stdout 一致很关键）
         assert!(format_event_line(&ev, Some("nonexistent-prefix")).is_none());
+    }
+
+    #[test]
+    fn events_format_line_includes_agent_responded_text() {
+        use fuxi_core::{Event, EventKind, EventMeta};
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::AgentResponded {
+                text: "门客最终答案：README 可改两点".into(),
+            },
+        };
+        let line = format_event_line(&ev, None).expect("应输出");
+        assert!(line.contains("agent_responded"), "缺 kind: {line}");
+        assert!(line.contains("README 可改两点"), "缺摘要正文: {line}");
     }
 }
