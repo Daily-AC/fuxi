@@ -492,8 +492,11 @@ impl Fuxi {
                     saw_terminal = false;
                 }
             }
-            // 无论怎么退出都摊回 Idle——channel 被 agent 提前关也算"不忙"。
-            shelf.set_status(agent_id, ShelfStatus::Idle).await;
+            // pump 退出默认摊回 Idle，但若已被 death_watcher 标 Dead（AgentDead），
+            // 不能回写成 Idle——否则会出现"门客死亡后又可用"的状态回退。
+            if shelf.status_of(agent_id).await != Some(ShelfStatus::Dead) {
+                shelf.set_status(agent_id, ShelfStatus::Idle).await;
+            }
             debug!(agent = %agent_id, saw_terminal, "dispatch pump 退出");
         });
 
