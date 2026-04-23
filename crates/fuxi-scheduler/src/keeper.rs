@@ -14,6 +14,7 @@ use crate::spec::TriggerSpec;
 use crate::store::{FireCause, FireRecord, FireStatus, TriggerRow, TriggerStore};
 use crate::{Error, Result, new_fire_id};
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use croner::Cron;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_events::EventBus;
@@ -179,15 +180,26 @@ impl Keeper {
 /// - FsWatch / Webhook：Keeper 不负责（由响应式通路触发），返回 false。
 pub fn should_fire(row: &TriggerRow, now: DateTime<Utc>) -> Result<bool> {
     match &row.spec {
-        TriggerSpec::Cron { expr, tz: _ } => {
-            // v1：时区暂按 UTC 计算——tz 字段 Keeper 先不用，避免引入 chrono-tz 依赖。
-            // croner 支持时区，后续补一层用户自选 tz 即可。
+        TriggerSpec::Cron { expr, tz } => {
             // `with_seconds_optional` 允许 5 字段 or 6 字段两种表达式（后者含秒）。
             let cron = Cron::new(expr.as_str())
                 .with_seconds_optional()
                 .parse()
                 .map_err(|e| Error::Cron(format!("parse {expr:?}: {e}")))?;
             let anchor = row.last_fired_at.unwrap_or(row.created_at);
+            if let Some(tz_name) = tz.as_deref()
+                && !tz_name.trim().is_empty()
+            {
+                let timezone: Tz = tz_name
+                    .parse()
+                    .map_err(|e| Error::Cron(format!("invalid tz {tz_name:?}: {e}")))?;
+                let anchor_tz = anchor.with_timezone(&timezone);
+                let now_tz = now.with_timezone(&timezone);
+                let next = cron
+                    .find_next_occurrence(&anchor_tz, false)
+                    .map_err(|e| Error::Cron(format!("next after {anchor_tz}: {e}")))?;
+                return Ok(next <= now_tz);
+            }
             let next = cron
                 .find_next_occurrence(&anchor, false)
                 .map_err(|e| Error::Cron(format!("next after {anchor}: {e}")))?;
@@ -289,6 +301,27 @@ mod tests {
             !should_fire(&row, now2).expect("ok"),
             "刚 fire 过 9:10，同一秒不再 fire"
         );
+    }
+
+    #[test]
+    fn should_fire_cron_respects_tz_when_provided() {
+        let row = TriggerRow {
+            id: new_trigger_id(),
+            spec: TriggerSpec::Cron {
+                expr: "0 9 * * *".into(),
+                tz: Some("Asia/Shanghai".into()),
+            },
+            intent: "tz".into(),
+            session_id: None,
+            enabled: true,
+            consecutive_failures: 0,
+            max_failures: 5,
+            last_fired_at: None,
+            // UTC 00:00 = 上海 08:00，下一次 09:00 本地应是 UTC 01:00
+            created_at: Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).unwrap(),
+        };
+        let now = Utc.with_ymd_and_hms(2026, 4, 23, 1, 0, 5).unwrap();
+        assert!(should_fire(&row, now).expect("ok"));
     }
 
     #[test]

@@ -1,8 +1,7 @@
 //! 门客注册表。
 //!
 //! 在进程内维护一份 `AgentId → ShelfEntry` 的 HashMap，读写都走
-//! `tokio::sync::RwLock`：读多写少，dispatch_to_any 扫描是读、spawn
-//! 插入是写。
+//! `tokio::sync::RwLock`：读多写少，状态更新/插入走写锁。
 
 use fuxi_core::agent::{Agent, AgentCard};
 use fuxi_core::id::AgentId;
@@ -87,11 +86,9 @@ impl Shelf {
         self.inner.read().await.get(&id).map(|e| e.status)
     }
 
-    /// **原子地**按角色找一个 Idle 门客并置为 Busy——解决 `dispatch_to_any` 的
-    /// TOCTOU 窗口（find + set_status 分两步会让并发调用拿到同一个 id）。
+    /// **原子地**按角色找一个 Idle 门客并置为 Busy（观测/调试辅助）。
     ///
-    /// 返回 `Some(id)` 意味着调用方已独占该门客；外层再调 `dispatch` 的
-    /// `set_status(Busy)` 是幂等无害的。
+    /// task-bound 主路径默认不复用 idle；此方法保留给兼容路径与运维工具。
     pub async fn claim_idle_by_role(&self, role: &str) -> Option<AgentId> {
         let mut guard = self.inner.write().await;
         let pick = guard
