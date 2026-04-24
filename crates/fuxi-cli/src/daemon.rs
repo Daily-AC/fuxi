@@ -1379,6 +1379,60 @@ mod tests {
         assert_eq!(cfg.token, "t-123");
     }
 
+    /// Phase 3d: role frontmatter 的 `required_tags: ["codex"]` 数组要被读入
+    /// DistGatewayConfig；CLI `--node` 明确给 → 变成 pinned_node。
+    #[test]
+    fn build_dist_gateway_config_reads_required_tags_from_metadata() {
+        let metadata = serde_json::json!({
+            "dist_controller": "https://home.qmledmq.cn",
+            "dist_node": "home",
+            "dist_token": "t-123",
+            "required_tags": ["codex", "gpu"]
+        });
+        let cfg = build_dist_gateway_config(&metadata, None)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(cfg.required_tags, vec!["codex".to_string(), "gpu".into()]);
+        // metadata.dist_node 给了明确值，就是 pin
+        assert_eq!(cfg.pinned_node.as_deref(), Some("home"));
+    }
+
+    /// 缺字段 → 空 required_tags（派工回落到"任一 idle worker"）。
+    #[test]
+    fn build_dist_gateway_config_missing_required_tags_is_empty() {
+        let metadata = serde_json::json!({
+            "dist_controller": "https://home.qmledmq.cn",
+            "dist_node": "home",
+            "dist_token": "t-123",
+        });
+        let cfg = build_dist_gateway_config(&metadata, None)
+            .expect("ok")
+            .expect("some");
+        assert!(cfg.required_tags.is_empty());
+    }
+
+    /// CLI `--node` 显式给 → 覆写 metadata.dist_node 的 pin 目标（同时照搬
+    /// required_tags——pin 和 tag filter 两条独立维度）。
+    #[test]
+    fn build_dist_gateway_config_cli_node_pins_and_keeps_tags() {
+        let metadata = serde_json::json!({
+            "dist_controller": "https://home.qmledmq.cn",
+            "dist_node": "other",
+            "dist_token": "t-123",
+            "required_tags": ["codex"]
+        });
+        let cfg = build_dist_gateway_config(&metadata, Some("laptop"))
+            .expect("ok")
+            .expect("some");
+        assert_eq!(cfg.pinned_node.as_deref(), Some("laptop"));
+        assert_eq!(cfg.required_tags, vec!["codex".to_string()]);
+    }
+
+    // NB: env-only pin 行为（FUXI_DIST_NODE 不 pin）不写单测——CLAUDE.md 标记
+    // "env 测试注意"：std::env::set_var 多线程不安全，和其他 test 并行会脏读，
+    // 已经因此挂过一次。语义靠 `build_dist_gateway_config` 的实现审查 + 集成
+    // smoke 兜底。
+
     #[test]
     fn normalize_cli_rejects_unknown() {
         let err = normalize_cli(Some("foo".into())).expect_err("invalid cli should fail");

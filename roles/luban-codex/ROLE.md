@@ -8,6 +8,10 @@ metadata:
   tier: worker
   fuxi-version: "1.0"
   cli: codex
+  # 分布式派工要求：跑我需要的 worker 必须声明 "codex" tag
+  # （worker `fuxi dist worker --tag codex` 注册时带上）。未来 luban-gpu 变体
+  # 出现时可以加 "gpu" 做区分。
+  required_tags: ["codex"]
 allowed-tools: Read Write Edit Grep Glob Bash
 ---
 
