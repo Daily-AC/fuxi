@@ -101,9 +101,56 @@ pub fn resolve_default_model() -> String {
     std::env::var(DEFAULT_MODEL_ENV).unwrap_or_else(|_| DEFAULT_MODEL_FALLBACK.to_string())
 }
 
+/// Codex prompt 组装——把 role 系统提示 prepend 进去。
+///
+/// 为什么 prepend 而非走 `--append-system-prompt`：codex exec 子命令**不接受**
+/// 这个 flag（cc 专属）。role 心智注入只能靠把 body 拼到 prompt 开头，由模型
+/// 当作 conversation preamble 消费。这会吃掉一点 token 预算，但对比完全没 role
+/// 心智（现状）是净赢。
+///
+/// 分隔符 `---` 是一个低冲突、在 markdown 世界里公认的分界线；便于模型把前
+/// 后两段内容分开理解，也便于日志里人肉定位 role preamble 和具体任务描述的
+/// 分界。
+///
+/// 抽成自由函数而非方法：本地 `CodexAgent::dispatch` 和远端 `fuxi dist worker`
+/// 都要用同一条拼装规则；free fn 避免把字段关系拧死在 agent 内部。
+pub fn compose_prompt(system_prompt: &str, title: &str, description: &str) -> String {
+    let body = if description.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title}\n\n{description}")
+    };
+    if system_prompt.trim().is_empty() {
+        body
+    } else {
+        format!("{system_prompt}\n\n---\n\n{body}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compose_prompt_prepends_system_with_separator() {
+        let out = compose_prompt("你是鲁班", "拆任务", "去干活");
+        assert!(out.starts_with("你是鲁班\n\n---\n\n"), "got: {out}");
+        assert!(out.contains("拆任务\n\n去干活"), "got: {out}");
+    }
+
+    #[test]
+    fn compose_prompt_skips_separator_when_system_empty() {
+        let out = compose_prompt("", "拆任务", "去干活");
+        assert_eq!(out, "拆任务\n\n去干活");
+        let out = compose_prompt("   ", "只有标题", "");
+        assert_eq!(out, "只有标题");
+    }
+
+    #[test]
+    fn compose_prompt_title_only_when_description_empty() {
+        let out = compose_prompt("role", "标题", "");
+        assert_eq!(out, "role\n\n---\n\n标题");
+    }
 
     #[test]
     fn default_args_contain_exec_and_json() {

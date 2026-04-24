@@ -10,7 +10,7 @@
 //! - **单次派发语义**：目前 `CodexAgent` 只跟踪「最近一次 dispatch 产生的
 //!   child」；上游暂时没有并发多 task 的需求。
 
-use crate::config::CodexLaunchConfig;
+use crate::config::{CodexLaunchConfig, compose_prompt};
 use crate::parser::{self, TranslateState, parse_line, translate};
 use crate::spawn::{SpawnedCodex, spawn_codex};
 use async_trait::async_trait;
@@ -112,12 +112,16 @@ impl CodexAgent {
     }
 
     /// Task → codex 的 prompt 字符串。
-    fn task_to_prompt(task: &Task) -> String {
-        if task.description.is_empty() {
-            task.title.clone()
-        } else {
-            format!("{}\n\n{}", task.title, task.description)
-        }
+    ///
+    /// `profile.system_prompt` 非空时会 prepend 进 prompt——这是 codex 获得 role
+    /// 心智的唯一途径（codex exec 不吃 `--append-system-prompt`，见 `compose_prompt`
+    /// 注释）。
+    fn task_to_prompt(&self, task: &Task) -> String {
+        compose_prompt(
+            &self.card.profile.system_prompt,
+            &task.title,
+            &task.description,
+        )
     }
 }
 
@@ -128,7 +132,7 @@ impl Agent for CodexAgent {
     }
 
     async fn dispatch(&self, task: Task) -> Result<mpsc::Receiver<Event>> {
-        let prompt = Self::task_to_prompt(&task);
+        let prompt = self.task_to_prompt(&task);
         let SpawnedCodex { child, stdout, pid } =
             spawn_codex(&self.cfg, &prompt).map_err(CodexError::Io)?;
 
@@ -283,12 +287,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn task_to_prompt_with_description_joins() {
+    #[tokio::test]
+    async fn task_to_prompt_with_description_joins() {
+        let agent = CodexAgent::launch(profile(), CodexLaunchConfig::default())
+            .await
+            .expect("launch");
         let mut t = Task::new("title", "desc");
-        assert_eq!(CodexAgent::task_to_prompt(&t), "title\n\ndesc");
+        assert_eq!(agent.task_to_prompt(&t), "title\n\ndesc");
         t.description = String::new();
-        assert_eq!(CodexAgent::task_to_prompt(&t), "title");
+        assert_eq!(agent.task_to_prompt(&t), "title");
+    }
+
+    /// role 心智必须经由 `profile.system_prompt` 注入 prompt——否则 codex exec
+    /// 完全不知道自己扮演什么 role（`--append-system-prompt` 是 cc 专属）。
+    #[tokio::test]
+    async fn task_to_prompt_prepends_profile_system_prompt() {
+        let mut p = profile();
+        p.system_prompt = "你是鲁班，擅长拆任务".into();
+        let agent = CodexAgent::launch(p, CodexLaunchConfig::default())
+            .await
+            .expect("launch");
+        let t = Task::new("第一步", "把任务拆成三段");
+        let prompt = agent.task_to_prompt(&t);
+        assert!(
+            prompt.starts_with("你是鲁班，擅长拆任务\n\n---\n\n"),
+            "got: {prompt}"
+        );
+        assert!(prompt.contains("第一步\n\n把任务拆成三段"), "got: {prompt}");
     }
 
     #[test]

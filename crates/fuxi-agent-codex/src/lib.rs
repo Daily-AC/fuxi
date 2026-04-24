@@ -26,7 +26,8 @@ pub mod spawn;
 
 pub use agent::{CodexAgent, CodexError};
 pub use config::{
-    CodexLaunchConfig, DEFAULT_MODEL_ENV, DEFAULT_MODEL_FALLBACK, resolve_default_model,
+    CodexLaunchConfig, DEFAULT_MODEL_ENV, DEFAULT_MODEL_FALLBACK, compose_prompt,
+    resolve_default_model,
 };
 pub use parser::{CodexEvent, TranslateState, parse_line, translate};
 pub use spawn::{SpawnedCodex, spawn_codex};
