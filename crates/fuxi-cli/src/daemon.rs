@@ -558,6 +558,16 @@ impl Agent for DistGatewayAgent {
         let (tx, rx) = mpsc::channel::<Event>(32);
         let cfg = self.cfg.clone();
         let aid = self.card.id;
+        // role 心智来自 loader 写入的 profile.system_prompt（同本地 CodexAgent）
+        // ——worker 侧会 prepend 到 prompt 头部。空串则不填，省 bytes。
+        let system_prompt = {
+            let sp = self.card.profile.system_prompt.trim();
+            if sp.is_empty() {
+                None
+            } else {
+                Some(sp.to_string())
+            }
+        };
         tokio::spawn(async move {
             let client = Client::new();
             let controller = cfg.controller.trim_end_matches('/').to_string();
@@ -574,6 +584,7 @@ impl Agent for DistGatewayAgent {
                     node_id: cfg.node_id.clone(),
                     title: task.title.clone(),
                     body,
+                    system_prompt,
                 })
                 .send()
                 .await
