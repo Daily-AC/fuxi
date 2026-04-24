@@ -522,9 +522,16 @@ pub(crate) struct RecallHandle {
 #[derive(Debug, Clone)]
 struct DistGatewayConfig {
     controller: String,
+    /// enqueue 时写入 job 作 "requester hint"（日志/审计）。3b 之后不影响派工。
     node_id: String,
     token: String,
     poll_ms: u64,
+    /// role 声明需要的 worker 能力——enqueue 透传，派工时 `pull` 端匹配。
+    /// 空集 = 无能力要求，任一 idle worker 可取。
+    required_tags: Vec<String>,
+    /// 硬 pin：只有 `worker.node_id == x` 能取此 job。CLI `--node` 或
+    /// role metadata.dist_node 明确声明时填（env 默认不 pin）。
+    pinned_node: Option<String>,
 }
 
 /// 远端网关门客：把 dispatch 转成 `/dist/enqueue`，再轮询 `/dist/progress` 拿增量。
@@ -594,6 +601,8 @@ impl Agent for DistGatewayAgent {
                     title: task.title.clone(),
                     body,
                     system_prompt,
+                    required_tags: cfg.required_tags.clone(),
+                    pinned_node: cfg.pinned_node.clone(),
                 })
                 .send()
                 .await
@@ -919,16 +928,19 @@ fn build_dist_gateway_config(
     let env_controller = std::env::var("FUXI_DIST_CONTROLLER").ok();
     let controller = metadata_controller.or(env_controller);
 
-    let node_id = node_override
+    // pin 语义：CLI `--node` 或 role metadata `dist_node` 是**显式声明**——pin。
+    // 仅 env `FUXI_DIST_NODE` 则只作 hint，不 pin（env 往往用作默认值，不该
+    // 变成硬限制把所有 role 锁死在同一 worker）。
+    let cli_node = node_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| metadata_string(metadata, "dist_node"))
-        .or_else(|| std::env::var("FUXI_DIST_NODE").ok());
+        .map(ToOwned::to_owned);
+    let metadata_node = metadata_string(metadata, "dist_node");
+    let env_node = std::env::var("FUXI_DIST_NODE").ok();
+    let pinned_node = cli_node.clone().or_else(|| metadata_node.clone());
+    let node_id_hint = pinned_node.clone().or(env_node);
 
-    let wants_dist = node_override.is_some()
-        || controller.is_some()
-        || metadata_string(metadata, "dist_node").is_some();
+    let wants_dist = node_override.is_some() || controller.is_some() || metadata_node.is_some();
     if !wants_dist {
         return Ok(None);
     }
@@ -936,7 +948,7 @@ fn build_dist_gateway_config(
     let controller = controller.ok_or_else(|| {
         anyhow!("缺 dist controller：请配置 metadata.dist_controller 或 $FUXI_DIST_CONTROLLER")
     })?;
-    let node_id = node_id.ok_or_else(|| {
+    let node_id = node_id_hint.ok_or_else(|| {
         anyhow!("缺 dist node：请配置 metadata.dist_node 或 --node / $FUXI_DIST_NODE")
     })?;
 
@@ -952,12 +964,36 @@ fn build_dist_gateway_config(
             )
         })?;
     let poll_ms = metadata_u64(metadata, "dist_poll_ms").unwrap_or(1000);
+    let required_tags = metadata_string_vec(metadata, "required_tags");
     Ok(Some(DistGatewayConfig {
         controller,
         node_id,
         token,
         poll_ms,
+        required_tags,
+        pinned_node,
     }))
+}
+
+/// 读 metadata 里的字符串数组字段，空/缺失都返回空 Vec。
+///
+/// Phase 0 删过一个同名函数（那个支持字符串 split 分支，只给 ssh 路径用）；
+/// 这个新版只接数组——role metadata 的 `required_tags: ["codex"]` 用 TOML 数组
+/// 写最自然，不再支持空格分隔字符串（那属于 CLI 世界，不该泄漏到 role 文件）。
+fn metadata_string_vec(metadata: &serde_json::Value, key: &str) -> Vec<String> {
+    metadata
+        .as_object()
+        .and_then(|m| m.get(key))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn normalize_node(node: Option<String>) -> Option<String> {
