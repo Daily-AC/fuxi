@@ -206,6 +206,31 @@ pub struct DistCancelResp {
     pub accepted: bool,
 }
 
+/// Worker 周期心跳——把**自己真实的 inflight 列表**报给 controller。
+///
+/// 为什么带 inflight 不只是 ping：worker 可能因为意外重启丢失 in-memory 状态，
+/// controller 这边的 `NodeRuntimeInfo.inflight` 可能比实际多。让 worker 权威
+/// 声明 "我现在真的在跑这些 job"，controller 以 worker 为准，自动修复漂移。
+///
+/// 频率约定：worker 每 10s 发一次；controller 30s 未收到视作 dead。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistHeartbeatReq {
+    pub token: String,
+    pub node_id: String,
+    /// worker 自身视角的 inflight job_ids。空 = 当前空闲。
+    #[serde(default)]
+    pub inflight: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistHeartbeatResp {
+    pub ok: bool,
+    /// controller 汇报的"你应该 cancel 的 job_ids"——worker 对账后杀相应 child。
+    /// 当前只填 `cancelled` 集合与 worker.inflight 的交集。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cancel_pending: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistProgressQuery {
     pub token: String,
@@ -233,10 +258,8 @@ pub struct NodeRuntimeInfo {
     pub tags: Vec<String>,
     /// 同一 worker 允许的最大并发 job 数（≥1）。
     pub max_concurrency: u32,
-    /// 当前 inflight 的 job_ids——Phase 3c 的 heartbeat / timeout 会用到。
-    /// register 不清它（runtime state 不该被 worker 重连抹掉）。
-    // Phase 3a 仅做占位；3c heartbeat 上来后会有真正 read site。
-    #[allow(dead_code)]
+    /// 当前 inflight 的 job_ids——pull 添加，report/heartbeat/sweep_stale
+    /// 维护。worker 心跳的 inflight 是对账权威（自愈 controller-side 漂移）。
     pub inflight: Vec<String>,
 }
 
@@ -500,6 +523,80 @@ impl DistController {
         g.cancelled.insert(job_id.to_string());
     }
 
+    /// 心跳：worker 以自身为权威声明当前真实 inflight。
+    ///
+    /// - 刷新 `last_seen`
+    /// - 把 controller 这边 `NodeRuntimeInfo.inflight` **替换**成 worker 报的
+    ///   列表（自动对账，worker 重启丢 state 的 case 会自然修复）
+    /// - 返回 `cancel_pending` = worker.inflight ∩ controller.cancelled，让
+    ///   worker 看到该杀哪些 child（补救"push 无输出时段 cancel 不生效"）
+    ///
+    /// 注意：不从 controller.inflight (全局 job 表) 里移除那些 worker 声明已
+    /// 不在的 job——移除权归 report（job 结束）和 sweep_stale（worker 死亡）。
+    pub async fn heartbeat(&self, node_id: &str, worker_inflight: Vec<String>) -> Vec<String> {
+        let mut g = self.inner.lock().await;
+        let cancelled = g.cancelled.clone();
+        let node = g.nodes.entry(node_id.to_string()).or_default();
+        node.last_seen = Some(Instant::now());
+        node.inflight = worker_inflight.clone();
+        worker_inflight
+            .into_iter()
+            .filter(|jid| cancelled.contains(jid))
+            .collect()
+    }
+
+    /// Sweep：回收 `now - last_seen > stale_after` 的 worker 占用的 job。
+    ///
+    /// 回收策略：
+    /// - 从该 worker 的 `inflight` 列表逐个回收 job_id
+    /// - 从 controller 全局 `inflight` 移除，`global_queue` push_front 让它优先
+    ///   被下一个 live worker 取（避免队尾打转）
+    /// - 清空 node.inflight
+    ///
+    /// 返回被回收的 `(node_id, job_ids)`，调用方可发事件 / 日志。
+    ///
+    /// **未做**：retry_count 上限保护。第一版假设 dead worker 重抢一次就行，
+    /// 真需要防 poison job 循环，在 DistJob 加计数字段再做。
+    // 3c 只落协议 + 算法，up/repl 侧的 periodic sweep task 留 3c-2；
+    // clippy 会把 sweep_stale 视作无 binary caller——测试里用到但 bin target 看不到。
+    #[allow(dead_code)]
+    pub async fn sweep_stale(
+        &self,
+        now: Instant,
+        stale_after: Duration,
+    ) -> Vec<(String, Vec<String>)> {
+        let mut g = self.inner.lock().await;
+        let dead: Vec<String> = g
+            .nodes
+            .iter()
+            .filter_map(|(nid, info)| match info.last_seen {
+                Some(ts) if now.saturating_duration_since(ts) > stale_after => Some(nid.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut recycled = Vec::new();
+        for nid in dead {
+            let Some(node) = g.nodes.get_mut(&nid) else {
+                continue;
+            };
+            let jobs = std::mem::take(&mut node.inflight);
+            let mut jobs_to_push = Vec::with_capacity(jobs.len());
+            for jid in &jobs {
+                if let Some(job) = g.inflight.remove(jid) {
+                    jobs_to_push.push(job);
+                }
+            }
+            // push_front 让被回收的 job 优先派发（老 job 等待久了，公平）
+            for job in jobs_to_push.into_iter().rev() {
+                g.global_queue.push_front(job);
+            }
+            if !jobs.is_empty() {
+                recycled.push((nid, jobs));
+            }
+        }
+        recycled
+    }
+
     /// Gateway 短轮询：返回 `seq > after` 的所有 chunks + job 终态。
     ///
     /// `done=true` 意味着 controller 已收到 final report，**且** 所有之前上报
@@ -639,6 +736,21 @@ async fn cancel_handler(
     Json(DistCancelResp { accepted: true }).into_response()
 }
 
+async fn heartbeat_handler(
+    State(ctrl): State<Arc<DistController>>,
+    Json(req): Json<DistHeartbeatReq>,
+) -> impl IntoResponse {
+    if req.token != ctrl.token() {
+        return unauthorized().into_response();
+    }
+    let cancel_pending = ctrl.heartbeat(&req.node_id, req.inflight).await;
+    Json(DistHeartbeatResp {
+        ok: true,
+        cancel_pending,
+    })
+    .into_response()
+}
+
 pub fn router(ctrl: Arc<DistController>) -> Router {
     Router::new()
         .route("/dist/register", post(register_handler))
@@ -649,6 +761,7 @@ pub fn router(ctrl: Arc<DistController>) -> Router {
         .route("/dist/progress", post(progress_post_handler))
         .route("/dist/progress", get(progress_get_handler))
         .route("/dist/cancel", post(cancel_handler))
+        .route("/dist/heartbeat", post(heartbeat_handler))
         .with_state(ctrl)
 }
 
@@ -1578,6 +1691,149 @@ mod tests {
         let back: DistEnqueueReq = serde_json::from_str(&s).unwrap();
         assert_eq!(back.required_tags, vec!["codex", "gpu"]);
         assert_eq!(back.pinned_node.as_deref(), Some("home"));
+    }
+
+    // ── Phase 3c · 心跳 + sweep ──
+
+    #[tokio::test]
+    async fn heartbeat_refreshes_last_seen_and_inflight() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec![], 1).await;
+        let pending = ctrl
+            .heartbeat("n", vec!["job-x".into(), "job-y".into()])
+            .await;
+        assert!(pending.is_empty());
+        let info = ctrl.node_info("n").await.unwrap();
+        assert_eq!(info.inflight, vec!["job-x", "job-y"]);
+        assert!(info.last_seen.is_some());
+    }
+
+    /// worker 视角权威：心跳里的 inflight 覆盖 controller 的记录。模拟"worker
+    /// 重启丢了某 job 的 tracking" → 心跳后 controller 跟上。
+    #[tokio::test]
+    async fn heartbeat_lets_worker_be_authoritative_on_its_inflight() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec![], 2).await;
+        // 先模拟 pull 让 controller 记 inflight=[A,B]
+        {
+            let mut g = ctrl.inner.lock().await;
+            g.nodes
+                .get_mut("n")
+                .unwrap()
+                .inflight
+                .extend(["A".into(), "B".into()]);
+        }
+        // worker 心跳只声明 B——表示 A 已经没在跑（可能它已经 report 完、
+        // 或者进程重启丢 state）
+        ctrl.heartbeat("n", vec!["B".into()]).await;
+        let info = ctrl.node_info("n").await.unwrap();
+        assert_eq!(info.inflight, vec!["B"]);
+    }
+
+    /// cancel 请求的 job 被 worker 心跳感知——返回给 worker 去杀 child。
+    #[tokio::test]
+    async fn heartbeat_reports_cancel_pending_in_intersection() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec![], 2).await;
+        ctrl.cancel_job("A").await;
+        ctrl.cancel_job("Z").await; // Z 不在 worker 的 inflight 里
+        let pending = ctrl.heartbeat("n", vec!["A".into(), "B".into()]).await;
+        assert_eq!(
+            pending,
+            vec!["A".to_string()],
+            "只返回 inflight ∩ cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_stale_worker_inflight_to_queue_front() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("dead".into(), vec![], 1).await;
+        // 给 dead worker 手动塞 inflight + 往 controller.inflight 注入 job
+        let (job_a, job_b) = {
+            let mut g = ctrl.inner.lock().await;
+            let job_a = DistJob {
+                id: "A".into(),
+                node_id: "dead".into(),
+                title: "ta".into(),
+                body: String::new(),
+                created_at: 0,
+                system_prompt: None,
+                required_tags: vec![],
+                pinned_node: None,
+            };
+            let job_b = DistJob {
+                id: "B".into(),
+                node_id: "dead".into(),
+                title: "tb".into(),
+                body: String::new(),
+                created_at: 0,
+                system_prompt: None,
+                required_tags: vec![],
+                pinned_node: None,
+            };
+            g.inflight.insert("A".into(), job_a.clone());
+            g.inflight.insert("B".into(), job_b.clone());
+            let node = g.nodes.get_mut("dead").unwrap();
+            node.inflight = vec!["A".into(), "B".into()];
+            // 模拟 last_seen 在很久以前
+            node.last_seen = Some(Instant::now() - Duration::from_secs(120));
+            (job_a, job_b)
+        };
+        let recycled = ctrl
+            .sweep_stale(Instant::now(), Duration::from_secs(30))
+            .await;
+        assert_eq!(recycled.len(), 1);
+        assert_eq!(recycled[0].0, "dead");
+        assert_eq!(recycled[0].1, vec!["A", "B"]);
+        // 验证 job 回到 queue 前端
+        let g = ctrl.inner.lock().await;
+        let front_ids: Vec<&str> = g.global_queue.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(front_ids, vec!["A", "B"]);
+        assert!(!g.inflight.contains_key("A"));
+        assert!(!g.inflight.contains_key("B"));
+        assert!(g.nodes.get("dead").unwrap().inflight.is_empty());
+        // 使用 jobs 避免 clippy dead_let
+        let _ = (job_a.id, job_b.id);
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_live_workers_alone() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("alive".into(), vec![], 1).await;
+        {
+            let mut g = ctrl.inner.lock().await;
+            let node = g.nodes.get_mut("alive").unwrap();
+            node.inflight = vec!["A".into()];
+            // 心跳刚刚
+            node.last_seen = Some(Instant::now());
+        }
+        let recycled = ctrl
+            .sweep_stale(Instant::now(), Duration::from_secs(30))
+            .await;
+        assert!(recycled.is_empty());
+        let info = ctrl.node_info("alive").await.unwrap();
+        assert_eq!(info.inflight, vec!["A"]);
+    }
+
+    #[test]
+    fn dist_heartbeat_req_serde_round_trip() {
+        let req = DistHeartbeatReq {
+            token: "t".into(),
+            node_id: "n".into(),
+            inflight: vec!["job-1".into(), "job-2".into()],
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: DistHeartbeatReq = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.inflight.len(), 2);
+    }
+
+    /// 老版 worker 没有 inflight 字段——要能兜底空。
+    #[test]
+    fn dist_heartbeat_req_deserializes_without_inflight() {
+        let raw = r#"{"token":"t","node_id":"n"}"#;
+        let req: DistHeartbeatReq = serde_json::from_str(raw).unwrap();
+        assert!(req.inflight.is_empty());
     }
 
     /// 老版 gateway 不带 required_tags/pinned_node，serde 要兜默认。
