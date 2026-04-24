@@ -532,6 +532,13 @@ struct DistGatewayConfig {
     /// 硬 pin：只有 `worker.node_id == x` 能取此 job。CLI `--node` 或
     /// role metadata.dist_node 明确声明时填（env 默认不 pin）。
     pinned_node: Option<String>,
+    /// 指定 worker 上用哪个 CLI 跑——源自 role profile.cli（`"claude-code"` /
+    /// `"codex"`）。worker 端根据它选 CliAdapter；老版 worker 不认识就
+    /// fallback 到 codex（Phase 4a select_adapter 语义）。
+    cli: String,
+    /// cc 专属参数——role 的 allowed-tools frontmatter，以 `--allowed-tools`
+    /// 传给 worker 端的 claude-code adapter。codex 路径忽略。
+    allowed_tools: Vec<String>,
 }
 
 /// 远端网关门客：把 dispatch 转成 `/dist/enqueue`，再轮询 `/dist/progress` 拿增量。
@@ -603,6 +610,8 @@ impl Agent for DistGatewayAgent {
                     system_prompt,
                     required_tags: cfg.required_tags.clone(),
                     pinned_node: cfg.pinned_node.clone(),
+                    cli: cfg.cli.clone(),
+                    allowed_tools: cfg.allowed_tools.clone(),
                 })
                 .send()
                 .await
@@ -838,21 +847,26 @@ async fn spawn_by_role(
     let cli = requested_cli.unwrap_or_else(|| profile.cli.clone());
     profile.cli = cli.clone();
 
-    if requested_node.as_deref().is_some_and(|n| n != "local") && cli != "codex" {
-        return Err(anyhow!(
-            "--node 远端节点当前只支持 codex；当前 cli={cli}（role={role}）"
-        ));
-    }
-
+    // Phase 4b: cc 也允许走分布式——cli-specific 的 "远端只支持 codex" 禁令取消。
+    // worker 端按 job.cli 选 CliAdapter（Phase 4a），cc 走 Phase 4c 的 stdout
+    // stream-json MVP（无 WS 反连，避 Clash TUN 的坑；follow-up/resume 不支持）。
     let force_local = requested_node.as_deref().is_some_and(|n| n == "local");
-    if cli == "codex"
-        && !force_local
-        && let Some(cfg) = build_dist_gateway_config(&metadata_json, requested_node.as_deref())?
+    if !force_local
+        && let Some(mut cfg) = build_dist_gateway_config(&metadata_json, requested_node.as_deref())?
     {
+        cfg.cli = cli.clone();
+        cfg.allowed_tools = loaded.allowed_tools.clone().unwrap_or_default();
         if recall.resume_session_id.is_some() || recall.worktree.is_some() {
             tracing::warn!(
                 role = %role,
-                "dist gateway codex 暂不支持 recall；忽略 recall_task/recall_role"
+                cli = %cli,
+                "dist gateway 暂不支持 recall；忽略 recall_task/recall_role"
+            );
+        }
+        if cli == "claude-code" {
+            tracing::warn!(
+                role = %role,
+                "dist gateway claude-code 当前只支持 one-shot；follow-up/resume 自动退化为新 dispatch"
             );
         }
         let id = AgentId::new();
@@ -972,6 +986,10 @@ fn build_dist_gateway_config(
         poll_ms,
         required_tags,
         pinned_node,
+        // cli / allowed_tools 调用方（spawn_by_role）会从 loaded 补上——
+        // build_dist_gateway_config 职责纯粹，只看 metadata。
+        cli: String::new(),
+        allowed_tools: Vec::new(),
     }))
 }
 

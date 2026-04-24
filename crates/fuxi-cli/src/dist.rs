@@ -2,7 +2,7 @@
 //!
 //! 目标：让远端机器主动连接 controller 拉任务并回传结果，不依赖 controller 入站到家宽。
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -49,6 +49,15 @@ pub struct DistJob {
     /// None 则仅靠 tags 过滤。用户显式 `fuxi spawn --node home` 走这条。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_node: Option<String>,
+    /// 指定 worker 用哪个 CLI adapter（`"codex"` / `"claude-code"` / 未来
+    /// `"gemini"` 等）。空串 = 默认 codex（向后兼容老版 gateway，不填就 codex）。
+    /// worker 端不认识的值直接 fail job，避免 panic / 无限 retry。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cli: String,
+    /// cc 专属——role 声明的 allowed_tools（`--allowed-tools` flag 的内容）。
+    /// codex 忽略。老版不填 → 空 Vec → cc adapter 不加 flag。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +74,10 @@ pub struct DistEnqueueReq {
     pub required_tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_node: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cli: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +349,7 @@ impl DistController {
         self.inner.lock().await.nodes.get(node_id).cloned()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
         node_id_hint: String,
@@ -344,6 +358,8 @@ impl DistController {
         system_prompt: Option<String>,
         required_tags: Vec<String>,
         pinned_node: Option<String>,
+        cli: String,
+        allowed_tools: Vec<String>,
     ) -> String {
         let id = format!("job-{}", Uuid::new_v4());
         let job = DistJob {
@@ -355,6 +371,8 @@ impl DistController {
             system_prompt,
             required_tags: required_tags.clone(),
             pinned_node: pinned_node.clone(),
+            cli,
+            allowed_tools,
         };
         let mut g = self.inner.lock().await;
         g.global_queue.push_back(job);
@@ -660,6 +678,8 @@ async fn enqueue_handler(
             req.system_prompt,
             req.required_tags,
             req.pinned_node,
+            req.cli,
+            req.allowed_tools,
         )
         .await;
     Json(DistEnqueueResp { job_id }).into_response()
@@ -828,6 +848,9 @@ pub struct DistWorkerArgs {
     pub token: Option<String>,
     #[arg(long, default_value = "codex")]
     pub codex_bin: String,
+    /// claude-code CLI 路径。默认走 PATH 里的 `claude`。
+    #[arg(long, default_value = "claude")]
+    pub cc_bin: String,
     #[arg(long, default_value_t = 1000)]
     pub poll_ms: u64,
     /// 声明本节点能力（可重复），用于 tag-based 派工。示例：
@@ -868,6 +891,10 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
             // 若真要定点派，用户用 `fuxi spawn --node` 走 gateway 路径。
             required_tags: Vec::new(),
             pinned_node: None,
+            // CLI 入口不指定 cli——worker 按默认（codex）跑；若用户就想
+            // 在分布式命令行直派 cc，Phase 4b 之后可扩 `fuxi dist enqueue --cli cc`。
+            cli: String::new(),
+            allowed_tools: Vec::new(),
         })
         .send()
         .await
@@ -885,7 +912,7 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
 }
 
 pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
-    let token = resolve_token(args.token)?;
+    let token = resolve_token(args.token.clone())?;
     let controller = args.controller.trim_end_matches('/').to_string();
     let client = Client::new();
     client
@@ -986,7 +1013,11 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
             token: &token,
             node_id: &args.node,
         };
-        let run = run_codex_job(&ctx, &args.codex_bin, &job).await;
+        // Phase 4b: 按 job.cli 派到对应 adapter。空串走 codex（老版 gateway 兼容）。
+        let run = match select_adapter(&job.cli, &args) {
+            Ok(adapter) => adapter.run(&ctx, &job).await,
+            Err(e) => Err(e),
+        };
         let (ok, output) = match run {
             Ok(pair) => pair,
             Err(e) => (false, format!("worker run error: {e}")),
@@ -1022,6 +1053,97 @@ struct WorkerCtx<'a> {
     controller: &'a str,
     token: &'a str,
     node_id: &'a str,
+}
+
+/// 抽象 worker 端的 CLI 执行器——让 codex / claude-code / 未来 gemini 等都能
+/// 平行实装同一个 trait，worker 主循环按 job.cli 字段选择具体 adapter。
+///
+/// 跨域协作 + 多 CLI 通用性是伏羲愿景的两支——这个 trait 是通用性的落点；
+/// 跨域那条（HTTPS + token）通过现有 register/pull 协议已就绪。
+///
+/// `run` 合约：
+/// - 期间可 push progress chunks 到 `ctx.controller`（通过 `flush_progress`）
+/// - 返回 `(ok, final_output)`——`ok=false` 走失败 report，`final_output` 给
+///   `/dist/job` 非流式消费者兜底（比如纯 curl 用户）
+/// - 长耗时应定期 flush 不憋在本地 buffer，体现 progress
+/// - 对 `ProgressAck.should_cancel=true` 要响应：杀 child、走 ok=false
+///   "cancelled" 的终态
+#[async_trait::async_trait]
+trait CliAdapter: Send + Sync {
+    /// 名称要和 `DistJob.cli` 字段对齐。当前支持 `"codex"`；`"claude-code"`
+    /// 由 Phase 4c 的 `CcAdapter` 接入。
+    // bin target 下 run_worker 只调 run(); name() 供测试 / 未来日志和 4b
+    // 的 route-by-cli 用。
+    #[allow(dead_code)]
+    fn name(&self) -> &'static str;
+
+    async fn run(&self, ctx: &WorkerCtx<'_>, job: &DistJob) -> Result<(bool, String)>;
+}
+
+/// codex CLI 的 adapter——包装原有 `run_codex_job` 实现。bin 字段支持非
+/// PATH 定位，或用户提供替代 codex wrapper（比如 rustls 兼容的 fork）。
+struct CodexAdapter {
+    bin: String,
+}
+
+impl CodexAdapter {
+    fn new(bin: String) -> Self {
+        Self { bin }
+    }
+}
+
+#[async_trait::async_trait]
+impl CliAdapter for CodexAdapter {
+    fn name(&self) -> &'static str {
+        "codex"
+    }
+
+    async fn run(&self, ctx: &WorkerCtx<'_>, job: &DistJob) -> Result<(bool, String)> {
+        run_codex_job(ctx, &self.bin, job).await
+    }
+}
+
+/// Claude Code CLI 的 adapter（Phase 4c MVP）。
+///
+/// 走 `claude -p "<prompt>" --output-format stream-json --verbose` 模式——
+/// **不**走 `--sdk-url` WS 反连（避 Clash TUN 把本机 loopback 吞了的坑）。
+/// 代价是不支持 follow-up / resume（one-shot per job），但分布式场景下
+/// 多轮对话优先在本机跑、分布式下更常见的是 rubber-duck / code review /
+/// summarize 这类单轮任务——MVP 覆盖足够。
+struct CcAdapter {
+    bin: String,
+}
+
+impl CcAdapter {
+    fn new(bin: String) -> Self {
+        Self { bin }
+    }
+}
+
+#[async_trait::async_trait]
+impl CliAdapter for CcAdapter {
+    fn name(&self) -> &'static str {
+        "claude-code"
+    }
+
+    async fn run(&self, ctx: &WorkerCtx<'_>, job: &DistJob) -> Result<(bool, String)> {
+        run_cc_job(ctx, &self.bin, job).await
+    }
+}
+
+/// 按 job.cli / role metadata 选择 adapter。未知 CLI 直接报错——worker 会把
+/// 这个当 job 失败走 report，避免无限 retry。
+///
+/// 当前只支持 `"codex"`；`""` 作 legacy 默认（老版 gateway 不填 `cli` 字段
+/// 时 serde 会给空串），也走 codex。
+fn select_adapter(cli: &str, args: &DistWorkerArgs) -> Result<Box<dyn CliAdapter>> {
+    match cli {
+        "codex" | "" => Ok(Box::new(CodexAdapter::new(args.codex_bin.clone()))),
+        "claude-code" => Ok(Box::new(CcAdapter::new(args.cc_bin.clone()))),
+        other => Err(anyhow!(
+            "worker 未装载 CLI adapter: {other:?}（当前支持 codex、claude-code；gemini 等待扩）"
+        )),
+    }
 }
 
 /// 攒够这么多条就 flush 一次（无论时钟）。
@@ -1232,6 +1354,216 @@ async fn run_codex_job(
     Ok((ok, output))
 }
 
+/// cc stream-json 事件 → progress push。
+///
+/// 关键映射：
+/// - `AssistantText` → `AssistantText`（主回复）
+/// - `AssistantThinking` → `Thinking`（每条原样推；前端聚合视觉由 TUI rail 做）
+/// - `AssistantToolUse` → `ToolCall`（"<tool_name> <input-brief>"）
+/// - `UserToolResult` → `ToolCall` 或 `Error`（按 is_error 分）
+/// - `ResultError` → `Error`
+/// - `ResultSuccess` → `None`——文本已经在 AssistantText 发过，不重复
+/// - `SystemInit` / `SystemOther` / `RateLimit` / `Unknown` → `None`（协议噪音）
+fn cc_event_to_push(ev: &fuxi_agent_cc::CcEvent) -> Option<ProgressPush> {
+    use fuxi_agent_cc::CcEvent;
+    match ev {
+        CcEvent::AssistantText { text } => Some(ProgressPush {
+            kind: ProgressKind::AssistantText,
+            text: text.clone(),
+        }),
+        CcEvent::AssistantThinking { text } => Some(ProgressPush {
+            kind: ProgressKind::Thinking,
+            text: text.clone(),
+        }),
+        CcEvent::AssistantToolUse {
+            tool_name, input, ..
+        } => {
+            let brief: String = serde_json::to_string(input)
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect();
+            Some(ProgressPush {
+                kind: ProgressKind::ToolCall,
+                text: if brief.is_empty() {
+                    tool_name.clone()
+                } else {
+                    format!("{tool_name} {brief}")
+                },
+            })
+        }
+        CcEvent::UserToolResult {
+            is_error,
+            content_preview,
+            ..
+        } => {
+            let preview: String = content_preview.chars().take(400).collect();
+            Some(ProgressPush {
+                kind: if *is_error {
+                    ProgressKind::Error
+                } else {
+                    ProgressKind::ToolCall
+                },
+                text: if preview.trim().is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    preview
+                },
+            })
+        }
+        CcEvent::ResultError { reason } => Some(ProgressPush {
+            kind: ProgressKind::Error,
+            text: reason.clone(),
+        }),
+        CcEvent::ResultSuccess { .. }
+        | CcEvent::SystemInit { .. }
+        | CcEvent::SystemOther { .. }
+        | CcEvent::RateLimit { .. }
+        | CcEvent::Unknown { .. } => None,
+    }
+}
+
+/// 流式执行 claude-code 任务：spawn `claude -p` + stdout stream-json 行读。
+async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bool, String)> {
+    let prompt = if job.body.trim().is_empty() {
+        job.title.clone()
+    } else {
+        format!("{}\n\n{}", job.title, job.body)
+    };
+
+    let mut args: Vec<String> = vec![
+        "-p".into(),
+        prompt,
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+        "--permission-mode".into(),
+        "bypassPermissions".into(),
+        "--dangerously-skip-permissions".into(),
+        "--no-session-persistence".into(),
+    ];
+    if let Some(sp) = job.system_prompt.as_deref()
+        && !sp.trim().is_empty()
+    {
+        args.push("--append-system-prompt".into());
+        args.push(sp.to_string());
+    }
+    if !job.allowed_tools.is_empty() {
+        args.push("--allowed-tools".into());
+        args.push(job.allowed_tools.join(","));
+    }
+
+    let mut child = Command::new(bin)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // 两个坑都要避——参照 fuxi_agent_cc::spawn 的做法：
+        // 1. Clash/Surge TUN 可能代理 loopback（即便我们不反连 WS，cc 自己
+        //    可能也有 telemetry loopback），NO_PROXY 保险
+        // 2. 嵌套检测（父 cc 起子 cc）
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .env_remove("CLAUDE_CODE_NO_FLICKER")
+        .env_remove("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+        .env_remove("CLAUDE_CODE_EXECPATH")
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("spawn claude binary failed: {bin}"))?;
+
+    let stdout = child.stdout.take().context("cc stdout pipe missing")?;
+    let stderr = child.stderr.take();
+    let mut reader = BufReader::new(stdout).lines();
+
+    let mut buffer: Vec<ProgressPush> = Vec::new();
+    let mut last_flush = Instant::now();
+    let mut final_text = String::new();
+    let mut got_error = false;
+    let mut got_cancel = false;
+
+    loop {
+        let line_res = tokio::time::timeout(
+            Duration::from_millis(PROGRESS_FLUSH_INTERVAL_MS),
+            reader.next_line(),
+        )
+        .await;
+
+        let mut eof = false;
+        match line_res {
+            Ok(Ok(Some(line))) => {
+                if !line.trim().is_empty()
+                    && let Ok(ev) = fuxi_agent_cc::parse_line(&line)
+                    && let Some(push) = cc_event_to_push(&ev)
+                {
+                    if matches!(push.kind, ProgressKind::AssistantText) {
+                        if !final_text.is_empty() {
+                            final_text.push('\n');
+                        }
+                        final_text.push_str(&push.text);
+                    }
+                    if matches!(push.kind, ProgressKind::Error) {
+                        got_error = true;
+                    }
+                    buffer.push(push);
+                }
+            }
+            Ok(Ok(None)) => eof = true,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "cc stdout read failed");
+                eof = true;
+            }
+            Err(_) => {}
+        }
+
+        let due_to_batch = buffer.len() >= PROGRESS_FLUSH_BATCH;
+        let due_to_time = !buffer.is_empty()
+            && last_flush.elapsed() >= Duration::from_millis(PROGRESS_FLUSH_INTERVAL_MS);
+        if due_to_batch || due_to_time || (eof && !buffer.is_empty()) {
+            let batch = std::mem::take(&mut buffer);
+            let cancel = flush_progress(ctx, &job.id, batch).await;
+            last_flush = Instant::now();
+            if cancel {
+                got_cancel = true;
+                let _ = child.start_kill();
+                break;
+            }
+        }
+        if eof {
+            break;
+        }
+    }
+
+    let status = child.wait().await.context("waiting cc child")?;
+    let stderr_text = match stderr {
+        Some(mut se) => {
+            let mut s = String::new();
+            let _ = se.read_to_string(&mut s).await;
+            s
+        }
+        None => String::new(),
+    };
+
+    let ok = status.success() && !got_error && !got_cancel;
+    let output = if got_cancel {
+        if final_text.trim().is_empty() {
+            "cancelled by controller".to_string()
+        } else {
+            format!(
+                "cancelled by controller\n---\n{}",
+                truncate_text(&final_text, 800)
+            )
+        }
+    } else if !final_text.trim().is_empty() {
+        truncate_text(&final_text, 1200)
+    } else if !stderr_text.trim().is_empty() {
+        truncate_text(stderr_text.trim(), 1200)
+    } else {
+        format!("cc exited with {status}")
+    };
+    Ok((ok, output))
+}
+
 fn truncate_text(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -1258,6 +1590,8 @@ mod tests {
             system_prompt: system.map(ToOwned::to_owned),
             required_tags: vec![],
             pinned_node: None,
+            cli: String::new(),
+            allowed_tools: vec![],
         }
     }
 
@@ -1306,6 +1640,8 @@ mod tests {
             system_prompt: Some("role preamble".into()),
             required_tags: vec![],
             pinned_node: None,
+            cli: String::new(),
+            allowed_tools: vec![],
         };
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: DistEnqueueReq = serde_json::from_str(&encoded).unwrap();
@@ -1607,6 +1943,8 @@ mod tests {
             None,
             vec![],
             None,
+            String::new(),
+            vec![],
         )
         .await
     }
@@ -1641,6 +1979,8 @@ mod tests {
                 None,
                 vec!["gpu".into()],
                 None,
+                String::new(),
+                vec![],
             )
             .await;
         assert!(
@@ -1665,6 +2005,8 @@ mod tests {
                 None,
                 vec![],
                 Some("nodeB".into()),
+                String::new(),
+                vec![],
             )
             .await;
         assert!(ctrl.pull("nodeA").await.is_none(), "pin 到 B，A 不该取到");
@@ -1686,6 +2028,8 @@ mod tests {
                 None,
                 vec![],
                 Some("nodeB".into()),
+                String::new(),
+                vec![],
             )
             .await;
         let free = enq_simple(&ctrl, "anyone").await;
@@ -1759,11 +2103,146 @@ mod tests {
             system_prompt: None,
             required_tags: vec!["codex".into(), "gpu".into()],
             pinned_node: Some("home".into()),
+            cli: String::new(),
+            allowed_tools: vec![],
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: DistEnqueueReq = serde_json::from_str(&s).unwrap();
         assert_eq!(back.required_tags, vec!["codex", "gpu"]);
         assert_eq!(back.pinned_node.as_deref(), Some("home"));
+    }
+
+    // ── Phase 4a · CliAdapter trait ──
+
+    fn worker_args_stub() -> DistWorkerArgs {
+        DistWorkerArgs {
+            controller: "http://x".into(),
+            node: "n".into(),
+            token: None,
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 1000,
+            tags: vec![],
+            max_concurrency: 1,
+        }
+    }
+
+    #[test]
+    fn select_adapter_accepts_codex() {
+        let a = match super::select_adapter("codex", &worker_args_stub()) {
+            Ok(a) => a,
+            Err(e) => panic!("codex 应通过: {e}"),
+        };
+        assert_eq!(a.name(), "codex");
+    }
+
+    #[test]
+    fn select_adapter_treats_empty_string_as_codex_default() {
+        // 老版 gateway 不填 cli 字段 → serde default 到空串 → 走 codex 兼容。
+        let a = match super::select_adapter("", &worker_args_stub()) {
+            Ok(a) => a,
+            Err(e) => panic!("空串应落回 codex: {e}"),
+        };
+        assert_eq!(a.name(), "codex");
+    }
+
+    #[test]
+    fn select_adapter_rejects_unknown_cli() {
+        match super::select_adapter("vim", &worker_args_stub()) {
+            Ok(a) => panic!("vim 不该被接受，却返回了 {}", a.name()),
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(msg.contains("vim"), "error 里应带 unknown cli 名: {msg}");
+            }
+        }
+    }
+
+    // ── Phase 4c · CcAdapter MVP ──
+
+    #[test]
+    fn select_adapter_accepts_claude_code() {
+        let a = match super::select_adapter("claude-code", &worker_args_stub()) {
+            Ok(a) => a,
+            Err(e) => panic!("claude-code 应通过: {e}"),
+        };
+        assert_eq!(a.name(), "claude-code");
+    }
+
+    #[test]
+    fn cc_event_assistant_text_maps_to_assistant_kind() {
+        let ev = fuxi_agent_cc::CcEvent::AssistantText {
+            text: "hello world".into(),
+        };
+        let p = super::cc_event_to_push(&ev).unwrap();
+        assert_eq!(p.kind, ProgressKind::AssistantText);
+        assert_eq!(p.text, "hello world");
+    }
+
+    #[test]
+    fn cc_event_thinking_maps_to_thinking_kind() {
+        let ev = fuxi_agent_cc::CcEvent::AssistantThinking {
+            text: "Hmm let me think".into(),
+        };
+        let p = super::cc_event_to_push(&ev).unwrap();
+        assert_eq!(p.kind, ProgressKind::Thinking);
+    }
+
+    #[test]
+    fn cc_event_tool_use_maps_to_tool_call() {
+        let ev = fuxi_agent_cc::CcEvent::AssistantToolUse {
+            tool_id: "tooluse_1".into(),
+            tool_name: "Read".into(),
+            input: serde_json::json!({"path": "/tmp/x"}),
+        };
+        let p = super::cc_event_to_push(&ev).unwrap();
+        assert_eq!(p.kind, ProgressKind::ToolCall);
+        assert!(p.text.starts_with("Read"), "tool_name 应在前: {}", p.text);
+        assert!(p.text.contains("/tmp/x"), "input brief 应保留: {}", p.text);
+    }
+
+    #[test]
+    fn cc_event_tool_result_error_maps_to_error_kind() {
+        let ev = fuxi_agent_cc::CcEvent::UserToolResult {
+            tool_use_id: "t1".into(),
+            is_error: true,
+            content_preview: "permission denied".into(),
+        };
+        let p = super::cc_event_to_push(&ev).unwrap();
+        assert_eq!(p.kind, ProgressKind::Error);
+    }
+
+    #[test]
+    fn cc_event_result_success_is_silent() {
+        // ResultSuccess.text 和最后 AssistantText 往往重复——worker 已累积过，
+        // 不能重复 push 否则 TUI 看到两份相同文本。
+        let ev = fuxi_agent_cc::CcEvent::ResultSuccess {
+            text: "hello".into(),
+        };
+        assert!(super::cc_event_to_push(&ev).is_none());
+    }
+
+    #[test]
+    fn cc_event_result_error_maps_to_error_kind() {
+        let ev = fuxi_agent_cc::CcEvent::ResultError {
+            reason: "rate limited".into(),
+        };
+        let p = super::cc_event_to_push(&ev).unwrap();
+        assert_eq!(p.kind, ProgressKind::Error);
+        assert!(p.text.contains("rate limited"));
+    }
+
+    #[test]
+    fn cc_event_system_events_are_silent() {
+        let ev = fuxi_agent_cc::CcEvent::SystemInit {
+            session_id: "s".into(),
+            model: None,
+            cwd: None,
+        };
+        assert!(super::cc_event_to_push(&ev).is_none());
+        let ev = fuxi_agent_cc::CcEvent::RateLimit {
+            info: serde_json::Value::Null,
+        };
+        assert!(super::cc_event_to_push(&ev).is_none());
     }
 
     // ── Phase 3c · 心跳 + sweep ──
@@ -1834,6 +2313,8 @@ mod tests {
                 system_prompt: None,
                 required_tags: vec![],
                 pinned_node: None,
+                cli: String::new(),
+                allowed_tools: vec![],
             };
             let job_b = DistJob {
                 id: "B".into(),
@@ -1844,6 +2325,8 @@ mod tests {
                 system_prompt: None,
                 required_tags: vec![],
                 pinned_node: None,
+                cli: String::new(),
+                allowed_tools: vec![],
             };
             g.inflight.insert("A".into(), job_a.clone());
             g.inflight.insert("B".into(), job_b.clone());
