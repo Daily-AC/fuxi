@@ -94,6 +94,19 @@ pub struct DistJobStatusResp {
 pub struct DistRegisterReq {
     pub token: String,
     pub node_id: String,
+    /// Worker 自报能力。gateway enqueue 若带 `required_tags` 必须是本集合的
+    /// 子集才能被派给此 worker。典型：`["home", "codex", "gpu"]`。空集 =
+    /// 只接受无要求的 job。向后兼容：老版 worker 不带字段 → `Vec::new()`。
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 并发 job 上限。默认 1（codex exec 是 one-shot 单进程，多并发要求
+    /// 本机器真有冗余 ChatGPT session / API key）。
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
+}
+
+fn default_max_concurrency() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,9 +209,29 @@ pub struct DistProgressResp {
     pub final_output: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NodeRuntimeInfo {
     pub last_seen: Option<Instant>,
+    /// Worker 上次 register 声明的 tags。register 重连会覆盖。
+    pub tags: Vec<String>,
+    /// 同一 worker 允许的最大并发 job 数（≥1）。
+    pub max_concurrency: u32,
+    /// 当前 inflight 的 job_ids——Phase 3c 的 heartbeat / timeout 会用到。
+    /// register 不清它（runtime state 不该被 worker 重连抹掉）。
+    // Phase 3a 仅做占位；3c heartbeat 上来后会有真正 read site。
+    #[allow(dead_code)]
+    pub inflight: Vec<String>,
+}
+
+impl Default for NodeRuntimeInfo {
+    fn default() -> Self {
+        Self {
+            last_seen: None,
+            tags: Vec::new(),
+            max_concurrency: 1,
+            inflight: Vec::new(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -233,6 +266,32 @@ impl DistController {
 
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// 记录 / 更新一个 worker 的能力声明。
+    ///
+    /// 同一 `node_id` 再次 register（worker 重连）时：
+    /// - 覆盖 `tags` 和 `max_concurrency`
+    /// - 刷新 `last_seen`
+    /// - **保留** `inflight`——那是 runtime state，重连不应该清空（Phase 3c
+    ///   的 heartbeat/timeout 才是 inflight 的清理边界）。
+    ///
+    /// `max_concurrency=0` 被归一到 1，防止 worker 传 0 把自己锁死在永远不
+    /// 接任务的状态。
+    pub async fn register(&self, node_id: String, tags: Vec<String>, max_concurrency: u32) {
+        let mut g = self.inner.lock().await;
+        let entry = g.nodes.entry(node_id).or_default();
+        entry.last_seen = Some(Instant::now());
+        entry.tags = tags;
+        entry.max_concurrency = max_concurrency.max(1);
+    }
+
+    /// 快照查询：返回 `node_id` 当前的 runtime 信息（`None` 表示从未 register）。
+    /// Phase 3b 的 tag-based 派工匹配会消费 `tags` 和 `max_concurrency`。
+    // Phase 3a 只在测试里有 caller；3b 的派工算法会正式消费。
+    #[allow(dead_code)]
+    pub async fn node_info(&self, node_id: &str) -> Option<NodeRuntimeInfo> {
+        self.inner.lock().await.nodes.get(node_id).cloned()
     }
 
     pub async fn enqueue(
@@ -419,10 +478,8 @@ async fn register_handler(
     if req.token != ctrl.token() {
         return unauthorized().into_response();
     }
-    {
-        let mut g = ctrl.inner.lock().await;
-        g.nodes.entry(req.node_id).or_default().last_seen = Some(Instant::now());
-    }
+    ctrl.register(req.node_id, req.tags, req.max_concurrency)
+        .await;
     Json(DistRegisterResp { ok: true }).into_response()
 }
 
@@ -560,6 +617,13 @@ pub struct DistWorkerArgs {
     pub codex_bin: String,
     #[arg(long, default_value_t = 1000)]
     pub poll_ms: u64,
+    /// 声明本节点能力（可重复），用于 tag-based 派工。示例：
+    /// `--tag home --tag codex --tag gpu`。不传 = 空集（只接无要求的 job）。
+    #[arg(long = "tag", value_name = "TAG")]
+    pub tags: Vec<String>,
+    /// 本 worker 允许的最大并发 job 数。默认 1。
+    #[arg(long, default_value_t = 1)]
+    pub max_concurrency: u32,
 }
 
 fn resolve_token(token: Option<String>) -> Result<String> {
@@ -612,6 +676,8 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
         .json(&DistRegisterReq {
             token: token.clone(),
             node_id: args.node.clone(),
+            tags: args.tags.clone(),
+            max_concurrency: args.max_concurrency,
         })
         .send()
         .await
@@ -1205,5 +1271,80 @@ mod tests {
         assert_eq!(back.chunks.len(), 1);
         assert_eq!(back.chunks[0].kind, ProgressKind::ToolCall);
         assert_eq!(back.chunks[0].text, "ls -la");
+    }
+
+    // ── Phase 3a · worker capability 上报 ──
+
+    #[tokio::test]
+    async fn register_stores_tags_and_capacity() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec!["home".into(), "codex".into()], 2)
+            .await;
+        let info = ctrl.node_info("nodeA").await.expect("node registered");
+        assert_eq!(info.tags, vec!["home", "codex"]);
+        assert_eq!(info.max_concurrency, 2);
+        assert!(info.last_seen.is_some());
+        assert!(info.inflight.is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_reconnect_updates_tags_but_preserves_inflight() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec!["a".into()], 1).await;
+        // 模拟 inflight：Phase 3b 会通过 pull 自动填，这里手注入一条验证边界。
+        {
+            let mut g = ctrl.inner.lock().await;
+            g.nodes.get_mut("n").unwrap().inflight.push("job-1".into());
+        }
+        // worker 重连（同 node_id 再次 register）
+        ctrl.register("n".into(), vec!["b".into()], 3).await;
+        let info = ctrl.node_info("n").await.unwrap();
+        assert_eq!(info.tags, vec!["b"], "tags 应被覆盖");
+        assert_eq!(info.max_concurrency, 3);
+        assert_eq!(
+            info.inflight,
+            vec!["job-1"],
+            "inflight 是 runtime state，不该被 register 清空"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_zero_capacity_clamps_to_one() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec![], 0).await;
+        assert_eq!(
+            ctrl.node_info("n").await.unwrap().max_concurrency,
+            1,
+            "0 会让 worker 永远不接任务——归一到 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_info_returns_none_for_unknown_node() {
+        let ctrl = test_ctrl().await;
+        assert!(ctrl.node_info("ghost").await.is_none());
+    }
+
+    /// 向后兼容：老版 worker 不带 tags/max_concurrency，serde 要给默认值。
+    #[test]
+    fn dist_register_req_deserializes_without_new_fields() {
+        let raw = r#"{"token":"t","node_id":"n"}"#;
+        let req: DistRegisterReq = serde_json::from_str(raw).expect("decode");
+        assert!(req.tags.is_empty());
+        assert_eq!(req.max_concurrency, 1, "默认 1 并发");
+    }
+
+    #[test]
+    fn dist_register_req_round_trips_new_fields() {
+        let req = DistRegisterReq {
+            token: "t".into(),
+            node_id: "n".into(),
+            tags: vec!["home".into(), "gpu".into()],
+            max_concurrency: 4,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: DistRegisterReq = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.tags, vec!["home", "gpu"]);
+        assert_eq!(back.max_concurrency, 4);
     }
 }
