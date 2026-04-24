@@ -7,6 +7,10 @@ metadata:
   role: luban
   tier: worker
   fuxi-version: "1.0"
+  # 分布式派工要求：跑我需要的 worker 必须声明 "cc" tag（worker
+  # `fuxi dist worker --tag cc` 注册时带上）。跟 luban-codex 的 ["codex"]
+  # 互斥——玄女按 role 派活时 controller 自动只派到对应能力的 worker。
+  required_tags: ["cc"]
 allowed-tools: Read Write Edit Grep Glob Bash
 ---
 
