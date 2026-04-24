@@ -707,15 +707,14 @@ fn normalize_path_token(tok: &str) -> Option<PathBuf> {
 }
 
 fn default_attachment_dir() -> PathBuf {
-    let base = std::env::var_os("FUXI_ATTACHMENT_DIR")
+    std::env::var_os("FUXI_ATTACHMENT_DIR")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::current_dir()
                 .ok()
                 .map(|d| d.join(".fuxi/attachments"))
         })
-        .unwrap_or_else(|| PathBuf::from(".fuxi/attachments"));
-    base
+        .unwrap_or_else(|| PathBuf::from(".fuxi/attachments"))
 }
 
 fn new_textarea() -> TextArea<'static> {
@@ -793,6 +792,7 @@ impl ReplApp {
     /// 粘贴事件：
     /// - 若像"文件拖放/路径粘贴"（全部 token 都是存在的文件）→ 转成附件引用
     /// - 否则按普通文本插入 textarea
+    ///
     /// 公理：bracketed paste 让 IME / 剪贴板整块内容一次进入，避免逐键 race。
     pub(crate) fn handle_paste(&mut self, s: &str) {
         self.focus = Focus::Input;
@@ -826,7 +826,7 @@ impl ReplApp {
         if !self.input_text().trim().is_empty() {
             self.input.insert_newline();
         }
-        self.input.insert_str(&refs.join("\n"));
+        self.input.insert_str(refs.join("\n"));
     }
 
     fn try_insert_pasted_files(&mut self, s: &str) -> bool {
@@ -951,7 +951,7 @@ impl ReplApp {
                 crate::toast::ToastVariant::Success,
                 Duration::from_secs(3),
             );
-            return true;
+            true
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -1094,11 +1094,11 @@ impl ReplApp {
                 }
             }
             EventKind::AgentReady { .. } => {
-                if let Some(id) = who {
-                    if id == self.xuannv_id {
-                        self.xuannv_status = ShelfStatus::Idle;
-                        self.refresh_xuannv_busy_anchor();
-                    }
+                if let Some(id) = who
+                    && id == self.xuannv_id
+                {
+                    self.xuannv_status = ShelfStatus::Idle;
+                    self.refresh_xuannv_busy_anchor();
                 }
             }
             EventKind::AgentDead { cause } => {
@@ -1377,7 +1377,7 @@ impl ReplApp {
     }
 
     fn role_display(&self, role: &str) -> String {
-        if role.chars().any(|c| !c.is_ascii()) {
+        if !role.is_ascii() {
             return role.to_string();
         }
         match role.to_ascii_lowercase().as_str() {
@@ -1477,10 +1477,10 @@ impl ReplApp {
             let new_active = match row {
                 PaneRow::GroupHeader(gidx) => {
                     let groups = self.visible_task_groups();
-                    if let Some((key, _, _)) = groups.get(*gidx) {
-                        if !self.collapsed_task_groups.remove(key) {
-                            self.collapsed_task_groups.insert(key.clone());
-                        }
+                    if let Some((key, _, _)) = groups.get(*gidx)
+                        && !self.collapsed_task_groups.remove(key)
+                    {
+                        self.collapsed_task_groups.insert(key.clone());
                     }
                     self.resync_roster_selection();
                     return;
@@ -1845,7 +1845,7 @@ impl ReplApp {
             match ev {
                 crate::autocomplete::PopupEvent::None => {
                     self.input = new_textarea();
-                    self.input.insert_str(&self.popup.display_input());
+                    self.input.insert_str(self.popup.display_input());
                     self.focus = Focus::Input;
                 }
                 crate::autocomplete::PopupEvent::Close => {
@@ -2097,7 +2097,7 @@ impl ReplApp {
         // 比 4fps 更有活力，又不会像每帧跳动那样制造焦虑感。
         if self.active_is_busy() {
             self.spinner_tick_gate = self.spinner_tick_gate.wrapping_add(1);
-            if self.spinner_tick_gate % 3 == 0 {
+            if self.spinner_tick_gate.is_multiple_of(3) {
                 self.status_spinner.tick();
             }
         } else {
@@ -2974,7 +2974,7 @@ impl ReplApp {
                     (
                         vec![
                             Line::from(format!("worker   {}", short_id_of(id))),
-                            Line::from(format!("role     {}", truncate_by_width(&role, 16))),
+                            Line::from(format!("role     {}", truncate_by_width(role, 16))),
                             Line::from(Span::styled(
                                 "（未绑定任务）",
                                 Style::default().fg(Color::DarkGray),
@@ -5601,7 +5601,7 @@ mod tests {
         assert!(!app.popup.is_open(), "Execute 后 popup 自闭合");
         assert!(app.help_overlay_open, "/help 应打开帮助面板");
         assert!(
-            app.dialogues.get(&ActiveTarget::Xuannv).is_none(),
+            !app.dialogues.contains_key(&ActiveTarget::Xuannv),
             "/help 不应写入对话 transcript"
         );
     }
@@ -5770,7 +5770,7 @@ mod tests {
         assert!(took, "/help 应被本地 handler 吃掉");
         assert!(app.help_overlay_open, "/help 应打开帮助面板");
         assert!(
-            app.dialogues.get(&ActiveTarget::Xuannv).is_none(),
+            !app.dialogues.contains_key(&ActiveTarget::Xuannv),
             "/help 不应写入对话 transcript"
         );
     }
