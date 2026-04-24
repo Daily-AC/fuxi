@@ -231,6 +231,7 @@ pub async fn run(args: Args) -> Result<()> {
         .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok());
     let app_router = if let Some(token) = dist_token {
         let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
+        crate::dist::spawn_sweep_task(dist_ctrl.clone());
         app_router.merge(crate::dist::router(dist_ctrl))
     } else {
         app_router
