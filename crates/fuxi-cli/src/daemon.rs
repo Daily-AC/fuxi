@@ -612,11 +612,19 @@ impl Agent for DistGatewayAgent {
                 }
             };
 
+            // 流式轮询 progress：每拿到一批增量 chunk 就按 kind emit 事件；
+            // done=true 时 emit 终态。不再走老的"一次性 AgentResponded(final_output)"
+            // ——长任务用户不用等黑盒，每几百毫秒能看到增量。
+            let mut cursor: u64 = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(cfg.poll_ms)).await;
                 let poll = client
-                    .get(format!("{controller}/dist/job"))
-                    .query(&[("token", cfg.token.as_str()), ("job_id", job_id.as_str())])
+                    .get(format!("{controller}/dist/progress"))
+                    .query(&[
+                        ("token", cfg.token.as_str()),
+                        ("job_id", job_id.as_str()),
+                        ("after", cursor.to_string().as_str()),
+                    ])
                     .send()
                     .await
                     .and_then(reqwest::Response::error_for_status);
@@ -624,17 +632,20 @@ impl Agent for DistGatewayAgent {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                let status = match resp.json::<crate::dist::DistJobStatusResp>().await {
+                let status = match resp.json::<crate::dist::DistProgressResp>().await {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
+                for chunk in &status.chunks {
+                    if chunk.seq > cursor {
+                        cursor = chunk.seq;
+                    }
+                    let kind = progress_chunk_to_event_kind(chunk);
+                    let _ = emit_event(&tx, aid, task.id, kind).await;
+                }
                 if !status.done {
                     continue;
                 }
-                let output = status
-                    .output
-                    .unwrap_or_else(|| "dist worker returned empty output".to_string());
-                let ok = status.ok.unwrap_or(false);
                 let _ = emit_event(
                     &tx,
                     aid,
@@ -645,19 +656,28 @@ impl Agent for DistGatewayAgent {
                     },
                 )
                 .await;
-                let _ = emit_event(
-                    &tx,
-                    aid,
-                    task.id,
-                    EventKind::AgentResponded { text: output },
-                )
-                .await;
-                let terminal = if ok {
+                let terminal = if status.final_ok.unwrap_or(false) {
                     EventKind::TaskStateChanged {
                         from: TaskState::Delivering,
                         to: TaskState::Done,
                     }
                 } else {
+                    // 失败 path：把 final_output 作为错误摘要补发（chunks 里可能
+                    // 已经 Error 过，但 final_output 常含退出码信息，一并 emit
+                    // 给用户完整上下文）。
+                    if let Some(txt) = status.final_output.as_deref()
+                        && !txt.trim().is_empty()
+                    {
+                        let _ = emit_event(
+                            &tx,
+                            aid,
+                            task.id,
+                            EventKind::AgentResponded {
+                                text: format!("[final] {txt}"),
+                            },
+                        )
+                        .await;
+                    }
                     EventKind::TaskStateChanged {
                         from: TaskState::InProgress,
                         to: TaskState::Cancelled,
@@ -685,6 +705,23 @@ impl Agent for DistGatewayAgent {
     async fn shutdown(&self) -> fuxi_core::Result<()> {
         Ok(())
     }
+}
+
+/// progress chunk → EventKind 映射。当前所有 kind 都走 `AgentResponded` 通道，
+/// 仅靠 `[tool]` / `[thinking]` / `[error]` 文本前缀区分；TUI 将来可以据此上色。
+///
+/// 为什么不映射到 `ThinkingStarted` / `ToolCallStarted`：那两条都是独立 lifecycle
+/// 事件，codex wire 里我们只拿得到 **completed** 阶段（reasoning/item），缺
+/// started 就让 TUI 状态机为难。全走 AgentResponded + 前缀是最少破坏的选择，
+/// Phase 3+ 真要分层渲染时再细化。
+fn progress_chunk_to_event_kind(chunk: &crate::dist::ProgressChunk) -> EventKind {
+    let text = match chunk.kind {
+        crate::dist::ProgressKind::AssistantText => chunk.text.clone(),
+        crate::dist::ProgressKind::Thinking => format!("[thinking] {}", chunk.text),
+        crate::dist::ProgressKind::ToolCall => format!("[tool] {}", chunk.text),
+        crate::dist::ProgressKind::Error => format!("[error] {}", chunk.text),
+    };
+    EventKind::AgentResponded { text }
 }
 
 async fn emit_event(
@@ -1285,6 +1322,42 @@ mod tests {
             node_scoped_dist_token_env("home-prod").as_deref(),
             Some("FUXI_DIST_HOME_PROD_TOKEN")
         );
+    }
+
+    fn mk_chunk(kind: crate::dist::ProgressKind, text: &str) -> crate::dist::ProgressChunk {
+        crate::dist::ProgressChunk {
+            seq: 1,
+            kind,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn progress_chunk_assistant_text_is_raw() {
+        let ev = progress_chunk_to_event_kind(&mk_chunk(
+            crate::dist::ProgressKind::AssistantText,
+            "hello world",
+        ));
+        let EventKind::AgentResponded { text } = ev else {
+            panic!("expected AgentResponded");
+        };
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn progress_chunk_non_assistant_kinds_use_prefixes() {
+        let cases = [
+            (crate::dist::ProgressKind::Thinking, "[thinking] "),
+            (crate::dist::ProgressKind::ToolCall, "[tool] "),
+            (crate::dist::ProgressKind::Error, "[error] "),
+        ];
+        for (kind, prefix) in cases {
+            let ev = progress_chunk_to_event_kind(&mk_chunk(kind, "x"));
+            let EventKind::AgentResponded { text } = ev else {
+                panic!("expected AgentResponded");
+            };
+            assert!(text.starts_with(prefix), "{:?}: got {}", kind, text);
+        }
     }
 
     // ── M3.7 · `Command::Kill` 实装 ──
