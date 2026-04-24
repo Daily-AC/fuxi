@@ -3074,31 +3074,41 @@ where
                 );
             }
             DialogueLine::Agent { name: _, text } => {
-                let agent_err = is_agent_error_text(text);
-                let mut merged = text.clone();
+                let (kind, first_stripped) = classify_agent_text(text);
+                // 合并相邻**同 kind** 的 agent 行——分布式 progress 会把一次
+                // turn 内的 tool 输出拆成多条 chunk，每条一个 AgentResponded
+                // 事件；渲染时合成一个带 rail 的块视觉干净。
+                let mut merged = first_stripped.to_string();
                 let mut j = i + 1;
                 while j < entries.len() {
-                    match &entries[j].line {
-                        DialogueLine::Agent { name: _, text: t2 }
-                            if is_agent_error_text(t2) == agent_err =>
-                        {
+                    if let DialogueLine::Agent { name: _, text: t2 } = &entries[j].line {
+                        let (k2, s2) = classify_agent_text(t2);
+                        if k2 == kind {
                             merged.push('\n');
-                            merged.push_str(t2);
+                            merged.push_str(s2);
                             j += 1;
+                            continue;
                         }
-                        _ => break,
                     }
+                    break;
                 }
-                let (anchor, anchor_color, body_style) = if agent_err {
-                    ("✕ ", th.error(), Style::default().fg(th.error()))
+                // Tool 输出照抄 opencode：硬截 10 行——长命令回显裸露太多
+                // 会把 assistant 文本挤出屏外，读起来更散。
+                let merged = if matches!(kind, AgentKind::Tool) {
+                    truncate_lines(&merged, 10)
                 } else {
-                    (
-                        "● ",
-                        th.agent_first_line(),
-                        Style::default().fg(th.subtext1),
-                    )
+                    merged
                 };
-                push_anchored(&mut out, &merged, anchor, anchor_color, true, body_style);
+                let sty = style_for_agent_kind(kind, &th);
+                push_anchored_with_rail(
+                    &mut out,
+                    &merged,
+                    sty.anchor,
+                    sty.anchor_color,
+                    sty.bold_first,
+                    sty.body,
+                    Some(('│', sty.rail_color)),
+                );
                 i = j;
                 continue;
             }
@@ -3188,6 +3198,103 @@ fn is_agent_error_text(text: &str) -> bool {
         || s.contains("exception")
 }
 
+/// Agent 消息的语义分类——分布式 progress 通过前缀表达（见
+/// `daemon.rs::progress_chunk_to_event_kind`），本地门客也会有失败文本落入
+/// Error。渲染器据此选 rail/color/anchor。
+///
+/// 不改 `DialogueLine::Agent` 结构——所有分类在渲染时 pure-fn 派生。每帧重算
+/// 便宜（只扫前缀），避免了事件入口处 classify、struct 扩字段带来的跨文件波及。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentKind {
+    Assistant,
+    Thinking,
+    Tool,
+    Error,
+}
+
+/// 剥离 `[thinking]` / `[tool]` / `[error]` / `[final]` 前缀并归类。
+/// 返回引用避免 clone——调用方如需拥有所有权再 `to_string()`。
+fn classify_agent_text(text: &str) -> (AgentKind, &str) {
+    if let Some(rest) = text.strip_prefix("[thinking] ") {
+        return (AgentKind::Thinking, rest);
+    }
+    if let Some(rest) = text.strip_prefix("[tool] ") {
+        return (AgentKind::Tool, rest);
+    }
+    if let Some(rest) = text.strip_prefix("[error] ") {
+        return (AgentKind::Error, rest);
+    }
+    if let Some(rest) = text.strip_prefix("[final] ") {
+        // `[final]` 是 dist 失败 path 的补充摘要——语义上是 error 的尾巴，
+        // 跟它同 rail 聚合比单独一类视觉更清爽。
+        return (AgentKind::Error, rest);
+    }
+    if is_agent_error_text(text) {
+        return (AgentKind::Error, text);
+    }
+    (AgentKind::Assistant, text)
+}
+
+/// 一 kind 一套视觉参数。
+///
+/// 设计：所有 kind 都走 `│` (U+2502) 续行 rail——单字符 + semantic color 区分
+/// （对齐 opencode：靠颜色分类、不靠字符跳动）。`Assistant` 的 rail 用 muted
+/// 色 = 低存在感；`Tool` / `Error` rail 用语义色让块边界更明显。
+struct AgentStyle {
+    anchor: &'static str,
+    anchor_color: Color,
+    body: Style,
+    rail_color: Color,
+    bold_first: bool,
+}
+
+fn style_for_agent_kind(kind: AgentKind, th: &Theme) -> AgentStyle {
+    match kind {
+        AgentKind::Assistant => AgentStyle {
+            anchor: "● ",
+            anchor_color: th.agent_first_line(),
+            body: Style::default().fg(th.subtext1),
+            rail_color: th.muted(),
+            bold_first: true,
+        },
+        AgentKind::Thinking => AgentStyle {
+            anchor: "◦ ",
+            anchor_color: th.muted(),
+            body: Style::default()
+                .fg(th.muted())
+                .add_modifier(Modifier::ITALIC),
+            rail_color: th.muted(),
+            bold_first: false,
+        },
+        AgentKind::Tool => AgentStyle {
+            anchor: "▸ ",
+            anchor_color: th.tool_call(),
+            body: Style::default().fg(th.subtext1),
+            rail_color: th.tool_call(),
+            bold_first: false,
+        },
+        AgentKind::Error => AgentStyle {
+            anchor: "✕ ",
+            anchor_color: th.error(),
+            body: Style::default().fg(th.error()),
+            rail_color: th.error(),
+            bold_first: false,
+        },
+    }
+}
+
+/// 硬截多行文本到 `max` 行。溢出时尾部替换为 `…` 单行（照抄 opencode 的
+/// "不折叠不展开" 设计——长 tool 输出裸露太多不如直接砍）。
+fn truncate_lines(text: &str, max: usize) -> String {
+    let mut lines = text.lines();
+    let mut kept: Vec<&str> = lines.by_ref().take(max).collect();
+    if lines.next().is_some() {
+        // 还有剩余——追加省略标记
+        kept.push("…");
+    }
+    kept.join("\n")
+}
+
 /// 把多行 `text` 渲染为「首行锚点 + 续行缩进」的若干 `Line`。
 ///
 /// - `anchor`: 首行前缀（`› ` / `● ` 等）
@@ -3202,6 +3309,24 @@ fn push_anchored<'a>(
     bold: bool,
     body_style: Style,
 ) {
+    push_anchored_with_rail(out, text, anchor, anchor_color, bold, body_style, None);
+}
+
+/// 扩展版：续行前缀可替换成彩色 rail（`│ ` + color）做视觉聚合。
+///
+/// `rail = None` 保持老行为——续行缩进两空格。`Some((ch, color))` 让每条
+/// 续行首列画一个 rail 字符（典型 `│` U+2502），后跟空格，共 2 列保持与 anchor
+/// 等宽。char 宽度必须是 1（box-drawing 范围内）——该函数内不做宽度检查，
+/// 传入方保证。
+fn push_anchored_with_rail<'a>(
+    out: &mut Vec<Line<'a>>,
+    text: &str,
+    anchor: &str,
+    anchor_color: Color,
+    bold: bool,
+    body_style: Style,
+    rail: Option<(char, Color)>,
+) {
     let anchor_text = anchor.to_string();
     let anchor_style = {
         let mut s = Style::default().fg(anchor_color);
@@ -3209,6 +3334,12 @@ fn push_anchored<'a>(
             s = s.add_modifier(Modifier::BOLD);
         }
         s
+    };
+    let continuation_span = |rail: Option<(char, Color)>| -> Span<'a> {
+        match rail {
+            Some((ch, color)) => Span::styled(format!("{ch} "), Style::default().fg(color)),
+            None => Span::raw(" ".repeat(ANCHOR_WIDTH)),
+        }
     };
     let mut first_line = true;
     for ln in text.lines() {
@@ -3220,7 +3351,7 @@ fn push_anchored<'a>(
             first_line = false;
         } else {
             out.push(Line::from(vec![
-                Span::raw(" ".repeat(ANCHOR_WIDTH)),
+                continuation_span(rail),
                 Span::styled(ln.to_string(), body_style),
             ]));
         }
@@ -5110,7 +5241,11 @@ mod tests {
         let rendered = render_dialogue_collapsed(entries.iter());
         assert_eq!(rendered.len(), 2, "连续 agent 应折叠成一个块（两行正文）");
         assert!(line_to_plain(&rendered[0]).starts_with("● "));
-        assert!(line_to_plain(&rendered[1]).starts_with("  "));
+        assert!(
+            line_to_plain(&rendered[1]).starts_with("│ "),
+            "续行应画 rail: {:?}",
+            line_to_plain(&rendered[1])
+        );
     }
 
     #[test]
@@ -5136,7 +5271,11 @@ mod tests {
         let rendered = render_dialogue_collapsed(entries.iter());
         assert_eq!(rendered.len(), 2, "应合并成一个消息块（两行正文）");
         assert!(line_to_plain(&rendered[0]).starts_with("● "));
-        assert!(line_to_plain(&rendered[1]).starts_with("  "));
+        assert!(
+            line_to_plain(&rendered[1]).starts_with("│ "),
+            "续行应画 rail: {:?}",
+            line_to_plain(&rendered[1])
+        );
     }
 
     /// hard newline 续行：首行挂锚点，后续行 8 空格对齐，不重复挂 `▍`。
@@ -5155,8 +5294,161 @@ mod tests {
             "第 2 段不应重复竖条: {:?}",
             line_to_plain(&rendered[1])
         );
+        // User 走 no-rail（push_anchored 默认 None）——续行仍 2 空格。
         assert!(line_to_plain(&rendered[1]).starts_with("  "), "2 空格对齐");
         assert!(line_to_plain(&rendered[2]).starts_with("  "));
+    }
+
+    // ── 方向 2 · 分布式 progress 视觉分类 ──
+
+    #[test]
+    fn classify_agent_text_recognizes_dist_prefixes() {
+        assert_eq!(
+            classify_agent_text("[thinking] 递归扫描"),
+            (AgentKind::Thinking, "递归扫描")
+        );
+        assert_eq!(
+            classify_agent_text("[tool] $ ls -la"),
+            (AgentKind::Tool, "$ ls -la")
+        );
+        assert_eq!(
+            classify_agent_text("[error] enqueue failed"),
+            (AgentKind::Error, "enqueue failed")
+        );
+        assert_eq!(
+            classify_agent_text("[final] codex exited 2"),
+            (AgentKind::Error, "codex exited 2"),
+            "[final] 归 Error 类聚合到一条 rail"
+        );
+    }
+
+    #[test]
+    fn classify_agent_text_legacy_errors_go_to_error_kind() {
+        // 老门客失败文本无前缀，`is_agent_error_text` 兜底。
+        let (k, _) = classify_agent_text("API error: rate limit");
+        assert_eq!(k, AgentKind::Error);
+    }
+
+    #[test]
+    fn classify_agent_text_default_is_assistant() {
+        let (k, s) = classify_agent_text("只是一段普通回复");
+        assert_eq!(k, AgentKind::Assistant);
+        assert_eq!(s, "只是一段普通回复");
+    }
+
+    /// thinking 前缀应走独立 rail，不和 assistant 合并（视觉上是两段）。
+    #[test]
+    fn render_dialogue_splits_assistant_and_thinking_kinds() {
+        let entries = [
+            DialogueEntry::at_fixed(
+                DialogueLine::Agent {
+                    name: "鲁班".into(),
+                    text: "正在分析…".into(),
+                },
+                10,
+                0,
+            ),
+            DialogueEntry::at_fixed(
+                DialogueLine::Agent {
+                    name: "鲁班".into(),
+                    text: "[thinking] 要递归三层".into(),
+                },
+                10,
+                1,
+            ),
+        ];
+        let rendered = render_dialogue_collapsed(entries.iter());
+        // assistant 与 thinking 是两个独立块（各一行），无 kind 切换空行
+        // （`dialogue_kind` 只区分到 DialogueLine variant，不进 agent sub-kind）。
+        let plains: Vec<String> = rendered.iter().map(line_to_plain).collect();
+        assert!(
+            plains
+                .iter()
+                .any(|s| s.starts_with("● ") && s.contains("正在分析")),
+            "应有 assistant anchor 且保留正文: {plains:?}"
+        );
+        // thinking 块的 anchor 是 "◦ "，内容不含 "[thinking]"（已剥离）
+        let thinking_line = plains
+            .iter()
+            .find(|s| s.starts_with("◦ "))
+            .expect("应出现 thinking anchor");
+        assert!(
+            thinking_line.contains("要递归三层"),
+            "stripped content 应被保留: {thinking_line}"
+        );
+        assert!(
+            !thinking_line.contains("[thinking]"),
+            "前缀应被剥离: {thinking_line}"
+        );
+    }
+
+    /// 同 kind 连续 chunks 要合并——分布式 worker 一轮 tool 会拆多条。
+    #[test]
+    fn render_dialogue_merges_consecutive_tool_chunks() {
+        let entries = [
+            DialogueEntry::at_fixed(
+                DialogueLine::Agent {
+                    name: "鲁班".into(),
+                    text: "[tool] $ rg fn dispatch".into(),
+                },
+                10,
+                0,
+            ),
+            DialogueEntry::at_fixed(
+                DialogueLine::Agent {
+                    name: "鲁班".into(),
+                    text: "[tool] src/daemon.rs:557".into(),
+                },
+                10,
+                1,
+            ),
+        ];
+        let rendered = render_dialogue_collapsed(entries.iter());
+        let joined = rendered
+            .iter()
+            .map(line_to_plain)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("▸ $ rg fn dispatch"), "got:\n{joined}");
+        assert!(joined.contains("│ src/daemon.rs:557"), "got:\n{joined}");
+        assert!(!joined.contains("[tool]"), "前缀应被剥离: {joined}");
+    }
+
+    #[test]
+    fn truncate_lines_caps_at_max_and_marks_overflow() {
+        let s = "1\n2\n3\n4\n5";
+        assert_eq!(truncate_lines(s, 10), "1\n2\n3\n4\n5", "未超上限原样返回");
+        assert_eq!(truncate_lines(s, 3), "1\n2\n3\n…", "超出用 … 单行标记溢出");
+    }
+
+    #[test]
+    fn render_dialogue_tool_body_truncated_to_ten_lines() {
+        let long_tool = (1..=20)
+            .map(|i| format!("[tool] line{i}"))
+            .collect::<Vec<_>>();
+        let entries: Vec<DialogueEntry> = long_tool
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                DialogueEntry::at_fixed(
+                    DialogueLine::Agent {
+                        name: "鲁班".into(),
+                        text: t.clone(),
+                    },
+                    10,
+                    i as u32 % 60,
+                )
+            })
+            .collect();
+        let rendered = render_dialogue_collapsed(entries.iter());
+        // 10 条保留 + 1 条 "…" = 11 行；其他行（前缀空行等）不干扰断言方向
+        let body_lines: Vec<String> = rendered.iter().map(line_to_plain).collect();
+        assert!(
+            body_lines
+                .iter()
+                .any(|l| l.trim_start_matches("│ ") == "…" || l.trim_start_matches("▸ ") == "…"),
+            "应出现 … 溢出标记，实际: {body_lines:?}"
+        );
     }
 
     /// CJK 宽度：首行锚点固定 8 宽，不随内容 CJK 膨胀。
