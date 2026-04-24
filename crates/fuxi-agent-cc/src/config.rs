@@ -392,7 +392,8 @@ mod tests {
             .position(|a| a == "--model")
             .expect("expected --model flag");
         assert!(
-            args.get(idx + 1).is_some_and(|v| v == DEFAULT_MODEL_FALLBACK),
+            args.get(idx + 1)
+                .is_some_and(|v| v == DEFAULT_MODEL_FALLBACK),
             "expected fallback model {DEFAULT_MODEL_FALLBACK}, got: {args:?}"
         );
     }

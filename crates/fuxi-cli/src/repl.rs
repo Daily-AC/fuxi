@@ -1343,7 +1343,9 @@ impl ReplApp {
         let pick = self
             .tasks
             .iter()
-            .filter(|t| t.worker == id && !matches!(t.state, TaskState::Done | TaskState::Cancelled))
+            .filter(|t| {
+                t.worker == id && !matches!(t.state, TaskState::Done | TaskState::Cancelled)
+            })
             .max_by_key(|t| t.dispatched_at)
             .or_else(|| {
                 self.tasks
