@@ -103,6 +103,75 @@ pub struct DistPullQuery {
     pub node_id: String,
 }
 
+/// 流式回传的语义分类。Gateway 把不同 kind 翻成不同 `EventKind`
+/// （AssistantText → AgentResponded，Thinking → AgentThinking，
+/// ToolCall → ToolInvoked-like，Error → AgentResponded 带标签），
+/// 让 TUI 能按语义上色 / 折叠。
+///
+/// 故意不和 `fuxi_agent_codex::CodexEvent` 直接耦合：后者是 codex 的 wire 格式，
+/// 本枚举是分布式层独立的语义层，将来换 wire（比如 gemini）也好改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressKind {
+    AssistantText,
+    Thinking,
+    ToolCall,
+    Error,
+}
+
+/// controller 存储态 + pull 返回给 gateway 的块。
+///
+/// `seq` 由 controller 分配（per-job 单调递增 from 1），worker 上报时不填。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressChunk {
+    pub seq: u64,
+    pub kind: ProgressKind,
+    pub text: String,
+}
+
+/// worker → controller 的单块。seq 在此**不出现**——controller 分配。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressPush {
+    pub kind: ProgressKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistProgressReq {
+    pub token: String,
+    pub node_id: String,
+    pub job_id: String,
+    pub chunks: Vec<ProgressPush>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistProgressAck {
+    /// 接受几条；job 未登记时为 0（worker 应停 push 并等 final report）。
+    pub accepted: usize,
+    /// 本批结束后 job 在 controller 端的最大 seq——worker 可以对账。
+    pub last_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistProgressQuery {
+    pub token: String,
+    pub job_id: String,
+    /// 只返回 seq > after 的 chunks。首次轮询传 0。
+    pub after: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistProgressResp {
+    pub chunks: Vec<ProgressChunk>,
+    /// job 已收到终态 report，后续不会有新 chunks。
+    pub done: bool,
+    /// done=true 时填；否则 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_output: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NodeRuntimeInfo {
     pub last_seen: Option<Instant>,
@@ -114,6 +183,10 @@ struct DistInner {
     inflight: HashMap<String, DistJob>,
     finished: HashMap<String, DistReportReq>,
     nodes: HashMap<String, NodeRuntimeInfo>,
+    /// job_id → 按 seq 有序的 progress chunks。
+    progress: HashMap<String, Vec<ProgressChunk>>,
+    /// job_id → 下一个要分配的 seq（从 1 开始）。
+    progress_next_seq: HashMap<String, u64>,
 }
 
 /// controller 进程内状态。
@@ -237,6 +310,68 @@ impl DistController {
             node_id: None,
         }
     }
+
+    /// worker 上报一批 progress chunks。controller 分配 per-job 单调 seq。
+    ///
+    /// 若 job 从未 pull 过（inflight 不存在）也不拒——允许 worker 在 pull
+    /// 与首次 push 之间有 race。返回 `(accepted, last_seq)`：accepted 总是
+    /// 等于 chunks.len()（当前不做拒收），last_seq 用于 worker 对账。
+    pub async fn push_progress(
+        &self,
+        node_id: &str,
+        job_id: &str,
+        pushes: Vec<ProgressPush>,
+    ) -> (usize, u64) {
+        let mut g = self.inner.lock().await;
+        g.nodes.entry(node_id.to_string()).or_default().last_seen = Some(Instant::now());
+        // 先把 next_seq 拷出来释放 progress_next_seq 的借用，避免 progress 那边的
+        // second mutable borrow 冲突。
+        let mut next_seq = *g.progress_next_seq.entry(job_id.to_string()).or_insert(1);
+        let mut accepted = 0usize;
+        let mut last_seq = next_seq.saturating_sub(1);
+        let bucket = g.progress.entry(job_id.to_string()).or_default();
+        for p in pushes {
+            let chunk = ProgressChunk {
+                seq: next_seq,
+                kind: p.kind,
+                text: p.text,
+            };
+            last_seq = chunk.seq;
+            bucket.push(chunk);
+            next_seq += 1;
+            accepted += 1;
+        }
+        g.progress_next_seq.insert(job_id.to_string(), next_seq);
+        (accepted, last_seq)
+    }
+
+    /// Gateway 短轮询：返回 `seq > after` 的所有 chunks + job 终态。
+    ///
+    /// `done=true` 意味着 controller 已收到 final report，**且** 所有之前上报
+    /// 的 progress 都已包含在内（worker 承诺 report 前 flush 干净 progress）。
+    pub async fn pull_progress_after(&self, job_id: &str, after: u64) -> DistProgressResp {
+        let g = self.inner.lock().await;
+        let chunks = g
+            .progress
+            .get(job_id)
+            .map(|v| v.iter().filter(|c| c.seq > after).cloned().collect())
+            .unwrap_or_default();
+        if let Some(done) = g.finished.get(job_id) {
+            DistProgressResp {
+                chunks,
+                done: true,
+                final_ok: Some(done.ok),
+                final_output: Some(done.output.clone()),
+            }
+        } else {
+            DistProgressResp {
+                chunks,
+                done: false,
+                final_ok: None,
+                final_output: None,
+            }
+        }
+    }
 }
 
 fn unauthorized() -> (StatusCode, String) {
@@ -305,6 +440,29 @@ async fn job_status_handler(
     Json(ctrl.job_status(&q.job_id).await).into_response()
 }
 
+async fn progress_post_handler(
+    State(ctrl): State<Arc<DistController>>,
+    Json(req): Json<DistProgressReq>,
+) -> impl IntoResponse {
+    if req.token != ctrl.token() {
+        return unauthorized().into_response();
+    }
+    let (accepted, last_seq) = ctrl
+        .push_progress(&req.node_id, &req.job_id, req.chunks)
+        .await;
+    Json(DistProgressAck { accepted, last_seq }).into_response()
+}
+
+async fn progress_get_handler(
+    State(ctrl): State<Arc<DistController>>,
+    Query(q): Query<DistProgressQuery>,
+) -> impl IntoResponse {
+    if q.token != ctrl.token() {
+        return unauthorized().into_response();
+    }
+    Json(ctrl.pull_progress_after(&q.job_id, q.after).await).into_response()
+}
+
 pub fn router(ctrl: Arc<DistController>) -> Router {
     Router::new()
         .route("/dist/register", post(register_handler))
@@ -312,6 +470,8 @@ pub fn router(ctrl: Arc<DistController>) -> Router {
         .route("/dist/pull", get(pull_handler))
         .route("/dist/report", post(report_handler))
         .route("/dist/job", get(job_status_handler))
+        .route("/dist/progress", post(progress_post_handler))
+        .route("/dist/progress", get(progress_get_handler))
         .with_state(ctrl)
 }
 
@@ -623,5 +783,123 @@ mod tests {
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: DistEnqueueReq = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.system_prompt.as_deref(), Some("role preamble"));
+    }
+
+    // ── progress 子系统 ──
+
+    async fn test_ctrl() -> Arc<DistController> {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        Arc::new(DistController::new("tok".into(), bus))
+    }
+
+    fn push(kind: ProgressKind, text: &str) -> ProgressPush {
+        ProgressPush {
+            kind,
+            text: text.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn push_progress_assigns_monotonic_seq_per_job() {
+        let ctrl = test_ctrl().await;
+        let (acc1, last1) = ctrl
+            .push_progress(
+                "nodeA",
+                "job-1",
+                vec![
+                    push(ProgressKind::AssistantText, "hello"),
+                    push(ProgressKind::AssistantText, "world"),
+                ],
+            )
+            .await;
+        assert_eq!(acc1, 2);
+        assert_eq!(last1, 2);
+        let (acc2, last2) = ctrl
+            .push_progress("nodeA", "job-1", vec![push(ProgressKind::Thinking, "嗯")])
+            .await;
+        assert_eq!(acc2, 1);
+        assert_eq!(last2, 3);
+    }
+
+    #[tokio::test]
+    async fn pull_progress_after_cursor_filters() {
+        let ctrl = test_ctrl().await;
+        ctrl.push_progress(
+            "nodeA",
+            "job-1",
+            vec![
+                push(ProgressKind::AssistantText, "a"),
+                push(ProgressKind::AssistantText, "b"),
+                push(ProgressKind::Thinking, "c"),
+            ],
+        )
+        .await;
+        let resp = ctrl.pull_progress_after("job-1", 0).await;
+        assert_eq!(resp.chunks.len(), 3);
+        assert!(!resp.done);
+        let resp2 = ctrl.pull_progress_after("job-1", 2).await;
+        assert_eq!(resp2.chunks.len(), 1);
+        assert_eq!(resp2.chunks[0].seq, 3);
+        assert_eq!(resp2.chunks[0].kind, ProgressKind::Thinking);
+    }
+
+    #[tokio::test]
+    async fn pull_progress_reports_done_after_report() {
+        let ctrl = test_ctrl().await;
+        ctrl.push_progress(
+            "nodeA",
+            "job-1",
+            vec![push(ProgressKind::AssistantText, "partial")],
+        )
+        .await;
+        // 在收到 final report 前 done=false
+        assert!(!ctrl.pull_progress_after("job-1", 0).await.done);
+        ctrl.report(DistReportReq {
+            token: "tok".into(),
+            node_id: "nodeA".into(),
+            job_id: "job-1".into(),
+            ok: true,
+            output: "final".into(),
+            duration_ms: 42,
+        })
+        .await;
+        let resp = ctrl.pull_progress_after("job-1", 0).await;
+        assert!(resp.done);
+        assert_eq!(resp.final_ok, Some(true));
+        assert_eq!(resp.final_output.as_deref(), Some("final"));
+    }
+
+    #[tokio::test]
+    async fn progress_seq_spaces_are_independent_per_job() {
+        let ctrl = test_ctrl().await;
+        ctrl.push_progress(
+            "nodeA",
+            "job-A",
+            vec![push(ProgressKind::AssistantText, "a")],
+        )
+        .await;
+        let (_, last_b) = ctrl
+            .push_progress(
+                "nodeA",
+                "job-B",
+                vec![push(ProgressKind::AssistantText, "b")],
+            )
+            .await;
+        assert_eq!(last_b, 1, "job-B 的 seq 从 1 起，不受 job-A 影响");
+    }
+
+    #[tokio::test]
+    async fn progress_req_round_trips_via_serde() {
+        let req = DistProgressReq {
+            token: "t".into(),
+            node_id: "n".into(),
+            job_id: "j".into(),
+            chunks: vec![push(ProgressKind::ToolCall, "ls -la")],
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: DistProgressReq = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.chunks.len(), 1);
+        assert_eq!(back.chunks[0].kind, ProgressKind::ToolCall);
+        assert_eq!(back.chunks[0].text, "ls -la");
     }
 }
