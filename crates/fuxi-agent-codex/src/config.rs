@@ -25,10 +25,11 @@ pub const DEFAULT_MODEL_FALLBACK: &str = "";
 /// 它由 `CodexAgent::dispatch` 从 Task 里组装，spawn 时作为 argv 尾部追加。
 #[derive(Debug, Clone)]
 pub struct CodexLaunchConfig {
-    /// 可选 argv 前缀。
+    /// 可选 argv 前缀——在 `exec --json ...` 之前插入的原样参数。
     ///
-    /// 典型远端用法：`binary="ssh"` + `argv_prefix=["home-server","--","codex"]`，
-    /// 最终命令：`ssh home-server -- codex exec --json ...`
+    /// 保留它的意义：把 codex 子进程包在 wrapper（比如 trace/perf 工具）里时，
+    /// 不必 fork `binary` 字段也能组装完整命令。分布式远端执行走 `fuxi dist worker`
+    /// 这条专用路径，不再通过本字段拼 ssh。
     pub argv_prefix: Vec<String>,
     /// `-m <model>`。空字符串意味着「使用 codex 默认」——不传 `-m` flag。
     pub model: String,
