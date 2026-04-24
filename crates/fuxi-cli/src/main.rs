@@ -25,6 +25,7 @@ mod dist;
 mod draft_stash;
 mod extractor_hook;
 mod ipc;
+mod markdown;
 mod memory_cmd;
 mod prompt_history;
 mod recall_sink;

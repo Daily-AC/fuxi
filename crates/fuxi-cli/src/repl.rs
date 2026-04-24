@@ -3078,13 +3078,19 @@ where
                 // 合并相邻**同 kind** 的 agent 行——分布式 progress 会把一次
                 // turn 内的 tool 输出拆成多条 chunk，每条一个 AgentResponded
                 // 事件；渲染时合成一个带 rail 的块视觉干净。
+                // Assistant 走 markdown，段落分隔是 `\n\n`；其他 kind 纯文本用 `\n`。
+                let sep = if matches!(kind, AgentKind::Assistant) {
+                    "\n\n"
+                } else {
+                    "\n"
+                };
                 let mut merged = first_stripped.to_string();
                 let mut j = i + 1;
                 while j < entries.len() {
                     if let DialogueLine::Agent { name: _, text: t2 } = &entries[j].line {
                         let (k2, s2) = classify_agent_text(t2);
                         if k2 == kind {
-                            merged.push('\n');
+                            merged.push_str(sep);
                             merged.push_str(s2);
                             j += 1;
                             continue;
@@ -3100,15 +3106,33 @@ where
                     merged
                 };
                 let sty = style_for_agent_kind(kind, &th);
-                push_anchored_with_rail(
-                    &mut out,
-                    &merged,
-                    sty.anchor,
-                    sty.anchor_color,
-                    sty.bold_first,
-                    sty.body,
-                    Some(('│', sty.rail_color)),
-                );
+                match kind {
+                    AgentKind::Assistant => {
+                        // Assistant 文本走 markdown 渲染——bold/italic/inline code/代码块等
+                        // 转成 Ratatui Spans；tool/thinking/error 仍走纯文本（tool 是
+                        // shell output，markdown 语法会误伤；thinking/error 短多单行）。
+                        let md_lines = crate::markdown::md_to_lines(&merged, sty.body, &th);
+                        push_lines_with_rail(
+                            &mut out,
+                            md_lines,
+                            sty.anchor,
+                            sty.anchor_color,
+                            sty.bold_first,
+                            Some(('│', sty.rail_color)),
+                        );
+                    }
+                    _ => {
+                        push_anchored_with_rail(
+                            &mut out,
+                            &merged,
+                            sty.anchor,
+                            sty.anchor_color,
+                            sty.bold_first,
+                            sty.body,
+                            Some(('│', sty.rail_color)),
+                        );
+                    }
+                }
                 i = j;
                 continue;
             }
@@ -3310,6 +3334,61 @@ fn push_anchored<'a>(
     body_style: Style,
 ) {
     push_anchored_with_rail(out, text, anchor, anchor_color, bold, body_style, None);
+}
+
+/// 已预渲染的 `Vec<Line>`（比如 markdown 处理过的 Assistant 文本）前缀锚点 / rail。
+///
+/// 等同 `push_anchored_with_rail` 的"行级"版本——给首行 Span 前插 anchor、
+/// 其余行前插 rail。用 `std::mem::take` 搬迁 span ownership，`'static` 要求
+/// 由上游 md_to_lines 返回 `Vec<Line<'static>>` 保证。
+fn push_lines_with_rail(
+    out: &mut Vec<Line<'static>>,
+    mut lines: Vec<Line<'static>>,
+    anchor: &str,
+    anchor_color: Color,
+    bold_first: bool,
+    rail: Option<(char, Color)>,
+) {
+    if lines.is_empty() {
+        // 空 markdown（比如纯空白输入）仍要挂一个 anchor 表示 "这条消息存在"
+        out.push(Line::from(vec![
+            Span::styled(
+                anchor.to_string(),
+                make_anchor_style(anchor_color, bold_first),
+            ),
+            Span::raw(String::new()),
+        ]));
+        return;
+    }
+    let rail_span = |r: Option<(char, Color)>| -> Span<'static> {
+        match r {
+            Some((ch, color)) => Span::styled(format!("{ch} "), Style::default().fg(color)),
+            None => Span::raw(" ".repeat(ANCHOR_WIDTH)),
+        }
+    };
+    for (idx, line) in lines.iter_mut().enumerate() {
+        let existing = std::mem::take(&mut line.spans);
+        let mut new_spans: Vec<Span<'static>> = Vec::with_capacity(existing.len() + 1);
+        if idx == 0 {
+            new_spans.push(Span::styled(
+                anchor.to_string(),
+                make_anchor_style(anchor_color, bold_first),
+            ));
+        } else {
+            new_spans.push(rail_span(rail));
+        }
+        new_spans.extend(existing);
+        line.spans = new_spans;
+    }
+    out.extend(lines);
+}
+
+fn make_anchor_style(color: Color, bold: bool) -> Style {
+    let mut s = Style::default().fg(color);
+    if bold {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    s
 }
 
 /// 扩展版：续行前缀可替换成彩色 rail（`│ ` + color）做视觉聚合。
@@ -5217,7 +5296,10 @@ mod tests {
 
     // ───────── 对话渲染 · M4.1 方案 A ─────────
 
-    /// 连续 agent 消息应被折叠为一个消息块：首行锚点，续行缩进。
+    /// 连续 agent 消息应被折叠为一个消息块：首行锚点，续行带 rail。
+    ///
+    /// Assistant kind 走 markdown，合并时用 `\n\n` 分隔成两段——段间多一个空行，
+    /// 空行同样挂 rail（视觉上连续）。所以是 3 行：line1 / rail-only / line2。
     #[test]
     fn render_dialogue_v2_each_entry_has_one_anchor() {
         let entries = [
@@ -5239,12 +5321,17 @@ mod tests {
             ),
         ];
         let rendered = render_dialogue_collapsed(entries.iter());
-        assert_eq!(rendered.len(), 2, "连续 agent 应折叠成一个块（两行正文）");
+        assert_eq!(rendered.len(), 3, "两段 + 段间空行 = 3 行");
         assert!(line_to_plain(&rendered[0]).starts_with("● "));
         assert!(
-            line_to_plain(&rendered[1]).starts_with("│ "),
-            "续行应画 rail: {:?}",
+            line_to_plain(&rendered[1]).starts_with("│"),
+            "段间空行应画 rail: {:?}",
             line_to_plain(&rendered[1])
+        );
+        assert!(
+            line_to_plain(&rendered[2]).starts_with("│ "),
+            "第二段应画 rail: {:?}",
+            line_to_plain(&rendered[2])
         );
     }
 
@@ -5269,12 +5356,13 @@ mod tests {
             ),
         ];
         let rendered = render_dialogue_collapsed(entries.iter());
-        assert_eq!(rendered.len(), 2, "应合并成一个消息块（两行正文）");
+        // Assistant markdown 两段合并用 `\n\n` 分隔 → 3 行（含段间空行 + rail）
+        assert_eq!(rendered.len(), 3, "应合并成一块（两段 + 段间空行）");
         assert!(line_to_plain(&rendered[0]).starts_with("● "));
         assert!(
-            line_to_plain(&rendered[1]).starts_with("│ "),
-            "续行应画 rail: {:?}",
-            line_to_plain(&rendered[1])
+            line_to_plain(&rendered[2]).starts_with("│ "),
+            "第二段应画 rail: {:?}",
+            line_to_plain(&rendered[2])
         );
     }
 
@@ -5470,25 +5558,32 @@ mod tests {
     }
 
     /// 续行首字与首行首字同列——视觉"挂"在首行内容下方。
+    ///
+    /// Assistant 走 markdown——单 chunk 内 `\n` 是 soft break（变空格），
+    /// 要用 `\n\n` 表达段落分隔。这里测 rail 宽度与 anchor 同宽，用多段文本。
     #[test]
     fn render_dialogue_v2_indent_alignment() {
         let entries = [DialogueEntry::at_fixed(
             DialogueLine::Agent {
                 name: "".into(),
-                text: "A\nB".into(),
+                text: "A\n\nB".into(),
             },
             12,
             0,
         )];
         let rendered = render_dialogue_collapsed(entries.iter());
         let first = line_to_plain(&rendered[0]);
-        let second = line_to_plain(&rendered[1]);
-        // 首行 A 的列 = 锚点宽度后第一字符位置
+        // A 段 + 空行（带 rail） + B 段——B 在第 3 行 (idx 2)
+        let b_line = rendered
+            .iter()
+            .map(line_to_plain)
+            .find(|s| s.contains('B'))
+            .expect("应渲染 B 段");
         let first_content_col = UnicodeWidthStr::width(&first[..first.find('A').unwrap()]);
-        let second_content_col = UnicodeWidthStr::width(&second[..second.find('B').unwrap()]);
+        let b_content_col = UnicodeWidthStr::width(&b_line[..b_line.find('B').unwrap()]);
         assert_eq!(
-            first_content_col, second_content_col,
-            "续行首字应与首行首字同列"
+            first_content_col, b_content_col,
+            "B 段首字应与 A 段首字同列——anchor `● ` 与 rail `│ ` 同宽"
         );
     }
 

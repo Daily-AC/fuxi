@@ -43,6 +43,9 @@ tui-textarea = { version = "0.7", default-features = false, features = ["ratatui
 unicode-width = "0.2"
 # OSC52 clipboard escape 序列需要 base64（payload = base64(text)）
 base64 = "0.22"
+# Markdown 渲染——assistant 文本走 commonmark → Ratatui Spans；只用 parse 能力，
+# 不要 html 渲染 feature，减小依赖面。
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
