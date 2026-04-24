@@ -29,6 +29,9 @@ pub const DIST_TOKEN_ENV: &str = "FUXI_DIST_TOKEN";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistJob {
     pub id: String,
+    /// 保留字段但语义弱化——仅作 enqueue 时留下的 "requester hint"（日志/审计可读）。
+    /// 真正的路由由 `pinned_node` + `required_tags` + worker capacity 三元决定。
+    /// 3a 之前这个字段是 per-node queue key，3b 之后派工不再看它。
     pub node_id: String,
     pub title: String,
     pub body: String,
@@ -38,16 +41,30 @@ pub struct DistJob {
     /// （`#[serde(default)]`），两端不强耦合升级节奏。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// 派工过滤：worker 必须满足 `required_tags ⊆ worker.tags` 才能取此 job。
+    /// 空集 = 任意 worker 都可取（兜底路径，行为上等同 round-robin）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_tags: Vec<String>,
+    /// 硬 pin 到指定 worker node。Some(x) 时只有 `node_id == x` 的 worker 能取；
+    /// None 则仅靠 tags 过滤。用户显式 `fuxi spawn --node home` 走这条。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistEnqueueReq {
     pub token: String,
+    /// requester hint——见 `DistJob.node_id`。老版 gateway 会传自己的 --node 值，
+    /// 新版会置空或当 `pinned_node` 用。
     pub node_id: String,
     pub title: String,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,7 +253,9 @@ impl Default for NodeRuntimeInfo {
 
 #[derive(Default)]
 struct DistInner {
-    queues: HashMap<String, VecDeque<DistJob>>,
+    /// 全局派工队列——3b 以前是 per-node HashMap；改成全局后派工不再与 enqueuer
+    /// 声明的 `node_id` 耦合，真正的路由走 pull 时的 matcher（pinned / tags / capacity）。
+    global_queue: VecDeque<DistJob>,
     inflight: HashMap<String, DistJob>,
     finished: HashMap<String, DistReportReq>,
     nodes: HashMap<String, NodeRuntimeInfo>,
@@ -296,22 +315,26 @@ impl DistController {
 
     pub async fn enqueue(
         &self,
-        node_id: String,
+        node_id_hint: String,
         title: String,
         body: String,
         system_prompt: Option<String>,
+        required_tags: Vec<String>,
+        pinned_node: Option<String>,
     ) -> String {
         let id = format!("job-{}", Uuid::new_v4());
         let job = DistJob {
             id: id.clone(),
-            node_id: node_id.clone(),
+            node_id: node_id_hint.clone(),
             title: title.clone(),
             body,
             created_at: chrono::Utc::now().timestamp(),
             system_prompt,
+            required_tags: required_tags.clone(),
+            pinned_node: pinned_node.clone(),
         };
         let mut g = self.inner.lock().await;
-        g.queues.entry(node_id.clone()).or_default().push_back(job);
+        g.global_queue.push_back(job);
         drop(g);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
@@ -319,7 +342,9 @@ impl DistController {
                 label: "dist_job_enqueued".into(),
                 payload: serde_json::json!({
                     "job_id": id,
-                    "node_id": node_id,
+                    "node_id_hint": node_id_hint,
+                    "required_tags": required_tags,
+                    "pinned_node": pinned_node,
                     "title": title
                 }),
             },
@@ -327,15 +352,46 @@ impl DistController {
         id
     }
 
+    /// 派工匹配：worker `node_id` 想取任务，扫全局 queue 找**第一个**满足以下
+    /// 三条的 job：
+    /// 1. `pinned_node.is_none() || pinned_node == Some(node_id)` ——未 pin 或 pin 到我
+    /// 2. `required_tags ⊆ worker.tags` ——能力是超集
+    /// 3. worker 还有并发额度（`inflight.len() < max_concurrency`）
+    ///
+    /// 匹配后 job 从 queue 移走、记入 controller.inflight、push 进 worker.inflight。
+    /// 未注册（从未 register）的 worker 视为空 tags + 默认 1 并发。
     pub async fn pull(&self, node_id: &str) -> Option<DistJob> {
         let mut g = self.inner.lock().await;
-        g.nodes.entry(node_id.to_string()).or_default().last_seen = Some(Instant::now());
+        // 先刷新 last_seen 并拿 capacity/tags 快照；3a 的 register 没跑过也兜底建默认
+        let (worker_tags, capacity_left) = {
+            let node = g.nodes.entry(node_id.to_string()).or_default();
+            node.last_seen = Some(Instant::now());
+            let left = (node.max_concurrency as usize).saturating_sub(node.inflight.len());
+            (node.tags.clone(), left)
+        };
+        if capacity_left == 0 {
+            return None;
+        }
+        let idx = g.global_queue.iter().position(|job| {
+            if let Some(pin) = &job.pinned_node
+                && pin != node_id
+            {
+                return false;
+            }
+            // required_tags ⊆ worker_tags
+            job.required_tags.iter().all(|t| worker_tags.contains(t))
+        })?;
         let job = g
-            .queues
-            .entry(node_id.to_string())
-            .or_default()
-            .pop_front()?;
+            .global_queue
+            .remove(idx)
+            .expect("position just returned a valid index");
         g.inflight.insert(job.id.clone(), job.clone());
+        // 写 worker.inflight——pull 是唯一入口，report/timeout 是出口
+        g.nodes
+            .get_mut(node_id)
+            .expect("entry was just touched")
+            .inflight
+            .push(job.id.clone());
         drop(g);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
@@ -344,7 +400,9 @@ impl DistController {
                 payload: serde_json::json!({
                     "job_id": job.id,
                     "node_id": node_id,
-                    "title": job.title
+                    "title": job.title,
+                    "required_tags": job.required_tags,
+                    "pinned_node": job.pinned_node,
                 }),
             },
         });
@@ -356,6 +414,10 @@ impl DistController {
         g.nodes.entry(req.node_id.clone()).or_default().last_seen = Some(Instant::now());
         let existed = g.inflight.remove(&req.job_id).is_some();
         g.finished.insert(req.job_id.clone(), req.clone());
+        // Phase 3b: 从 worker 的 inflight list 释放——否则 capacity 永远 0
+        if let Some(worker) = g.nodes.get_mut(&req.node_id) {
+            worker.inflight.retain(|id| id != &req.job_id);
+        }
         drop(g);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
@@ -494,7 +556,14 @@ async fn enqueue_handler(
         return (StatusCode::BAD_REQUEST, "title empty".to_string()).into_response();
     }
     let job_id = ctrl
-        .enqueue(req.node_id, req.title, req.body, req.system_prompt)
+        .enqueue(
+            req.node_id,
+            req.title,
+            req.body,
+            req.system_prompt,
+            req.required_tags,
+            req.pinned_node,
+        )
         .await;
     Json(DistEnqueueResp { job_id }).into_response()
 }
@@ -651,6 +720,10 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
             body,
             // CLI 入口裸派，不组装 role 心智——gateway agent 路径才会填。
             system_prompt: None,
+            // CLI 同样不带 tags / pin——派工走全局 queue，谁空闲谁取。
+            // 若真要定点派，用户用 `fuxi spawn --node` 走 gateway 路径。
+            required_tags: Vec::new(),
+            pinned_node: None,
         })
         .send()
         .await
@@ -997,6 +1070,8 @@ mod tests {
             body: body.into(),
             created_at: 0,
             system_prompt: system.map(ToOwned::to_owned),
+            required_tags: vec![],
+            pinned_node: None,
         }
     }
 
@@ -1043,6 +1118,8 @@ mod tests {
             title: "T".into(),
             body: "B".into(),
             system_prompt: Some("role preamble".into()),
+            required_tags: vec![],
+            pinned_node: None,
         };
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: DistEnqueueReq = serde_json::from_str(&encoded).unwrap();
@@ -1332,6 +1409,184 @@ mod tests {
         let req: DistRegisterReq = serde_json::from_str(raw).expect("decode");
         assert!(req.tags.is_empty());
         assert_eq!(req.max_concurrency, 1, "默认 1 并发");
+    }
+
+    // ── Phase 3b · 全局 queue + tag matcher ──
+
+    async fn enq_simple(ctrl: &DistController, title: &str) -> String {
+        ctrl.enqueue(
+            "hint".into(),
+            title.into(),
+            String::new(),
+            None,
+            vec![],
+            None,
+        )
+        .await
+    }
+
+    /// 无 tag 要求的 job 可被任一 worker pull（全局 queue）。
+    #[tokio::test]
+    async fn pull_anyone_gets_untagged_job() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec!["codex".into()], 1).await;
+        ctrl.register("nodeB".into(), vec![], 1).await;
+        let jid = enq_simple(&ctrl, "任意").await;
+        let got = ctrl.pull("nodeB").await.expect("nodeB should match");
+        assert_eq!(got.id, jid);
+        assert!(
+            ctrl.pull("nodeA").await.is_none(),
+            "job 已被 B 取走，A 应为空"
+        );
+    }
+
+    /// required_tags 必须是 worker.tags 的子集；不匹配的 worker 拿不到。
+    #[tokio::test]
+    async fn pull_filters_by_required_tags() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec!["codex".into(), "gpu".into()], 1)
+            .await;
+        ctrl.register("nodeB".into(), vec!["codex".into()], 1).await;
+        let jid = ctrl
+            .enqueue(
+                "hint".into(),
+                "需要 gpu".into(),
+                String::new(),
+                None,
+                vec!["gpu".into()],
+                None,
+            )
+            .await;
+        assert!(
+            ctrl.pull("nodeB").await.is_none(),
+            "nodeB 无 gpu tag 不应匹配"
+        );
+        let got = ctrl.pull("nodeA").await.expect("nodeA 应匹配");
+        assert_eq!(got.id, jid);
+    }
+
+    /// pinned_node 只允许指定 node 取；别的 worker 跳过。
+    #[tokio::test]
+    async fn pull_honors_pinned_node() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        ctrl.register("nodeB".into(), vec![], 1).await;
+        let jid = ctrl
+            .enqueue(
+                "hint".into(),
+                "pin to B".into(),
+                String::new(),
+                None,
+                vec![],
+                Some("nodeB".into()),
+            )
+            .await;
+        assert!(ctrl.pull("nodeA").await.is_none(), "pin 到 B，A 不该取到");
+        let got = ctrl.pull("nodeB").await.expect("B 能取到");
+        assert_eq!(got.id, jid);
+    }
+
+    /// pinned 的 job 跳过后，后面无 pin 的 job 能被跳过者取走——matcher 不是贪婪的。
+    #[tokio::test]
+    async fn pull_skips_pinned_to_find_later_match() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        ctrl.register("nodeB".into(), vec![], 1).await;
+        let _pinned_to_b = ctrl
+            .enqueue(
+                "hint".into(),
+                "pin B".into(),
+                String::new(),
+                None,
+                vec![],
+                Some("nodeB".into()),
+            )
+            .await;
+        let free = enq_simple(&ctrl, "anyone").await;
+        let got = ctrl
+            .pull("nodeA")
+            .await
+            .expect("nodeA 应跳过 pinned-to-B，取第二条");
+        assert_eq!(got.id, free);
+    }
+
+    /// capacity 满时 pull 返 None——即使 queue 非空。
+    #[tokio::test]
+    async fn pull_blocks_when_worker_at_capacity() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        let _j1 = enq_simple(&ctrl, "j1").await;
+        let _j2 = enq_simple(&ctrl, "j2").await;
+        assert!(ctrl.pull("nodeA").await.is_some(), "第一条取走");
+        assert!(ctrl.pull("nodeA").await.is_none(), "容量 1 已满，不应再派");
+    }
+
+    /// report 释放 capacity——之后 pull 能再取。
+    #[tokio::test]
+    async fn report_releases_capacity_for_next_pull() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        let j1 = enq_simple(&ctrl, "j1").await;
+        let _j2 = enq_simple(&ctrl, "j2").await;
+        let _ = ctrl.pull("nodeA").await.expect("take j1");
+        ctrl.report(DistReportReq {
+            token: "tok".into(),
+            node_id: "nodeA".into(),
+            job_id: j1,
+            ok: true,
+            output: "done".into(),
+            duration_ms: 1,
+        })
+        .await;
+        assert!(ctrl.pull("nodeA").await.is_some(), "report 释放后应能再取");
+    }
+
+    /// max_concurrency=2 能同时 hold 两条 job。
+    #[tokio::test]
+    async fn pull_respects_max_concurrency_greater_than_one() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 2).await;
+        let _ = enq_simple(&ctrl, "a").await;
+        let _ = enq_simple(&ctrl, "b").await;
+        let _ = enq_simple(&ctrl, "c").await;
+        assert!(ctrl.pull("nodeA").await.is_some());
+        assert!(ctrl.pull("nodeA").await.is_some(), "第二条仍 OK");
+        assert!(ctrl.pull("nodeA").await.is_none(), "第三条被 capacity 拦");
+    }
+
+    /// 未 register 的 worker 直接 pull 也不炸——默认 1 并发 + 空 tags。
+    #[tokio::test]
+    async fn pull_works_for_unregistered_worker_with_defaults() {
+        let ctrl = test_ctrl().await;
+        let jid = enq_simple(&ctrl, "anyone").await;
+        let got = ctrl.pull("ghost").await.expect("默认 1 容量应能取");
+        assert_eq!(got.id, jid);
+    }
+
+    #[test]
+    fn dist_enqueue_req_round_trips_tag_and_pin_fields() {
+        let req = DistEnqueueReq {
+            token: "t".into(),
+            node_id: "hint".into(),
+            title: "T".into(),
+            body: "B".into(),
+            system_prompt: None,
+            required_tags: vec!["codex".into(), "gpu".into()],
+            pinned_node: Some("home".into()),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: DistEnqueueReq = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.required_tags, vec!["codex", "gpu"]);
+        assert_eq!(back.pinned_node.as_deref(), Some("home"));
+    }
+
+    /// 老版 gateway 不带 required_tags/pinned_node，serde 要兜默认。
+    #[test]
+    fn dist_enqueue_req_deserializes_without_tag_fields() {
+        let raw = r#"{"token":"t","node_id":"n","title":"T","body":"B"}"#;
+        let req: DistEnqueueReq = serde_json::from_str(raw).unwrap();
+        assert!(req.required_tags.is_empty());
+        assert!(req.pinned_node.is_none());
     }
 
     #[test]
