@@ -158,7 +158,11 @@ impl DistController {
     pub async fn pull(&self, node_id: &str) -> Option<DistJob> {
         let mut g = self.inner.lock().await;
         g.nodes.entry(node_id.to_string()).or_default().last_seen = Some(Instant::now());
-        let job = g.queues.entry(node_id.to_string()).or_default().pop_front()?;
+        let job = g
+            .queues
+            .entry(node_id.to_string())
+            .or_default()
+            .pop_front()?;
         g.inflight.insert(job.id.clone(), job.clone());
         drop(g);
         let _ = self.bus.publish(Event {
@@ -177,10 +181,7 @@ impl DistController {
 
     pub async fn report(&self, req: DistReportReq) -> bool {
         let mut g = self.inner.lock().await;
-        g.nodes
-            .entry(req.node_id.clone())
-            .or_default()
-            .last_seen = Some(Instant::now());
+        g.nodes.entry(req.node_id.clone()).or_default().last_seen = Some(Instant::now());
         let existed = g.inflight.remove(&req.job_id).is_some();
         g.finished.insert(req.job_id.clone(), req.clone());
         drop(g);
@@ -341,9 +342,7 @@ fn resolve_token(token: Option<String>) -> Result<String> {
         return Ok(t);
     }
     std::env::var(DIST_TOKEN_ENV).with_context(|| {
-        format!(
-            "missing dist token: pass --token or set ${DIST_TOKEN_ENV} environment variable"
-        )
+        format!("missing dist token: pass --token or set ${DIST_TOKEN_ENV} environment variable")
     })
 }
 
