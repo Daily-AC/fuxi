@@ -751,6 +751,37 @@ async fn heartbeat_handler(
     .into_response()
 }
 
+/// 后台 sweep tick——每 30s 扫一次 `last_seen > STALE_SECS` 的 worker，把它们
+/// 的 inflight 回滚到 global_queue 前端。`up`/`repl` 启动 controller 时调一次
+/// 即可，返回 `JoinHandle` 供调用方持有（目前没关心 lifetime，`tokio::spawn`
+/// 足矣；daemon 下线时 tokio runtime 一起终结）。
+///
+/// 阈值 60s = 两次 worker 心跳间隔的合理上限。worker 每 10s 心跳，5-6 次丢包
+/// 才会超，通常意味着进程真死或 controller 侧丢数据，回收是对的。
+pub fn spawn_sweep_task(ctrl: Arc<DistController>) {
+    const TICK_SECS: u64 = 30;
+    const STALE_SECS: u64 = 60;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(TICK_SECS));
+        // 跳过 tokio interval 的 immediate first tick——controller 刚起，
+        // 任何 worker 都还没 register，扫一遍无意义还制造启动噪音。
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let recycled = ctrl
+                .sweep_stale(Instant::now(), Duration::from_secs(STALE_SECS))
+                .await;
+            for (node_id, jobs) in recycled {
+                tracing::warn!(
+                    node_id = %node_id,
+                    jobs = ?jobs,
+                    "sweep: recycled inflight from stale worker back to queue front"
+                );
+            }
+        }
+    });
+}
+
 pub fn router(ctrl: Arc<DistController>) -> Router {
     Router::new()
         .route("/dist/register", post(register_handler))
@@ -871,6 +902,46 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
         .error_for_status()
         .context("dist register non-2xx")?;
 
+    // Phase 3c-2 · worker 端 inflight 跟踪 + 心跳任务。
+    //
+    // 主循环 pull 到 job 时 insert、report 之前 remove——让 controller 能
+    // 经心跳对账得到真实状态，不依赖 pull/report 两侧往返包都不丢。
+    //
+    // 心跳 task 每 10s 发一次，controller 30s 阈值 = 3 次丢包才开始怀疑
+    // worker 死。第一次心跳立即发，让 controller 知道我刚起、inflight 是空。
+    let inflight: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+    {
+        let hb_inflight = inflight.clone();
+        let hb_token = token.clone();
+        let hb_node = args.node.clone();
+        let hb_controller = controller.clone();
+        let hb_client = client.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                let snapshot: Vec<String> = {
+                    let g = hb_inflight.lock().await;
+                    g.iter().cloned().collect()
+                };
+                let req = DistHeartbeatReq {
+                    token: hb_token.clone(),
+                    node_id: hb_node.clone(),
+                    inflight: snapshot,
+                };
+                let _ = hb_client
+                    .post(format!("{hb_controller}/dist/heartbeat"))
+                    .json(&req)
+                    .send()
+                    .await;
+                // 忽略 ack 的 cancel_pending——cancel 主路径是 push_progress
+                // 的 should_cancel（run_codex_job 内已实装）。未来 worker 支持
+                // 并发多 job 时再用 ack 路径定向 kill 某个 child。
+            }
+        });
+    }
+
     loop {
         let pull = client
             .get(format!("{controller}/dist/pull"))
@@ -907,6 +978,7 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
         };
 
         let job_id = job.id.clone();
+        inflight.lock().await.insert(job_id.clone());
         let started = Instant::now();
         let ctx = WorkerCtx {
             client: &client,
@@ -919,6 +991,7 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
             Ok(pair) => pair,
             Err(e) => (false, format!("worker run error: {e}")),
         };
+        inflight.lock().await.remove(&job_id);
         let _ = client
             .post(format!("{controller}/dist/report"))
             .json(&DistReportReq {

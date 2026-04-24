@@ -119,6 +119,11 @@ pub async fn run(args: Args) -> Result<()> {
         .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok());
     let firehose_router = if let Some(token) = dist_token {
         let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
+        // Phase 3c-2: 起后台 sweep tick——30s 扫一次，凡 last_seen > 60s 的 worker
+        // 都把它的 inflight 回滚到全局 queue 前端。让 dead worker 自愈，不用 smoke
+        // 当天那样手动补 report。60s 阈值 = 两次心跳间隔（worker 每 10s 发一次，6
+        // 次不到是 60s）——给网络抖动留 buffer，但又不至于让挂机 job 无限霸位。
+        crate::dist::spawn_sweep_task(dist_ctrl.clone());
         firehose_router.merge(crate::dist::router(dist_ctrl))
     } else {
         tracing::warn!(
