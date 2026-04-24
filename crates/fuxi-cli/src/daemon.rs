@@ -27,6 +27,7 @@ use fuxi_scheduler::store::{FireCause, NewTrigger};
 use fuxi_scheduler::{Keeper, TriggerSpec, TriggerStore, new_trigger_id};
 use fuxi_skills as skill_loader;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -526,12 +527,18 @@ struct DistGatewayConfig {
     poll_ms: u64,
 }
 
-/// 远端网关门客：把 dispatch 转成 `/dist/enqueue`，再轮询 `/dist/job` 回传结果。
+/// 远端网关门客：把 dispatch 转成 `/dist/enqueue`，再轮询 `/dist/progress` 拿增量。
 ///
 /// 这让玄女保持现有 spawn/dispatch 心智，底层可把 codex 执行下沉到公网网关节点。
 struct DistGatewayAgent {
     card: AgentCard,
     cfg: DistGatewayConfig,
+    /// 活跃的 `task_id → job_id` 映射——cancel 时据此回查 controller 的 job id。
+    ///
+    /// 每次 dispatch 在拿到 enqueue 响应后插入，dispatch 完成（无论 ok / err /
+    /// cancel）时移除。并发 dispatch 合法（Task 层可能把一个 agent 当 one-shot
+    /// spawn，理论上不会并发，但 shelf 回收慢时容许这个组合）。
+    active: Arc<tokio::sync::Mutex<HashMap<TaskId, String>>>,
 }
 
 impl DistGatewayAgent {
@@ -544,6 +551,7 @@ impl DistGatewayAgent {
                 status: AgentStatus::Idle,
             },
             cfg,
+            active: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -558,6 +566,7 @@ impl Agent for DistGatewayAgent {
         let (tx, rx) = mpsc::channel::<Event>(32);
         let cfg = self.cfg.clone();
         let aid = self.card.id;
+        let active = self.active.clone();
         // role 心智来自 loader 写入的 profile.system_prompt（同本地 CodexAgent）
         // ——worker 侧会 prepend 到 prompt 头部。空串则不填，省 bytes。
         let system_prompt = {
@@ -612,11 +621,15 @@ impl Agent for DistGatewayAgent {
                 }
             };
 
+            // 记 active 映射供 cancel 回查 job_id。loop 结束时统一移除
+            // （见 'body 标签的 break）。
+            active.lock().await.insert(task.id, job_id.clone());
+
             // 流式轮询 progress：每拿到一批增量 chunk 就按 kind emit 事件；
             // done=true 时 emit 终态。不再走老的"一次性 AgentResponded(final_output)"
             // ——长任务用户不用等黑盒，每几百毫秒能看到增量。
             let mut cursor: u64 = 0;
-            loop {
+            'body: loop {
                 tokio::time::sleep(std::time::Duration::from_millis(cfg.poll_ms)).await;
                 let poll = client
                     .get(format!("{controller}/dist/progress"))
@@ -684,8 +697,9 @@ impl Agent for DistGatewayAgent {
                     }
                 };
                 let _ = emit_event(&tx, aid, task.id, terminal).await;
-                return;
+                break 'body;
             }
+            active.lock().await.remove(&task.id);
         });
         Ok(rx)
     }
@@ -696,10 +710,38 @@ impl Agent for DistGatewayAgent {
         ))
     }
 
-    async fn cancel(&self, _task_id: TaskId) -> fuxi_core::Result<()> {
-        Err(fuxi_core::CoreError::Other(
-            "dist gateway worker does not support cancel yet".into(),
-        ))
+    async fn cancel(&self, task_id: TaskId) -> fuxi_core::Result<()> {
+        // 查活跃 task→job 映射；无匹配视作 no-op（本地/分布式混合 shelf 下
+        // 上层可能向任意 agent 发 cancel，不该因为 map miss 就报错）。
+        let job_id = match self.active.lock().await.get(&task_id).cloned() {
+            Some(id) => id,
+            None => {
+                tracing::debug!(agent = %self.card.id, task = %task_id, "dist gateway cancel ignored: no active job");
+                return Ok(());
+            }
+        };
+        let url = format!("{}/dist/cancel", self.cfg.controller.trim_end_matches('/'));
+        let res = Client::new()
+            .post(url)
+            .json(&crate::dist::DistCancelReq {
+                token: self.cfg.token.clone(),
+                job_id: job_id.clone(),
+            })
+            .send()
+            .await;
+        match res {
+            Ok(r) if r.status().is_success() => {
+                tracing::info!(agent = %self.card.id, task = %task_id, job = %job_id, "dist gateway cancel posted");
+                Ok(())
+            }
+            Ok(r) => Err(fuxi_core::CoreError::Other(format!(
+                "dist gateway cancel non-2xx: {}",
+                r.status()
+            ))),
+            Err(e) => Err(fuxi_core::CoreError::Other(format!(
+                "dist gateway cancel failed: {e}"
+            ))),
+        }
     }
 
     async fn shutdown(&self) -> fuxi_core::Result<()> {

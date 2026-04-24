@@ -15,7 +15,7 @@ use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_events::EventBus;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -154,6 +154,26 @@ pub struct DistProgressAck {
     pub accepted: usize,
     /// 本批结束后 job 在 controller 端的最大 seq——worker 可以对账。
     pub last_seq: u64,
+    /// controller 侧已收到对该 job 的 cancel 指令。worker 看到 true 就
+    /// 杀 codex 子进程并以 `ok=false, output="cancelled"` 走 final report。
+    ///
+    /// 用 ack 捎带而非独立 endpoint：worker 每次 flush 自然到 controller，
+    /// 不需要额外轮询循环。代价是"无输出时段的 cancel"要等到下一次 flush
+    /// 才生效——Phase 3 再视需要加独立 cancel-poll 通道。
+    #[serde(default)]
+    pub should_cancel: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistCancelReq {
+    pub token: String,
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistCancelResp {
+    /// 成功记下 cancel flag（job 不存在也返回 true，无状态幂等）。
+    pub accepted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +211,8 @@ struct DistInner {
     progress: HashMap<String, Vec<ProgressChunk>>,
     /// job_id → 下一个要分配的 seq（从 1 开始）。
     progress_next_seq: HashMap<String, u64>,
+    /// 已收到 cancel 指令的 job。worker 下一次 push 时从 ack 得知。
+    cancelled: HashSet<String>,
 }
 
 /// controller 进程内状态。
@@ -325,7 +347,7 @@ impl DistController {
         node_id: &str,
         job_id: &str,
         pushes: Vec<ProgressPush>,
-    ) -> (usize, u64) {
+    ) -> (usize, u64, bool) {
         let mut g = self.inner.lock().await;
         g.nodes.entry(node_id.to_string()).or_default().last_seen = Some(Instant::now());
         // 先把 next_seq 拷出来释放 progress_next_seq 的借用，避免 progress 那边的
@@ -346,7 +368,15 @@ impl DistController {
             accepted += 1;
         }
         g.progress_next_seq.insert(job_id.to_string(), next_seq);
-        (accepted, last_seq)
+        let should_cancel = g.cancelled.contains(job_id);
+        (accepted, last_seq, should_cancel)
+    }
+
+    /// 标记 job 已被取消。worker 下一次 push_progress 的 ack 里会看到
+    /// should_cancel=true。幂等——对不存在或已 finished 的 job 也返回 true。
+    pub async fn cancel_job(&self, job_id: &str) {
+        let mut g = self.inner.lock().await;
+        g.cancelled.insert(job_id.to_string());
     }
 
     /// Gateway 短轮询：返回 `seq > after` 的所有 chunks + job 终态。
@@ -451,10 +481,15 @@ async fn progress_post_handler(
     if req.token != ctrl.token() {
         return unauthorized().into_response();
     }
-    let (accepted, last_seq) = ctrl
+    let (accepted, last_seq, should_cancel) = ctrl
         .push_progress(&req.node_id, &req.job_id, req.chunks)
         .await;
-    Json(DistProgressAck { accepted, last_seq }).into_response()
+    Json(DistProgressAck {
+        accepted,
+        last_seq,
+        should_cancel,
+    })
+    .into_response()
 }
 
 async fn progress_get_handler(
@@ -467,6 +502,17 @@ async fn progress_get_handler(
     Json(ctrl.pull_progress_after(&q.job_id, q.after).await).into_response()
 }
 
+async fn cancel_handler(
+    State(ctrl): State<Arc<DistController>>,
+    Json(req): Json<DistCancelReq>,
+) -> impl IntoResponse {
+    if req.token != ctrl.token() {
+        return unauthorized().into_response();
+    }
+    ctrl.cancel_job(&req.job_id).await;
+    Json(DistCancelResp { accepted: true }).into_response()
+}
+
 pub fn router(ctrl: Arc<DistController>) -> Router {
     Router::new()
         .route("/dist/register", post(register_handler))
@@ -476,6 +522,7 @@ pub fn router(ctrl: Arc<DistController>) -> Router {
         .route("/dist/job", get(job_status_handler))
         .route("/dist/progress", post(progress_post_handler))
         .route("/dist/progress", get(progress_get_handler))
+        .route("/dist/cancel", post(cancel_handler))
         .with_state(ctrl)
 }
 
@@ -657,11 +704,13 @@ const PROGRESS_FLUSH_BATCH: usize = 4;
 /// 或者攒够这个时间就 flush——即使没满 batch。
 const PROGRESS_FLUSH_INTERVAL_MS: u64 = 200;
 
-async fn flush_progress(ctx: &WorkerCtx<'_>, job_id: &str, chunks: Vec<ProgressPush>) {
+/// Flush 一批 progress chunk 到 controller。返回 true 表示 controller 告知
+/// 该 job 已被 cancel，worker 应立即杀 child 并走终止 report。
+async fn flush_progress(ctx: &WorkerCtx<'_>, job_id: &str, chunks: Vec<ProgressPush>) -> bool {
     if chunks.is_empty() {
-        return;
+        return false;
     }
-    let _ = ctx
+    let resp = ctx
         .client
         .post(format!("{}/dist/progress", ctx.controller))
         .json(&DistProgressReq {
@@ -672,6 +721,14 @@ async fn flush_progress(ctx: &WorkerCtx<'_>, job_id: &str, chunks: Vec<ProgressP
         })
         .send()
         .await;
+    match resp {
+        Ok(r) if r.status().is_success() => r
+            .json::<DistProgressAck>()
+            .await
+            .map(|ack| ack.should_cancel)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// codex wire event → progress push（`None` 表示此事件不该上报给 gateway）。
@@ -765,6 +822,7 @@ async fn run_codex_job(
     let mut last_flush = Instant::now();
     let mut final_text = String::new();
     let mut got_error = false;
+    let mut got_cancel = false;
 
     loop {
         let line_res = tokio::time::timeout(
@@ -805,8 +863,13 @@ async fn run_codex_job(
             && last_flush.elapsed() >= Duration::from_millis(PROGRESS_FLUSH_INTERVAL_MS);
         if due_to_batch || due_to_time || (eof && !buffer.is_empty()) {
             let batch = std::mem::take(&mut buffer);
-            flush_progress(ctx, &job.id, batch).await;
+            let cancel = flush_progress(ctx, &job.id, batch).await;
             last_flush = Instant::now();
+            if cancel {
+                got_cancel = true;
+                let _ = child.start_kill();
+                break;
+            }
         }
         if eof {
             break;
@@ -823,8 +886,17 @@ async fn run_codex_job(
         None => String::new(),
     };
 
-    let ok = status.success() && !got_error;
-    let output = if !final_text.trim().is_empty() {
+    let ok = status.success() && !got_error && !got_cancel;
+    let output = if got_cancel {
+        if final_text.trim().is_empty() {
+            "cancelled by controller".to_string()
+        } else {
+            format!(
+                "cancelled by controller\n---\n{}",
+                truncate_text(&final_text, 800)
+            )
+        }
+    } else if !final_text.trim().is_empty() {
         truncate_text(&final_text, 1200)
     } else if !stderr_text.trim().is_empty() {
         truncate_text(stderr_text.trim(), 1200)
@@ -928,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn push_progress_assigns_monotonic_seq_per_job() {
         let ctrl = test_ctrl().await;
-        let (acc1, last1) = ctrl
+        let (acc1, last1, cancel1) = ctrl
             .push_progress(
                 "nodeA",
                 "job-1",
@@ -940,11 +1012,45 @@ mod tests {
             .await;
         assert_eq!(acc1, 2);
         assert_eq!(last1, 2);
-        let (acc2, last2) = ctrl
+        assert!(!cancel1);
+        let (acc2, last2, cancel2) = ctrl
             .push_progress("nodeA", "job-1", vec![push(ProgressKind::Thinking, "嗯")])
             .await;
         assert_eq!(acc2, 1);
         assert_eq!(last2, 3);
+        assert!(!cancel2);
+    }
+
+    /// cancel_job 标记后，下一次 push_progress 的 ack should_cancel=true。
+    #[tokio::test]
+    async fn push_progress_ack_reflects_cancellation() {
+        let ctrl = test_ctrl().await;
+        ctrl.cancel_job("job-x").await;
+        let (_, _, should_cancel) = ctrl
+            .push_progress(
+                "nodeA",
+                "job-x",
+                vec![push(ProgressKind::AssistantText, "a")],
+            )
+            .await;
+        assert!(
+            should_cancel,
+            "cancelled job 的 push ack 应返 should_cancel=true"
+        );
+    }
+
+    /// 未 cancel 的 job ack 不该搞错成 true。
+    #[tokio::test]
+    async fn push_progress_ack_false_for_non_cancelled() {
+        let ctrl = test_ctrl().await;
+        let (_, _, should_cancel) = ctrl
+            .push_progress(
+                "nodeA",
+                "job-y",
+                vec![push(ProgressKind::AssistantText, "a")],
+            )
+            .await;
+        assert!(!should_cancel);
     }
 
     #[tokio::test]
@@ -1004,7 +1110,7 @@ mod tests {
             vec![push(ProgressKind::AssistantText, "a")],
         )
         .await;
-        let (_, last_b) = ctrl
+        let (_, last_b, _) = ctrl
             .push_progress(
                 "nodeA",
                 "job-B",
