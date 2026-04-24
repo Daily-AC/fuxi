@@ -2,20 +2,24 @@
 //!
 //! 目标：让远端机器主动连接 controller 拉任务并回传结果，不依赖 controller 入站到家宽。
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Args as ClapArgs, Subcommand};
+use fuxi_agent_codex::CodexEvent;
+use fuxi_agent_codex::parser::ItemPhase;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_events::EventBus;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -605,9 +609,15 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
 
         let job_id = job.id.clone();
         let started = Instant::now();
-        let run = run_codex_job(&args.codex_bin, &job).await;
+        let ctx = WorkerCtx {
+            client: &client,
+            controller: &controller,
+            token: &token,
+            node_id: &args.node,
+        };
+        let run = run_codex_job(&ctx, &args.codex_bin, &job).await;
         let (ok, output) = match run {
-            Ok(text) => (true, text),
+            Ok(pair) => pair,
             Err(e) => (false, format!("worker run error: {e}")),
         };
         let _ = client
@@ -634,7 +644,104 @@ fn build_codex_prompt_from_job(job: &DistJob) -> String {
     fuxi_agent_codex::compose_prompt(system, &job.title, &job.body)
 }
 
-async fn run_codex_job(codex_bin: &str, job: &DistJob) -> Result<String> {
+/// worker 运行上下文——push progress 需要的 HTTP 目标。
+struct WorkerCtx<'a> {
+    client: &'a Client,
+    controller: &'a str,
+    token: &'a str,
+    node_id: &'a str,
+}
+
+/// 攒够这么多条就 flush 一次（无论时钟）。
+const PROGRESS_FLUSH_BATCH: usize = 4;
+/// 或者攒够这个时间就 flush——即使没满 batch。
+const PROGRESS_FLUSH_INTERVAL_MS: u64 = 200;
+
+async fn flush_progress(ctx: &WorkerCtx<'_>, job_id: &str, chunks: Vec<ProgressPush>) {
+    if chunks.is_empty() {
+        return;
+    }
+    let _ = ctx
+        .client
+        .post(format!("{}/dist/progress", ctx.controller))
+        .json(&DistProgressReq {
+            token: ctx.token.to_string(),
+            node_id: ctx.node_id.to_string(),
+            job_id: job_id.to_string(),
+            chunks,
+        })
+        .send()
+        .await;
+}
+
+/// codex wire event → progress push（`None` 表示此事件不该上报给 gateway）。
+///
+/// 映射策略：
+/// - `AgentMessage` → `AssistantText`（模型对用户的回复文本）
+/// - `CommandStarted` / `CommandCompleted` → `ToolCall`
+/// - `Error` / `TurnFailed` → `Error`
+/// - `ItemOther` 的 completed 阶段 → `Thinking`（reasoning 等）
+/// - 其他协议级事件（ThreadStarted / TurnStarted / TurnCompleted / Unknown）静默
+fn codex_event_to_push(ev: &CodexEvent) -> Option<ProgressPush> {
+    match ev {
+        CodexEvent::AgentMessage { text, .. } => Some(ProgressPush {
+            kind: ProgressKind::AssistantText,
+            text: text.clone(),
+        }),
+        CodexEvent::CommandStarted { command, .. } => Some(ProgressPush {
+            kind: ProgressKind::ToolCall,
+            text: format!("$ {command}"),
+        }),
+        CodexEvent::CommandCompleted {
+            command,
+            exit_code,
+            output_preview,
+            ..
+        } => {
+            let marker = match exit_code {
+                Some(0) | None => String::new(),
+                Some(n) => format!(" [exit={n}]"),
+            };
+            let preview: String = output_preview.chars().take(400).collect();
+            let text = if preview.trim().is_empty() {
+                format!("$ {command}{marker}")
+            } else {
+                format!("$ {command}{marker}\n{preview}")
+            };
+            Some(ProgressPush {
+                kind: ProgressKind::ToolCall,
+                text,
+            })
+        }
+        CodexEvent::Error { message } => Some(ProgressPush {
+            kind: ProgressKind::Error,
+            text: message.clone(),
+        }),
+        CodexEvent::TurnFailed { reason } => Some(ProgressPush {
+            kind: ProgressKind::Error,
+            text: reason.clone(),
+        }),
+        CodexEvent::ItemOther {
+            phase: ItemPhase::Completed,
+            item_type,
+            ..
+        } => Some(ProgressPush {
+            kind: ProgressKind::Thinking,
+            text: format!("[{item_type}] completed"),
+        }),
+        _ => None,
+    }
+}
+
+/// 流式执行 codex 任务：spawn + 按行读 stdout + 增量 POST progress。
+///
+/// 返回 `(ok, final_output)`——外层负责发 `/dist/report`。`final_output` 是
+/// 整轮回复的文本汇总（给老 `/dist/job` 非流式消费者兜底），已做长度截断。
+async fn run_codex_job(
+    ctx: &WorkerCtx<'_>,
+    codex_bin: &str,
+    job: &DistJob,
+) -> Result<(bool, String)> {
     let prompt = build_codex_prompt_from_job(job);
     let cfg = fuxi_agent_codex::CodexLaunchConfig {
         binary: codex_bin.to_string(),
@@ -642,62 +749,90 @@ async fn run_codex_job(codex_bin: &str, job: &DistJob) -> Result<String> {
     };
     let mut args = cfg.build_args();
     args.push(prompt);
-    let out = Command::new(codex_bin)
+
+    let mut child = Command::new(codex_bin)
         .args(&args)
-        .output()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("spawn codex binary failed: {codex_bin}"))?;
 
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let mut summary = extract_text_summary(&stdout);
-    if summary.is_empty() {
-        summary = stdout.trim().to_string();
-    }
-    if summary.is_empty() {
-        summary = stderr.trim().to_string();
-    }
-    if summary.is_empty() {
-        return Err(anyhow!("codex produced empty stdout/stderr"));
-    }
-    if !out.status.success() {
-        return Err(anyhow!("codex exited with {}: {}", out.status, summary));
-    }
-    Ok(summary)
-}
+    let stdout = child.stdout.take().context("codex stdout pipe missing")?;
+    let stderr = child.stderr.take();
+    let mut reader = BufReader::new(stdout).lines();
 
-fn extract_text_summary(stdout: &str) -> String {
-    let mut texts = Vec::new();
-    for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        collect_text_fields(&v, &mut texts);
-    }
-    let joined = texts.join("\n");
-    truncate_text(&joined, 1200)
-}
+    let mut buffer: Vec<ProgressPush> = Vec::new();
+    let mut last_flush = Instant::now();
+    let mut final_text = String::new();
+    let mut got_error = false;
 
-fn collect_text_fields(v: &serde_json::Value, out: &mut Vec<String>) {
-    match v {
-        serde_json::Value::Object(map) => {
-            for (k, vv) in map {
-                if k == "text"
-                    && let Some(s) = vv.as_str()
-                    && !s.trim().is_empty()
+    loop {
+        let line_res = tokio::time::timeout(
+            Duration::from_millis(PROGRESS_FLUSH_INTERVAL_MS),
+            reader.next_line(),
+        )
+        .await;
+
+        let mut eof = false;
+        match line_res {
+            Ok(Ok(Some(line))) => {
+                if !line.trim().is_empty()
+                    && let Ok(ev) = fuxi_agent_codex::parse_line(&line)
+                    && let Some(push) = codex_event_to_push(&ev)
                 {
-                    out.push(s.trim().to_string());
+                    if matches!(push.kind, ProgressKind::AssistantText) {
+                        if !final_text.is_empty() {
+                            final_text.push('\n');
+                        }
+                        final_text.push_str(&push.text);
+                    }
+                    if matches!(push.kind, ProgressKind::Error) {
+                        got_error = true;
+                    }
+                    buffer.push(push);
                 }
-                collect_text_fields(vv, out);
             }
-        }
-        serde_json::Value::Array(arr) => {
-            for vv in arr {
-                collect_text_fields(vv, out);
+            Ok(Ok(None)) => eof = true,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "codex stdout read failed");
+                eof = true;
             }
+            Err(_) => { /* 200ms timeout —— 落盘机会 */ }
         }
-        _ => {}
+
+        let due_to_batch = buffer.len() >= PROGRESS_FLUSH_BATCH;
+        let due_to_time = !buffer.is_empty()
+            && last_flush.elapsed() >= Duration::from_millis(PROGRESS_FLUSH_INTERVAL_MS);
+        if due_to_batch || due_to_time || (eof && !buffer.is_empty()) {
+            let batch = std::mem::take(&mut buffer);
+            flush_progress(ctx, &job.id, batch).await;
+            last_flush = Instant::now();
+        }
+        if eof {
+            break;
+        }
     }
+
+    let status = child.wait().await.context("waiting codex child")?;
+    let stderr_text = match stderr {
+        Some(mut se) => {
+            let mut s = String::new();
+            let _ = se.read_to_string(&mut s).await;
+            s
+        }
+        None => String::new(),
+    };
+
+    let ok = status.success() && !got_error;
+    let output = if !final_text.trim().is_empty() {
+        truncate_text(&final_text, 1200)
+    } else if !stderr_text.trim().is_empty() {
+        truncate_text(stderr_text.trim(), 1200)
+    } else {
+        // 兜底：既没 AgentMessage 也没 stderr，留个 status 线索
+        format!("codex exited with {status}")
+    };
+    Ok((ok, output))
 }
 
 fn truncate_text(s: &str, max: usize) -> String {
@@ -715,15 +850,6 @@ fn truncate_text(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extract_text_summary_collects_nested_text_fields() {
-        let raw = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}
-{"type":"tool","x":{"text":"world"}}"#;
-        let s = extract_text_summary(raw);
-        assert!(s.contains("hello"), "got: {s}");
-        assert!(s.contains("world"), "got: {s}");
-    }
 
     fn job_for(title: &str, body: &str, system: Option<&str>) -> DistJob {
         DistJob {
@@ -886,6 +1012,78 @@ mod tests {
             )
             .await;
         assert_eq!(last_b, 1, "job-B 的 seq 从 1 起，不受 job-A 影响");
+    }
+
+    #[test]
+    fn codex_event_agent_message_maps_to_assistant_text() {
+        let ev = CodexEvent::AgentMessage {
+            item_id: "i".into(),
+            text: "hello".into(),
+        };
+        let p = codex_event_to_push(&ev).unwrap();
+        assert_eq!(p.kind, ProgressKind::AssistantText);
+        assert_eq!(p.text, "hello");
+    }
+
+    #[test]
+    fn codex_event_command_events_map_to_tool_call() {
+        let started = CodexEvent::CommandStarted {
+            item_id: "i".into(),
+            command: "ls".into(),
+            raw_item: serde_json::Value::Null,
+        };
+        assert_eq!(
+            codex_event_to_push(&started).unwrap().kind,
+            ProgressKind::ToolCall
+        );
+
+        let completed = CodexEvent::CommandCompleted {
+            item_id: "i".into(),
+            command: "ls".into(),
+            exit_code: Some(1),
+            status: "failed".into(),
+            output_preview: "oops".into(),
+        };
+        let p = codex_event_to_push(&completed).unwrap();
+        assert_eq!(p.kind, ProgressKind::ToolCall);
+        assert!(p.text.contains("exit=1"), "got: {}", p.text);
+        assert!(p.text.contains("oops"), "got: {}", p.text);
+    }
+
+    #[test]
+    fn codex_event_errors_map_to_error_kind() {
+        let p = codex_event_to_push(&CodexEvent::Error {
+            message: "boom".into(),
+        })
+        .unwrap();
+        assert_eq!(p.kind, ProgressKind::Error);
+        let p = codex_event_to_push(&CodexEvent::TurnFailed {
+            reason: "rate".into(),
+        })
+        .unwrap();
+        assert_eq!(p.kind, ProgressKind::Error);
+    }
+
+    #[test]
+    fn codex_event_protocol_meta_events_are_silent() {
+        assert!(
+            codex_event_to_push(&CodexEvent::TurnStarted).is_none(),
+            "TurnStarted 不该上报"
+        );
+        assert!(
+            codex_event_to_push(&CodexEvent::ThreadStarted {
+                thread_id: "t".into()
+            })
+            .is_none(),
+            "ThreadStarted 不该上报"
+        );
+        assert!(
+            codex_event_to_push(&CodexEvent::TurnCompleted {
+                usage: serde_json::Value::Null
+            })
+            .is_none(),
+            "TurnCompleted 不该上报"
+        );
     }
 
     #[tokio::test]
