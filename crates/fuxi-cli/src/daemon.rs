@@ -761,15 +761,8 @@ async fn spawn_by_role(
         return Ok(fuxi.insert_agent(agent, None).await);
     }
 
-    let remote_host = metadata_string(&metadata_json, "remote_host");
-
     let kind: WorkerKind = match cli.as_str() {
         "claude-code" => {
-            if let Some(host) = remote_host.as_deref() {
-                return Err(anyhow!(
-                    "role={role} 配置了 metadata.remote_host={host:?}，但 claude-code 远端派活暂不支持（cc 依赖本地 WS 反连）"
-                ));
-            }
             // P2 召回前提：cc 必须 persist session 才能下次 --resume 命中。
             // CcLaunchConfig 默认在 resume_session_id 和 session_id **都 None** 时
             // 加 `--no-session-persistence`——sink 记的 session_id 第二轮 resume 即死。
@@ -803,7 +796,7 @@ async fn spawn_by_role(
                     "codex 不支持 session resume；worktree 仍会复用（如有）"
                 );
             }
-            WorkerKind::Codex(build_codex_launch_config(role, remote_host, &metadata_json))
+            WorkerKind::Codex(CodexLaunchConfig::default())
         }
         other => {
             return Err(anyhow!(
@@ -826,37 +819,6 @@ async fn spawn_by_role(
             .await
             .map_err(|e| anyhow!(e.to_string()))
     }
-}
-
-/// 按角色 metadata 构造 codex 启动配置。
-///
-/// 支持分布式最小能力：
-/// - `metadata.remote_host: "<ssh-host>"` 时通过 ssh 远端执行 codex
-/// - 可选 `metadata.remote_codex_bin: "codex"` 覆盖远端 codex 可执行名
-/// - 可选 `metadata.remote_ssh_opts`（字符串或数组）透传 ssh 选项
-fn build_codex_launch_config(
-    role: &str,
-    remote_host: Option<String>,
-    metadata: &serde_json::Value,
-) -> CodexLaunchConfig {
-    let mut cfg = CodexLaunchConfig::default();
-    if let Some(host) = remote_host {
-        let remote_bin =
-            metadata_string(metadata, "remote_codex_bin").unwrap_or_else(|| "codex".to_string());
-        let mut prefix = metadata_string_list(metadata, "remote_ssh_opts").unwrap_or_default();
-        prefix.push(host.clone());
-        prefix.push("--".to_string());
-        prefix.push(remote_bin.clone());
-        cfg.binary = "ssh".to_string();
-        cfg.argv_prefix = prefix;
-        tracing::info!(
-            role = %role,
-            remote_host = %host,
-            remote_bin = %remote_bin,
-            "spawn codex worker via ssh"
-        );
-    }
-    cfg
 }
 
 fn build_dist_gateway_config(
@@ -972,28 +934,6 @@ fn metadata_u64(metadata: &serde_json::Value, key: &str) -> Option<u64> {
         .as_object()
         .and_then(|m| m.get(key))
         .and_then(serde_json::Value::as_u64)
-}
-
-fn metadata_string_list(metadata: &serde_json::Value, key: &str) -> Option<Vec<String>> {
-    let raw = metadata.as_object().and_then(|m| m.get(key))?;
-    if let Some(s) = raw.as_str() {
-        let items = s
-            .split_whitespace()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        return Some(items);
-    }
-    let arr = raw.as_array()?;
-    Some(
-        arr.iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>(),
-    )
 }
 
 /// P2 召回：把 `--recall-task` / `--recall-role` 翻成 `RecallHandle`。
@@ -1267,35 +1207,6 @@ mod tests {
             Response::Err { error } => assert!(error.contains("无召回记录"), "got: {error}"),
             other => panic!("expected Err, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn metadata_string_list_accepts_array() {
-        let metadata = serde_json::json!({
-            "remote_ssh_opts": ["-i", "~/.ssh/id_ed25519"]
-        });
-        let got = metadata_string_list(&metadata, "remote_ssh_opts").unwrap();
-        assert_eq!(got, vec!["-i", "~/.ssh/id_ed25519"]);
-    }
-
-    #[test]
-    fn build_codex_launch_config_remote_uses_ssh_prefix() {
-        let metadata = serde_json::json!({
-            "remote_ssh_opts": "-p 2222",
-            "remote_codex_bin": "/usr/local/bin/codex"
-        });
-        let cfg = build_codex_launch_config("luban", Some("home".into()), &metadata);
-        assert_eq!(cfg.binary, "ssh");
-        assert_eq!(
-            cfg.argv_prefix,
-            vec![
-                "-p".to_string(),
-                "2222".to_string(),
-                "home".to_string(),
-                "--".to_string(),
-                "/usr/local/bin/codex".to_string()
-            ]
-        );
     }
 
     #[test]
