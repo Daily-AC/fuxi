@@ -1750,6 +1750,14 @@ impl ReplApp {
                 self.run_command_action(crate::command_registry::CommandAction::Nodes);
                 true
             }
+            "pair" => {
+                self.execute_pair_command();
+                true
+            }
+            "devices" => {
+                self.execute_devices_command(arg);
+                true
+            }
             _ => {
                 self.toasts.push(
                     format!("未知命令 /{cmd}，输入 /help 查看可用命令"),
@@ -1859,7 +1867,33 @@ impl ReplApp {
                 }
             }
             CommandAction::Nodes => self.execute_nodes_command(),
+            CommandAction::Pair => self.execute_pair_command(),
+            CommandAction::Devices(arg) => self.execute_devices_command(arg.as_deref()),
         }
+    }
+
+    /// `/pair` handler——β 阶段先做 placeholder：toast 提醒用户 IM daemon 未连。
+    /// `fuxi im start` 子命令（ζ）落地后会持有共享 `PendingPairs`，届时这里
+    /// 改成调 `pairs.start(DEFAULT_PIN_TTL)` 并把 PIN 显示在 toast / overlay 里。
+    pub(crate) fn execute_pair_command(&mut self) {
+        self.toasts.push(
+            "IM 配对：请先启动 fuxi-im daemon（待 ζ 接入）",
+            crate::toast::ToastVariant::Info,
+            Duration::from_secs(5),
+        );
+    }
+
+    /// `/devices` handler——同上，先 toast；接 daemon 后改读 `device_tokens` 表。
+    pub(crate) fn execute_devices_command(&mut self, arg: Option<&str>) {
+        let msg = match arg {
+            Some(a) if a.starts_with("revoke") => "设备吊销：fuxi-im daemon 接入后可用".to_string(),
+            _ => "设备列表：fuxi-im daemon 接入后可用".to_string(),
+        };
+        self.toasts.push(
+            msg,
+            crate::toast::ToastVariant::Info,
+            Duration::from_secs(4),
+        );
     }
 
     /// `/theme` handler：

@@ -15,7 +15,13 @@
 mod handlers;
 mod router;
 
+pub mod auth;
+pub mod db;
+pub mod devices;
 pub mod error;
+pub mod middleware;
+pub mod pair;
+pub mod push;
 pub mod state;
 
 pub use error::{Error, Result};
