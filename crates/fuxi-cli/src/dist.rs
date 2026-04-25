@@ -534,8 +534,25 @@ impl DistController {
         }
     }
 
-    /// 注入 SQLite 持久化层。Builder 风格让现有 in-memory-only 测试不破。
-    /// 注入后 enqueue/pull/report/cancel/sweep 立刻开始 dual-write。
+    /// 生产路径推荐 ctor——直接绑定 persistence，等价 `Self::new(token, bus).with_persistence(p)`。
+    /// 单独签名让生产入口 grep 起来一目了然；老 `new()` 留给 in-memory 测试。
+    pub fn new_with_persistence(
+        token: String,
+        bus: EventBus,
+        persistence: Arc<crate::dist_persistence::JobPersistence>,
+    ) -> Self {
+        Self {
+            token,
+            bus,
+            inner: Mutex::new(DistInner::default()),
+            metrics: Arc::new(Metrics::new()),
+            persistence: Some(persistence),
+        }
+    }
+
+    /// 注入 SQLite 持久化层（builder 形态）。让现有 in-memory-only 测试不破：
+    /// `DistController::new(t, b).with_persistence(p)`。
+    /// 生产路径也可直接用 `Self::new_with_persistence(t, b, p)`。
     pub fn with_persistence(
         mut self,
         persistence: Arc<crate::dist_persistence::JobPersistence>,
@@ -546,10 +563,13 @@ impl DistController {
 
     /// γ #3 (gateway restart e2e) 的入口契约：
     ///
-    /// 调用方拿到一个**新** controller（可能 with_persistence 也可能不带；不带时此方法 noop）。
-    /// 本方法读 SQLite，把 'queued' 行按 enqueued_at 升序 push_back 到 global_queue，
-    /// 把 'inflight' 行视作 stale orphans 同样 push_back（push_back 而非 push_front：
-    /// orphan 不抢 queued 的次序，让 sweep tick 把它们当 dead-worker 走也是 OK 路径）。
+    /// 调用方拿到一个**新** controller（可能装了 persistence 也可能没；没装时此方法 noop）。
+    /// 读 SQLite 重建 in-memory queue：
+    /// - 'queued' 行按 enqueued_at 升序 **push_back**（保留原派工次序）
+    /// - 'inflight' 行视作 stale orphans **push_front**（与 sweep_stale 既有语义对齐——
+    ///   `dist.rs` 注释 "push_front 让被回收的 job 优先派发"；orphan 已等过一轮 controller crash，
+    ///   公平起见优先派；新 enqueue 的 queued 排在 orphan 后）
+    /// - 同步把 SQLite 行从 inflight 翻回 queued，避免下次重启又被当 orphan
     ///
     /// 返回 `(queued_n, orphan_n)` 给调用方做 metric / 日志。无 persistence 时返回 `(0, 0)`。
     ///
@@ -568,23 +588,22 @@ impl DistController {
         };
         let queued_n = restored.queued.len();
         let orphan_n = restored.orphans.len();
+        let orphan_ids: Vec<String> = restored.orphans.iter().map(|j| j.id.clone()).collect();
         let mut g = self.inner.lock().await;
+        // 先 push_back queued（保派工次序）；再 orphan 倒序 push_front，最终次序：
+        // [orphan_0, orphan_1, ..., queued_0, queued_1, ...]
         for job in restored.queued {
             g.global_queue.push_back(job);
         }
-        // orphan：当 stale 重 enqueue。in-memory 不写 inflight，让正常 pull 流程接管。
-        // 同步刷一行 SQLite 把 inflight 翻回 queued，避免下次重启又被当 orphan。
-        let orphan_ids: Vec<String> = restored.orphans.iter().map(|j| j.id.clone()).collect();
-        for job in restored.orphans {
-            g.global_queue.push_back(job);
+        for job in restored.orphans.into_iter().rev() {
+            g.global_queue.push_front(job);
         }
         let depth = g.global_queue.len() as i64;
         drop(g);
         self.metrics.queue_depth.set(depth);
         // SQLite 同步——orphan 翻回 queued，否则下次重启它们仍是 inflight 又被当 orphan
-        let persistence_clone = persistence.clone();
         for id in orphan_ids {
-            if let Err(e) = persistence_clone.record_sweep_to_queued(&id).await {
+            if let Err(e) = persistence.record_sweep_to_queued(&id).await {
                 tracing::warn!(job_id = %id, error = %e, "orphan 翻回 queued 失败——下次重启会再当 orphan");
             }
         }
@@ -5386,5 +5405,117 @@ mod tests {
         let (q, o) = ctrl.restore_from_persistence().await;
         assert_eq!(q, 0);
         assert_eq!(o, 0);
+    }
+
+    /// path 4 α #7：restore 后 orphan 排在 restore 之后 enqueue 的 queued 之前。
+    /// 验 push_front 语义（与 sweep_stale 既有 "被回收的 job 优先派发" 注释对齐）。
+    #[tokio::test]
+    async fn restore_orders_orphans_before_queued() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dbpath = tmp.path().join("dist.db");
+
+        // ctrl_a：enqueue 4 个 + pull 全部 → 4 个 inflight，drop 后 controller 死。
+        let bus_a = EventBus::with_memory_store().await.expect("bus");
+        let p_a = Arc::new(JobPersistence::connect_file(&dbpath).await.expect("p"));
+        let ctrl_a =
+            Arc::new(DistController::new("tok".into(), bus_a).with_persistence(p_a.clone()));
+        ctrl_a.register("nodeA".into(), vec![], 4).await;
+        let mut orphan_ids = Vec::new();
+        for label in ["O1", "O2", "O3", "O4"] {
+            orphan_ids.push(
+                ctrl_a
+                    .enqueue(
+                        "h".into(),
+                        label.into(),
+                        "B".into(),
+                        None,
+                        vec![],
+                        None,
+                        String::new(),
+                        vec![],
+                    )
+                    .await,
+            );
+        }
+        for _ in 0..4 {
+            ctrl_a.pull("nodeA").await.expect("pull");
+        }
+        drop(ctrl_a);
+        drop(p_a);
+
+        // ctrl_b：restore 先（4 个 orphan push_front），再 enqueue 2 个新 queued
+        // → pull 顺序应是 [orphans..., new_queueds...]
+        let bus_b = EventBus::with_memory_store().await.expect("bus");
+        let p_b = Arc::new(JobPersistence::connect_file(&dbpath).await.expect("p"));
+        let ctrl_b = Arc::new(DistController::new_with_persistence(
+            "tok".into(),
+            bus_b,
+            p_b.clone(),
+        ));
+        let (qn, on) = ctrl_b.restore_from_persistence().await;
+        assert_eq!(qn, 0);
+        assert_eq!(on, 4);
+        let new_q1 = ctrl_b
+            .enqueue(
+                "h".into(),
+                "NewQ1".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let new_q2 = ctrl_b
+            .enqueue(
+                "h".into(),
+                "NewQ2".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        ctrl_b.register("nodeB".into(), vec![], 10).await;
+        let mut order = Vec::new();
+        while let Some(job) = ctrl_b.pull("nodeB").await {
+            order.push(job.id);
+        }
+        assert_eq!(order.len(), 6);
+        // 头 4 个必为 orphans（顺序 = restored.orphans 顺序，dispatched_at ASC）
+        assert_eq!(&order[..4], &orphan_ids[..]);
+        // 末 2 个是 restore 之后 enqueue 的 fresh queued
+        assert_eq!(order[4], new_q1);
+        assert_eq!(order[5], new_q2);
+    }
+
+    /// path 4 α #8：`new_with_persistence` free-fn ctor smoke test——
+    /// 与 builder 路径行为等价（都启用 dual-write）。
+    #[tokio::test]
+    async fn new_with_persistence_ctor_enables_dual_write() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let p = Arc::new(JobPersistence::connect_memory().await.expect("p"));
+        let ctrl = Arc::new(DistController::new_with_persistence(
+            "tok".into(),
+            bus,
+            p.clone(),
+        ));
+        let job_id = ctrl
+            .enqueue(
+                "h".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let row = p.job_row(&job_id).await.expect("row").expect("exists");
+        assert_eq!(row.state, "queued");
     }
 }
