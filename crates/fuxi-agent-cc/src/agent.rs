@@ -26,7 +26,7 @@ use crate::spawn::{SpawnedCc, spawn_claude};
 use crate::ws_bridge::WsChannel;
 use async_trait::async_trait;
 use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
-use fuxi_core::event::{Event, EventKind, EventMeta};
+use fuxi_core::event::{DeliverableKind, Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::Task;
 use fuxi_core::{CoreError, Result};
@@ -387,6 +387,46 @@ impl Agent for CcAgent {
         self.inner.lock().await.channel.cli_session_id().await
     }
 
+    /// 程序化 nudge 入口（Decision 13）。主路径是 LLM 输出 sentinel JSON 经
+    /// parser 翻 `AgentRequestReview`——本方法供编排层 / 测试 / 未来工具
+    /// 从外部主动让 cc 门客发 review。
+    async fn request_review(
+        &self,
+        task_id: TaskId,
+        deliverable_kind: DeliverableKind,
+        summary: String,
+        artifact_ref: Option<String>,
+    ) -> Result<()> {
+        let event = build_review_event(
+            self.card.id,
+            task_id,
+            deliverable_kind,
+            summary,
+            artifact_ref,
+        );
+
+        // 仿 send_message overflow 路径：clone tx 再锁外发，`active_tx=None`
+        // 时 trace warn——cc 在 dispatch 之前 / shutdown 之后没 active_tx。
+        let tx_opt = self.inner.lock().await.active_tx.clone();
+        if let Some(tx) = tx_opt {
+            if tx.send(event).await.is_err() {
+                tracing::debug!(agent = %self.card.id, "request_review 投递失败：active_tx 已关闭");
+                return Err(CoreError::Other(
+                    "request_review delivery failed: active_tx closed".into(),
+                ));
+            }
+            Ok(())
+        } else {
+            tracing::warn!(
+                agent = %self.card.id,
+                "request_review 无处投递：active_tx=None；调用方应先 dispatch 再 nudge"
+            );
+            Err(CoreError::Other(
+                "request_review failed: no active dispatch (active_tx=None)".into(),
+            ))
+        }
+    }
+
     async fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.status = AgentStatus::Stopping;
@@ -420,6 +460,30 @@ impl Agent for CcAgent {
         inner.status = AgentStatus::Dead;
         tracing::info!(agent = %self.card.id, "cc agent shutdown complete");
         Ok(())
+    }
+}
+
+/// 抽出 `request_review` 的事件构造逻辑，方便单测——adapter method 只剩
+/// "lock + clone active_tx + send" 投递骨架，被 e2e 覆盖即可。
+fn build_review_event(
+    agent_id: AgentId,
+    task_id: TaskId,
+    deliverable_kind: DeliverableKind,
+    summary: String,
+    artifact_ref: Option<String>,
+) -> Event {
+    let mut meta = EventMeta::now();
+    meta.agent = Some(agent_id);
+    meta.task = Some(task_id);
+    Event {
+        meta,
+        kind: EventKind::AgentRequestReview {
+            agent: agent_id,
+            task: task_id,
+            deliverable_kind,
+            summary,
+            artifact_ref,
+        },
     }
 }
 
@@ -643,5 +707,58 @@ mod tests {
     fn cc_agent_implements_session_id_via_agent_trait() {
         fn assert_agent<A: Agent>() {}
         assert_agent::<CcAgent>();
+    }
+
+    /// `request_review` 事件构造：agent / task 必须填到 `meta` + `kind` 双处，
+    /// kind 字段必须如实回显——下游 EventStore 持久化和 bridge attention filter
+    /// 都按这两套字段读。
+    #[test]
+    fn build_review_event_populates_meta_and_kind_fields() {
+        let agent = AgentId::new();
+        let task = TaskId::new();
+        let ev = build_review_event(
+            agent,
+            task,
+            DeliverableKind::CodeChange,
+            "三绿等审".into(),
+            Some("sha:abc".into()),
+        );
+        assert_eq!(ev.meta.agent, Some(agent));
+        assert_eq!(ev.meta.task, Some(task));
+        match ev.kind {
+            EventKind::AgentRequestReview {
+                agent: kagent,
+                task: ktask,
+                deliverable_kind,
+                summary,
+                artifact_ref,
+            } => {
+                assert_eq!(kagent, agent);
+                assert_eq!(ktask, task);
+                assert_eq!(deliverable_kind, DeliverableKind::CodeChange);
+                assert_eq!(summary, "三绿等审");
+                assert_eq!(artifact_ref.as_deref(), Some("sha:abc"));
+            }
+            other => panic!("expected AgentRequestReview, got {other:?}"),
+        }
+    }
+
+    /// `artifact_ref=None` 在 build 阶段就该被原样保留——summary-only deliverable
+    /// （research_summary / decision_request）的常见形态。
+    #[test]
+    fn build_review_event_preserves_artifact_ref_none() {
+        let ev = build_review_event(
+            AgentId::new(),
+            TaskId::new(),
+            DeliverableKind::ResearchSummary,
+            "看完 auth".into(),
+            None,
+        );
+        match ev.kind {
+            EventKind::AgentRequestReview { artifact_ref, .. } => {
+                assert!(artifact_ref.is_none());
+            }
+            other => panic!("expected AgentRequestReview, got {other:?}"),
+        }
     }
 }

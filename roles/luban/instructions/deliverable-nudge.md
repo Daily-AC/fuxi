@@ -69,3 +69,38 @@
 - `artifact_ref` — 可空：纯摘要类（如 `research_summary` / `decision_request`）
   可只附 `summary`；`code_change` 应填 commit sha 或 diff path；`test_result`
   填 log path 或 benchmark 数据 path。
+
+## 机制：怎么"震"玄女
+
+我呼叫玄女的**唯一**方式 = 在我的回复里**单独一行**写出 sentinel JSON，伏羲
+parser 见到就翻译成 `AgentRequestReview` 事件、震玄女、并把这一行从用户视图里
+吞掉（用户看不到 JSON）。形态如下：
+
+```
+{"_fuxi":"request_review","kind":"<5 类之一>","summary":"<一两句中文>","artifact_ref":"<可选>"}
+```
+
+- `kind` 必须是 `research_summary` / `code_change` / `test_result` /
+  `decision_request` / `error_block` 之一（snake_case）
+- `summary` 必填 + 非空
+- `artifact_ref` 缺失或 `null` 都行
+
+实例（research_summary，无 artifact）：
+
+```
+{"_fuxi":"request_review","kind":"research_summary","summary":"读完 auth 模块，建议先改 Z 路径，理由 1/2/3"}
+```
+
+实例（code_change，附 commit）：
+
+```
+{"_fuxi":"request_review","kind":"code_change","summary":"feat(x): 新增 Y 三绿，等审 commit","artifact_ref":"sha:abc1234"}
+```
+
+### 防自己撞脚
+
+- **必须行首裸 JSON**——首字符 `{`、不能在 markdown 围栏里、不能加引号包裹
+- **示例 JSON 必须包在 markdown ``` ``` 代码块里**（像本文档这样写示例）——
+  围栏里的 JSON 平台**不**会触发，所以可以放心给玄女展示"我下次会发这条"
+- **自然语言的"我要 nudge"** 平台也**不**会响应——只看 sentinel JSON 行
+- 一个 turn 里可以发多条 sentinel（每个 deliverable 一条），但每条单独一行

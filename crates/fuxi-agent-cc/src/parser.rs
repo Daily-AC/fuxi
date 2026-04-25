@@ -9,10 +9,45 @@
 //!
 //! 翻译规则表见 `reference_cc_stream_json.md` §cc↔A2A 事件映射。
 
-use fuxi_core::event::{Event, EventKind, EventMeta};
+use fuxi_core::event::{DeliverableKind, Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::TaskState;
+use serde::Deserialize;
 use serde_json::Value;
+
+/// Decision 13 sentinel：LLM 在 `AssistantText` 内**单独一行**写出此 JSON object
+/// 即触发 `AgentRequestReview`。`_fuxi` 命名空间隔离常规 JSON。
+///
+/// 防误触：parser 必须严格判 `text.trim().starts_with('{')`——markdown ``` ```
+/// 围栏内的、缩进过的、引号包裹的 JSON 都不会被识别。
+#[derive(Debug, Deserialize)]
+struct RequestReviewSentinel {
+    /// 必须等于 `"request_review"`——否则不是 fuxi 控制消息。
+    #[serde(rename = "_fuxi")]
+    kind_marker: String,
+    kind: DeliverableKind,
+    summary: String,
+    #[serde(default)]
+    artifact_ref: Option<String>,
+}
+
+/// 尝试把一段 `AssistantText` 解析为 sentinel；只有**整段单行裸 JSON object** +
+/// `_fuxi == "request_review"` + `kind` 是合法枚举值 + `summary` 非空 才算命中。
+/// 不命中（含解析失败）返 None，调用方退化为 `AgentResponded`。
+fn try_parse_request_review_sentinel(text: &str) -> Option<RequestReviewSentinel> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let parsed: RequestReviewSentinel = serde_json::from_str(trimmed).ok()?;
+    if parsed.kind_marker != "request_review" {
+        return None;
+    }
+    if parsed.summary.is_empty() {
+        return None;
+    }
+    Some(parsed)
+}
 
 /// 一条 stream-json 行被解析后的中间形态。
 ///
@@ -314,6 +349,28 @@ pub fn translate(
             }
         }
         CcEvent::AssistantText { text } => {
+            // Decision 13 sentinel：先尝试识别为 `_fuxi:request_review` 控制消息。
+            // 命中：发 AgentRequestReview，**不**置 responded_this_turn（控制消息
+            // 不算 LLM 回复，避免吞掉真正的回复 turn-end fallback）。
+            // task_id 为 None 不该发 sentinel（无 task 关联无意义）；按 caller
+            // 契约 dispatch 后必有 current_task。这里仍守护一下：无 task 时降级
+            // AgentResponded 透传。
+            if let Some(sentinel) = try_parse_request_review_sentinel(&text)
+                && let Some(t) = task_id
+            {
+                out.push(mk_event(
+                    agent_id,
+                    task_id,
+                    EventKind::AgentRequestReview {
+                        agent: agent_id,
+                        task: t,
+                        deliverable_kind: sentinel.kind,
+                        summary: sentinel.summary,
+                        artifact_ref: sentinel.artifact_ref,
+                    },
+                ));
+                return out;
+            }
             state.responded_this_turn = true;
             out.push(mk_event(
                 agent_id,
@@ -919,5 +976,177 @@ mod tests {
         let t = super::truncate_preview(&s, 256);
         // 不应崩溃，不应切坏字符——chars().count 必须 <= 256。
         assert!(t.chars().count() <= 256);
+    }
+
+    // ── sentinel marker `_fuxi:request_review`（Decision 13）────────
+
+    /// 主路径：`AssistantText` 单独一行裸 JSON `{"_fuxi":"request_review", ...}`
+    /// 必须翻译成 `AgentRequestReview`，**且不再 emit AgentResponded**——
+    /// 把控制消息藏起来，玄女只看到 review 请求，用户也不会看到一坨 JSON。
+    #[test]
+    fn translate_sentinel_emits_request_review_and_suppresses_responded() {
+        use fuxi_core::event::DeliverableKind;
+        let mut st = TranslateState::new();
+        let task = TaskId::new();
+        let out = translate(
+            CcEvent::AssistantText {
+                text: r#"{"_fuxi":"request_review","kind":"code_change","summary":"小绿了","artifact_ref":"sha:abc"}"#
+                    .to_string(),
+            },
+            fresh_agent(),
+            Some(task),
+            &mut st,
+            None,
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "sentinel 行只发一条事件，suppressed AgentResponded"
+        );
+        match &out[0].kind {
+            EventKind::AgentRequestReview {
+                deliverable_kind,
+                summary,
+                artifact_ref,
+                task: t,
+                ..
+            } => {
+                assert_eq!(*deliverable_kind, DeliverableKind::CodeChange);
+                assert_eq!(summary, "小绿了");
+                assert_eq!(artifact_ref.as_deref(), Some("sha:abc"));
+                assert_eq!(*t, task);
+            }
+            other => panic!("expected AgentRequestReview, got {other:?}"),
+        }
+        // 关键：sentinel 不该置 responded_this_turn——终态时冷场景仍要发 result text。
+        // （否则 LLM 一行 sentinel + 一行真回复在 result 里被吞）
+        assert!(
+            !st.responded_this_turn,
+            "sentinel 行不属于 LLM 回复，不该置 responded_this_turn"
+        );
+    }
+
+    /// `summary` 必填 + `kind` 必为枚举值之一；缺字段或 kind 非法 → 退化普通 AgentResponded。
+    #[test]
+    fn translate_sentinel_with_missing_kind_falls_back_to_responded() {
+        let mut st = TranslateState::new();
+        let bad = r#"{"_fuxi":"request_review","summary":"only summary"}"#;
+        let out = translate(
+            CcEvent::AssistantText {
+                text: bad.to_string(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        // 没 kind = 不是合法 sentinel = 当普通文本走，TUI 仍能看到（用户 debug 友好）
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == bad),
+            "缺 kind 应退化 AgentResponded，got {:?}",
+            out[0].kind
+        );
+    }
+
+    /// 防误触防线 1：sentinel 必须**首字符 `{`**——markdown 代码块（前导
+    /// ``` ```、缩进、引号包裹）里的 JSON 不应触发。
+    #[test]
+    fn translate_sentinel_in_code_fence_does_not_trigger() {
+        let mut st = TranslateState::new();
+        // 模拟 LLM 在示例文档里写「这条事件长这样：` ```{"_fuxi":"..."} ``` 」
+        let fenced =
+            "```\n{\"_fuxi\":\"request_review\",\"kind\":\"code_change\",\"summary\":\"x\"}\n```";
+        let out = translate(
+            CcEvent::AssistantText {
+                text: fenced.to_string(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0].kind, EventKind::AgentResponded { .. }),
+            "代码块整体不是行首 JSON，应当 AgentResponded 整段透传，got {:?}",
+            out[0].kind
+        );
+    }
+
+    /// 防误触防线 2：单行裸 JSON 但 `_fuxi` 字段不是 `"request_review"` —— 退化普通文本。
+    #[test]
+    fn translate_non_fuxi_json_passes_as_responded() {
+        let mut st = TranslateState::new();
+        let other_json = r#"{"hello":"world","kind":"code_change"}"#;
+        let out = translate(
+            CcEvent::AssistantText {
+                text: other_json.to_string(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == other_json),
+            "非 _fuxi sentinel 应当透传，got {:?}",
+            out[0].kind
+        );
+    }
+
+    /// `artifact_ref` 是 Optional——缺它仍是合法 sentinel（譬如 research_summary 类）。
+    #[test]
+    fn translate_sentinel_without_artifact_ref_is_valid() {
+        use fuxi_core::event::DeliverableKind;
+        let mut st = TranslateState::new();
+        let out = translate(
+            CcEvent::AssistantText {
+                text:
+                    r#"{"_fuxi":"request_review","kind":"research_summary","summary":"读完 auth"}"#
+                        .to_string(),
+            },
+            fresh_agent(),
+            Some(TaskId::new()),
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 1);
+        match &out[0].kind {
+            EventKind::AgentRequestReview {
+                deliverable_kind,
+                artifact_ref,
+                ..
+            } => {
+                assert_eq!(*deliverable_kind, DeliverableKind::ResearchSummary);
+                assert!(artifact_ref.is_none());
+            }
+            other => panic!("expected AgentRequestReview, got {other:?}"),
+        }
+    }
+
+    /// task_id 缺失时（dispatch 前的孤立场景）退化 AgentResponded 透传——
+    /// AgentRequestReview 字段强制 `task: TaskId`，无 task 关联无意义。
+    #[test]
+    fn translate_sentinel_without_task_id_falls_back_to_responded() {
+        let mut st = TranslateState::new();
+        let raw =
+            r#"{"_fuxi":"request_review","kind":"code_change","summary":"x","artifact_ref":null}"#;
+        let out = translate(
+            CcEvent::AssistantText {
+                text: raw.to_string(),
+            },
+            fresh_agent(),
+            None, // 无 task_id
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == raw),
+            "无 task_id 时应退化 AgentResponded 透传，got {:?}",
+            out[0].kind
+        );
     }
 }
