@@ -4574,4 +4574,496 @@ mod tests {
         );
         srv.abort();
     }
+
+    // ── path 3 γ：HMAC e2e + replay/skew/tampering 攻击防御 ──
+    //
+    // 起带 `router_with_hmac` 的 controller，针对 6 类攻击 + 2 类合法路径验证：
+    //   A. e2e full cycle（β signed_post/get 全链路）
+    //   B. tampering（body / method / path 篡改）
+    //   C. replay（同 sig+ts+nonce 二发）
+    //   D. clock skew（容忍窗内 / 窗外）
+    //   E. config（HmacSecret::from_env env 缺值拒绝）
+    //
+    // β 的 wrapper 把签名 + 发送原子化，攻击侧要"先签后改"必须直接调 α 的
+    // `sign_request` 算 sig，再手搓 reqwest::Request 加 3 header 发——helper
+    // `build_signed_attack_request` 让所有攻击 case 都通过这一个入口构造。
+
+    /// γ：起带 HMAC layer 的 controller。secret 注入 router，client 端用
+    /// 同一份 secret 算签名 → 走中间件验证。
+    async fn spawn_controller_signed() -> (
+        Arc<DistController>,
+        String,
+        Arc<crate::dist_auth::HmacSecret>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use crate::dist_auth::{HmacGate, HmacSecret};
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let ctrl = Arc::new(DistController::new("tok".into(), bus));
+        let secret = Arc::new(HmacSecret::new("γ-test-secret-very-long-key-32b+".into()));
+        let gate = HmacGate::new(HmacSecret::new("γ-test-secret-very-long-key-32b+".into()));
+        let app = router_with_hmac(ctrl.clone(), gate);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (ctrl, format!("http://{addr}"), secret, handle)
+    }
+
+    /// γ：手搓"已签名 + 可篡改"的 reqwest 请求。
+    ///
+    /// `sign_method` / `sign_path` / `sign_body` 是签名喂进 canonical 的字段；
+    /// `wire_method` / `wire_url` / `wire_body` 是真正发出去的请求字段——
+    /// 攻击 case 故意让两套不一致，验证 middleware 拦得住。
+    ///
+    /// 合法 case 直接传同样的值（用 `sign_request_legitimate` 包一层）。
+    #[allow(clippy::too_many_arguments)]
+    fn build_signed_attack_request(
+        client: &reqwest::Client,
+        secret: &crate::dist_auth::HmacSecret,
+        sign_method: &str,
+        sign_path: &str,
+        sign_body: &[u8],
+        ts_ms: u64,
+        nonce: &str,
+        wire_method: reqwest::Method,
+        wire_url: &str,
+        wire_body: Vec<u8>,
+    ) -> reqwest::Request {
+        use crate::dist_auth::{X_FUXI_NONCE, X_FUXI_SIGNATURE, X_FUXI_TIMESTAMP, sign_request};
+        let sig = sign_request(secret, sign_method, sign_path, ts_ms, nonce, sign_body);
+        // 注：HTTP header 值必须 ASCII（RFC 7230），axum middleware 的
+        // `to_str().ok()` 会对非 ASCII 字节返 None → 误判 MissingHeader 401。
+        // 测试用的 nonce 字面量保持 ASCII（避免中文/Greek 标识混入 header）。
+        client
+            .request(wire_method, wire_url)
+            .body(wire_body)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(X_FUXI_TIMESTAMP, ts_ms.to_string())
+            .header(X_FUXI_NONCE, nonce)
+            .header(X_FUXI_SIGNATURE, sig)
+            .build()
+            .expect("build attack request")
+    }
+
+    // ─── A：e2e full cycle ───────────────────────────────────────
+
+    /// A：register POST + pull GET + progress POST + report POST，全走 β
+    /// 的 signed_post / signed_get → 全链路 200。这是"正路通"的最小验证。
+    /// pull 在无 job 入队时返回空 job——只验 200 即可，job 内容由别的测试覆盖。
+    #[tokio::test]
+    async fn hmac_e2e_signed_register_pull_report_full_cycle() {
+        use crate::dist_auth_client::{signed_get, signed_post};
+        let (ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        // 1) register
+        let register_req = DistRegisterReq {
+            node_id: "γnode".into(),
+            tags: vec!["cc".into()],
+            max_concurrency: 1,
+        };
+        let r = signed_post(
+            &client,
+            &secret,
+            &format!("{base}/dist/register"),
+            &register_req,
+        )
+        .await
+        .expect("register send");
+        assert_eq!(r.status(), reqwest::StatusCode::OK, "register 必须 200");
+
+        // 2) enqueue（也走 HMAC，证明所有 endpoint 一致鉴权）
+        let enq_req = DistEnqueueReq {
+            node_id: String::new(),
+            title: "γjob".into(),
+            body: "do work".into(),
+            system_prompt: None,
+            required_tags: vec![],
+            pinned_node: None,
+            cli: String::new(),
+            allowed_tools: vec![],
+        };
+        let r = signed_post(&client, &secret, &format!("{base}/dist/enqueue"), &enq_req)
+            .await
+            .expect("enqueue send");
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+        let enq_resp: DistEnqueueResp = r.json().await.expect("decode enqueue");
+        let job_id = enq_resp.job_id;
+
+        // 3) pull
+        let r = signed_get(
+            &client,
+            &secret,
+            &format!("{base}/dist/pull"),
+            &[("token", "tok"), ("node_id", "γnode")],
+        )
+        .await
+        .expect("pull send");
+        assert_eq!(r.status(), reqwest::StatusCode::OK, "pull 必须 200");
+        let pull_resp: DistPullResp = r.json().await.expect("decode pull");
+        let pulled_id = pull_resp.job.expect("应 pull 到刚 enqueue 的 job").id;
+
+        // 4) progress
+        let progress_req = DistProgressReq {
+            node_id: "γnode".into(),
+            job_id: pulled_id.clone(),
+            chunks: vec![ProgressPush {
+                kind: ProgressKind::AssistantText,
+                text: "halfway".into(),
+            }],
+        };
+        let r = signed_post(
+            &client,
+            &secret,
+            &format!("{base}/dist/progress"),
+            &progress_req,
+        )
+        .await
+        .expect("progress send");
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+        let ack: DistProgressAck = r.json().await.expect("decode progress");
+        assert_eq!(ack.accepted, 1);
+
+        // 5) report
+        let report_req = DistReportReq {
+            node_id: "γnode".into(),
+            job_id: pulled_id.clone(),
+            ok: true,
+            output: "done".into(),
+            duration_ms: 42,
+        };
+        let r = signed_post(
+            &client,
+            &secret,
+            &format!("{base}/dist/report"),
+            &report_req,
+        )
+        .await
+        .expect("report send");
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+
+        // controller 视角：job 已终态
+        let s = ctrl.job_status(&job_id).await;
+        assert!(s.done && s.ok == Some(true));
+
+        srv.abort();
+    }
+
+    // ─── B：tampering 攻击 ───────────────────────────────────────
+
+    /// B-1：worker 合法签名后 attacker MITM 改 body 1 byte → 401。
+    /// 模拟方式：手算 sig（用真 body）但发送时塞篡改后的 body。
+    #[tokio::test]
+    async fn hmac_e2e_tampered_body_rejected() {
+        use crate::dist_auth::now_unix_ms;
+        let (_ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        let real_body = serde_json::to_vec(&DistRegisterReq {
+            node_id: "honest".into(),
+            tags: vec![],
+            max_concurrency: 1,
+        })
+        .unwrap();
+        let mut tampered = real_body.clone();
+        // 改 1 byte——找第一个 '"' 后面的字符替换成 '!'，破坏 JSON 但仍能进 middleware
+        let pos = tampered.iter().position(|&b| b == b'"').unwrap_or(0) + 1;
+        tampered[pos] = b'!';
+        assert_ne!(real_body, tampered, "篡改未生效");
+
+        let req = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/register",
+            &real_body, // 用 real_body 算签
+            now_unix_ms(),
+            "gnonce-body",
+            reqwest::Method::POST,
+            &format!("{base}/dist/register"),
+            tampered, // 但发 tampered body
+        );
+        let resp = client.execute(req).await.expect("send");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "篡改 body 后 middleware 必须 401"
+        );
+        srv.abort();
+    }
+
+    /// B-2：sig 是 POST 的，attacker 改成 PUT → 401。
+    /// PUT 无 route 命中也是 401（middleware 在路由前），目标是验 method 进 canonical。
+    /// 用 axum 真实存在的 method 路径——POST /dist/cancel 改 PUT 同 path 看 middleware 是否拦下。
+    #[tokio::test]
+    async fn hmac_e2e_tampered_method_rejected() {
+        use crate::dist_auth::now_unix_ms;
+        let (_ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        let body = serde_json::to_vec(&DistCancelReq {
+            job_id: "any".into(),
+        })
+        .unwrap();
+        // 签 POST，发 PUT
+        let req = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/cancel",
+            &body,
+            now_unix_ms(),
+            "gnonce-method",
+            reqwest::Method::PUT,
+            &format!("{base}/dist/cancel"),
+            body.clone(),
+        );
+        let resp = client.execute(req).await.expect("send");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "method substitution 必须 401（PUT≠POST canonical）"
+        );
+        srv.abort();
+    }
+
+    /// B-3：endpoint substitution——sig 是 /dist/heartbeat 的，attacker
+    /// 拷贝同样的 sig + headers 路由到 /dist/event → 401。task spec 高亮的关键测试。
+    #[tokio::test]
+    async fn hmac_e2e_tampered_path_rejected() {
+        use crate::dist_auth::now_unix_ms;
+        let (ctrl, base, secret, srv) = spawn_controller_signed().await;
+        ctrl.register("substituted".into(), vec![], 1).await;
+        let client = reqwest::Client::new();
+
+        // body 同时是合法的 heartbeat 和合法的 event payload——只验签名拒，
+        // 排除 body decode 失败导致的 401 假阳。用一个简单 heartbeat req。
+        let hb_body = serde_json::to_vec(&DistHeartbeatReq {
+            node_id: "substituted".into(),
+            inflight: vec![],
+        })
+        .unwrap();
+        let req = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/heartbeat", // 签 heartbeat
+            &hb_body,
+            now_unix_ms(),
+            "gnonce-path",
+            reqwest::Method::POST,
+            &format!("{base}/dist/event"), // 发到 event
+            hb_body.clone(),
+        );
+        let resp = client.execute(req).await.expect("send");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "endpoint substitution 必须 401（path 进 canonical → sig 不匹配）"
+        );
+        srv.abort();
+    }
+
+    // ─── C：replay 攻击 ─────────────────────────────────────────
+
+    /// C-1：相同 sig + timestamp + nonce 二发 → 第二次 401（NonceCache 命中）。
+    #[tokio::test]
+    async fn hmac_e2e_replayed_request_within_window_rejected() {
+        use crate::dist_auth::now_unix_ms;
+        let (_ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        let body = serde_json::to_vec(&DistRegisterReq {
+            node_id: "replay-target".into(),
+            tags: vec![],
+            max_concurrency: 1,
+        })
+        .unwrap();
+        let ts = now_unix_ms();
+        let nonce = "gnonce-replay-fixed";
+
+        // 第一次发：build → execute
+        let req1 = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/register",
+            &body,
+            ts,
+            nonce,
+            reqwest::Method::POST,
+            &format!("{base}/dist/register"),
+            body.clone(),
+        );
+        let resp1 = client.execute(req1).await.expect("send 1");
+        assert_eq!(resp1.status(), reqwest::StatusCode::OK, "首次合法应 200");
+
+        // 第二次：完全相同的参数（同 ts、同 nonce、同 sig、同 body） → 401
+        let req2 = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/register",
+            &body,
+            ts,
+            nonce,
+            reqwest::Method::POST,
+            &format!("{base}/dist/register"),
+            body.clone(),
+        );
+        let resp2 = client.execute(req2).await.expect("send 2");
+        assert_eq!(
+            resp2.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "replay（同 nonce）必须 401"
+        );
+        srv.abort();
+    }
+
+    /// C-2：timestamp = now - 10min（超 5min skew tolerance）→ 401。
+    #[tokio::test]
+    async fn hmac_e2e_old_timestamp_rejected_after_skew() {
+        use crate::dist_auth::now_unix_ms;
+        let (_ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        let body = serde_json::to_vec(&DistRegisterReq {
+            node_id: "old-ts".into(),
+            tags: vec![],
+            max_concurrency: 1,
+        })
+        .unwrap();
+        let stale_ts = now_unix_ms().saturating_sub(10 * 60 * 1000); // 10 分钟前
+        let req = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/register",
+            &body,
+            stale_ts,
+            "gnonce-old-ts",
+            reqwest::Method::POST,
+            &format!("{base}/dist/register"),
+            body.clone(),
+        );
+        let resp = client.execute(req).await.expect("send");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "10 分钟前的 timestamp 超 5min skew → 401"
+        );
+        srv.abort();
+    }
+
+    // ─── D：clock skew tolerance ────────────────────────────────
+
+    /// D-1：timestamp = now - 4min（5min 容忍窗内）→ 200。
+    #[tokio::test]
+    async fn hmac_e2e_request_within_5min_skew_accepted() {
+        use crate::dist_auth::now_unix_ms;
+        let (_ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        let body = serde_json::to_vec(&DistRegisterReq {
+            node_id: "past-skew".into(),
+            tags: vec![],
+            max_concurrency: 1,
+        })
+        .unwrap();
+        let past_ts = now_unix_ms().saturating_sub(4 * 60 * 1000); // 4 分钟前
+        let req = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/register",
+            &body,
+            past_ts,
+            "gnonce-past-skew",
+            reqwest::Method::POST,
+            &format!("{base}/dist/register"),
+            body.clone(),
+        );
+        let resp = client.execute(req).await.expect("send");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "4 分钟前在 5min 容忍窗内 → 200"
+        );
+        srv.abort();
+    }
+
+    /// D-2：timestamp = now + 4min（worker 时钟走快，未来在窗内）→ 200。
+    #[tokio::test]
+    async fn hmac_e2e_future_timestamp_within_skew_accepted() {
+        use crate::dist_auth::now_unix_ms;
+        let (_ctrl, base, secret, srv) = spawn_controller_signed().await;
+        let client = reqwest::Client::new();
+
+        let body = serde_json::to_vec(&DistRegisterReq {
+            node_id: "future-skew".into(),
+            tags: vec![],
+            max_concurrency: 1,
+        })
+        .unwrap();
+        let future_ts = now_unix_ms() + 4 * 60 * 1000; // 未来 4 分钟
+        let req = build_signed_attack_request(
+            &client,
+            &secret,
+            "POST",
+            "/dist/register",
+            &body,
+            future_ts,
+            "gnonce-future-skew",
+            reqwest::Method::POST,
+            &format!("{base}/dist/register"),
+            body.clone(),
+        );
+        let resp = client.execute(req).await.expect("send");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "未来 4 分钟在 5min 容忍窗内（worker 时钟走快） → 200"
+        );
+        srv.abort();
+    }
+
+    // ─── E：config-fail（HmacSecret::from_env 缺 env） ──────────
+
+    /// E：env 未设 → `from_env()` 返 `MissingSecretEnv` 携 env 名。
+    /// 单元测试代替 spawn cargo run binary——daemon main 自决 panic vs eprintln+exit，
+    /// 测试只验"config 这层会拦下"。
+    ///
+    /// edition 2024：`std::env::set_var/remove_var` 是 unsafe。本测试是
+    /// crate 内**唯一**触碰此 env 的测试，无并发风险；保存/恢复以避免污染
+    /// `cargo test` 跑下一个测试用例时的环境。
+    #[test]
+    fn hmac_secret_from_env_returns_err_when_unset() {
+        use crate::dist_auth::{FUXI_DIST_HMAC_SECRET_ENV, HmacError, HmacSecret};
+        // 保存当前值（dev 可能 export 过）
+        let saved = std::env::var(FUXI_DIST_HMAC_SECRET_ENV).ok();
+        // SAFETY: 测试单线程访问 env；无并发 reader；finally 恢复。
+        unsafe {
+            std::env::remove_var(FUXI_DIST_HMAC_SECRET_ENV);
+        }
+        let r = HmacSecret::from_env();
+        // 恢复
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(FUXI_DIST_HMAC_SECRET_ENV, v),
+                None => std::env::remove_var(FUXI_DIST_HMAC_SECRET_ENV),
+            }
+        }
+        // HmacSecret 不实现 Debug（防止 secret 字节意外打印），所以直接 match 而非 expect_err。
+        match r {
+            Err(HmacError::MissingSecretEnv(name)) => {
+                assert_eq!(name, FUXI_DIST_HMAC_SECRET_ENV);
+            }
+            Err(other) => panic!("期望 MissingSecretEnv，得到 {other:?}"),
+            Ok(_) => panic!("env 已 unset 但 from_env 仍返 Ok"),
+        }
+    }
 }
