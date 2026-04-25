@@ -71,12 +71,17 @@ impl HmacSecret {
         Self(SecretString::from(secret))
     }
 
-    /// 从 env 读 secret；缺/空 → Err。daemon main 早期调，refuse start。
-    pub fn from_env() -> Result<Self, String> {
+    /// 从 env 读 secret；缺/空 → `Err(HmacError::MissingSecretEnv)`。
+    ///
+    /// 不直接 panic：daemon main 自决 panic / eprintln+exit，γ 单测可
+    /// `temp_env::with_var_unset` + `expect_err` 不必 catch_unwind。
+    pub fn from_env() -> Result<Self, HmacError> {
         let raw = std::env::var(FUXI_DIST_HMAC_SECRET_ENV)
-            .map_err(|_| format!("{FUXI_DIST_HMAC_SECRET_ENV} not set"))?;
+            .map_err(|_| HmacError::MissingSecretEnv(FUXI_DIST_HMAC_SECRET_ENV.to_string()))?;
         if raw.trim().is_empty() {
-            return Err(format!("{FUXI_DIST_HMAC_SECRET_ENV} is empty"));
+            return Err(HmacError::MissingSecretEnv(
+                FUXI_DIST_HMAC_SECRET_ENV.to_string(),
+            ));
         }
         Ok(Self::new(raw))
     }
@@ -86,15 +91,20 @@ impl HmacSecret {
     }
 }
 
-/// HMAC 验签 / replay 检测的失败原因。**仅供 trace 日志**——middleware 不向
-/// HTTP 客户端透露具体原因（避免 oracle）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// HMAC 验签 / replay 检测的失败原因。
+///
+/// **大多数 variant 仅供 trace 日志**——middleware 不向 HTTP 客户端透露
+/// 具体原因（避免 oracle）。`MissingSecretEnv` 例外：它出现在 daemon 启动期
+/// `HmacSecret::from_env()` 路径，让 caller 友好打印 env 名而不是 panic。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HmacError {
     BadSignature,
     ClockSkew,
     ReplayedNonce,
     MissingHeader,
     BadTimestamp,
+    /// from_env 缺 env / 空串。content = env 变量名，方便 user-facing error。
+    MissingSecretEnv(String),
 }
 
 impl HmacError {
@@ -105,9 +115,25 @@ impl HmacError {
             Self::ReplayedNonce => "replayed_nonce",
             Self::MissingHeader => "missing_header",
             Self::BadTimestamp => "bad_timestamp",
+            Self::MissingSecretEnv(_) => "missing_secret_env",
         }
     }
 }
+
+impl std::fmt::Display for HmacError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadSignature => f.write_str("HMAC signature mismatch"),
+            Self::ClockSkew => f.write_str("HMAC timestamp outside skew window"),
+            Self::ReplayedNonce => f.write_str("HMAC nonce already seen (replay)"),
+            Self::MissingHeader => f.write_str("HMAC required header missing"),
+            Self::BadTimestamp => f.write_str("HMAC timestamp not parseable as u64"),
+            Self::MissingSecretEnv(name) => write!(f, "{name} not set or empty"),
+        }
+    }
+}
+
+impl std::error::Error for HmacError {}
 
 /// Bounded LRU nonce 去重缓存，跨请求线程安全共享。
 pub struct NonceCache {
@@ -590,12 +616,16 @@ mod tests {
     }
 
     #[test]
-    fn from_env_missing_returns_err() {
-        // 不依赖 env：直接调内部分支等价覆盖
-        // safety：unset → from_env Err；这里 set 然后 unset 风险与其它测试串扰，跳过 mutate env
-        let secret = HmacSecret::new("k".into());
-        // 仅断言 Default 不会泄漏
-        assert!(!format!("{:?}", "[hidden]").contains("super-secret"));
-        let _ = secret;
+    fn missing_secret_env_variant_carries_env_name() {
+        // 不去 mutate process env（多 test 并发会串扰）——直接构造 variant 验
+        // Display + as_trace_str 走 user-facing 路径。γ 的真 env 测试可用
+        // `temp_env::with_var_unset(FUXI_DIST_HMAC_SECRET_ENV, || from_env())`。
+        let err = HmacError::MissingSecretEnv(FUXI_DIST_HMAC_SECRET_ENV.to_string());
+        let display = format!("{err}");
+        assert!(
+            display.contains(FUXI_DIST_HMAC_SECRET_ENV),
+            "Display 应含 env 名以友好提示用户，得到：{display}"
+        );
+        assert_eq!(err.as_trace_str(), "missing_secret_env");
     }
 }
