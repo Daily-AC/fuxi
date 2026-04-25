@@ -1050,14 +1050,16 @@ impl DistController {
     /// 远端 worker 转发的一批事件 → controller 主 bus 原样 publish。
     ///
     /// 调用前 endpoint 已校验 token 与 node 注册；本方法只关心 publish + 计数。
-    /// `node_id` 仅用作 metric label；事件本身的 `EventMeta` 不被改写——
-    /// TODO（δ #4）：等 `EventMeta.source_node_id` 落地后这里 set Some(node_id)，
-    /// 让 TUI 能从 meta 区分本地 vs 远端事件，无需依赖外部上下文。
+    /// 入口处 stamp `EventMeta.source_node_id = Some(node_id)`——
+    /// 让 TUI/firehose 从 meta 区分本地 vs 远端事件，无需依赖外部上下文。
+    /// **覆盖而非保留** worker 自己塞的值：信任域以 controller 边界为准，
+    /// 防止任何中间环节伪造 source_node_id。
     pub fn republish_remote_events(&self, node_id: &str, events: Vec<Event>) -> usize {
         let total = events.len() as u64;
         let mut accepted = 0usize;
         let mut failed = 0u64;
-        for ev in events {
+        for mut ev in events {
+            ev.meta.source_node_id = Some(node_id.to_string());
             match self.bus.publish(ev) {
                 Ok(()) => accepted += 1,
                 Err(_) => failed += 1,
@@ -4372,5 +4374,170 @@ mod tests {
         let mut state = fuxi_agent_codex::TranslateState::new();
         super::codex_publish_line(&bus, "{not json", AgentId::new(), None, &mut state, None).await;
         assert_eq!(bus.queue_len().await, 0, "坏行不该入队");
+    }
+
+    // ── δ #4 P2 v1 收尾：cross-node bus e2e（EventMeta.source_node_id 全链路）──
+
+    /// δ #4 cross_node_bus_e2e_marks_source_node_id：HTTP 路径全链路验证——
+    /// 远端 worker POST /dist/event → controller stamp `source_node_id =
+    /// Some(node_id)` → bus broadcast → home 订阅者收到的事件 meta 带 source_node_id。
+    /// **不依赖 NetworkBusClient 的 transport 细节**——直接 HTTP POST 模拟 worker
+    /// 任何 HTTP 客户端的可观察行为；β 的 client 走的就是这条 wire。
+    #[tokio::test]
+    async fn cross_node_bus_e2e_marks_source_node_id() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        ctrl.register("far".into(), vec![], 1).await;
+        let bus = ctrl.bus().clone();
+
+        // probe 必须在 POST 之前 subscribe——broadcast 不留历史。
+        let probe = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut s = bus.subscribe();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remain.is_zero() {
+                    return None;
+                }
+                if let Ok(Some(Ok(ev))) = tokio::time::timeout(remain, s.next()).await
+                    && matches!(ev.kind, fuxi_core::EventKind::AgentResponded { .. })
+                {
+                    return Some(ev);
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // worker 发的事件 meta.source_node_id 故意 None——controller 应**覆盖**它，
+        // 不能依赖 worker 端自填（信任域 = controller 边界）。
+        let req = DistEventReq {
+            token: "tok".into(),
+            node_id: "far".into(),
+            events: vec![ev_agent_responded("远端来的")],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let got = probe.await.expect("join").expect("event");
+        assert_eq!(
+            got.meta.source_node_id.as_deref(),
+            Some("far"),
+            "controller 必须 stamp source_node_id"
+        );
+        match got.kind {
+            fuxi_core::EventKind::AgentResponded { text, .. } => {
+                assert_eq!(text, "远端来的");
+            }
+            other => panic!("expect AgentResponded, got {other:?}"),
+        }
+        srv.abort();
+    }
+
+    /// δ #4 cross_node_bus_e2e_overrides_worker_supplied_source_node_id：
+    /// 即便 worker 自己塞了 `source_node_id = "imposter"`，controller 仍会
+    /// 覆盖成 endpoint 的 node_id。防止伪造。
+    #[tokio::test]
+    async fn cross_node_bus_e2e_overrides_worker_supplied_source_node_id() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        ctrl.register("realnode".into(), vec![], 1).await;
+        let bus = ctrl.bus().clone();
+
+        let probe = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut s = bus.subscribe();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remain.is_zero() {
+                    return None;
+                }
+                if let Ok(Some(Ok(ev))) = tokio::time::timeout(remain, s.next()).await
+                    && matches!(ev.kind, fuxi_core::EventKind::AgentResponded { .. })
+                {
+                    return Some(ev);
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut spoofed = ev_agent_responded("trying to spoof");
+        spoofed.meta.source_node_id = Some("imposter".into());
+        let req = DistEventReq {
+            token: "tok".into(),
+            node_id: "realnode".into(),
+            events: vec![spoofed],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let got = probe.await.expect("join").expect("event");
+        assert_eq!(
+            got.meta.source_node_id.as_deref(),
+            Some("realnode"),
+            "controller 必须以 endpoint 的 node_id 为准，覆盖 worker 自填"
+        );
+        srv.abort();
+    }
+
+    /// δ #4 cross_node_bus_e2e_persists_source_node_id：远端事件经 controller
+    /// 落 SQLite，replay 出来 source_node_id 字段保真——TUI 重启后回放历史
+    /// 事件仍能区分本地/远端。
+    #[tokio::test]
+    async fn cross_node_bus_e2e_persists_source_node_id() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        ctrl.register("far".into(), vec![], 1).await;
+        let bus = ctrl.bus().clone();
+
+        let req = DistEventReq {
+            token: "tok".into(),
+            node_id: "far".into(),
+            events: vec![ev_agent_responded("落库测试")],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        // 等 EventBus writer 任务把事件落库——内部 mpsc + 串行 writer。
+        // 用 deadline 轮询比固定 sleep 稳：CI 慢机器也能等到。
+        use futures_util::StreamExt;
+        use fuxi_events::ReplayCursor;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let got = loop {
+            let mut stream = bus.replay(ReplayCursor::Beginning, false);
+            let mut all = Vec::new();
+            while let Some(Ok(ev)) = stream.next().await {
+                all.push(ev);
+            }
+            if let Some(ev) = all
+                .into_iter()
+                .find(|e| matches!(e.kind, fuxi_core::EventKind::AgentResponded { .. }))
+            {
+                break ev;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("3s 内没等到事件落库");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            got.meta.source_node_id.as_deref(),
+            Some("far"),
+            "SQLite payload 必须保留 source_node_id（v1 reside 在 JSON blob，不加专列）"
+        );
+        srv.abort();
     }
 }

@@ -794,6 +794,33 @@ mod tests {
         }
     }
 
+    /// δ #4 回归保护：`EventMeta.source_node_id` 必须经 SQLite payload blob
+    /// 完整 roundtrip——v1 不加专列存它，全靠 `serde_json::to_string(ev)` 把
+    /// 它落进 payload。若哪天有人为了"性能"把 payload 改成只存 EventKind，本测会挂。
+    #[tokio::test]
+    async fn persists_event_meta_source_node_id_in_payload_blob() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let mut meta = fuxi_core::EventMeta::now();
+        meta.source_node_id = Some("far".into());
+        let ev = Event {
+            meta,
+            kind: EventKind::AgentResponded {
+                text: "远端响应".into(),
+            },
+        };
+        store.append(&ev).await.expect("append");
+
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].meta.source_node_id.as_deref(), Some("far"));
+        match &got[0].kind {
+            EventKind::AgentResponded { text } => assert_eq!(text, "远端响应"),
+            other => panic!("expect AgentResponded, got {other:?}"),
+        }
+    }
+
     /// M3.6 回归保护：删掉 TaskDelivered/TaskCancelled 变体后，task 终态
     /// **必须**仍能通过 TaskStateChanged{Done|Cancelled} 落盘+回放并保留字段。
     /// 这是替代两个孤儿变体的**唯一通道**，丢失这条线 = M3.6 走偏。

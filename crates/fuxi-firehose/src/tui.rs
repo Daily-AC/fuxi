@@ -35,10 +35,13 @@ pub struct EventRow {
     pub who: String,
     /// 事件类型 tag（同 EventStore 里的 kind_tag）。
     pub kind_tag: &'static str,
-    /// 单行摘要。
+    /// 单行摘要。远端事件已带 `[<node_id>] ` 前缀。
     pub summary: String,
     /// 渲染颜色——按 kind 大类分配。
     pub color: Color,
+    /// 远端事件的 source node_id；本地事件 None。渲染时据此叠 `Modifier::DIM`，
+    /// 让用户秒级辨别"这条来自哪台机器"。
+    pub source_node_id: Option<String>,
     /// 原事件里的 ingest 时刻（本地时钟）——用来算 rate。
     pub ingested_at: Instant,
 }
@@ -53,7 +56,13 @@ impl EventRow {
             .map(|a| short_id(&a.to_string()))
             .unwrap_or_else(|| "platform".to_string());
         let kind_tag = kind_tag(&ev.kind);
-        let summary = summarize(&ev.kind);
+        let base_summary = summarize(&ev.kind);
+        // 远端事件 summary 前缀 `[<node_id>] `——人眼第一眼就能区分本地/远端，
+        // 比修改 color 信息更密（color 还在传达 kind 大类）。
+        let summary = match &ev.meta.source_node_id {
+            Some(node) => format!("[{node}] {base_summary}"),
+            None => base_summary,
+        };
         let color = color_for(&ev.kind);
         Self {
             time,
@@ -61,6 +70,7 @@ impl EventRow {
             kind_tag,
             summary,
             color,
+            source_node_id: ev.meta.source_node_id.clone(),
             ingested_at: Instant::now(),
         }
     }
@@ -250,20 +260,33 @@ impl FirehoseApp {
         let items: Vec<ListItem> = visible
             .iter()
             .map(|r| {
+                // 远端事件整行叠 DIM——保留原色（kind 大类语义）+ 暗一档（远端维度）。
+                // 单行文本只 dim kind_tag 一段会让 summary 与 kind_tag 视觉脱节，
+                // 索性整行（time/who/kind_tag/summary）都加 DIM 修饰。
+                let dim = if r.source_node_id.is_some() {
+                    Modifier::DIM
+                } else {
+                    Modifier::empty()
+                };
                 let line = Line::from(vec![
-                    Span::styled(r.time.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        r.time.clone(),
+                        Style::default().fg(Color::DarkGray).add_modifier(dim),
+                    ),
                     Span::raw(" "),
                     Span::styled(
                         format!("{:<12}", short(&r.who, 12)),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(Color::Yellow).add_modifier(dim),
                     ),
                     Span::raw(" "),
                     Span::styled(
                         format!("{:<22}", r.kind_tag),
-                        Style::default().fg(r.color).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(r.color)
+                            .add_modifier(Modifier::BOLD | dim),
                     ),
                     Span::raw(" "),
-                    Span::raw(r.summary.clone()),
+                    Span::styled(r.summary.clone(), Style::default().add_modifier(dim)),
                 ]);
                 ListItem::new(line)
             })
@@ -754,5 +777,126 @@ mod tests {
             reason: "user".into(),
         };
         assert_eq!(color_for(&kind), Color::LightRed);
+    }
+
+    /// δ #4：远端事件 summary 必须以 `[<node_id>] ` 前缀开头。本地事件不带前缀。
+    /// EventRow.source_node_id 字段需保留 raw node_id 供渲染层叠 DIM。
+    #[test]
+    fn event_row_remote_prefixes_summary_and_keeps_node_id() {
+        let mut meta = EventMeta::now();
+        meta.source_node_id = Some("home".into());
+        let ev = Event {
+            meta,
+            kind: EventKind::AgentResponded {
+                text: "远端响应".into(),
+            },
+        };
+        let row = EventRow::from_event(&ev);
+        assert!(
+            row.summary.starts_with("[home] "),
+            "summary={:?}",
+            row.summary
+        );
+        assert_eq!(row.source_node_id.as_deref(), Some("home"));
+
+        // 本地事件对照——无前缀，source_node_id None。
+        let ev_local = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::AgentResponded {
+                text: "本地响应".into(),
+            },
+        };
+        let row_local = EventRow::from_event(&ev_local);
+        assert!(!row_local.summary.starts_with("["), "{}", row_local.summary);
+        assert!(row_local.source_node_id.is_none());
+    }
+
+    /// δ #4：渲染时远端行的 kind_tag span 应叠加 `Modifier::DIM`——TestBackend
+    /// 的 buffer cell 带 modifier 字段，可直接比对。本地行不带 DIM。
+    #[test]
+    fn snapshot_render_dims_remote_row_kind_tag() {
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = FirehoseApp::new();
+        // 本地一条 + 远端一条。
+        app.ingest(&Event {
+            meta: EventMeta::now(),
+            kind: EventKind::PlatformStarted {
+                version: "0.1".into(),
+            },
+        });
+        let mut remote_meta = EventMeta::now();
+        remote_meta.source_node_id = Some("far".into());
+        app.ingest(&Event {
+            meta: remote_meta,
+            kind: EventKind::AgentResponded {
+                text: "远端来的".into(),
+            },
+        });
+
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+
+        // 找 "platform_started" 与 "agent_responded" 各自所在行；扫每行第一个非空格 cell
+        // 之后查 kind_tag 列附近的 modifier。简化：分别在 row 1/2 (top bar 占 row 0)。
+        let last_y = buf.area.height - 1;
+        let mut local_dim_count = 0;
+        let mut remote_dim_count = 0;
+        for y in 1..last_y {
+            let line = row_text(&buf, y);
+            if line.contains("platform_started") {
+                for x in 0..buf.area.width {
+                    if buf[(x, y)].modifier.contains(Modifier::DIM) {
+                        local_dim_count += 1;
+                    }
+                }
+            } else if line.contains("agent_responded") {
+                for x in 0..buf.area.width {
+                    if buf[(x, y)].modifier.contains(Modifier::DIM) {
+                        remote_dim_count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(local_dim_count, 0, "本地行不应有 DIM cell");
+        assert!(
+            remote_dim_count > 0,
+            "远端行应至少有一个 DIM cell（kind_tag/summary 等）"
+        );
+    }
+
+    /// δ #4：snapshot 上能直接看到 `[far] ` 前缀字样——人眼/grep 友好。
+    #[test]
+    fn snapshot_render_shows_remote_node_prefix() {
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut app = FirehoseApp::new();
+        let mut remote_meta = EventMeta::now();
+        remote_meta.source_node_id = Some("far".into());
+        app.ingest(&Event {
+            meta: remote_meta,
+            kind: EventKind::WorkerRegistered {
+                node_id: "alpha".into(),
+                tags: vec!["cc".into()],
+                max_concurrency: 2,
+            },
+        });
+
+        terminal.draw(|f| app.draw(f)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+
+        let last_y = buf.area.height - 1;
+        let middle: String = (1..last_y)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            middle.contains("[far]"),
+            "应渲染 [far] 前缀；middle:\n{middle}"
+        );
+        assert!(
+            middle.contains("worker_registered"),
+            "kind_tag 仍要在；middle:\n{middle}"
+        );
     }
 }

@@ -76,6 +76,12 @@ pub struct EventMeta {
     pub agent: Option<AgentId>,
     /// Which task it relates to, if any.
     pub task: Option<TaskId>,
+    /// 远端 worker node_id——controller `/dist/event` republish 前 set 此字段；
+    /// `None` = 本地 controller 自己产出。给 TUI/firehose 区分本地 vs 远端使用。
+    /// `serde(default)` 保留对老 SQLite payload / 老 wire JSON 的反序列化兼容；
+    /// `skip_serializing_if = "Option::is_none"` 让本地事件 JSON 不带这个 key。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_node_id: Option<String>,
 }
 
 impl EventMeta {
@@ -86,6 +92,7 @@ impl EventMeta {
             session: None,
             agent: None,
             task: None,
+            source_node_id: None,
         }
     }
 }
@@ -481,6 +488,63 @@ mod tests {
             let again = serde_json::to_value(&back).expect("re-ser");
             assert_eq!(again.get("type").and_then(|x| x.as_str()), Some(expect));
         }
+    }
+
+    /// 默认 None 时 wire JSON 不带 `source_node_id` key——
+    /// 老 reader（不认这个字段）反序列化也不影响；
+    /// 同时本地事件的 payload 不被新字段污染。
+    #[test]
+    fn event_meta_source_node_id_omitted_when_none() {
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::PlatformStarted {
+                version: "0.1".into(),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(
+            !json.contains("source_node_id"),
+            "本地事件不应输出 source_node_id key, json={json}"
+        );
+    }
+
+    /// 设置 Some(node_id) 后 wire JSON 带 key + roundtrip 字段保真。
+    #[test]
+    fn event_meta_source_node_id_roundtrip_when_some() {
+        let mut meta = EventMeta::now();
+        meta.source_node_id = Some("far".into());
+        let ev = Event {
+            meta,
+            kind: EventKind::AgentResponded {
+                text: "远端来的".into(),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("\"source_node_id\":\"far\""), "json={json}");
+        let back: Event = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.meta.source_node_id.as_deref(), Some("far"));
+    }
+
+    /// 老 SQLite payload / 老 wire JSON 不带 `source_node_id` 字段，
+    /// 反序列化必须 fall back 到 None 而不是报错——`#[serde(default)]` 兜底。
+    #[test]
+    fn event_meta_deserializes_legacy_payload_without_source_node_id() {
+        // 模拟 P2 之前生成的 payload：完全没有 source_node_id key。
+        let legacy = serde_json::json!({
+            "meta": {
+                "id": Uuid::new_v4().to_string(),
+                "at": Utc::now().to_rfc3339(),
+                "session": null,
+                "agent": null,
+                "task": null,
+            },
+            "kind": {
+                "type": "platform_started",
+                "version": "0.0.1",
+            }
+        });
+        let ev: Event = serde_json::from_value(legacy).expect("legacy de");
+        assert!(ev.meta.source_node_id.is_none());
     }
 
     #[test]
