@@ -12,35 +12,7 @@
 //! **用户只跟玄女对话**。这些子命令对玄女可见、对用户不可见。
 
 use clap::{Parser, Subcommand};
-
-mod autocomplete;
-mod banner;
-mod click_registry;
-mod client;
-mod clipboard;
-mod command_registry;
-mod daemon;
-mod demo;
-mod dist;
-mod dist_auth;
-mod dist_auth_client;
-mod dist_event_client;
-mod draft_stash;
-mod extractor_hook;
-mod ipc;
-mod markdown;
-mod memory_cmd;
-mod prompt_history;
-mod recall_sink;
-mod repl;
-mod session;
-mod skill;
-mod spinner;
-mod subcommands;
-mod theme;
-mod toast;
-mod up;
-mod watch;
+use fuxi_cli::{banner, demo, dist, memory_cmd, repl, skill, subcommands, theme, up, watch};
 
 #[derive(Debug, Parser)]
 #[command(name = "fuxi", version, about = "伏羲·玄女门客军团的指挥台", long_about = None)]

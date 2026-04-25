@@ -468,8 +468,11 @@ pub(crate) struct NodeView {
 }
 
 /// 主对话对象——对谁说话、右栏展示谁。
+///
+/// `pub`：被 `draft_stash::DraftStash` 的 pub 方法签名引用，pub(crate) 会
+/// 触发 `private_interfaces` warning（lib 化后所有 mod 都 pub 暴露）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ActiveTarget {
+pub enum ActiveTarget {
     Xuannv,
     Worker(AgentId),
 }
