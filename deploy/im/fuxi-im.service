@@ -1,0 +1,18 @@
+[Unit]
+Description=fuxi IM HTTPS server (PWA + 玄女 platform on :9100)
+After=network.target
+
+[Service]
+Type=simple
+User=e0-7
+# $HOME 必须显式设置——`fuxi im start` 用 $HOME 解析 ~/.fuxi/{events,im}.db、
+# ~/.fuxi/im_hmac.key、~/.fuxi/im_vapid.json、~/.local/share/fuxi/im-web 等路径。
+Environment=HOME=/home/e0-7
+# RUST_LOG 默认走 fuxi 自己的 init_tracing；如需调试解开下一行
+# Environment=RUST_LOG=info,fuxi=debug,fuxi_im=debug
+ExecStart=/home/e0-7/.local/bin/fuxi im start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
