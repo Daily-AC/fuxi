@@ -30,6 +30,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
         .route("/api/auth/pair", post(handlers::auth::pair))
         .route("/api/push/subscribe", post(handlers::push::subscribe))
+        .route("/api/push/silence", post(handlers::push::silence))
+        .route("/api/push/vapid-pub", get(handlers::push::vapid_public_key))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
