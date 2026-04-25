@@ -1,0 +1,465 @@
+//! γ · WebSocket 事件流 + 历史 replay 端到端测。
+//!
+//! 起真实 axum server（ephemeral port）+ 真实 WS 客户端（tokio-tungstenite）+ 真实
+//! `EventBus`，验证：
+//!   1. `WS /api/conv` 订阅玄女事件，publish 后能在客户端 deserialize 成 `EventKind`
+//!   2. `WS /api/conv?from=<id>` cursor replay：先发 N 条历史，再连 + tail live
+//!   3. `WS /api/tasks/{id}/stream` 按 task_id 过滤——订 A 不收 B
+//!   4. broadcast Lagged 不挂订阅链——海量发布 → server 不崩、客户端继续可读
+//!   5. `EventKind` 联合 round-trip serde（防 wire format 退化——下发即原 enum）
+//!   6. `GET /api/tasks/{id}/events?from=<cursor>&limit=N` 历史回放分页
+//!
+//! 为什么这样写：firehose `tests/hub_roundtrip.rs` 同款思路——单元测 hook 不到 axum
+//! 路由 + 真 socket，唯有起 server 才能暴露 frame 边界/查询参数解析坑。
+
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use futures_util::StreamExt;
+use fuxi_core::{AgentId, Event, EventKind, EventMeta, TaskId};
+use fuxi_events::EventBus;
+use fuxi_im::{AppState, router};
+use fuxi_orchestrator::Fuxi;
+use fuxi_workspace::GitWorktreeWorkspace;
+use std::sync::Arc;
+use std::time::Duration;
+use tempfile::TempDir;
+use tokio::net::TcpListener;
+use tokio::process::Command;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::protocol::Message;
+use tower::ServiceExt;
+use url::Url;
+
+async fn make_workspace() -> (TempDir, Arc<GitWorktreeWorkspace>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path();
+    run_git(path, &["init", "-q", "-b", "main"]).await;
+    tokio::fs::write(path.join("README.md"), "seed")
+        .await
+        .unwrap();
+    run_git(path, &["add", "-A"]).await;
+    run_git(
+        path,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    )
+    .await;
+    let ws = Arc::new(GitWorktreeWorkspace::with_default_base(path.to_path_buf()));
+    (dir, ws)
+}
+
+async fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .await
+        .expect("spawn git");
+    assert!(out.status.success(), "git {args:?} failed");
+}
+
+/// 启 IM server——返回 base url、bus、xuannv_id（已注入）和 server handle。
+async fn spawn_im() -> (
+    String,
+    EventBus,
+    AgentId,
+    TempDir,
+    tokio::task::JoinHandle<()>,
+) {
+    let bus = EventBus::with_memory_store().await.expect("bus");
+    let (dir, ws) = make_workspace().await;
+    let fuxi = Arc::new(Fuxi::new(bus.clone(), ws));
+
+    // 玄女 id：测试不真起 cc，只挂个 id 让 handler 拿得到。
+    let xuannv_id = AgentId::new();
+    fuxi.set_xuannv(xuannv_id).await;
+
+    let state = AppState::new(fuxi);
+    let app = router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let h = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let base = format!("http://{addr}");
+    (base, bus, xuannv_id, dir, h)
+}
+
+fn agent_event(agent: AgentId, text: &str) -> Event {
+    let mut meta = EventMeta::now();
+    meta.agent = Some(agent);
+    Event {
+        meta,
+        kind: EventKind::AgentResponded { text: text.into() },
+    }
+}
+
+fn task_event(task: TaskId, label: &str) -> Event {
+    let mut meta = EventMeta::now();
+    meta.task = Some(task);
+    Event {
+        meta,
+        kind: EventKind::Custom {
+            label: label.into(),
+            payload: serde_json::json!({}),
+        },
+    }
+}
+
+async fn next_event(
+    stream: &mut (
+             impl StreamExt<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+             + Unpin
+         ),
+    label: &str,
+) -> Event {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("[{label}] 等待 3s 没收到帧"))
+            .unwrap_or_else(|| panic!("[{label}] 流关闭"))
+            .unwrap_or_else(|e| panic!("[{label}] ws err: {e}"));
+        match msg {
+            Message::Text(t) => {
+                return serde_json::from_str::<Event>(&t)
+                    .unwrap_or_else(|e| panic!("[{label}] event 反序列化失败: {e}, body={t}"));
+            }
+            // 心跳/控制帧忽略，直到拿到下一条 text。
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+            Message::Binary(_) => continue,
+            Message::Close(_) => panic!("[{label}] server 主动 close"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn ws_conv_streams_xuannv_events_live() {
+    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
+    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (_w, mut r) = ws.split();
+
+    // 给 server 一点时间订上 broadcast——不是轮询，是握手延迟。
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    bus.publish(agent_event(xuannv, "你好以琳"))
+        .expect("publish");
+
+    let got = next_event(&mut r, "conv-live").await;
+    match got.kind {
+        EventKind::AgentResponded { text } => assert_eq!(text, "你好以琳"),
+        other => panic!("expect AgentResponded, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ws_conv_filters_out_other_agents() {
+    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
+    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (_w, mut r) = ws.split();
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let other = AgentId::new();
+    // 噪声：别的门客的事件——不是玄女 id，应该被过滤掉。
+    bus.publish(agent_event(other, "门客噪音"))
+        .expect("publish");
+    // 真信号：玄女说话。
+    bus.publish(agent_event(xuannv, "玄女发言"))
+        .expect("publish");
+
+    let got = next_event(&mut r, "conv-filter").await;
+    match got.kind {
+        EventKind::AgentResponded { text } => assert_eq!(text, "玄女发言", "应只收玄女事件"),
+        other => panic!("expect AgentResponded, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ws_conv_replay_from_cursor_then_tails_live() {
+    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+
+    // 先发三条历史；anchor = a。
+    let a = agent_event(xuannv, "a");
+    let b = agent_event(xuannv, "b");
+    let c = agent_event(xuannv, "c");
+    let anchor = a.meta.id;
+    bus.publish(a).expect("publish a");
+    bus.publish(b).expect("publish b");
+    bus.publish(c).expect("publish c");
+    // 等 writer flush 进 SQLite。
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let url_s = format!(
+        "{}/api/conv?from={}",
+        base.replace("http://", "ws://"),
+        anchor
+    );
+    let url = Url::parse(&url_s).expect("parse");
+    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (_w, mut r) = ws.split();
+
+    // 应严格在 a 之后——先 b、再 c。
+    let first = next_event(&mut r, "replay-1").await;
+    let second = next_event(&mut r, "replay-2").await;
+    match first.kind {
+        EventKind::AgentResponded { text } => assert_eq!(text, "b"),
+        o => panic!("expect b, got {o:?}"),
+    }
+    match second.kind {
+        EventKind::AgentResponded { text } => assert_eq!(text, "c"),
+        o => panic!("expect c, got {o:?}"),
+    }
+
+    // 再发一条 live d——live tail 必须连上来。
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    bus.publish(agent_event(xuannv, "d")).expect("publish d");
+    let third = next_event(&mut r, "replay-tail").await;
+    match third.kind {
+        EventKind::AgentResponded { text } => assert_eq!(text, "d"),
+        o => panic!("expect d, got {o:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ws_task_stream_filters_by_task_id() {
+    let (base, bus, _xuannv, _dir, _srv) = spawn_im().await;
+
+    let task_a = TaskId::new();
+    let task_b = TaskId::new();
+
+    let url_s = format!(
+        "{}/api/tasks/{}/stream",
+        base.replace("http://", "ws://"),
+        task_a
+    );
+    let url = Url::parse(&url_s).expect("parse");
+    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (_w, mut r) = ws.split();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // 先发 task_b 的噪声，再发 task_a 的真信号——订阅 A 应只收到 A。
+    bus.publish(task_event(task_b, "B-noise"))
+        .expect("publish B");
+    bus.publish(task_event(task_a, "A-signal"))
+        .expect("publish A");
+
+    let got = next_event(&mut r, "task-filter").await;
+    match got.kind {
+        EventKind::Custom { label, .. } => assert_eq!(label, "A-signal", "应只收 task_a 事件"),
+        o => panic!("expect Custom, got {o:?}"),
+    }
+    // meta.task 必须是 task_a。
+    assert_eq!(got.meta.task, Some(task_a));
+}
+
+#[tokio::test]
+async fn ws_conv_survives_broadcast_lag() {
+    // broadcast Lagged 不挂订阅链——CLAUDE.md 强调的坑。
+    // 做法：扔大量事件 → server WS loop 应继续运行、客户端能继续读到后续事件。
+    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
+    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (_w, mut r) = ws.split();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // 灌大量事件——broadcast 容量 1024，发 4000 条触发 Lagged。
+    for i in 0..4000 {
+        bus.publish(agent_event(xuannv, &format!("flood-{i}")))
+            .expect("publish");
+    }
+    // 客户端来不及消费的事件被 broadcast 端 lag 掉，但 server WS loop 不应退出。
+    // 留充裕窗口让 broadcast 把队列消化掉。
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // 再发一条新事件——若 server 挂了、订阅死了，这条收不到；活的话能收到。
+    bus.publish(agent_event(xuannv, "after-lag"))
+        .expect("publish after");
+
+    // 跳过 lag 期间能拿到的所有 flood-*，找到 after-lag。
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::time::Instant::now() > deadline {
+            panic!("server 未在 broadcast lag 后存活——没收到 after-lag 事件");
+        }
+        let msg = tokio::time::timeout(Duration::from_secs(2), r.next())
+            .await
+            .expect("timeout")
+            .expect("closed")
+            .expect("err");
+        if let Message::Text(t) = msg {
+            let ev: Event = serde_json::from_str(&t).expect("event");
+            if let EventKind::AgentResponded { text } = ev.kind
+                && text == "after-lag"
+            {
+                break;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ws_event_kind_serde_roundtrip_preserves_tag_union() {
+    // 防 wire format 退化：服务端下发的就是 `EventKind` 的 `#[serde(tag="type")]`，
+    // 客户端拿到 JSON 反序列化回 `Event` 必须 OK，且 type tag 是 snake_case。
+    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
+    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (_w, mut r) = ws.split();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let mut meta = EventMeta::now();
+    meta.agent = Some(xuannv);
+    let ev = Event {
+        meta,
+        kind: EventKind::ToolCallStarted {
+            tool: "Bash".into(),
+            args: serde_json::json!({"command": "ls"}),
+        },
+    };
+    bus.publish(ev).expect("publish");
+
+    // 拿到原始 text，先做"裸 JSON 形状"断言（type tag = snake_case），再走 serde。
+    let raw = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(3), r.next())
+            .await
+            .expect("timeout")
+            .expect("closed")
+            .expect("err");
+        match msg {
+            Message::Text(t) => break t,
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+            other => panic!("expect text, got {other:?}"),
+        }
+    };
+    let raw_str: String = raw.to_string();
+    let v: serde_json::Value = serde_json::from_str(&raw_str).expect("json");
+    let kind_tag = v
+        .get("kind")
+        .and_then(|k| k.get("type"))
+        .and_then(|t| t.as_str())
+        .expect("kind.type 应在");
+    assert_eq!(
+        kind_tag, "tool_call_started",
+        "wire 上 EventKind 标签必须是 snake_case"
+    );
+
+    // 完整 round-trip。
+    let parsed: Event = serde_json::from_str(&raw_str).expect("Event roundtrip");
+    match parsed.kind {
+        EventKind::ToolCallStarted { tool, args } => {
+            assert_eq!(tool, "Bash");
+            assert_eq!(args["command"], "ls");
+        }
+        other => panic!("expect ToolCallStarted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn http_task_events_returns_history_with_pagination() {
+    let (base, bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let task = TaskId::new();
+
+    // 灌 5 条 task 事件 + 1 条噪声（不同 task）。
+    for i in 0..5 {
+        bus.publish(task_event(task, &format!("h-{i}")))
+            .expect("publish");
+    }
+    bus.publish(task_event(TaskId::new(), "other-task"))
+        .expect("publish noise");
+    // 等 SQLite flush。
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let http = reqwest::Client::new();
+    // 默认（无 from）：返全部 5 条该 task 历史，限 limit=3。
+    let url = format!("{base}/api/tasks/{task}/events?limit=3");
+    let resp = http.get(&url).send().await.expect("get");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let evs: Vec<Event> = resp.json().await.expect("json");
+    assert_eq!(evs.len(), 3, "limit=3 应只返 3 条");
+    for e in &evs {
+        assert_eq!(e.meta.task, Some(task), "必须是该 task 事件");
+    }
+    // 顺序：h-0, h-1, h-2（按 rowid 升序）。
+    let labels: Vec<String> = evs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Custom { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec!["h-0", "h-1", "h-2"]);
+}
+
+#[tokio::test]
+async fn http_task_events_with_cursor_returns_strictly_after() {
+    let (base, bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let task = TaskId::new();
+
+    let a = task_event(task, "a");
+    let b = task_event(task, "b");
+    let c = task_event(task, "c");
+    let anchor = a.meta.id;
+    bus.publish(a).expect("publish a");
+    bus.publish(b).expect("publish b");
+    bus.publish(c).expect("publish c");
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let http = reqwest::Client::new();
+    let url = format!("{base}/api/tasks/{task}/events?from={anchor}");
+    let resp = http.get(&url).send().await.expect("get");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let evs: Vec<Event> = resp.json().await.expect("json");
+    assert_eq!(evs.len(), 2, "anchor 之后 2 条");
+    let labels: Vec<String> = evs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::Custom { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec!["b", "c"]);
+}
+
+#[tokio::test]
+async fn http_task_events_rejects_bad_cursor() {
+    let (base, _bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let task = TaskId::new();
+    let http = reqwest::Client::new();
+    let url = format!("{base}/api/tasks/{task}/events?from=not-a-uuid");
+    let resp = http.get(&url).send().await.expect("get");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// 路由级冒烟：α 留的 `/api/tasks` 不动；γ 不该破坏它。
+#[tokio::test]
+async fn list_tasks_root_still_returns_array() {
+    let (_base, _bus, _xuannv, _dir, _srv) = spawn_im().await;
+    // 用 oneshot 拿一份独立的 router 验契约——避免和 server 的 listener 抢端口。
+    let bus = EventBus::with_memory_store().await.expect("bus");
+    let (_dir2, ws) = make_workspace().await;
+    let fuxi = Arc::new(Fuxi::new(bus, ws));
+    let app = router(AppState::new(fuxi));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tasks?root=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(v.is_array());
+}
