@@ -9,10 +9,12 @@
 
 use crate::auth::HmacSecret;
 use crate::devices::DeviceStore;
+use crate::lockout::LoginGuard;
 use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
 use fuxi_orchestrator::Fuxi;
 use sqlx::SqlitePool;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// 共享给所有 handler 的应用状态。`Clone` 廉价（内部都是 `Arc`）。
@@ -32,12 +34,18 @@ pub struct AppState {
 pub struct ImAuth {
     /// 全局 HMAC 密钥——sign / verify token 用。
     pub secret: Arc<HmacSecret>,
-    /// 内存 PIN 表——TUI `/pair` 投入、`/api/auth/pair` 消费。
+    /// 内存 PIN 表——TUI `/pair` 投入、`/api/auth/pair` 消费（fallback 路径）。
     pub pairs: Arc<PendingPairs>,
-    /// `device_tokens` 持久层——配对成功入库；`/devices` 读 / revoke。
+    /// `device_tokens` 持久层——配对/登入成功入库；`/devices` 读 / revoke。
     /// `Option`：测试场景下没 db pool 可注入；handler 处理 None 视作"持久化关闭"
     /// （仍签 token，跳过入库）——这样 router_smoke 不必起 sqlx。
     pub devices: Option<DeviceStore>,
+    /// β · #9 主密码 hash 文件路径。`Option`：测试默认无；production 用
+    /// `password::default_path()`。文件**可能不存在**——handler 应返 503 引导用户
+    /// 跑 `fuxi im set-password`。
+    pub password_path: Option<Arc<PathBuf>>,
+    /// β · #9 IP 维度登入失败计数 + 锁定守卫。
+    pub login_guard: Arc<LoginGuard>,
 }
 
 impl AppState {
@@ -96,7 +104,7 @@ impl ImPush {
 }
 
 impl ImAuth {
-    /// 进程内瞬态：随机生成 32 字节 HMAC key + 空 pairs + 无 db。
+    /// 进程内瞬态：随机生成 32 字节 HMAC key + 空 pairs + 无 db + 无 password。
     /// 测试用——重启后 token 全失效，但 smoke 路径不依赖持久化。
     pub fn ephemeral() -> Self {
         use base64::Engine;
@@ -109,15 +117,26 @@ impl ImAuth {
             secret: Arc::new(secret),
             pairs: Arc::new(PendingPairs::new()),
             devices: None,
+            password_path: None,
+            login_guard: Arc::new(LoginGuard::new()),
         }
     }
 
     /// production 注入：文件 key + im.db SqlitePool 包装的 DeviceStore。
+    /// `password_path` 默认 `~/.fuxi/im_password.bcrypt`（`HOME` 缺时为 None）。
     pub fn with_persistence(secret: HmacSecret, devices: DeviceStore) -> Self {
         Self {
             secret: Arc::new(secret),
             pairs: Arc::new(PendingPairs::new()),
             devices: Some(devices),
+            password_path: crate::password::default_path().map(Arc::new),
+            login_guard: Arc::new(LoginGuard::new()),
         }
+    }
+
+    /// 显式覆盖主密码文件路径（单测注入临时路径）。
+    pub fn with_password_path(mut self, path: PathBuf) -> Self {
+        self.password_path = Some(Arc::new(path));
+        self
     }
 }

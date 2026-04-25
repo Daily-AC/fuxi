@@ -1,5 +1,7 @@
 //! Cookie 鉴权 layer——所有 `/api/*` 路由要带合法 `fuxi_im_token` cookie；
-//! `/api/auth/pair` 和 `/healthz` 豁免（前者是配对入口、后者是 nginx upstream check）。
+//! `/api/auth/login`（主密码登入）/ `/api/auth/pair`（PIN 降级 fallback）/
+//! `/healthz`（nginx upstream check）三条豁免——前两者本身就是签发 cookie
+//! 的入口，自然不能要求带已有的 cookie。
 //!
 //! 设计取舍：
 //! - **不区分 401 原因**：缺 cookie / 解码失败 / 签名错 / 过期 → 一律 401，
@@ -31,9 +33,9 @@ impl AuthGate {
     }
 }
 
-/// 不需要鉴权的路径前缀——配对入口本身、liveness probe。
+/// 不需要鉴权的路径前缀——登入入口、配对入口本身、liveness probe。
 fn is_exempt(path: &str) -> bool {
-    matches!(path, "/api/auth/pair" | "/healthz")
+    matches!(path, "/api/auth/login" | "/api/auth/pair" | "/healthz")
 }
 
 /// axum middleware 入口。

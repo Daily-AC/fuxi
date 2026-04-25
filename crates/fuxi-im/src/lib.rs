@@ -19,8 +19,10 @@ pub mod auth;
 pub mod db;
 pub mod devices;
 pub mod error;
+pub mod lockout;
 pub mod middleware;
 pub mod pair;
+pub mod password;
 pub mod push;
 pub mod state;
 

@@ -79,6 +79,8 @@ subtle = "2"
 # nonce 用十六进制随机数；hex 同时用于签名输出格式
 hex = "0.4"
 rand = "0.8"
+# β · #9 fuxi im set-password 交互式输密码不回显（无 echo + 二次确认）
+rpassword = "7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

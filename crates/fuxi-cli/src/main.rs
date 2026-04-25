@@ -74,6 +74,9 @@ enum Command {
 enum ImCmd {
     /// 启动 IM axum 服务（默认 :9100），含完整伏羲 platform。
     Start(subcommands::ImStartArgs),
+    /// 设置 PWA 登入主密码（交互式 + bcrypt + ~/.fuxi/im_password.bcrypt）。
+    #[command(name = "set-password")]
+    SetPassword(subcommands::ImSetPasswordArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Command::Im(i)) => match i {
             ImCmd::Start(args) => subcommands::run_im_start(args).await,
+            ImCmd::SetPassword(args) => subcommands::run_im_set_password(args).await,
         },
     }
 }

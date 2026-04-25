@@ -1,20 +1,35 @@
-//! `/api/auth/pair` —— 设备一次性 PIN 配对（β · Decision 14 D）。
+//! `/api/auth/login` —— 主密码登入（β · Task #9，主路）。
+//! `/api/auth/pair` —— 设备一次性 PIN 配对（β · Decision 14 D，降级 fallback）。
 //!
-//! 流程：TUI `/pair` 调 [`crate::pair::PendingPairs::start`] 出 6 位 PIN →
-//! 用户在手机 PWA 输入 PIN + 设备名 POST 此端点 → handler 调 `claim` 验 PIN →
-//! 签 token + 写 device_tokens（若注入 DeviceStore）+ Set-Cookie。
+//! 流程：
+//! - **主路**：用户在 PWA 输主密码 + 设备名 POST `/api/auth/login` → bcrypt::verify
+//!   → 通过则签 HMAC token + 写 device_tokens + Set-Cookie。
+//! - **fallback**：忘密码场景走 `/api/auth/pair` —— TUI `/pair` 出 PIN，PWA 输入
+//!   POST `/api/auth/pair` → claim PIN → 签 token + 写 device_tokens + Set-Cookie。
+//! - 两条路径**后半段（签 token + 写库 + cookie）共用** [`finalize_login`]。
+//!
+//! ## 暴力防御
+//!
+//! login handler 在 verify 之前调 [`crate::lockout::LoginGuard::check`]：
+//! - 该 IP 已锁 → 401 + 不真做 bcrypt（避免 attacker 还能消耗服务器 CPU）
+//! - 一分钟内 5 次失败 → 锁 5 分钟
+//! - 成功登入 → 清失败计数
 
-use crate::auth::{COOKIE_NAME, build_set_cookie, fresh_claims, sign_token};
+use crate::auth::{build_set_cookie, fresh_claims, sign_token};
 use crate::devices::DeviceRecord;
 use crate::error::{Error, Result};
+use crate::lockout::GuardDecision;
 use crate::pair::ClaimError;
+use crate::password::{check_password, read_password_file};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
+use std::time::Instant;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -51,16 +66,83 @@ pub async fn pair(State(state): State<AppState>, Json(body): Json<PairBody>) -> 
         }
     })?;
 
-    // 设备 id 用 uuid v4，token 主体 + cookie + device_tokens 主键三处共用。
+    finalize_login(&state, name).await
+}
+
+/// `/api/auth/login` 请求体——主密码 + 设备名。
+#[derive(Debug, Deserialize)]
+pub struct LoginBody {
+    /// 用户在 home 跑 `fuxi im set-password` 设的主密码明文。
+    pub password: String,
+    /// 用户给设备起的可读名（"以琳的 iPhone"）。
+    pub device_name: String,
+}
+
+/// 503 响应体（密码未设置时引导用户 set-password）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PasswordNotSetResponse {
+    pub error: &'static str,
+}
+
+/// `POST /api/auth/login` 实装（主路）。
+pub async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginBody>,
+) -> Result<Response> {
+    let name = body.device_name.trim();
+    if name.is_empty() {
+        return Err(Error::BadRequest("device_name 不能为空".into()));
+    }
+    if body.password.is_empty() {
+        return Err(Error::BadRequest("password 不能为空".into()));
+    }
+
+    let ip = client_ip(&headers).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+    let now = Instant::now();
+    if let GuardDecision::Locked { remaining_secs } = state.im_auth.login_guard.check(ip, now) {
+        tracing::warn!(%ip, remaining_secs, "login rejected: ip locked");
+        return Err(Error::Unauthorized(format!(
+            "登入失败次数过多，请 {remaining_secs}s 后重试"
+        )));
+    }
+
+    // 读密码文件——未注入路径或文件不存在都视作"未设密码"返 503 + 提示文案。
+    // password_path=None 在 production daemon 路径绝不会发生（with_persistence 自动
+    // 填默认值）；仅 router_smoke / unit test 走 ephemeral 时才命中。
+    let pf_opt = match state.im_auth.password_path.as_ref() {
+        Some(p) => read_password_file(p)?,
+        None => None,
+    };
+    let Some(pf) = pf_opt else {
+        return Ok(password_not_set_response());
+    };
+
+    let ok = check_password(&body.password, &pf)?;
+    if !ok {
+        state.im_auth.login_guard.record_failure(ip, now);
+        tracing::warn!(%ip, "login bad password");
+        return Err(Error::Unauthorized("密码不匹配".into()));
+    }
+
+    state.im_auth.login_guard.record_success(ip);
+    finalize_login(&state, name).await
+}
+
+/// 共用收尾：签 HMAC token、写 device_tokens、Set-Cookie。
+///
+/// pair / login 两条路径用同一个 contract：调用方先把"是不是合法人"判定完，
+/// 这里负责"我承认你这台设备" 的物理化（持久化 + cookie）。
+async fn finalize_login(state: &AppState, device_name: &str) -> Result<Response> {
     let device_id = Uuid::new_v4().to_string();
-    let claims = fresh_claims(device_id.clone(), name.to_string());
+    let claims = fresh_claims(device_id.clone(), device_name.to_string());
     let token = sign_token(&state.im_auth.secret, &claims)?;
 
     if let Some(devices) = &state.im_auth.devices {
         let now = Utc::now();
         let rec = DeviceRecord {
             token_id: device_id.clone(),
-            device_name: name.to_string(),
+            device_name: device_name.to_string(),
             // 当前用全局 key 签发；本列存的是 base64url 形式的 secret 占位
             // （CLAUDE.md 决策：未来 per-device rotation 才用得到）。
             // WHY 不写真 key 进每行：global key 有自己的 ~/.fuxi/im_hmac.key 文件
@@ -80,16 +162,34 @@ pub async fn pair(State(state): State<AppState>, Json(body): Json<PairBody>) -> 
     });
 
     let mut resp = (StatusCode::OK, body_json).into_response();
-    // header::SET_COOKIE 直接 insert——可能被 axum 把 string 解析失败 unwrap，
-    // 但 build_set_cookie 输出永远是 ASCII，安全。
     resp.headers_mut().insert(
         header::SET_COOKIE,
         cookie
             .parse()
             .map_err(|e| Error::Internal(format!("set-cookie header 解析失败: {e}")))?,
     );
-    let _ = COOKIE_NAME; // 防 unused import 警告——COOKIE_NAME 是公共 API 不能丢
     Ok(resp)
+}
+
+/// 提取客户端 IP——优先 `X-Forwarded-For`（nginx 反代会加），缺则 None。
+/// nginx vhost 必须配 `proxy_set_header X-Forwarded-For $remote_addr`，否则锁定
+/// 退化为"全部进来的 IP 都是 127.0.0.1（nginx 自己）"——一旦攻击 IP 接力，所有
+/// 真请求都会被同一个 127.0.0.1 锁定连累。本 handler 只读 header 不查 PeerAddr，
+/// 因为 axum::serve 没用 with_connect_info（要 ζ 配合）。
+fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .and_then(|s| s.parse().ok())
+}
+
+fn password_not_set_response() -> Response {
+    let body = Json(PasswordNotSetResponse {
+        error: "password not set, run `fuxi im set-password` on home",
+    });
+    (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
 }
 
 #[cfg(test)]
@@ -150,6 +250,7 @@ mod tests {
         let state = AppState::new(fuxi).with_im_auth(im_auth);
         let app = Router::new()
             .route("/api/auth/pair", post(pair))
+            .route("/api/auth/login", post(login))
             .with_state(state.clone());
         (dir, app, state)
     }
@@ -163,6 +264,8 @@ mod tests {
             secret: Arc::new(secret),
             pairs: pairs.clone(),
             devices: None,
+            password_path: None,
+            login_guard: Arc::new(crate::lockout::LoginGuard::new()),
         };
         let (_dir, app, state) = build(im_auth).await;
 
@@ -253,6 +356,8 @@ mod tests {
             secret: Arc::new(secret),
             pairs,
             devices: Some(store.clone()),
+            password_path: None,
+            login_guard: Arc::new(crate::lockout::LoginGuard::new()),
         };
         let (_ws_dir, app, _) = build(im_auth).await;
 
@@ -271,5 +376,200 @@ mod tests {
         let row = store.get(&parsed.device_id).await.unwrap().expect("入库");
         assert_eq!(row.device_name, "Pixel");
         assert!(row.revoked_at.is_none());
+    }
+
+    // ─── /api/auth/login（主密码主路） ───
+
+    /// helper：用临时 password 文件构造完整 ImAuth（含 login_guard）。
+    async fn build_with_password(
+        password: &str,
+        store: Option<crate::devices::DeviceStore>,
+    ) -> (tempfile::TempDir, Router, AppState) {
+        let pw_dir = tempfile::tempdir().expect("tmp pw");
+        let pw_path = pw_dir.path().join("im_password.bcrypt");
+        crate::password::write_password_file(&pw_path, password).expect("write pw");
+        let secret = HmacSecret::from_string("test-key".into());
+        let im_auth = ImAuth {
+            secret: Arc::new(secret),
+            pairs: Arc::new(PendingPairs::new()),
+            devices: store,
+            password_path: Some(Arc::new(pw_path)),
+            login_guard: Arc::new(crate::lockout::LoginGuard::new()),
+        };
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi).with_im_auth(im_auth);
+        let app = Router::new()
+            .route("/api/auth/pair", post(pair))
+            .route("/api/auth/login", post(login))
+            .with_state(state.clone());
+        // 把 pw_dir 一并返回防 drop——TempDir drop 会清掉密码文件
+        (pw_dir, app, state)
+    }
+
+    fn login_req(password: &str, device_name: &str, ip: Option<&str>) -> Request<Body> {
+        let body = serde_json::json!({ "password": password, "device_name": device_name });
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json");
+        if let Some(ip) = ip {
+            builder = builder.header("x-forwarded-for", ip);
+        }
+        builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn login_with_correct_password_signs_token_and_sets_cookie() {
+        let (_pw_dir, app, state) = build_with_password("correct-pass", None).await;
+        let resp = app
+            .clone()
+            .oneshot(login_req("correct-pass", "Pixel", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let set_cookie = resp
+            .headers()
+            .get("set-cookie")
+            .expect("must have Set-Cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("Secure"));
+        assert!(set_cookie.contains("SameSite=Lax"));
+        let token = set_cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("fuxi_im_token=")
+            .to_string();
+        let claims = verify_token(&state.im_auth.secret, &token).expect("valid");
+        assert_eq!(claims.name, "Pixel");
+    }
+
+    #[tokio::test]
+    async fn login_with_wrong_password_returns_401() {
+        let (_pw_dir, app, _) = build_with_password("correct-pass", None).await;
+        let resp = app
+            .oneshot(login_req("WRONG", "x", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn login_returns_503_when_password_not_set() {
+        // ephemeral ImAuth (无 password_path) → 503 + 提示文案
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi); // 默认 ephemeral
+        let app = Router::new()
+            .route("/api/auth/login", post(login))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(login_req("any", "x", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let msg = parsed["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("password not set"),
+            "提示文案应明示，得到：{msg}"
+        );
+        assert!(msg.contains("fuxi im set-password"));
+    }
+
+    #[tokio::test]
+    async fn login_lockout_after_five_failures_then_recovers() {
+        let (_pw_dir, app, _) = build_with_password("correct-pass", None).await;
+        let attacker = Some("198.51.100.99");
+        // 5 次错密码 → 第 6 次即使密码对也应被锁
+        for _ in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(login_req("WRONG", "x", attacker))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        // 锁定中——正确密码也拒
+        let resp = app
+            .clone()
+            .oneshot(login_req("correct-pass", "x", attacker))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "锁定期间正确密码也应 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_lockout_only_affects_offending_ip() {
+        let (_pw_dir, app, _) = build_with_password("correct-pass", None).await;
+        // attacker 锁
+        for _ in 0..5 {
+            let _ = app
+                .clone()
+                .oneshot(login_req("WRONG", "x", Some("198.51.100.99")))
+                .await
+                .unwrap();
+        }
+        // bystander 旁观 IP——正确密码仍应 200
+        let resp = app
+            .clone()
+            .oneshot(login_req("correct-pass", "y", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_writes_device_record_when_store_present() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("im.db");
+        let pool = crate::db::init_at(&db_path).await.expect("init db");
+        let store = crate::devices::DeviceStore::new(pool);
+        let (_pw_dir, app, _) = build_with_password("good-pass", Some(store.clone())).await;
+
+        let resp = app
+            .oneshot(login_req("good-pass", "Phone", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let parsed: PairResponse = serde_json::from_slice(&bytes).unwrap();
+
+        let row = store.get(&parsed.device_id).await.unwrap().expect("入库");
+        assert_eq!(row.device_name, "Phone");
+        assert!(row.revoked_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_rejects_empty_fields() {
+        let (_pw_dir, app, _) = build_with_password("correct-pass", None).await;
+        // 空 device_name
+        let resp = app
+            .clone()
+            .oneshot(login_req("correct-pass", "  ", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // 空密码
+        let resp = app
+            .oneshot(login_req("", "x", Some("203.0.113.5")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

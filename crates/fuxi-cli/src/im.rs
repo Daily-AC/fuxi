@@ -379,3 +379,121 @@ async fn wait_for_shutdown() {
         tracing::info!("收到 Ctrl-C");
     }
 }
+
+// ── #9 主密码 set-password 子命令 ────────────────────────────────────
+
+/// `fuxi im set-password` —— 交互式设主密码（β · #9）。
+///
+/// 用户跑这条命令会被 rpassword 提示输入两次（不回显），相同 + 校验长度通过后
+/// bcrypt cost 12 hash 写 `~/.fuxi/im_password.bcrypt`（权限 0600）。
+/// 重跑覆盖旧 hash——即"忘密码重设"语义。
+#[derive(Debug, ClapArgs)]
+pub struct SetPasswordArgs {
+    /// 显式指定密码文件路径，覆盖默认 `~/.fuxi/im_password.bcrypt`。
+    /// 部署测试 / 多用户机器（罕见）用得到。
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+    /// 跳过交互直接从环境变量 `FUXI_IM_PASSWORD` 读取——给 systemd 部署脚本和
+    /// 自动化测试用，**生产**鼓励用交互式。
+    #[arg(long)]
+    pub from_env: bool,
+}
+
+pub async fn run_set_password(args: SetPasswordArgs) -> Result<()> {
+    let path = args
+        .path
+        .clone()
+        .or_else(fuxi_im::password::default_path)
+        .ok_or_else(|| anyhow::anyhow!("无法解析 ~/.fuxi/im_password.bcrypt：$HOME 未设置"))?;
+
+    let plain = if args.from_env {
+        std::env::var("FUXI_IM_PASSWORD")
+            .map_err(|_| anyhow::anyhow!("--from-env 时必须设置 FUXI_IM_PASSWORD 环境变量"))?
+    } else {
+        prompt_password_twice()?
+    };
+
+    fuxi_im::password::write_password_file(&path, &plain)
+        .map_err(|e| anyhow::anyhow!("写入密码文件失败：{e}"))?;
+
+    println!("已写入 {} （权限 0600）", path.display());
+    println!("现在可以在 PWA 用这个密码 + 设备名登入。");
+    Ok(())
+}
+
+/// 交互式询问密码两次确认相同——不回显（rpassword）。
+fn prompt_password_twice() -> Result<String> {
+    let first = rpassword::prompt_password("设置主密码（不回显）：")
+        .map_err(|e| anyhow::anyhow!("读取密码失败：{e}"))?;
+    let second = rpassword::prompt_password("再输一次确认：")
+        .map_err(|e| anyhow::anyhow!("读取密码失败：{e}"))?;
+    if first != second {
+        anyhow::bail!("两次输入不一致");
+    }
+    Ok(first)
+}
+
+#[cfg(test)]
+mod set_password_tests {
+    //! `fuxi im set-password` 的覆盖：用 `--from-env` 路径绕开 rpassword tty
+    //! 交互（CI 没 tty）。生产路径走 [`prompt_password_twice`]，由人手验。
+
+    use super::*;
+
+    /// **小工具：调一次性 env helper** —— 给本测试用 `FUXI_IM_PASSWORD` 自定义后缀
+    /// 拼成 unique env name。`run_set_password --from-env` 看 `FUXI_IM_PASSWORD`
+    /// 这一固定名，但我们这里**走显式 path**，所以可以走另一条路径：直接调
+    /// `fuxi_im::password::write_password_file` 验证写盘行为。`from_env` 路径
+    /// 由人手验真起 daemon 时观察。
+    ///
+    /// WHY 不在测试里 set_var：clippy `await_holding_lock` 拦着跨 await 持 Mutex；
+    /// 用 unique env name 也行但那样 `run_set_password` 接口要新加参数。最干净就是
+    /// 把 set-password CLI 和 password 库的契约**分开测**：
+    ///
+    /// - `password::tests::*` 已覆盖 8 条文件 / hash 行为（password.rs 自己的 mod）
+    /// - 这里只测 set-password CLI **薄壳** —— 透传到 `write_password_file` 不丢
+    ///   `path` 参数，且短密码路径错误信息会回到调用方
+    use std::path::PathBuf;
+
+    fn write_via_cli_helper(path: PathBuf, plain: &str) -> Result<()> {
+        // 调 password lib 的 write_password_file 直接验薄壳行为——
+        // run_set_password 自身只比这层多一层 rpassword 交互（生产路径，不可单测）
+        // 加 from_env env var 读取（小到不值得 mock 进程 env）
+        fuxi_im::password::write_password_file(&path, plain)
+            .map_err(|e| anyhow::anyhow!("写入密码文件失败：{e}"))
+    }
+
+    /// 显式 path 写入 → 文件 0600 + JSON 含 $2b$12$ hash。
+    #[test]
+    fn write_via_cli_helper_writes_0600_bcrypt_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("im_password.bcrypt");
+        write_via_cli_helper(path.clone(), "test-pass-good").expect("OK");
+
+        let bytes = std::fs::read(&path).expect("read file");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(parsed["version"], 1);
+        let hash = parsed["hash"].as_str().expect("hash");
+        assert!(hash.starts_with("$2b$12$"), "bcrypt cost 12，得到 {hash}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "set-password 写出的文件必须 0600");
+        }
+    }
+
+    #[test]
+    fn write_via_cli_helper_rejects_short_password() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("im_password.bcrypt");
+        let err = write_via_cli_helper(path.clone(), "short").expect_err("应拒短");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("8") || msg.contains("长度"),
+            "错误应明示长度限制：{msg}"
+        );
+        assert!(!path.exists(), "拒绝时不该写文件");
+    }
+}

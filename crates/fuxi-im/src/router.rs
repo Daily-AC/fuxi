@@ -28,6 +28,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/conv", get(handlers::conv::conv_ws))
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
+        .route("/api/auth/login", post(handlers::auth::login))
         .route("/api/auth/pair", post(handlers::auth::pair))
         .route("/api/push/subscribe", post(handlers::push::subscribe))
         .route("/api/push/silence", post(handlers::push::silence))

@@ -693,6 +693,13 @@ pub async fn run_im_start(args: ImStartArgs) -> Result<()> {
     crate::im::run(args).await
 }
 
+/// `fuxi im set-password` 的参数 re-export——同样 thin shell。
+pub use crate::im::SetPasswordArgs as ImSetPasswordArgs;
+
+pub async fn run_im_set_password(args: ImSetPasswordArgs) -> Result<()> {
+    crate::im::run_set_password(args).await
+}
+
 // ── 共用渲染 ──
 
 /// 把 Response 打印到 stdout；Err 转成 anyhow 让 exit code 非零。
