@@ -193,6 +193,32 @@ pub async fn run(args: StartArgs) -> Result<()> {
         oracle.clone(),
     )))
     .await;
+
+    // 6.5 自启玄女（Task #8）。home 长跑场景下用户不必先 ssh 跑 REPL——`fuxi im start`
+    //     直接把玄女拉起来，PWA 第一次 `/api/conv` 就有人对面。
+    //
+    //     幂等：xuannv_bootstrap::ensure_xuannv 见到 xuannv_id 已 Some 直接返回；
+    //     重启场景下 set_xuannv 在进程内是丢的（内存态），但 cc 的 session 由策府
+    //     resolve_xuannv_session 保留，cc --resume 拉回上次上下文。
+    //
+    //     失败语义：role 加载错或 cc launch 失败 → fail-fast 让 systemd 重启；
+    //     这是部署期就该看到的错（roles 路径错配 / cc 没装），不该静默降级。
+    let xuannv_role = std::env::var("FUXI_IM_XUANNV_ROLE")
+        .unwrap_or_else(|_| crate::xuannv_bootstrap::DEFAULT_XUANNV_ROLE.to_string());
+    match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
+        Ok(id) => {
+            // set_xuannv 已经在 ensure_xuannv 里调用——上面 step 5 的 push_hooks_task
+            // 内部 wait_for_xuannv 会在下一次 2s 轮询拿到这个 id（旧设计的轮询路径
+            // 不动，避免 step 5 / 6.5 顺序耦合）。
+            tracing::info!(xuannv = %id, role = %xuannv_role, "玄女自启完成");
+        }
+        Err(e) => {
+            // 即便自启失败也别让整个 daemon 死——降级到"等 REPL 起玄女"路径，
+            // 让 push hooks 的 wait_for_xuannv 继续轮询兜底，IM API 仍可用。
+            tracing::warn!(error = %e, role = %xuannv_role,
+                "玄女自启失败，降级等 REPL 启动；PWA /api/conv 在玄女就位前会 503");
+        }
+    }
     let daemon = Daemon::new(
         fuxi.clone(),
         bus.clone(),

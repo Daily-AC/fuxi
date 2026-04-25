@@ -45,3 +45,4 @@ pub mod theme;
 pub mod toast;
 pub mod up;
 pub mod watch;
+pub mod xuannv_bootstrap;
