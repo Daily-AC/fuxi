@@ -4,10 +4,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "伏羲 CLI (binary entry `fuxi`)"
+# benches/dist_bench_common.rs 是共享 helper（被 β/γ 的 bench `mod`-include），
+# 不是独立 bench target——关闭 autobench，由 [[bench]] 显式枚举真 bench。
+autobenches = false
 
 [[bin]]
 name = "fuxi"
 path = "src/main.rs"
+
+[[bench]]
+name = "run_baseline"
+path = "benches/run_baseline.rs"
+harness = false
 
 [dependencies]
 fuxi-core.workspace = true
