@@ -229,12 +229,13 @@ pub async fn run(args: Args) -> Result<()> {
         .dist_token
         .clone()
         .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok());
-    let app_router = if let Some(token) = dist_token {
+    let (app_router, dist_ctrl) = if let Some(token) = dist_token {
         let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
         crate::dist::spawn_sweep_task(dist_ctrl.clone());
-        app_router.merge(crate::dist::router(dist_ctrl))
+        let router = app_router.merge(crate::dist::router(dist_ctrl.clone()));
+        (router, Some(dist_ctrl))
     } else {
-        app_router
+        (app_router, None)
     };
     let hub_listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -396,7 +397,7 @@ pub async fn run(args: Args) -> Result<()> {
         tracing::warn!(error = %e, "greet dispatch 失败，继续");
     }
 
-    let outcome = drive_tui(bus, fuxi.clone(), xuannv_id, resume_banner).await;
+    let outcome = drive_tui(bus, fuxi.clone(), xuannv_id, dist_ctrl, resume_banner).await;
 
     daemon_shutdown.notify_waiters();
     if let Err(e) = fuxi.shutdown().await {
@@ -420,6 +421,36 @@ pub async fn run(args: Args) -> Result<()> {
 pub(crate) enum Focus {
     Roster,
     Input,
+}
+
+/// 远端 worker 节点状态——拓扑面板用。
+/// `WorkerHeartbeatStateChanged.status` 字符串 `"alive"`/`"stale"` 解码后的内部表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeStatus {
+    Alive,
+    Stale,
+    /// 未知状态——只有 WorkerRegistered 触达过、还没收到心跳时的过渡态。
+    /// register 是"声明能力"，inflight/health 由后续心跳决定。
+    Unknown,
+}
+
+/// 远端 worker 节点的本地视图——TUI 拓扑面板状态机的最小单元。
+///
+/// 字段集**只**反映 γ EventKind 能携带的信息（+ 入栈时刻）；α 的 `NodeSnapshot`
+/// 是 wire 类型，初始 snapshot 灌入时通过 `apply_snapshot()` 转换，避免 TUI 直接
+/// 依赖 IPC schema。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeView {
+    pub node_id: String,
+    pub status: NodeStatus,
+    pub tags: Vec<String>,
+    pub inflight: u32,
+    pub max_concurrency: u32,
+    /// 最近一次本地接收事件的时刻——LAST_SEEN 列展示用，相对 now() 计算。
+    pub last_event_at: Instant,
+    /// 最近一次 sweep 事件回收的 job 数——状态栏/选中行展示参考。
+    /// 0 不代表"从未 sweep"——sweep 后死活并存。
+    pub last_recycled_count: u32,
 }
 
 /// 主对话对象——对谁说话、右栏展示谁。
@@ -589,6 +620,14 @@ pub(crate) struct ReplApp {
     pub(crate) meta_overlay_open: bool,
     /// help（命令说明）overlay 开关。`/help` 打开，Esc 关闭。
     pub(crate) help_overlay_open: bool,
+    /// /nodes 拓扑 overlay 开关。F6 切，`/nodes` 打开。
+    pub(crate) nodes_overlay_open: bool,
+    /// 远端 worker 视图——live update 由 EventBus WorkerRegistered/HeartbeatStateChanged/StaleSwept
+    /// 推送增量；初始 snapshot 由 IPC `Command::Nodes` 一次性灌（α 实装后）。
+    /// WHY 不用 HashMap：节点数 O(10)，Vec 顺序展示稳定（按 node_id 排序）。
+    pub(crate) nodes: Vec<NodeView>,
+    /// 拓扑 overlay 选中行游标，超出 nodes.len() 时 draw 时 clamp。
+    pub(crate) nodes_selected: usize,
     /// /tree 配置：true=左侧常驻任务树；false=单栏 + 按需浮层。
     pub(crate) tree_sidebar_enabled: bool,
     /// 任务树折叠状态：key 为 task_id 字符串（稳定，不受同名任务影响）。
@@ -764,6 +803,9 @@ impl ReplApp {
             roster_overlay_open: false,
             meta_overlay_open: false,
             help_overlay_open: false,
+            nodes_overlay_open: false,
+            nodes: Vec::new(),
+            nodes_selected: 0,
             tree_sidebar_enabled: env_truthy("FUXI_TREE_SIDEBAR"),
             collapsed_task_groups: HashSet::new(),
             popup: crate::autocomplete::SlashPopup::new(),
@@ -1243,8 +1285,118 @@ impl ReplApp {
                     }
                 }
             }
+            // ── 分布式拓扑（P6）: live update 拓扑面板 ─────────────
+            // WHY 不要轮询：公理 3——TUI 拓扑视图全靠订阅这三个事件做增量。
+            EventKind::WorkerRegistered {
+                node_id,
+                tags,
+                max_concurrency,
+            } => {
+                self.upsert_node_on_register(node_id, tags.clone(), *max_concurrency);
+            }
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id,
+                inflight_count,
+                status,
+            } => {
+                self.apply_node_heartbeat(node_id, *inflight_count, status);
+            }
+            EventKind::WorkerStaleSwept {
+                node_id,
+                recycled_jobs,
+            } => {
+                self.mark_node_stale(node_id, recycled_jobs.len() as u32);
+            }
             _ => {}
         }
+    }
+
+    /// `WorkerRegistered` 落地：节点首达就插入；重连只更新 tags + max_concurrency，
+    /// 保留 inflight/status——register 是"声明能力"不是"清状态"，沿 dist.rs 注释。
+    pub(crate) fn upsert_node_on_register(
+        &mut self,
+        node_id: &str,
+        tags: Vec<String>,
+        max_concurrency: u32,
+    ) {
+        let now = Instant::now();
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == node_id) {
+            node.tags = tags;
+            node.max_concurrency = max_concurrency;
+            node.last_event_at = now;
+        } else {
+            self.nodes.push(NodeView {
+                node_id: node_id.to_string(),
+                status: NodeStatus::Unknown,
+                tags,
+                inflight: 0,
+                max_concurrency,
+                last_event_at: now,
+                last_recycled_count: 0,
+            });
+            self.nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        }
+    }
+
+    /// `WorkerHeartbeatStateChanged` 落地：找到节点更 inflight + status，
+    /// `status` 字符串只识别 `"alive"`/`"stale"`，其他归 Unknown。
+    /// 找不到节点不创建——心跳不应早于 register。
+    pub(crate) fn apply_node_heartbeat(
+        &mut self,
+        node_id: &str,
+        inflight_count: u32,
+        status: &str,
+    ) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == node_id) {
+            node.inflight = inflight_count;
+            node.status = match status {
+                "alive" => NodeStatus::Alive,
+                "stale" => NodeStatus::Stale,
+                _ => NodeStatus::Unknown,
+            };
+            node.last_event_at = Instant::now();
+        }
+    }
+
+    /// `WorkerStaleSwept` 落地：标 stale + 记 recycled 数。inflight 保留——
+    /// sweep 只搬 job 不改 worker 的 inflight 字段（dist.rs sweep_stale 行为）。
+    pub(crate) fn mark_node_stale(&mut self, node_id: &str, recycled: u32) {
+        if let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == node_id) {
+            node.status = NodeStatus::Stale;
+            node.last_recycled_count = recycled;
+            node.last_event_at = Instant::now();
+        }
+    }
+
+    /// 把 IPC 来的 NodeSnapshot 全表灌成 NodeView——开机 priming 用。
+    /// 替换整个 self.nodes（不 merge，避免 stale 状态残留）。
+    /// `last_seen_ms_ago` 转回 `Instant` 时用 `now - delta`，丢一点点精度但 TUI 显示不敏感。
+    pub(crate) fn apply_snapshot(&mut self, snaps: Vec<crate::ipc::NodeSnapshot>) {
+        let now = Instant::now();
+        self.nodes = snaps
+            .into_iter()
+            .map(|s| {
+                let last_event_at = s
+                    .last_seen_ms_ago
+                    .and_then(|ms| now.checked_sub(Duration::from_millis(ms)))
+                    .unwrap_or(now);
+                let status = match s.status.as_str() {
+                    "alive" => NodeStatus::Alive,
+                    "stale" => NodeStatus::Stale,
+                    _ => NodeStatus::Unknown,
+                };
+                NodeView {
+                    node_id: s.node_id,
+                    status,
+                    tags: s.tags,
+                    inflight: s.inflight_count as u32,
+                    max_concurrency: s.max_concurrency,
+                    last_event_at,
+                    last_recycled_count: 0,
+                }
+            })
+            .collect();
+        self.nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
     }
 
     /// 完成/取消后清理过期任务。由 drive_tui 每帧前调一次；测试里直接喂 Instant。
@@ -1585,6 +1737,10 @@ impl ReplApp {
                 self.run_command_action(crate::command_registry::CommandAction::Status);
                 true
             }
+            "nodes" => {
+                self.run_command_action(crate::command_registry::CommandAction::Nodes);
+                true
+            }
             _ => {
                 self.toasts.push(
                     format!("未知命令 /{cmd}，输入 /help 查看可用命令"),
@@ -1594,6 +1750,15 @@ impl ReplApp {
                 true
             }
         }
+    }
+
+    /// `/nodes` handler：打开拓扑 overlay；其它 overlay 互斥关闭。
+    /// 数据由 EventBus 增量维护（公理 3）；overlay 一打开即用最新 state 渲染。
+    pub(crate) fn execute_nodes_command(&mut self) {
+        self.nodes_overlay_open = true;
+        self.help_overlay_open = false;
+        self.roster_overlay_open = false;
+        self.meta_overlay_open = false;
     }
 
     /// `/help` handler：打开 help overlay，不往 transcript 写系统行。
@@ -1684,6 +1849,7 @@ impl ReplApp {
                     self.focus = Focus::Roster;
                 }
             }
+            CommandAction::Nodes => self.execute_nodes_command(),
         }
     }
 
@@ -1890,10 +2056,15 @@ impl ReplApp {
             KeyCode::Esc => {
                 // 优先顺序：popup > overlay > interrupt。
                 // popup 已经在上面分支吃掉，这里到不了；overlay 其次，最后才是双击 Esc。
-                if self.roster_overlay_open || self.meta_overlay_open || self.help_overlay_open {
+                if self.roster_overlay_open
+                    || self.meta_overlay_open
+                    || self.help_overlay_open
+                    || self.nodes_overlay_open
+                {
                     self.roster_overlay_open = false;
                     self.meta_overlay_open = false;
                     self.help_overlay_open = false;
+                    self.nodes_overlay_open = false;
                     return None;
                 }
                 self.handle_esc_at(now);
@@ -1930,6 +2101,28 @@ impl ReplApp {
                 if self.meta_overlay_open {
                     self.roster_overlay_open = false;
                     self.help_overlay_open = false;
+                    self.nodes_overlay_open = false;
+                }
+                return None;
+            }
+            KeyCode::F(6) => {
+                // /nodes 拓扑 overlay。同 meta，不抢焦点。
+                self.nodes_overlay_open = !self.nodes_overlay_open;
+                if self.nodes_overlay_open {
+                    self.roster_overlay_open = false;
+                    self.meta_overlay_open = false;
+                    self.help_overlay_open = false;
+                }
+                return None;
+            }
+            KeyCode::Up if self.nodes_overlay_open => {
+                self.nodes_selected = self.nodes_selected.saturating_sub(1);
+                return None;
+            }
+            KeyCode::Down if self.nodes_overlay_open => {
+                let max = self.nodes.len().saturating_sub(1);
+                if self.nodes_selected < max {
+                    self.nodes_selected += 1;
                 }
                 return None;
             }
@@ -2154,7 +2347,7 @@ impl ReplApp {
         self.click.register(root[2], ClickAction::FocusInput);
         self.draw_status(f, root[3]);
 
-        // overlay 浮层——优先级：roster > help > meta（互斥，同时只一个开着）。
+        // overlay 浮层——优先级：roster > help > meta > nodes（互斥，同时只一个开着）。
         // 渲染顺序：overlay 在 toast 之前——toast 始终最顶。
         if !self.tree_sidebar_enabled && self.roster_overlay_open {
             self.draw_roster_overlay(f, f.area());
@@ -2162,6 +2355,8 @@ impl ReplApp {
             self.draw_help_overlay(f, f.area());
         } else if self.meta_overlay_open {
             self.draw_meta_overlay(f, f.area());
+        } else if self.nodes_overlay_open {
+            self.draw_nodes_overlay(f, f.area());
         }
 
         // slash popup——在 input 正上方贴条，40%-60% 屏宽居中。
@@ -2260,6 +2455,152 @@ impl ReplApp {
         let rect = Self::overlay_rect(area, 62, 72);
         f.render_widget(ratatui::widgets::Clear, rect);
         self.draw_help(f, rect);
+    }
+
+    /// /nodes 拓扑 overlay——比 meta 宽（要容 6 列），比 help 短（行数随节点）。
+    fn draw_nodes_overlay(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
+        let rect = Self::overlay_rect(area, 72, 60);
+        f.render_widget(ratatui::widgets::Clear, rect);
+        self.draw_nodes(f, rect);
+    }
+
+    /// 拓扑表格本体。空态有引导提示；有节点时 6 列表格 + 选中行高亮 + 状态栏。
+    /// **不**轮询——本函数仅基于 self.nodes 渲染，state 由 ingest() 外部刷。
+    fn draw_nodes(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
+        let t = theme();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" 远端 worker 拓扑 ")
+            .border_style(Style::default().fg(t.focus_border()));
+
+        if self.nodes.is_empty() {
+            let lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "无远端 worker",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(ratatui::layout::Alignment::Center),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "fuxi up --node <name> --controller https://...",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(ratatui::layout::Alignment::Center),
+                Line::from(Span::styled(
+                    "可注册一个",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(ratatui::layout::Alignment::Center),
+            ];
+            f.render_widget(Paragraph::new(lines).block(block), area);
+            return;
+        }
+
+        // 表头 + 数据行 + 状态栏。固定列宽，超长截断 `…`。
+        // 列宽：NODE 12 / STATUS 8 / TAGS 22 / IN/CAP 8 / LAST 11 / REG 12（合计 73 + 5 间隔 = 78，80 列基线）
+        let header = Line::from(vec![
+            Span::styled(
+                format!("{:<12} ", "NODE"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<8} ", "STATUS"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<22} ", "TAGS"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<8} ", "IN/CAP"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<11} ", "LAST_SEEN"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("{:<12}", "REGISTERED"),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+
+        let now = Instant::now();
+        let mut alive = 0u32;
+        let mut stale = 0u32;
+        let sel = self.nodes_selected.min(self.nodes.len().saturating_sub(1));
+
+        let mut lines: Vec<Line<'static>> = vec![header, Line::from("")];
+        for (idx, n) in self.nodes.iter().enumerate() {
+            match n.status {
+                NodeStatus::Alive => alive += 1,
+                NodeStatus::Stale => stale += 1,
+                NodeStatus::Unknown => {}
+            }
+            let (mark, mark_color, status_text) = match n.status {
+                NodeStatus::Alive => ("●", Color::Green, "alive"),
+                NodeStatus::Stale => ("○", Color::Red, "stale"),
+                NodeStatus::Unknown => ("·", Color::DarkGray, "?"),
+            };
+            let tags_str = {
+                let joined = n.tags.join(",");
+                if joined.chars().count() > 20 {
+                    format!("{}+{}", short_str(&joined, 17), n.tags.len())
+                } else {
+                    joined
+                }
+            };
+            let inflight_color = if n.max_concurrency > 0 && n.inflight >= n.max_concurrency {
+                Color::Yellow
+            } else {
+                Color::Reset
+            };
+            let last_seen = humanize_elapsed_live(now.duration_since(n.last_event_at));
+            let registered = humanize_elapsed_live(now.duration_since(n.last_event_at));
+            // ↑ register_at 暂用 last_event_at 兜底——α apply_snapshot 灌入时会单独写真值
+            let prefix = if idx == sel { "▶" } else { " " };
+
+            let row = Line::from(vec![
+                Span::raw(format!("{prefix}{:<11} ", short_str(&n.node_id, 11))),
+                Span::styled(format!("{mark} "), Style::default().fg(mark_color)),
+                Span::styled(
+                    format!("{:<6}", status_text),
+                    Style::default().fg(mark_color),
+                ),
+                Span::raw(format!("{:<22} ", short_str(&tags_str, 22))),
+                Span::styled(
+                    format!("{:>3}/{:<4} ", n.inflight, n.max_concurrency),
+                    Style::default().fg(inflight_color),
+                ),
+                Span::raw(format!("{:<11} ", short_str(&last_seen, 11))),
+                Span::raw(format!("{:<12}", short_str(&registered, 12))),
+            ]);
+            if idx == sel {
+                lines.push(
+                    row.style(Style::default().add_modifier(ratatui::style::Modifier::REVERSED)),
+                );
+            } else {
+                lines.push(row);
+            }
+        }
+
+        // 状态栏（最后一行）
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("▍ ", Style::default().fg(t.focus_border())),
+            Span::styled(format!("{alive} alive"), Style::default().fg(Color::Green)),
+            Span::raw(" · "),
+            Span::styled(format!("{stale} stale"), Style::default().fg(Color::Red)),
+            Span::raw(format!(" · 总 {} ", self.nodes.len())),
+            Span::raw(" · "),
+            Span::styled(
+                "F6 关 / ↑↓ 选 / Esc 关",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+
+        f.render_widget(Paragraph::new(lines).block(block), area);
     }
 
     /// Toast 层渲染。锚在输入框上方几行，避免用户注意力跳到屏幕右上。
@@ -3878,6 +4219,7 @@ async fn drive_tui(
     bus: EventBus,
     fuxi: Arc<Fuxi>,
     xuannv_id: AgentId,
+    dist_ctrl: Option<Arc<crate::dist::DistController>>,
     resume_banner: Option<String>,
 ) -> Result<()> {
     if let Err(e) = redirect_stderr_to_log("/tmp/fuxi.log") {
@@ -3920,6 +4262,13 @@ async fn drive_tui(
             crate::toast::ToastVariant::Info,
             Duration::from_secs(6),
         );
+    }
+    // 拓扑 panel 初始 snapshot——dist controller 启用时一次性拉全表灌进 ReplApp。
+    // WHY 不轮询：公理 3，后续增量靠 EventBus WorkerRegistered/HeartbeatStateChanged/StaleSwept
+    // 三事件推送。这里仅"开机第一帧 priming"，让 panel 不空。
+    if let Some(ctrl) = &dist_ctrl {
+        let snaps = ctrl.nodes_snapshot().await;
+        app.apply_snapshot(snaps);
     }
     let mut stream = bus.subscribe();
 
@@ -6589,5 +6938,183 @@ mod tests {
             "默认必须 loopback，避免误暴露"
         );
         assert_eq!(args.xuannv_role, "xuannv");
+    }
+
+    // ───────── P6 拓扑 panel：4 条 ingest 行为契约 ─────────
+
+    #[test]
+    fn nodes_panel_renders_empty_state() {
+        let app = ReplApp::stub();
+        assert!(app.nodes.is_empty(), "新 ReplApp 不应有 node");
+        assert_eq!(app.nodes_selected, 0);
+        assert!(!app.nodes_overlay_open, "overlay 默认关闭");
+    }
+
+    #[test]
+    fn nodes_panel_appends_on_worker_registered_event() {
+        let mut app = ReplApp::stub();
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "home".into(),
+                tags: vec!["cc".into(), "codex".into()],
+                max_concurrency: 4,
+            },
+        ));
+        assert_eq!(app.nodes.len(), 1);
+        let n = &app.nodes[0];
+        assert_eq!(n.node_id, "home");
+        assert_eq!(n.max_concurrency, 4);
+        assert_eq!(n.tags, vec!["cc".to_string(), "codex".to_string()]);
+        assert_eq!(n.inflight, 0);
+        // 仅 register 还未触达心跳——Unknown 比假装 Alive 诚实。
+        assert_eq!(n.status, NodeStatus::Unknown);
+
+        // 重连：再来一条 Registered 不重复插，仅更 tags/max。
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "home".into(),
+                tags: vec!["cc".into()],
+                max_concurrency: 8,
+            },
+        ));
+        assert_eq!(app.nodes.len(), 1, "重连不应重复插");
+        assert_eq!(app.nodes[0].max_concurrency, 8);
+        assert_eq!(app.nodes[0].tags, vec!["cc".to_string()]);
+
+        // 第二个节点按 node_id 排序插入。
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "alpha".into(),
+                tags: vec![],
+                max_concurrency: 1,
+            },
+        ));
+        assert_eq!(app.nodes.len(), 2);
+        assert_eq!(app.nodes[0].node_id, "alpha", "应按 id 排序");
+        assert_eq!(app.nodes[1].node_id, "home");
+    }
+
+    #[test]
+    fn nodes_panel_updates_inflight_on_heartbeat_state_changed_event() {
+        let mut app = ReplApp::stub();
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "home".into(),
+                tags: vec![],
+                max_concurrency: 4,
+            },
+        ));
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id: "home".into(),
+                inflight_count: 2,
+                status: "alive".into(),
+            },
+        ));
+        assert_eq!(app.nodes[0].inflight, 2);
+        assert_eq!(app.nodes[0].status, NodeStatus::Alive);
+
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id: "home".into(),
+                inflight_count: 0,
+                status: "stale".into(),
+            },
+        ));
+        assert_eq!(app.nodes[0].inflight, 0);
+        assert_eq!(app.nodes[0].status, NodeStatus::Stale);
+
+        // 心跳来时无对应节点（早于 register）→ 静默忽略，不创节点。
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id: "ghost".into(),
+                inflight_count: 5,
+                status: "alive".into(),
+            },
+        ));
+        assert_eq!(app.nodes.len(), 1, "无 register 的心跳不该凭空建节点");
+    }
+
+    #[test]
+    fn nodes_panel_apply_snapshot_replaces_all_nodes_sorted() {
+        let mut app = ReplApp::stub();
+        // 先放点旧 stale 数据，apply_snapshot 应整表替换不残留
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "old".into(),
+                tags: vec![],
+                max_concurrency: 1,
+            },
+        ));
+        app.apply_snapshot(vec![
+            crate::ipc::NodeSnapshot {
+                node_id: "zulu".into(),
+                tags: vec!["cc".into()],
+                max_concurrency: 4,
+                inflight_count: 2,
+                inflight: vec!["j1".into(), "j2".into()],
+                last_seen_ms_ago: Some(300),
+                registered_at_ms_ago: Some(60_000),
+                status: "alive".into(),
+            },
+            crate::ipc::NodeSnapshot {
+                node_id: "alpha".into(),
+                tags: vec![],
+                max_concurrency: 1,
+                inflight_count: 0,
+                inflight: vec![],
+                last_seen_ms_ago: Some(120_000),
+                registered_at_ms_ago: Some(120_000),
+                status: "stale".into(),
+            },
+        ]);
+        assert_eq!(app.nodes.len(), 2, "snapshot 应整表替换");
+        assert_eq!(app.nodes[0].node_id, "alpha", "应按 id 排序");
+        assert_eq!(app.nodes[0].status, NodeStatus::Stale);
+        assert_eq!(app.nodes[1].node_id, "zulu");
+        assert_eq!(app.nodes[1].status, NodeStatus::Alive);
+        assert_eq!(app.nodes[1].inflight, 2);
+        assert_eq!(app.nodes[1].max_concurrency, 4);
+        assert_eq!(app.nodes[1].tags, vec!["cc".to_string()]);
+    }
+
+    #[test]
+    fn nodes_panel_marks_stale_on_swept_event() {
+        let mut app = ReplApp::stub();
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "laptop".into(),
+                tags: vec![],
+                max_concurrency: 2,
+            },
+        ));
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id: "laptop".into(),
+                inflight_count: 3,
+                status: "alive".into(),
+            },
+        ));
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerStaleSwept {
+                node_id: "laptop".into(),
+                recycled_jobs: vec!["j1".into(), "j2".into()],
+            },
+        ));
+        assert_eq!(app.nodes[0].status, NodeStatus::Stale);
+        assert_eq!(app.nodes[0].last_recycled_count, 2);
+        // sweep 不清 inflight——dist.rs sweep_stale 行为；TUI 沿规约。
+        assert_eq!(app.nodes[0].inflight, 3);
     }
 }
