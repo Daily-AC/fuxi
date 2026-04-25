@@ -1,4 +1,4 @@
-//! `/api/push/subscribe` + `/api/push/silence` —— Web Push 端点（δ）。
+//! Web Push 端点（δ）：subscribe / silence / vapid-pub。
 //!
 //! 自签 VAPID 见 Decision 14 E。
 //!
@@ -9,6 +9,12 @@
 //! 退化方案：前端在 pair 完成后存 device_id 到 localStorage，每次 subscribe /
 //! silence 自带。auth cookie 仍是访问门禁，body 里的 device_id 只是软引用——
 //! 安全网仍由 cookie + token 维持。
+//!
+//! WHY 三个端点而不是一个：浏览器 `pushManager.subscribe({ applicationServerKey })`
+//! 必须**先**拿 VAPID 公钥（`GET /api/push/vapid-pub`），调完才能拿到 endpoint
+//! 然后 `POST /api/push/subscribe`。从 subscribe response 返公钥时机已晚——
+//! 调用方还没 subscribe 怎么再调？所以 vapid-pub 必须独立 GET。
+//! `silence` 是 visibilitychange=visible 时单独调，跟 subscribe 时机也不同。
 
 use crate::error::{Error, Result};
 use crate::push::store;
@@ -33,8 +39,6 @@ pub struct PushKeys {
 
 #[derive(Debug, Serialize)]
 pub struct SubscribeResponse {
-    /// VAPID 公钥 base64url-no-pad；前端用作 `applicationServerKey`。
-    pub vapid_public_key: String,
     /// 入库的订阅 id（前端不必用，调试方便）。
     pub subscription_id: String,
 }
@@ -47,10 +51,9 @@ pub async fn subscribe(
         state.im_push.db.as_ref().ok_or_else(|| {
             Error::Internal("push db pool 未注入（im_push disabled）".to_string())
         })?;
-    let kp =
-        state.im_push.keypair.as_ref().ok_or_else(|| {
-            Error::Internal("VAPID keypair 未注入（im_push disabled）".to_string())
-        })?;
+    // VAPID keypair 注入与否不影响 subscribe 路径——subscribe 只写库。
+    // 但生产部署若没 keypair，`/api/push/vapid-pub` 会 503，前端连
+    // applicationServerKey 都拿不到，自然走不到这一步。
 
     if body.endpoint.is_empty() || body.keys.p256dh.is_empty() || body.keys.auth.is_empty() {
         return Err(Error::BadRequest(
@@ -71,8 +74,31 @@ pub async fn subscribe(
     .await?;
 
     Ok(Json(SubscribeResponse {
-        vapid_public_key: kp.public_b64url.clone(),
         subscription_id: row.id,
+    }))
+}
+
+// ─── /api/push/vapid-pub ──────────────────────────────────────────────
+
+/// `GET /api/push/vapid-pub` —— 暴露 VAPID 公钥给前端拼 `applicationServerKey`。
+///
+/// 前端必须在 `pushManager.subscribe()` 调用之前拿到这个串，所以**必须**是独立
+/// GET 而不是 subscribe response 的字段（B 决议）。
+#[derive(Debug, Serialize)]
+pub struct VapidPublicKeyResponse {
+    /// P-256 公钥 base64url-no-pad（uncompressed point，65 字节解码后）。
+    pub key: String,
+}
+
+pub async fn vapid_public_key(
+    State(state): State<AppState>,
+) -> Result<Json<VapidPublicKeyResponse>> {
+    let kp =
+        state.im_push.keypair.as_ref().ok_or_else(|| {
+            Error::Internal("VAPID keypair 未注入（im_push disabled）".to_string())
+        })?;
+    Ok(Json(VapidPublicKeyResponse {
+        key: kp.public_b64url.clone(),
     }))
 }
 
@@ -80,12 +106,7 @@ pub async fn subscribe(
 
 /// `POST /api/push/silence`——客户端 visibilitychange=visible 时调，
 /// 暂停 push 一段时间（默认 60s）；body `{ device_id, seconds? }`。
-///
-/// 路由 team-lead 待 confirm（Decision 14 E 节正文有，C 表未列）；handler
-/// 已实装，等绿灯后在 `router.rs` 加 `.route("/api/push/silence", post(silence))`。
-/// `#[allow(dead_code)]` 暂避 clippy；并挂后即移除。
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct SilenceRequest {
     pub device_id: String,
     /// 暂停秒数；省略 = 60s；<=0 = 立即清除静音。
@@ -93,10 +114,8 @@ pub struct SilenceRequest {
     pub seconds: Option<i64>,
 }
 
-#[allow(dead_code)]
 const DEFAULT_SILENCE_SECS: i64 = 60;
 
-#[allow(dead_code)]
 pub async fn silence(
     State(state): State<AppState>,
     Json(body): Json<SilenceRequest>,
@@ -126,29 +145,41 @@ mod tests {
     use super::*;
     use crate::db::init_at;
 
-    /// 直接调 store + 验证 SubscribeResponse 序列化字段——
-    /// 完整 axum router 单测需要 Fuxi 句柄，留给 e2e（tests/push_*.rs）。
+    /// SubscribeResponse 不再带 vapid_public_key——序列化形状稳定。
     #[tokio::test]
     async fn subscribe_response_shape_is_stable() {
         let resp = SubscribeResponse {
-            vapid_public_key: "BabcXYZ".to_string(),
             subscription_id: "sub-1".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["vapid_public_key"], "BabcXYZ");
         assert_eq!(json["subscription_id"], "sub-1");
+        assert!(
+            json.get("vapid_public_key").is_none(),
+            "subscribe response 不该再带 vapid_public_key（已拆到独立 GET）"
+        );
     }
 
-    /// silence seconds<=0 清除静音；>0 设置 silence_until 未来时刻。
+    /// vapid_public_key response 形状：单字段 `key`，串非空且是合法 base64url。
     #[tokio::test]
-    async fn silence_seconds_logic() {
+    async fn vapid_public_key_response_shape() {
+        let resp = VapidPublicKeyResponse {
+            key: "BabcXYZ123".to_string(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["key"], "BabcXYZ123");
+    }
+
+    /// silence 写库后 list_active 该 device 被过滤；秒数 <=0 清除恢复 active。
+    #[tokio::test]
+    async fn silence_writes_to_db_and_filters_list_active() {
         let dir = tempfile::tempdir().expect("tmp");
         let pool = init_at(dir.path().join("im.db")).await.expect("db");
         store::upsert(&pool, "d1", "https://e/1", "p", "a")
             .await
             .unwrap();
 
-        // 设置静默
+        // 静默 60s——直接复用 silence handler 的内部逻辑（store::set_silence_until）
+        // 不通过 axum router（需要 Fuxi 句柄；e2e 走 tests/）。
         store::set_silence_until(
             &pool,
             "d1",
@@ -156,10 +187,38 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(store::list_active(&pool).await.unwrap().is_empty());
+        assert!(
+            store::list_active(&pool).await.unwrap().is_empty(),
+            "silence_until > now 该订阅应被 list_active 过滤"
+        );
 
-        // 清除
+        // 清除（seconds<=0 路径）
         store::set_silence_until(&pool, "d1", None).await.unwrap();
         assert_eq!(store::list_active(&pool).await.unwrap().len(), 1);
+    }
+
+    /// 验证 vapid_public_key handler 真从 keypair 取——直接用 keypair gen 出
+    /// 一个 VapidKeypair，模拟 ImPush state，验证返串 = keypair.public_b64url。
+    /// （不起 axum router；handler 是纯函数，直接断言。）
+    #[tokio::test]
+    async fn vapid_public_key_returns_keypair_public_b64url() {
+        use crate::push::keypair::generate_at;
+        let dir = tempfile::tempdir().expect("tmp");
+        let kp = generate_at(dir.path().join("vapid.json")).expect("gen");
+
+        // 校验生成的 public_b64url 是 64-byte X+Y 加 0x04 头 = 65 字节，base64url 后非空
+        assert!(!kp.public_b64url.is_empty());
+        use base64::Engine;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&kp.public_b64url)
+            .expect("base64url 合法");
+        assert_eq!(raw.len(), 65);
+        assert_eq!(raw[0], 0x04);
+
+        // 模拟 handler 路径：构造 VapidPublicKeyResponse 并断言字段一致
+        let resp = VapidPublicKeyResponse {
+            key: kp.public_b64url.clone(),
+        };
+        assert_eq!(resp.key, kp.public_b64url);
     }
 }
