@@ -9,6 +9,21 @@ import type {
   VapidPubResponse,
 } from "~/types/events";
 
+export interface LoginRequest {
+  password: string;
+  device_name: string;
+}
+
+export interface PairRequest {
+  pin: string;
+  device_name: string;
+}
+
+/** 鉴权结果——成功后 cookie 由后端 Set-Cookie 设，body 只回 device_id（debug + 吊销）。*/
+export interface AuthResponse {
+  device_id: string;
+}
+
 export interface ApiClient {
   fetchTasks(rootOnly: boolean): Promise<TaskListResponse>;
   fetchTaskEvents(taskId: string, fromCursor?: string): Promise<EventHistoryResponse>;
@@ -16,6 +31,10 @@ export interface ApiClient {
   dispatch(req: DispatchRequest): Promise<DispatchResponse>;
   vapidPub(): Promise<VapidPubResponse>;
   pushSubscribe(sub: PushSubscribeRequest): Promise<{ ok: true }>;
+  /** 主路：主密码登入。401 密码错；503 服务端没设密码；429 过多尝试；200 成功。*/
+  login(req: LoginRequest): Promise<AuthResponse>;
+  /** 副路：PIN 配对（"忘密码 / 没设过"降级路径）。*/
+  pair(req: PairRequest): Promise<AuthResponse>;
   openConvSocket(): WebSocket;
   openTaskSocket(taskId: string): WebSocket;
 }
@@ -65,6 +84,10 @@ export function createHttpClient(): ApiClient {
         method: "POST",
         body: JSON.stringify(sub),
       }),
+    login: (req) =>
+      jsonFetch<AuthResponse>(`/api/auth/login`, { method: "POST", body: JSON.stringify(req) }),
+    pair: (req) =>
+      jsonFetch<AuthResponse>(`/api/auth/pair`, { method: "POST", body: JSON.stringify(req) }),
     openConvSocket: () => new WebSocket(wsUrl("/api/conv")),
     openTaskSocket: (taskId) => new WebSocket(wsUrl(`/api/tasks/${encodeURIComponent(taskId)}/stream`)),
   };
