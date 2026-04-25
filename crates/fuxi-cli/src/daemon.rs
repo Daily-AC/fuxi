@@ -682,6 +682,9 @@ struct DistGatewayConfig {
     controller: String,
     /// enqueue 时写入 job 作 "requester hint"（日志/审计）。3b 之后不影响派工。
     node_id: String,
+    /// 旧 token——生产 authn 已切 HMAC（lazily-loaded `HmacSecret` 在 dispatch
+    /// 入口现取 from_env），仅 progress GET 的 query 兼容字段使用。新代码
+    /// 不要读它做鉴权。
     token: String,
     poll_ms: u64,
     /// role 声明需要的 worker 能力——enqueue 透传，派工时 `pull` 端匹配。
@@ -752,28 +755,35 @@ impl Agent for DistGatewayAgent {
         tokio::spawn(async move {
             let client = Client::new();
             let controller = cfg.controller.trim_end_matches('/').to_string();
+            // secret 在 dispatch 入口取——缺 env 直接走 terminal error，避免
+            // build_dist_gateway_config 单测因 env 强约束而炸。
+            let secret = match load_dist_secret() {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = emit_terminal_error(&tx, aid, task.id, format!("{e}")).await;
+                    return;
+                }
+            };
             let body = if task.description.trim().is_empty() {
                 task.title.clone()
             } else {
                 task.description.clone()
             };
             let enqueue_url = format!("{controller}/dist/enqueue");
-            let enq = client
-                .post(enqueue_url)
-                .json(&crate::dist::DistEnqueueReq {
-                    token: cfg.token.clone(),
-                    node_id: cfg.node_id.clone(),
-                    title: task.title.clone(),
-                    body,
-                    system_prompt,
-                    required_tags: cfg.required_tags.clone(),
-                    pinned_node: cfg.pinned_node.clone(),
-                    cli: cfg.cli.clone(),
-                    allowed_tools: cfg.allowed_tools.clone(),
-                })
-                .send()
-                .await
-                .and_then(reqwest::Response::error_for_status);
+            let enqueue_req = crate::dist::DistEnqueueReq {
+                node_id: cfg.node_id.clone(),
+                title: task.title.clone(),
+                body,
+                system_prompt,
+                required_tags: cfg.required_tags.clone(),
+                pinned_node: cfg.pinned_node.clone(),
+                cli: cfg.cli.clone(),
+                allowed_tools: cfg.allowed_tools.clone(),
+            };
+            let enq =
+                crate::dist_auth_client::signed_post(&client, &secret, &enqueue_url, &enqueue_req)
+                    .await
+                    .and_then(|resp| resp.error_for_status().map_err(anyhow::Error::from));
 
             let job_id = match enq {
                 Ok(resp) => match resp.json::<crate::dist::DistEnqueueResp>().await {
@@ -807,16 +817,24 @@ impl Agent for DistGatewayAgent {
             let mut cursor: u64 = 0;
             'body: loop {
                 tokio::time::sleep(std::time::Duration::from_millis(cfg.poll_ms)).await;
-                let poll = client
-                    .get(format!("{controller}/dist/progress"))
-                    .query(&[
+                let cursor_str = cursor.to_string();
+                let progress_url = format!("{controller}/dist/progress");
+                // query 不在签名保护内（α middleware 仅签 path），但 token 已弃用，
+                // job_id / after 仅作 routing hint——controller 用 HMAC 验身份，
+                // 不再凭 query token 鉴权。保留 token query 仅为兼容尚未升级的
+                // 旧 controller，新版会无视。
+                let poll = crate::dist_auth_client::signed_get(
+                    &client,
+                    &secret,
+                    &progress_url,
+                    &[
                         ("token", cfg.token.as_str()),
                         ("job_id", job_id.as_str()),
-                        ("after", cursor.to_string().as_str()),
-                    ])
-                    .send()
-                    .await
-                    .and_then(reqwest::Response::error_for_status);
+                        ("after", cursor_str.as_str()),
+                    ],
+                )
+                .await
+                .and_then(|resp| resp.error_for_status().map_err(anyhow::Error::from));
                 let resp = match poll {
                     Ok(r) => r,
                     Err(_) => continue,
@@ -897,14 +915,12 @@ impl Agent for DistGatewayAgent {
             }
         };
         let url = format!("{}/dist/cancel", self.cfg.controller.trim_end_matches('/'));
-        let res = Client::new()
-            .post(url)
-            .json(&crate::dist::DistCancelReq {
-                token: self.cfg.token.clone(),
-                job_id: job_id.clone(),
-            })
-            .send()
-            .await;
+        let cancel_req = crate::dist::DistCancelReq {
+            job_id: job_id.clone(),
+        };
+        let secret = load_dist_secret().map_err(|e| fuxi_core::CoreError::Other(format!("{e}")))?;
+        let res =
+            crate::dist_auth_client::signed_post(&Client::new(), &secret, &url, &cancel_req).await;
         match res {
             Ok(r) if r.status().is_success() => {
                 tracing::info!(agent = %self.card.id, task = %task_id, job = %job_id, "dist gateway cancel posted");
@@ -1135,6 +1151,9 @@ fn build_dist_gateway_config(
                 crate::dist::DIST_TOKEN_ENV
             )
         })?;
+    // HMAC 取代 token 作 dist 鉴权。**不在此处加载 secret**——build 阶段是纯
+    // metadata 解析，单测不必 set env 才能走通；secret 在 dispatch / cancel 入口
+    // 经 `cfg_secret_or_emit` 取 from_env，缺则 emit 终态错误而不 panic。
     let poll_ms = metadata_u64(metadata, "dist_poll_ms").unwrap_or(1000);
     let required_tags = metadata_string_vec(metadata, "required_tags");
     Ok(Some(DistGatewayConfig {
@@ -1149,6 +1168,14 @@ fn build_dist_gateway_config(
         cli: String::new(),
         allowed_tools: Vec::new(),
     }))
+}
+
+/// 取 HMAC secret——缺 env 时把错误信息嵌入 emit 路径而不是 panic。
+/// dispatch / cancel 都靠这个 helper 拿 secret，单点失败语义统一。
+fn load_dist_secret() -> anyhow::Result<Arc<crate::dist_auth::HmacSecret>> {
+    crate::dist_auth::HmacSecret::from_env()
+        .map(Arc::new)
+        .map_err(|e| anyhow!("dist gateway HMAC secret: {e}"))
 }
 
 /// 读 metadata 里的字符串数组字段，空/缺失都返回空 Vec。
