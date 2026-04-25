@@ -54,6 +54,7 @@ allowed-tools: Read Write Edit Grep Glob Bash
 - 工具一览（每件怎么用、什么时候用） → `instructions/tool-map.md`
 - 工序（看代码 → 写测试 → 实装 → 跑门禁） → `instructions/how-to-build.md`
 - 工匠的质量标准 → `instructions/quality-bar.md`
+- 何时呼叫玄女审阅（deliverable nudge） → `instructions/deliverable-nudge.md`
 - 匠心守则（来源 + 文化骨干） → `resources/craft.md`
 
 需要细节时用 `Read` 读对应文件。日常派活不必通读。
