@@ -48,6 +48,9 @@ pub struct Daemon {
     /// 策府——`Command::Spawn` 的 P2 召回 flag 走它查 `task-<id>` / `role-<role>`
     /// 的 `session_id` fact，转给 cc `--resume`。
     pub oracle: OracleStore,
+    /// dist controller——`Command::Nodes` 的数据源；`fuxi up` 没开 `--dist-token`
+    /// 时为 `None`，那时 `Command::Nodes` 直接返 err。
+    pub dist: Option<Arc<crate::dist::DistController>>,
     /// 发信号给 serve 循环的 abort——Command::Shutdown 触发。
     shutdown_signal: Arc<Notify>,
 }
@@ -66,8 +69,16 @@ impl Daemon {
             store,
             keeper,
             oracle,
+            dist: None,
             shutdown_signal: Arc::new(Notify::new()),
         }
+    }
+
+    /// 把 dist controller 句柄挂上来。`fuxi up` 在创建 `DistController` 之后调用
+    /// （没开 `--dist-token` 就不调）。
+    pub fn with_dist(mut self, dist: Arc<crate::dist::DistController>) -> Self {
+        self.dist = Some(dist);
+        self
     }
 
     /// 阻塞到收到 Shutdown 命令或 serve 循环错误。
@@ -92,6 +103,7 @@ impl Daemon {
         let keeper = self.keeper.clone();
         let bus = self.bus.clone();
         let oracle = self.oracle.clone();
+        let dist = self.dist.clone();
 
         loop {
             tokio::select! {
@@ -109,9 +121,10 @@ impl Daemon {
                     let keeper = keeper.clone();
                     let bus = bus.clone();
                     let oracle = oracle.clone();
+                    let dist = dist.clone();
                     let shutdown_hook = shutdown_hook.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, fuxi, bus, store, keeper, oracle, shutdown_hook).await {
+                        if let Err(e) = handle_conn(stream, fuxi, bus, store, keeper, oracle, dist, shutdown_hook).await {
                             tracing::warn!(error = %e, peer_pid = ?peer_pid, "connection handler errored");
                         }
                     });
@@ -130,6 +143,7 @@ impl Daemon {
 }
 
 /// 解析一行 JSON 命令 → 派发 → 写回一行响应。每条连接只处理一条命令，然后断开。
+#[allow(clippy::too_many_arguments)]
 async fn handle_conn(
     stream: UnixStream,
     fuxi: Arc<Fuxi>,
@@ -137,6 +151,7 @@ async fn handle_conn(
     store: TriggerStore,
     keeper: Arc<Keeper>,
     oracle: OracleStore,
+    dist: Option<Arc<crate::dist::DistController>>,
     shutdown_hook: Arc<Notify>,
 ) -> Result<()> {
     let (rx, mut tx) = stream.into_split();
@@ -156,7 +171,8 @@ async fn handle_conn(
             // 先抽元信息（command_kind / agent_id / task_id），dispatch_command
             // 会 move 走 cmd——拷一份短 id 给 ctx 不影响热路径。
             let ctx = command_log_ctx(&cmd);
-            let resp = dispatch_command(fuxi, bus, store, keeper, oracle, cmd, shutdown_hook).await;
+            let resp =
+                dispatch_command(fuxi, bus, store, keeper, oracle, dist, cmd, shutdown_hook).await;
             if let Response::Err { error } = &resp {
                 tracing::warn!(
                     error = %error,
@@ -217,6 +233,11 @@ fn command_log_ctx(cmd: &Command) -> CommandLogCtx {
         },
         Command::List => CommandLogCtx {
             kind: "list",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::Nodes => CommandLogCtx {
+            kind: "nodes",
             agent_id: None,
             task_id: None,
         },
@@ -283,12 +304,14 @@ fn command_log_ctx(cmd: &Command) -> CommandLogCtx {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_command(
     fuxi: Arc<Fuxi>,
     bus: EventBus,
     store: TriggerStore,
     keeper: Arc<Keeper>,
     oracle: OracleStore,
+    dist: Option<Arc<crate::dist::DistController>>,
     cmd: Command,
     shutdown_hook: Arc<Notify>,
 ) -> Response {
@@ -389,6 +412,16 @@ async fn dispatch_command(
                 .collect();
             Response::ok(serde_json::json!({"workers": items}))
         }
+
+        Command::Nodes => match dist {
+            None => Response::err(
+                "dist controller 未启用——`fuxi up` 缺 --dist-token / $FUXI_DIST_TOKEN",
+            ),
+            Some(ctrl) => {
+                let snapshots = ctrl.nodes_snapshot().await;
+                Response::ok(serde_json::json!({ "nodes": snapshots }))
+            }
+        },
 
         Command::Kill { agent_id } => match parse_agent_id(&agent_id) {
             Err(e) => Response::err(e),
@@ -1707,6 +1740,7 @@ mod tests {
             store,
             keeper,
             oracle,
+            None,
             Command::Kill {
                 agent_id: id.to_string(),
             },
@@ -1741,6 +1775,7 @@ mod tests {
             store,
             keeper,
             oracle,
+            None,
             Command::Kill {
                 agent_id: xuannv_id.to_string(),
             },
@@ -1761,6 +1796,61 @@ mod tests {
         );
     }
 
+    /// `Command::Nodes` 在 dist controller 缺席时返 Err（不是 panic）——
+    /// 玄女工具拿到具体 message 能给用户回"忘了开 --dist-token"。
+    #[tokio::test]
+    async fn nodes_without_dist_controller_returns_err() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let resp = dispatch_command(
+            fuxi,
+            bus,
+            store,
+            keeper,
+            oracle,
+            None,
+            Command::Nodes,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        match resp {
+            Response::Err { error } => {
+                assert!(error.contains("dist controller 未启用"), "got: {error}")
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    /// 接好 dist controller 后 `Command::Nodes` 返 nodes 数组——内容来自
+    /// `nodes_snapshot`，daemon 不再加工。register 一个 worker 后应能在响应里看到。
+    #[tokio::test]
+    async fn nodes_with_dist_controller_returns_snapshot() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let ctrl = Arc::new(crate::dist::DistController::new("tok".into(), bus.clone()));
+        ctrl.register("home".into(), vec!["cc".into()], 2).await;
+
+        let resp = dispatch_command(
+            fuxi,
+            bus,
+            store,
+            keeper,
+            oracle,
+            Some(ctrl),
+            Command::Nodes,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        match resp {
+            Response::Ok { data } => {
+                let nodes = data.get("nodes").expect("nodes 字段").as_array().unwrap();
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0]["node_id"], "home");
+                assert_eq!(nodes[0]["status"], "alive");
+                assert_eq!(nodes[0]["max_concurrency"], 2);
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
     /// 无效 agent_id 字符串走 parse_agent_id 失败路径返 Err。
     #[tokio::test]
     async fn kill_with_invalid_agent_id_returns_err() {
@@ -1771,6 +1861,7 @@ mod tests {
             store,
             keeper,
             oracle,
+            None,
             Command::Kill {
                 agent_id: "not-a-uuid".into(),
             },

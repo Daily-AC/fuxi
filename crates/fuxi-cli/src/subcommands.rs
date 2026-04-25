@@ -167,6 +167,122 @@ pub async fn run_list(_args: ListArgs) -> Result<()> {
     print_response(resp)
 }
 
+// ── nodes ──
+//
+// `fuxi nodes` —— 看 dist worker 拓扑。controller 端 nodes 表的快照。
+//
+// 默认 table 格式（人读）；`--json` 出 NodeSnapshot 数组（脚本/玄女吃）；
+// `--watch` 周期刷新（默认 1s，`--interval` 调）。
+//
+// **不订阅事件**——这是 ops 视角的快照命令，不破公理 #3（持续观察用 TUI）。
+
+#[derive(Debug, ClapArgs)]
+pub struct NodesArgs {
+    /// 输出 JSON（机器可读）；默认是表格。
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+    /// 持续刷新——每 `--interval` 秒重拉一次 snapshot 重渲染。
+    #[arg(long, default_value_t = false)]
+    pub watch: bool,
+    /// `--watch` 的刷新间隔（秒）。
+    #[arg(long, default_value_t = 1)]
+    pub interval: u64,
+}
+
+pub async fn run_nodes(args: NodesArgs) -> Result<()> {
+    if !args.watch {
+        return run_nodes_once(args.json).await;
+    }
+    let interval = args.interval.max(1);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval));
+    loop {
+        tick.tick().await;
+        // 标准 ANSI：cursor 回 home + 清屏。轻量，不进 alt-screen。
+        print!("\x1B[2J\x1B[H");
+        if let Err(e) = run_nodes_once(args.json).await {
+            // watch 短暂错误（daemon 重启等）不退，下一 tick 再试
+            eprintln!("nodes 拉取失败: {e}（{interval}s 后重试）");
+        }
+    }
+}
+
+async fn run_nodes_once(as_json: bool) -> Result<()> {
+    use crate::ipc::NodeSnapshot;
+    let resp = client::send(Command::Nodes).await?;
+    let data = match resp {
+        Response::Ok { data } => data,
+        Response::Pong => return Err(anyhow!("nodes 返回 pong，响应类型异常")),
+        Response::Err { error } => return Err(anyhow!(error)),
+    };
+    let nodes_val = data
+        .get("nodes")
+        .ok_or_else(|| anyhow!("响应缺 nodes 字段: {data}"))?
+        .clone();
+    let nodes: Vec<NodeSnapshot> =
+        serde_json::from_value(nodes_val).map_err(|e| anyhow!("nodes 解析失败: {e}"))?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&nodes)?);
+        return Ok(());
+    }
+    print_nodes_table(&nodes);
+    Ok(())
+}
+
+/// 表格输出：6 列固定宽度。无 worker 时打提示语避免误以为 daemon 没回。
+pub(crate) fn print_nodes_table(nodes: &[crate::ipc::NodeSnapshot]) {
+    if nodes.is_empty() {
+        println!("(无 dist worker 节点。worker 起来后 register 会出现在这里。)");
+        return;
+    }
+    println!(
+        "{:<14} {:<7} {:<24} {:>8} {:>8} {:>10}",
+        "NODE_ID", "STATUS", "TAGS", "INFLIGHT", "CAPACITY", "LAST_SEEN"
+    );
+    for n in nodes {
+        let tags = if n.tags.is_empty() {
+            "-".to_string()
+        } else {
+            n.tags.join(",")
+        };
+        let last_seen = match n.last_seen_ms_ago {
+            None => "?".to_string(),
+            Some(ms) => format_ms_ago(ms),
+        };
+        println!(
+            "{:<14} {:<7} {:<24} {:>8} {:>8} {:>10}",
+            truncate_cell(&n.node_id, 14),
+            n.status,
+            truncate_cell(&tags, 24),
+            n.inflight_count,
+            n.max_concurrency,
+            last_seen,
+        );
+    }
+}
+
+/// 把毫秒数渲染成人读相对时间：`<1s` / `300ms` / `5s` / `2m` / `1h`。
+pub(crate) fn format_ms_ago(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{}s", ms / 1_000)
+    } else if ms < 3_600_000 {
+        format!("{}m", ms / 60_000)
+    } else {
+        format!("{}h", ms / 3_600_000)
+    }
+}
+
+/// 表格列截断：超长字符串用 `…` 收尾，避免错位。
+fn truncate_cell(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 // ── block ──
 
 #[derive(Debug, ClapArgs)]
@@ -742,5 +858,38 @@ mod tests {
         let line = format_event_line(&ev, None).expect("应输出");
         assert!(line.contains("agent_responded"), "缺 kind: {line}");
         assert!(line.contains("README 可改两点"), "缺摘要正文: {line}");
+    }
+
+    /// `fuxi nodes` 默认 table，--json 输出 NodeSnapshot[]——clap 解析两个 flag
+    /// 都该正确落到 args 里；--interval 缺省 1。
+    #[test]
+    fn nodes_args_parses_json_watch_interval() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: NodesArgs,
+        }
+        let w = W::try_parse_from(["w"]).unwrap();
+        assert!(!w.a.json && !w.a.watch);
+        assert_eq!(w.a.interval, 1);
+
+        let w = W::try_parse_from(["w", "--json"]).unwrap();
+        assert!(w.a.json);
+
+        let w = W::try_parse_from(["w", "--watch", "--interval", "5"]).unwrap();
+        assert!(w.a.watch);
+        assert_eq!(w.a.interval, 5);
+    }
+
+    #[test]
+    fn format_ms_ago_renders_buckets() {
+        assert_eq!(format_ms_ago(0), "0ms");
+        assert_eq!(format_ms_ago(300), "300ms");
+        assert_eq!(format_ms_ago(999), "999ms");
+        assert_eq!(format_ms_ago(1_000), "1s");
+        assert_eq!(format_ms_ago(62_000), "1m");
+        assert_eq!(format_ms_ago(3_600_000), "1h");
+        assert_eq!(format_ms_ago(7_200_000), "2h");
     }
 }

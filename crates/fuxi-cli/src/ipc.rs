@@ -63,6 +63,9 @@ pub enum Command {
     Status { agent_id: Option<String> },
     /// 列出所有门客。
     List,
+    /// 列出所有 dist worker 节点（来自 controller 的 nodes 表）。
+    /// `--watch` 等是 CLI 层的事，IPC 上一次请求一次响应。
+    Nodes,
     /// 杀指定门客（shutdown 它的 cc 进程）。
     Kill { agent_id: String },
     /// 玄女请示用户前标记任务 Blocked——发 `task_blocked` 事件。
@@ -199,6 +202,32 @@ impl Response {
     }
 }
 
+/// Wire 类型：单个 dist worker 节点的快照。
+///
+/// **不直接暴露 `Instant`**——内部表示不可序列化、跨进程也无意义；
+/// 折成相对时间 `*_ms_ago`，让 daemon 是唯一的"时钟权威"。client/TUI 拿到
+/// 后只做展示，不需要再校时。
+///
+/// `status` 是预先算好的人类友好标签：daemon 端按 `last_seen_ms_ago > 60_000`
+/// 判 `stale`（与 `sweep_stale` 默认 60s 阈值一致），`None` 则 `unknown`。
+/// β 的 metrics、γ 的事件、δ 的 TUI 都直接 import 这个类型——schema 一处定义。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeSnapshot {
+    pub node_id: String,
+    pub tags: Vec<String>,
+    pub max_concurrency: u32,
+    /// `inflight.len()`——TUI 可不展开 inflight 列表也够用；下钻才看 `inflight`。
+    pub inflight_count: usize,
+    pub inflight: Vec<String>,
+    /// 自上次 `register/heartbeat/pull/report` 以来的毫秒数。`None` = 从未见过
+    /// （理论不会出现在 nodes 表里，留给老版兼容）。
+    pub last_seen_ms_ago: Option<u64>,
+    /// 自首次 register 以来的毫秒数；重连不会重置。
+    pub registered_at_ms_ago: Option<u64>,
+    /// `"alive"` / `"stale"` / `"unknown"`——daemon 端按 60s 阈值预判。
+    pub status: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +306,58 @@ mod tests {
         };
         let s = serde_json::to_string(&cmd).unwrap();
         assert!(s.contains(r#""mode":"interrupt""#), "got: {s}");
+    }
+
+    #[test]
+    fn nodes_command_serdes() {
+        let cmd = Command::Nodes;
+        let s = serde_json::to_string(&cmd).unwrap();
+        assert!(s.contains(r#""cmd":"nodes""#), "got: {s}");
+        let back: Command = serde_json::from_str(&s).unwrap();
+        matches!(back, Command::Nodes);
+    }
+
+    /// `NodeSnapshot` 是跨 IPC 的 wire 合约——β/γ/δ 都按这个 schema 拿数据。
+    /// 字段重命名 = 三方一起爆炸，所以这里把所有字段名 + 类型 round-trip 一遍。
+    #[test]
+    fn node_snapshot_wire_roundtrip() {
+        let snap = NodeSnapshot {
+            node_id: "home".into(),
+            tags: vec!["cc".into(), "codex".into()],
+            max_concurrency: 4,
+            inflight_count: 2,
+            inflight: vec!["job-1".into(), "job-2".into()],
+            last_seen_ms_ago: Some(300),
+            registered_at_ms_ago: Some(123_456),
+            status: "alive".into(),
+        };
+        let s = serde_json::to_string(&snap).unwrap();
+        // 字段名锁定——TUI 端按 key 取，不能漏字段
+        assert!(s.contains(r#""node_id":"home""#), "got: {s}");
+        assert!(s.contains(r#""inflight_count":2"#), "got: {s}");
+        assert!(s.contains(r#""last_seen_ms_ago":300"#), "got: {s}");
+        assert!(s.contains(r#""registered_at_ms_ago":123456"#), "got: {s}");
+        assert!(s.contains(r#""status":"alive""#), "got: {s}");
+        let back: NodeSnapshot = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, snap);
+    }
+
+    #[test]
+    fn node_snapshot_serializes_none_timestamps_explicitly() {
+        // Some(None) 区分 unknown / 没数据——必须显式写 null，不能 skip。
+        let snap = NodeSnapshot {
+            node_id: "n".into(),
+            tags: vec![],
+            max_concurrency: 1,
+            inflight_count: 0,
+            inflight: vec![],
+            last_seen_ms_ago: None,
+            registered_at_ms_ago: None,
+            status: "unknown".into(),
+        };
+        let s = serde_json::to_string(&snap).unwrap();
+        assert!(s.contains(r#""last_seen_ms_ago":null"#), "got: {s}");
+        assert!(s.contains(r#""registered_at_ms_ago":null"#), "got: {s}");
     }
 
     #[test]

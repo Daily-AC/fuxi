@@ -117,19 +117,23 @@ pub async fn run(args: Args) -> Result<()> {
         .dist_token
         .clone()
         .or_else(|| std::env::var(crate::dist::DIST_TOKEN_ENV).ok());
-    let firehose_router = if let Some(token) = dist_token {
-        let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
+    // dist_ctrl 句柄要给两路用：一路挂 /dist/* 路由，一路挂到 daemon 让 IPC
+    // `Command::Nodes` 能读 nodes 表。把句柄抽到这里，下面 daemon 构造时
+    // `with_dist` 注入。
+    let (firehose_router, dist_ctrl) = if let Some(token) = dist_token {
+        let ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
         // Phase 3c-2: 起后台 sweep tick——30s 扫一次，凡 last_seen > 60s 的 worker
         // 都把它的 inflight 回滚到全局 queue 前端。让 dead worker 自愈，不用 smoke
         // 当天那样手动补 report。60s 阈值 = 两次心跳间隔（worker 每 10s 发一次，6
         // 次不到是 60s）——给网络抖动留 buffer，但又不至于让挂机 job 无限霸位。
-        crate::dist::spawn_sweep_task(dist_ctrl.clone());
-        firehose_router.merge(crate::dist::router(dist_ctrl))
+        crate::dist::spawn_sweep_task(ctrl.clone());
+        let merged = firehose_router.merge(crate::dist::router(ctrl.clone()));
+        (merged, Some(ctrl))
     } else {
         tracing::warn!(
             "分布式 controller 未启用：缺 --dist-token / $FUXI_DIST_TOKEN（将不会挂载 /dist/* 路由）"
         );
-        firehose_router
+        (firehose_router, None)
     };
     let webhook_router = fuxi_scheduler::webhook::router(WebhookState {
         store: sched_store.clone(),
@@ -165,6 +169,11 @@ pub async fn run(args: Args) -> Result<()> {
         keeper.clone(),
         oracle,
     );
+    let daemon = if let Some(ctrl) = dist_ctrl.clone() {
+        daemon.with_dist(ctrl)
+    } else {
+        daemon
+    };
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
     let daemon_task = tokio::spawn(async move {
