@@ -517,6 +517,10 @@ pub struct DistController {
     bus: EventBus,
     inner: Mutex<DistInner>,
     pub metrics: Arc<Metrics>,
+    /// 可选 SQLite 持久化（path 4 α）——`None` = 纯 in-memory 老路径，
+    /// 重启丢 in-flight。生产装一个 `JobPersistence` 后 enqueue/pull/report/cancel/sweep
+    /// 全自动 dual-write，restart 后调 `restore_from_persistence` 重建 queue。
+    persistence: Option<Arc<crate::dist_persistence::JobPersistence>>,
 }
 
 impl DistController {
@@ -526,7 +530,65 @@ impl DistController {
             bus,
             inner: Mutex::new(DistInner::default()),
             metrics: Arc::new(Metrics::new()),
+            persistence: None,
         }
+    }
+
+    /// 注入 SQLite 持久化层。Builder 风格让现有 in-memory-only 测试不破。
+    /// 注入后 enqueue/pull/report/cancel/sweep 立刻开始 dual-write。
+    pub fn with_persistence(
+        mut self,
+        persistence: Arc<crate::dist_persistence::JobPersistence>,
+    ) -> Self {
+        self.persistence = Some(persistence);
+        self
+    }
+
+    /// γ #3 (gateway restart e2e) 的入口契约：
+    ///
+    /// 调用方拿到一个**新** controller（可能 with_persistence 也可能不带；不带时此方法 noop）。
+    /// 本方法读 SQLite，把 'queued' 行按 enqueued_at 升序 push_back 到 global_queue，
+    /// 把 'inflight' 行视作 stale orphans 同样 push_back（push_back 而非 push_front：
+    /// orphan 不抢 queued 的次序，让 sweep tick 把它们当 dead-worker 走也是 OK 路径）。
+    ///
+    /// 返回 `(queued_n, orphan_n)` 给调用方做 metric / 日志。无 persistence 时返回 `(0, 0)`。
+    ///
+    /// **必须在 controller 接受任何 enqueue/pull 之前调用**——否则会与正常 enqueue
+    /// race，job 顺序乱（虽然不丢，但派发次序与 enqueued_at 不一致）。
+    pub async fn restore_from_persistence(&self) -> (usize, usize) {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return (0, 0);
+        };
+        let restored = match persistence.restore().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "dist_jobs restore 失败，跳过——此次启动相当于无 persistence");
+                return (0, 0);
+            }
+        };
+        let queued_n = restored.queued.len();
+        let orphan_n = restored.orphans.len();
+        let mut g = self.inner.lock().await;
+        for job in restored.queued {
+            g.global_queue.push_back(job);
+        }
+        // orphan：当 stale 重 enqueue。in-memory 不写 inflight，让正常 pull 流程接管。
+        // 同步刷一行 SQLite 把 inflight 翻回 queued，避免下次重启又被当 orphan。
+        let orphan_ids: Vec<String> = restored.orphans.iter().map(|j| j.id.clone()).collect();
+        for job in restored.orphans {
+            g.global_queue.push_back(job);
+        }
+        let depth = g.global_queue.len() as i64;
+        drop(g);
+        self.metrics.queue_depth.set(depth);
+        // SQLite 同步——orphan 翻回 queued，否则下次重启它们仍是 inflight 又被当 orphan
+        let persistence_clone = persistence.clone();
+        for id in orphan_ids {
+            if let Err(e) = persistence_clone.record_sweep_to_queued(&id).await {
+                tracing::warn!(job_id = %id, error = %e, "orphan 翻回 queued 失败——下次重启会再当 orphan");
+            }
+        }
+        (queued_n, orphan_n)
     }
 
     /// 旧 token accessor——HMAC 取代后无生产 caller，保留供未迁移的 binary
@@ -673,6 +735,16 @@ impl DistController {
             allowed_tools,
         };
         let cli_label = cli_label_of(&job.cli);
+        // dual-write：先持久化（SQLite 是真相源）再 push 到 in-memory queue。
+        // 顺序很重要——反过来的话，controller 死在两步之间会让 in-memory 有 job 而
+        // SQLite 没有，restart 后丢。即使 SQLite 写失败（极端 case 比如磁盘满），
+        // 我们仍 push in-memory 让 hot path 能跑——只是失去 restart-safety，运维通过
+        // 监控 dist_jobs 写失败率发现。
+        if let Some(persistence) = self.persistence.as_ref()
+            && let Err(e) = persistence.record_enqueue(&job).await
+        {
+            tracing::warn!(job_id = %job.id, error = %e, "dist_jobs enqueue 写入失败——in-memory 仍接，重启会丢");
+        }
         let mut g = self.inner.lock().await;
         g.global_queue.push_back(job);
         let depth = g.global_queue.len() as i64;
@@ -740,7 +812,15 @@ impl DistController {
         };
         let depth = g.global_queue.len() as i64;
         let cli_label = cli_label_of(&job.cli);
+        let job_id_for_persist = job.id.clone();
         drop(g);
+        // dual-write：in-memory 已 commit，SQLite 同步翻 inflight。失败也不退回——
+        // 退回会让上层"已经派发"的承诺失效，引发更糟的双派；只 warn。
+        if let Some(persistence) = self.persistence.as_ref()
+            && let Err(e) = persistence.record_pull(&job_id_for_persist, node_id).await
+        {
+            tracing::warn!(job_id = %job_id_for_persist, error = %e, "dist_jobs pull 写入失败——重启可能误当 queued 重发");
+        }
         self.metrics
             .jobs_dispatched_total
             .with_label_values(&[&cli_label, node_id])
@@ -786,6 +866,12 @@ impl DistController {
             0
         };
         drop(g);
+        // dual-write：终态写盘——重启后该 job 不会再被 restore 到 queue。
+        if let Some(persistence) = self.persistence.as_ref()
+            && let Err(e) = persistence.record_report(&req.job_id, req.ok).await
+        {
+            tracing::warn!(job_id = %req.job_id, error = %e, "dist_jobs report 写入失败——重启可能误当 inflight 重派");
+        }
         let ok_label = if req.ok { "true" } else { "false" };
         self.metrics
             .jobs_completed_total
@@ -878,6 +964,14 @@ impl DistController {
     pub async fn cancel_job(&self, job_id: &str) {
         let mut g = self.inner.lock().await;
         g.cancelled.insert(job_id.to_string());
+        drop(g);
+        // dual-write：cancel 是"调度意图"——SQLite 标 cancelled 让重启后不再 restore；
+        // runtime 杀进程仍走 heartbeat ack 路径（worker 看到 should_cancel=true）。
+        if let Some(persistence) = self.persistence.as_ref()
+            && let Err(e) = persistence.record_cancel(job_id).await
+        {
+            tracing::warn!(job_id = %job_id, error = %e, "dist_jobs cancel 写入失败——重启会丢 cancel 意图");
+        }
     }
 
     /// 心跳：worker 以自身为权威声明当前真实 inflight。
@@ -1002,6 +1096,17 @@ impl DistController {
             self.metrics
                 .workers_swept_total
                 .inc_by(swept_nodes_with_jobs);
+        }
+        // dual-write：sweep 把 in-memory 的 inflight job 翻回 queue（push_front），
+        // 这里同步把 SQLite 行从 inflight 翻回 queued，避免重启后又被当 orphan。
+        if let Some(persistence) = self.persistence.as_ref() {
+            for (_nid, jobs) in &publish_targets {
+                for jid in jobs {
+                    if let Err(e) = persistence.record_sweep_to_queued(jid).await {
+                        tracing::warn!(job_id = %jid, error = %e, "dist_jobs sweep 写入失败");
+                    }
+                }
+            }
         }
         for (nid, jobs) in publish_targets {
             let _ = self.bus.publish(Event {
@@ -5065,5 +5170,221 @@ mod tests {
             Err(other) => panic!("期望 MissingSecretEnv，得到 {other:?}"),
             Ok(_) => panic!("env 已 unset 但 from_env 仍返 Ok"),
         }
+    }
+
+    // ─── path 4 α：DistController 与 JobPersistence 的集成 ───
+    //
+    // dist_persistence 自身的 5 条 TDD 测试在 `crate::dist_persistence::tests`；
+    // 这里只测"DistController 注入 persistence 后 mutating ops 真的写盘 +
+    // restore_from_persistence 真的塞回 queue"，避免 wiring drift。
+
+    use crate::dist_persistence::{JobPersistence, STATE_CANCELLED, STATE_DONE, STATE_INFLIGHT};
+
+    /// path 4 α #1：with_persistence 注入后 enqueue 在 SQLite 留行 + state=queued。
+    #[tokio::test]
+    async fn controller_enqueue_writes_persistence_row() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let p = Arc::new(JobPersistence::connect_memory().await.expect("p"));
+        let ctrl = Arc::new(DistController::new("tok".into(), bus).with_persistence(p.clone()));
+        let job_id = ctrl
+            .enqueue(
+                "hint".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let row = p.job_row(&job_id).await.expect("row").expect("exists");
+        assert_eq!(row.state, "queued");
+        assert!(row.assignee.is_none());
+    }
+
+    /// path 4 α #2：pull → SQLite state=inflight, assignee=node。
+    #[tokio::test]
+    async fn controller_pull_writes_inflight_to_persistence() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let p = Arc::new(JobPersistence::connect_memory().await.expect("p"));
+        let ctrl = Arc::new(DistController::new("tok".into(), bus).with_persistence(p.clone()));
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        let job_id = ctrl
+            .enqueue(
+                "hint".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let pulled = ctrl.pull("nodeA").await.expect("job");
+        assert_eq!(pulled.id, job_id);
+        let row = p.job_row(&job_id).await.expect("row").expect("exists");
+        assert_eq!(row.state, STATE_INFLIGHT);
+        assert_eq!(row.assignee.as_deref(), Some("nodeA"));
+    }
+
+    /// path 4 α #3：report → SQLite state=done, ok 标志正确。
+    #[tokio::test]
+    async fn controller_report_writes_done_to_persistence() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let p = Arc::new(JobPersistence::connect_memory().await.expect("p"));
+        let ctrl = Arc::new(DistController::new("tok".into(), bus).with_persistence(p.clone()));
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        let job_id = ctrl
+            .enqueue(
+                "h".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        ctrl.pull("nodeA").await.expect("job");
+        let accepted = ctrl
+            .report(DistReportReq {
+                node_id: "nodeA".into(),
+                job_id: job_id.clone(),
+                ok: false,
+                output: "boom".into(),
+                duration_ms: 12,
+            })
+            .await;
+        assert!(accepted);
+        let row = p.job_row(&job_id).await.expect("row").expect("exists");
+        assert_eq!(row.state, STATE_DONE);
+        assert_eq!(row.ok, Some(0));
+    }
+
+    /// path 4 α #4：cancel → SQLite state=cancelled。
+    #[tokio::test]
+    async fn controller_cancel_writes_cancelled_to_persistence() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let p = Arc::new(JobPersistence::connect_memory().await.expect("p"));
+        let ctrl = Arc::new(DistController::new("tok".into(), bus).with_persistence(p.clone()));
+        let job_id = ctrl
+            .enqueue(
+                "h".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        ctrl.cancel_job(&job_id).await;
+        let row = p.job_row(&job_id).await.expect("row").expect("exists");
+        assert_eq!(row.state, STATE_CANCELLED);
+    }
+
+    /// path 4 α #5（核心 γ 契约）：controller A enqueue 一堆 → 死掉；
+    /// controller B 用同一 SQLite 重启 → restore_from_persistence → queue 恢复。
+    /// 模拟 gateway 重启 in-flight 不丢的场景。
+    #[tokio::test]
+    async fn controller_restart_via_restore_repopulates_queue() {
+        // 共享一个 sqlite 文件——两个 controller 像两次启动
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dbpath = tmp.path().join("dist.db");
+
+        // === controller A：enqueue 3 个，pull 1 个，然后死掉（drop） ===
+        let bus_a = EventBus::with_memory_store().await.expect("bus");
+        let p_a = Arc::new(JobPersistence::connect_file(&dbpath).await.expect("p"));
+        let ctrl_a =
+            Arc::new(DistController::new("tok".into(), bus_a).with_persistence(p_a.clone()));
+        ctrl_a.register("nodeA".into(), vec![], 1).await;
+        let id_q1 = ctrl_a
+            .enqueue(
+                "h".into(),
+                "T1".into(),
+                "B1".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let id_q2 = ctrl_a
+            .enqueue(
+                "h".into(),
+                "T2".into(),
+                "B2".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let id_inf = ctrl_a
+            .enqueue(
+                "h".into(),
+                "T3".into(),
+                "B3".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        // pull 把 id_q1 翻 inflight（因为 pull 拿 queue head）。下面 restore 应该把它当 orphan。
+        let pulled = ctrl_a.pull("nodeA").await.expect("job");
+        assert_eq!(pulled.id, id_q1);
+        drop(ctrl_a);
+        drop(p_a);
+
+        // === controller B：相同 sqlite 重启 ===
+        let bus_b = EventBus::with_memory_store().await.expect("bus");
+        let p_b = Arc::new(JobPersistence::connect_file(&dbpath).await.expect("p"));
+        let ctrl_b =
+            Arc::new(DistController::new("tok".into(), bus_b).with_persistence(p_b.clone()));
+        let (queued_n, orphan_n) = ctrl_b.restore_from_persistence().await;
+        assert_eq!(
+            queued_n, 2,
+            "id_q2 + id_inf 还是 queued（id_inf 在 controller A 没 pull）"
+        );
+        assert_eq!(orphan_n, 1, "id_q1 之前被 pull 了");
+
+        // controller B 的 worker 来 pull——三个 job 全应能被取走，证明 restart 不丢。
+        ctrl_b.register("nodeB".into(), vec![], 5).await;
+        let mut got_ids: Vec<String> = Vec::new();
+        while let Some(job) = ctrl_b.pull("nodeB").await {
+            got_ids.push(job.id);
+        }
+        got_ids.sort();
+        let mut expect_ids = vec![id_q1.clone(), id_q2.clone(), id_inf.clone()];
+        expect_ids.sort();
+        assert_eq!(got_ids, expect_ids, "重启后三个 job 全部能再派发");
+
+        // SQLite 的 orphan 行应该被 restore 翻回 queued 然后 pull 又翻 inflight——
+        // 重点是不会再被当 orphan
+        let row = p_b.job_row(&id_q1).await.expect("row").expect("exists");
+        assert_eq!(
+            row.state, STATE_INFLIGHT,
+            "orphan 经 restore + pull 后应是 inflight 状态，assignee=nodeB"
+        );
+        assert_eq!(row.assignee.as_deref(), Some("nodeB"));
+    }
+
+    /// path 4 α #6：no persistence 时 restore_from_persistence noop——保留向后兼容。
+    /// 现有 in-memory-only 测试 / bench / repl 路径不能因为这条 wire 被破坏。
+    #[tokio::test]
+    async fn restore_is_noop_without_persistence() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let ctrl = Arc::new(DistController::new("tok".into(), bus));
+        let (q, o) = ctrl.restore_from_persistence().await;
+        assert_eq!(q, 0);
+        assert_eq!(o, 0);
     }
 }
