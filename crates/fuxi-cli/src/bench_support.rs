@@ -246,6 +246,165 @@ pub async fn spawn_controller_with_workers_tuned(
     }
 }
 
+// ── chaos test helpers (path 4 β) ─────────────────────────────────────────
+//
+// 这些 helper 给 `crates/fuxi-cli/tests/chaos_resilience.rs` 用。原本是
+// `dist::tests` 内部辅具，但 chaos 测试要在 lib 外做"起单 worker → abort →
+// 验另一 worker 接管"，必须从 integration test 拿到独立 JoinHandle。把生产
+// `run_worker_with` 的 wrap 集中放 bench_support，避免每个 integration test
+// 重新拼一遍 args + factory + secret。
+
+/// 起单个 worker（sleep_ms stub adapter）连到指定 controller，返回**独立**
+/// JoinHandle 给测试 abort 用——不像 `BenchHarness::shutdown` 一锅端，chaos
+/// 测试常需要"abort worker_a 但 worker_b 继续跑"。
+///
+/// `tags` 给 worker 声明；`max_concurrency` 给 register。`heartbeat_ms` 控制
+/// 心跳间隔——chaos 测试要能在合理时间窗内观察到 last_seen 老化，把它降到
+/// 100ms 让 sweep 走得快。
+pub fn spawn_one_worker(
+    base_url: String,
+    node_id: String,
+    sleep_ms: u64,
+    tags: Vec<String>,
+    max_concurrency: u32,
+    heartbeat_ms: u64,
+) -> JoinHandle<()> {
+    let stub = stub_adapter_with_sleep(sleep_ms);
+    let factory = make_factory(stub);
+    let args = DistWorkerArgs {
+        controller: base_url,
+        node: node_id,
+        token: Some("bench-tok".into()),
+        codex_bin: "codex".into(),
+        cc_bin: "claude".into(),
+        poll_ms: 30,
+        tags,
+        max_concurrency,
+    };
+    let secret = bench_secret();
+    tokio::spawn(async move {
+        let _ = run_worker_with(
+            args,
+            "bench-tok".into(),
+            secret,
+            factory,
+            Duration::from_millis(heartbeat_ms),
+        )
+        .await;
+    })
+}
+
+/// 同 `spawn_one_worker`，但所有 worker 共享外部传入的 active 计数器——
+/// chaos #4（多 worker × 多 job）要观测"全局 N 个 worker 同时在跑"做 kill 时机。
+pub fn spawn_one_worker_shared_active(
+    base_url: String,
+    node_id: String,
+    sleep_ms: u64,
+    active: Arc<AtomicUsize>,
+    heartbeat_ms: u64,
+) -> JoinHandle<()> {
+    let stub = stub_adapter_with_shared_active(sleep_ms, active);
+    let factory = make_factory(stub);
+    let args = DistWorkerArgs {
+        controller: base_url,
+        node: node_id,
+        token: Some("bench-tok".into()),
+        codex_bin: "codex".into(),
+        cc_bin: "claude".into(),
+        poll_ms: 30,
+        tags: vec![],
+        max_concurrency: 1,
+    };
+    let secret = bench_secret();
+    tokio::spawn(async move {
+        let _ = run_worker_with(
+            args,
+            "bench-tok".into(),
+            secret,
+            factory,
+            Duration::from_millis(heartbeat_ms),
+        )
+        .await;
+    })
+}
+
+/// 在 worker 与真 controller 之间插入"全路由阻断"代理。
+/// `partition` 切到 true 时**所有** `/dist/*` 都返 503，模拟链路彻底中断；
+/// 否则透传给上游。返回 `(proxy_url, partition_flag, axum_serve_handle)`。
+///
+/// chaos 测试用此 fixture 验"网络抖动 < sweep timeout 不丢 job"
+/// + "partition > sweep timeout 后 worker 能否复活"两条路径。
+///
+/// 实现复用 reqwest::Client 转发——避免重写 axum body 解析。`Host` 头剔掉，
+/// 让上游 client 重设；其它 header（HMAC sig / nonce 等）原样转。
+pub async fn spawn_partition_proxy(
+    upstream: String,
+) -> (String, Arc<std::sync::atomic::AtomicBool>, JoinHandle<()>) {
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, Method, StatusCode, Uri};
+    use axum::response::IntoResponse;
+    use axum::{Router, routing::any};
+    use reqwest::Client;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Clone)]
+    struct ProxyState {
+        upstream: String,
+        client: Client,
+        partition: Arc<AtomicBool>,
+    }
+
+    let partition = Arc::new(AtomicBool::new(false));
+    let state = ProxyState {
+        upstream,
+        client: Client::new(),
+        partition: partition.clone(),
+    };
+
+    async fn forward(
+        State(st): State<ProxyState>,
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> axum::response::Response {
+        if st.partition.load(Ordering::SeqCst) {
+            return (StatusCode::SERVICE_UNAVAILABLE, "partition").into_response();
+        }
+        let path_q = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        let url = format!("{}{}", st.upstream, path_q);
+        let mut rb = st.client.request(method, &url);
+        for (k, v) in headers.iter() {
+            if k.as_str().eq_ignore_ascii_case("host") {
+                continue;
+            }
+            rb = rb.header(k, v);
+        }
+        let resp = match rb.body(body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("proxy upstream err: {e}"))
+                    .into_response();
+            }
+        };
+        let status = resp.status();
+        let bytes = resp.bytes().await.unwrap_or_default();
+        (status, bytes).into_response()
+    }
+
+    let app = Router::new().fallback(any(forward)).with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("partition proxy bind");
+    let addr = listener.local_addr().expect("partition proxy addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (format!("http://{addr}"), partition, handle)
+}
+
 // ── markdown 报告 ──────────────────────────────────────────────────────────
 
 /// 一段 bench 报告：标题 + 表头 + 数据行 + 备注。`rows[i].len()` 应等于
