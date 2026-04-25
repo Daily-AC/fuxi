@@ -64,6 +64,8 @@ enum Command {
     Status(subcommands::StatusArgs),
     /// 【玄女工具】列出所有门客。
     List(subcommands::ListArgs),
+    /// 【玄女工具】列出所有 dist worker 节点（拓扑视图）。
+    Nodes(subcommands::NodesArgs),
     /// 【玄女工具】关停指定门客。
     Kill(subcommands::KillArgs),
     /// 【救急】直读 SQLite 看事件流（不走 daemon）。
@@ -141,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Intervene(args)) => subcommands::run_intervene(args).await,
         Some(Command::Status(args)) => subcommands::run_status(args).await,
         Some(Command::List(args)) => subcommands::run_list(args).await,
+        Some(Command::Nodes(args)) => subcommands::run_nodes(args).await,
         Some(Command::Kill(args)) => subcommands::run_kill(args).await,
         Some(Command::Events(args)) => subcommands::run_events(args).await,
         Some(Command::Block(args)) => subcommands::run_block(args).await,

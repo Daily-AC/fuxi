@@ -269,6 +269,8 @@ pub struct DistProgressResp {
 #[derive(Debug, Clone)]
 pub struct NodeRuntimeInfo {
     pub last_seen: Option<Instant>,
+    /// 首次 register 时间——重连不覆盖，让 `nodes_snapshot` 能算"在线时长"。
+    pub registered_at: Option<Instant>,
     /// Worker 上次 register 声明的 tags。register 重连会覆盖。
     pub tags: Vec<String>,
     /// 同一 worker 允许的最大并发 job 数（≥1）。
@@ -282,6 +284,7 @@ impl Default for NodeRuntimeInfo {
     fn default() -> Self {
         Self {
             last_seen: None,
+            registered_at: None,
             tags: Vec::new(),
             max_concurrency: 1,
             inflight: Vec::new(),
@@ -338,7 +341,13 @@ impl DistController {
     pub async fn register(&self, node_id: String, tags: Vec<String>, max_concurrency: u32) {
         let mut g = self.inner.lock().await;
         let entry = g.nodes.entry(node_id).or_default();
-        entry.last_seen = Some(Instant::now());
+        let now = Instant::now();
+        entry.last_seen = Some(now);
+        // 首次 register（重连不覆盖）——`registered_at` 给 `nodes_snapshot`
+        // 算"在线时长"。重连后这个值不变。
+        if entry.registered_at.is_none() {
+            entry.registered_at = Some(now);
+        }
         entry.tags = tags;
         entry.max_concurrency = max_concurrency.max(1);
     }
@@ -349,6 +358,57 @@ impl DistController {
     #[allow(dead_code)]
     pub async fn node_info(&self, node_id: &str) -> Option<NodeRuntimeInfo> {
         self.inner.lock().await.nodes.get(node_id).cloned()
+    }
+
+    /// 全量节点快照——供 IPC `Command::Nodes` / TUI 拓扑 panel 用。
+    ///
+    /// - 按 `node_id` 字典序排序，输出稳定（测试可断言、TUI 不抖）
+    /// - **不暴露 `Instant`**——折成 `last_seen_ms_ago` / `registered_at_ms_ago`，
+    ///   让 wire 类型保持可序列化、跨进程无歧义
+    /// - `status` 字段：`alive` / `stale` / `unknown`，按 `last_seen` 与
+    ///   60s 阈值比较，与 `sweep_stale` 默认阈值对齐——TUI 标红的边界和
+    ///   controller 自我回收的边界是同一根线
+    pub async fn nodes_snapshot(&self) -> Vec<crate::ipc::NodeSnapshot> {
+        const STALE_THRESHOLD: Duration = Duration::from_secs(60);
+        let now = Instant::now();
+        let snapshot = {
+            let g = self.inner.lock().await;
+            // 在锁内只拷数据，不计算时间——锁外再算 ms_ago
+            let mut entries: Vec<(String, NodeRuntimeInfo)> = g
+                .nodes
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries
+        };
+        snapshot
+            .into_iter()
+            .map(|(node_id, info)| {
+                let last_seen_ms_ago = info
+                    .last_seen
+                    .map(|ts| now.saturating_duration_since(ts).as_millis() as u64);
+                let registered_at_ms_ago = info
+                    .registered_at
+                    .map(|ts| now.saturating_duration_since(ts).as_millis() as u64);
+                let status = match info.last_seen {
+                    None => "unknown",
+                    Some(ts) if now.saturating_duration_since(ts) > STALE_THRESHOLD => "stale",
+                    Some(_) => "alive",
+                }
+                .to_string();
+                crate::ipc::NodeSnapshot {
+                    node_id,
+                    tags: info.tags,
+                    max_concurrency: info.max_concurrency,
+                    inflight_count: info.inflight.len(),
+                    inflight: info.inflight,
+                    last_seen_ms_ago,
+                    registered_at_ms_ago,
+                    status,
+                }
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2008,6 +2068,97 @@ mod tests {
     async fn node_info_returns_none_for_unknown_node() {
         let ctrl = test_ctrl().await;
         assert!(ctrl.node_info("ghost").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn nodes_snapshot_returns_empty_when_no_workers() {
+        let ctrl = test_ctrl().await;
+        let snap = ctrl.nodes_snapshot().await;
+        assert!(snap.is_empty(), "无 worker 应返回空 vec, got {snap:?}");
+    }
+
+    /// 三个 worker 按 node_id 字典序输出——TUI 渲染稳定靠这个。
+    /// 同时验证 ms_ago 字段非 None（刚 register 完）+ status="alive"。
+    #[tokio::test]
+    async fn nodes_snapshot_returns_all_registered_workers_sorted_by_id() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("z-node".into(), vec!["cc".into()], 4).await;
+        ctrl.register("a-node".into(), vec!["codex".into(), "gpu".into()], 2)
+            .await;
+        ctrl.register("m-node".into(), vec![], 1).await;
+
+        let snap = ctrl.nodes_snapshot().await;
+        assert_eq!(snap.len(), 3);
+        let ids: Vec<&str> = snap.iter().map(|n| n.node_id.as_str()).collect();
+        assert_eq!(ids, vec!["a-node", "m-node", "z-node"], "应字典序");
+
+        let a = &snap[0];
+        assert_eq!(a.tags, vec!["codex", "gpu"]);
+        assert_eq!(a.max_concurrency, 2);
+        assert_eq!(a.inflight_count, 0);
+        assert!(a.last_seen_ms_ago.is_some(), "刚 register，应有 last_seen");
+        assert!(a.registered_at_ms_ago.is_some());
+        assert_eq!(a.status, "alive");
+    }
+
+    /// 重连场景：第二次 register `registered_at` 不被覆盖。
+    /// 这是 wire 字段 `registered_at_ms_ago` 表达"在线时长"的核心保证——
+    /// 否则重连一次就清零，TUI 上看起来 worker 永远是新生的。
+    #[tokio::test]
+    async fn nodes_snapshot_registered_at_preserved_across_reconnect() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec!["a".into()], 1).await;
+        // 让时间过去一点
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let first_at = {
+            let g = ctrl.inner.lock().await;
+            g.nodes.get("n").unwrap().registered_at
+        };
+        // 重连
+        ctrl.register("n".into(), vec!["b".into()], 2).await;
+        let second_at = {
+            let g = ctrl.inner.lock().await;
+            g.nodes.get("n").unwrap().registered_at
+        };
+        assert_eq!(first_at, second_at, "重连不该刷新 registered_at");
+    }
+
+    /// `pull` 把 job 写进 worker.inflight，snapshot 应反映 inflight_count。
+    #[tokio::test]
+    async fn nodes_snapshot_reflects_inflight_after_pull() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 2).await;
+        let _jid1 = ctrl
+            .enqueue(
+                "h".into(),
+                "t1".into(),
+                String::new(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let _jid2 = ctrl
+            .enqueue(
+                "h".into(),
+                "t2".into(),
+                String::new(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        ctrl.pull("nodeA").await.expect("pull1");
+        ctrl.pull("nodeA").await.expect("pull2");
+
+        let snap = ctrl.nodes_snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].inflight_count, 2);
+        assert_eq!(snap[0].inflight.len(), 2);
     }
 
     /// 向后兼容：老版 worker 不带 tags/max_concurrency，serde 要给默认值。
