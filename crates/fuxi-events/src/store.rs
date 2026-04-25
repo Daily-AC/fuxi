@@ -305,6 +305,9 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         NoRoleMatched { .. } => "no_role_matched",
         AgentRequestReview { .. } => "agent_request_review",
         ReviewRequestTimeout { .. } => "review_request_timeout",
+        WorkerRegistered { .. } => "worker_registered",
+        WorkerHeartbeatStateChanged { .. } => "worker_heartbeat_state_changed",
+        WorkerStaleSwept { .. } => "worker_stale_swept",
         Custom { .. } => "custom",
     }
 }
@@ -698,6 +701,96 @@ mod tests {
                 assert_eq!(*waited_for_ms, 60_000);
             }
             other => panic!("expect ReviewRequestTimeout，得到 {other:?}"),
+        }
+    }
+
+    /// P6 拓扑事件三变体的 kind_tag + SQLite roundtrip + 字段保真。
+    /// 加 EventKind 变体时必须同步更 6 处；此测试做门禁。
+    #[tokio::test]
+    async fn persists_worker_topology_variants() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let registered = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::WorkerRegistered {
+                node_id: "nodeA".into(),
+                tags: vec!["cc".into(), "gpu".into()],
+                max_concurrency: 3,
+            },
+        };
+        let hb = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::WorkerHeartbeatStateChanged {
+                node_id: "nodeA".into(),
+                inflight_count: 2,
+                status: fuxi_core::WorkerStatus::Alive,
+            },
+        };
+        let swept = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::WorkerStaleSwept {
+                node_id: "nodeA".into(),
+                recycled_jobs: vec!["job-1".into(), "job-2".into()],
+            },
+        };
+        for ev in [&registered, &hb, &swept] {
+            store.append(ev).await.expect("append");
+        }
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "worker_registered",
+                "worker_heartbeat_state_changed",
+                "worker_stale_swept",
+            ]
+        );
+
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        assert_eq!(got.len(), 3);
+        match &got[0].kind {
+            EventKind::WorkerRegistered {
+                node_id,
+                tags,
+                max_concurrency,
+            } => {
+                assert_eq!(node_id, "nodeA");
+                assert_eq!(tags, &vec!["cc".to_string(), "gpu".to_string()]);
+                assert_eq!(*max_concurrency, 3);
+            }
+            other => panic!("expect WorkerRegistered，得到 {other:?}"),
+        }
+        match &got[1].kind {
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id,
+                inflight_count,
+                status,
+            } => {
+                assert_eq!(node_id, "nodeA");
+                assert_eq!(*inflight_count, 2);
+                assert_eq!(*status, fuxi_core::WorkerStatus::Alive);
+            }
+            other => panic!("expect WorkerHeartbeatStateChanged，得到 {other:?}"),
+        }
+        match &got[2].kind {
+            EventKind::WorkerStaleSwept {
+                node_id,
+                recycled_jobs,
+            } => {
+                assert_eq!(node_id, "nodeA");
+                assert_eq!(
+                    recycled_jobs,
+                    &vec!["job-1".to_string(), "job-2".to_string()]
+                );
+            }
+            other => panic!("expect WorkerStaleSwept，得到 {other:?}"),
         }
     }
 

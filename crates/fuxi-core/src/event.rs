@@ -26,6 +26,37 @@ pub enum DeliverableKind {
     ErrorBlock,
 }
 
+/// 远端 worker 心跳状态——`WorkerHeartbeatStateChanged.status` 的类型。
+/// 用 enum 而非 String：误拼（`"alvie"`）编译期挂；TUI 渲染走 match 也能漏 case 报错。
+/// `serde(rename_all = "snake_case")` 让 wire JSON 仍是 `"alive"` / `"stale"`，
+/// 跨语言/跨进程行为不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatus {
+    /// 心跳正常——controller 在 stale 阈值内最近一次收到该 worker 的心跳。
+    Alive,
+    /// 已被 sweep 标记失联——上一拍的 sweep_stale 命中后会发一条
+    /// `WorkerStaleSwept`，controller 内部把 `last_published_status` 标 stale，
+    /// 让 worker 恢复后下次心跳的 `status_flipped` 触发回 Alive 翻转事件。
+    Stale,
+}
+
+impl WorkerStatus {
+    /// 与 wire JSON 一致的 snake_case 字符串——TUI/log 渲染用。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkerStatus::Alive => "alive",
+            WorkerStatus::Stale => "stale",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// An event is always `{ meta, kind }`—meta is how the bus locates it,
 /// kind is what happened.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +268,36 @@ pub enum EventKind {
         waited_for_ms: u64,
     },
 
+    // ── 分布式拓扑（Phase 6 P6 topology/metrics）─────────────
+    /// Worker 向 controller 注册（首次或重连均发）。
+    /// `tags` 决定路由匹配，`max_concurrency` 给容量调度。
+    /// 重连场景下 controller 的 inflight 不会清——register 是"声明能力"，
+    /// 不是"清空运行时"，inflight 由 heartbeat/sweep 维护。
+    WorkerRegistered {
+        node_id: String,
+        tags: Vec<String>,
+        max_concurrency: u32,
+    },
+    /// Worker 心跳带来的状态变化——**采样而非全发**。
+    /// 心跳 200ms × N worker 全发会百万级噪声；只在以下条件发：
+    /// - `inflight_count` 与上次发布不同
+    /// - `status` 翻转（`Alive` ↔ `Stale`，stale→alive 是"sweep 后又回来了"）
+    ///
+    /// `status` 用 `WorkerStatus` enum 而非 String——类型安全 + match 漏 case
+    /// 编译期报；wire JSON 仍是 `"alive"`/`"stale"`（`#[serde(rename_all)]`）。
+    WorkerHeartbeatStateChanged {
+        node_id: String,
+        inflight_count: u32,
+        status: WorkerStatus,
+    },
+    /// Sweep tick 把超时 worker 的 inflight job 回收到 global_queue 前端。
+    /// `recycled_jobs` 可能为空（worker 死时本来就没活），但事件仍会发——
+    /// 让 TUI 拓扑面板能感知"worker 失联"事件本身（而非只看 job 视角）。
+    WorkerStaleSwept {
+        node_id: String,
+        recycled_jobs: Vec<String>,
+    },
+
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
     /// minimum—prefer adding a typed variant.
@@ -370,6 +431,55 @@ mod tests {
             assert_eq!(json, expect);
             let back: DeliverableKind = serde_json::from_str(&json).expect("de");
             assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn worker_status_serde_snake_case() {
+        for (kind, expect) in [
+            (WorkerStatus::Alive, "\"alive\""),
+            (WorkerStatus::Stale, "\"stale\""),
+        ] {
+            let json = serde_json::to_string(&kind).expect("ser");
+            assert_eq!(json, expect);
+            let back: WorkerStatus = serde_json::from_str(&json).expect("de");
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn worker_topology_tags_match_snake_case() {
+        for (kind, expect) in [
+            (
+                EventKind::WorkerRegistered {
+                    node_id: "n".into(),
+                    tags: vec!["cc".into()],
+                    max_concurrency: 2,
+                },
+                "worker_registered",
+            ),
+            (
+                EventKind::WorkerHeartbeatStateChanged {
+                    node_id: "n".into(),
+                    inflight_count: 1,
+                    status: WorkerStatus::Alive,
+                },
+                "worker_heartbeat_state_changed",
+            ),
+            (
+                EventKind::WorkerStaleSwept {
+                    node_id: "n".into(),
+                    recycled_jobs: vec!["job-a".into()],
+                },
+                "worker_stale_swept",
+            ),
+        ] {
+            let v = serde_json::to_value(&kind).expect("ser");
+            assert_eq!(v.get("type").and_then(|x| x.as_str()), Some(expect));
+            let back: EventKind = serde_json::from_value(v).expect("de");
+            // round-trip: tag check 已够；字段保真在 dist 层 publish 测试 + persistence 测试覆盖
+            let again = serde_json::to_value(&back).expect("re-ser");
+            assert_eq!(again.get("type").and_then(|x| x.as_str()), Some(expect));
         }
     }
 

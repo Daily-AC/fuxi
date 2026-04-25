@@ -433,6 +433,20 @@ fn summarize(k: &EventKind) -> String {
             short_id(&agent.to_string()),
             waited_for_ms
         ),
+        WorkerRegistered {
+            node_id,
+            tags,
+            max_concurrency,
+        } => format!("worker+ {node_id} tags={tags:?} cap={max_concurrency}"),
+        WorkerHeartbeatStateChanged {
+            node_id,
+            inflight_count,
+            status,
+        } => format!("worker~ {node_id} inflight={inflight_count} {status}"),
+        WorkerStaleSwept {
+            node_id,
+            recycled_jobs,
+        } => format!("worker✗ {node_id} recycled={}", recycled_jobs.len()),
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -497,6 +511,11 @@ fn color_for(k: &EventKind) -> Color {
         | TriggerDispatched { .. }
         | TriggerSkipped { .. }
         | TriggerFailed { .. } => Color::Red,
+
+        // 拓扑一族 —— register/heartbeat 平时事件用 Cyan（与"对话家族"的 Cyan
+        // 视觉接近不冲突，都是"flow 状态"），sweep 用 LightRed 强调失联。
+        WorkerRegistered { .. } | WorkerHeartbeatStateChanged { .. } => Color::Cyan,
+        WorkerStaleSwept { .. } => Color::LightRed,
 
         Custom { .. } => Color::DarkGray,
     }

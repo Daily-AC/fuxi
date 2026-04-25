@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -13,6 +13,10 @@ use fuxi_agent_codex::CodexEvent;
 use fuxi_agent_codex::parser::ItemPhase;
 use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_events::EventBus;
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -306,6 +310,159 @@ struct DistInner {
     progress_next_seq: HashMap<String, u64>,
     /// 已收到 cancel 指令的 job。worker 下一次 push 时从 ack 得知。
     cancelled: HashSet<String>,
+    /// P6: 上次 publish 的 inflight 数量——心跳采样判 diff 用。
+    /// heartbeat 200ms × N worker × 小时 = 百万级噪声，必须采样。
+    last_published_inflight: HashMap<String, u32>,
+    /// P6: 上次 publish 的 worker 状态（`"alive"` / `"stale"`）。
+    /// stale→alive（sweep 后 worker 重连心跳）翻转才发；alive→alive 不发。
+    last_published_status: HashMap<String, &'static str>,
+}
+
+/// 分布式 controller 的 prometheus 指标集合。
+///
+/// 用私有 `Registry`（不挂 default global）——一是避免跨测试串扰，二是若同
+/// 进程内将来再起第二个 controller（比如 multi-tenant）也不会 panic 在
+/// "Duplicate metrics collector registration"。`/metrics` handler 只 encode
+/// 这一份 registry。
+pub struct Metrics {
+    pub registry: Registry,
+    pub jobs_enqueued_total: IntCounterVec,
+    pub jobs_dispatched_total: IntCounterVec,
+    pub jobs_completed_total: IntCounterVec,
+    pub job_duration_ms: HistogramVec,
+    pub workers_registered: IntGauge,
+    pub queue_depth: IntGauge,
+    pub inflight_jobs: IntGaugeVec,
+    pub workers_swept_total: IntCounter,
+    pub workers_max_concurrency: IntGaugeVec,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        let registry = Registry::new();
+        let jobs_enqueued_total = IntCounterVec::new(
+            Opts::new("fuxi_dist_jobs_enqueued_total", "分布式队列已入队 job 总数"),
+            &["cli"],
+        )
+        .expect("metric definition is well-formed");
+        let jobs_dispatched_total = IntCounterVec::new(
+            Opts::new(
+                "fuxi_dist_jobs_dispatched_total",
+                "已 pull 到 worker 的 job 总数",
+            ),
+            &["cli", "node_id"],
+        )
+        .expect("metric definition is well-formed");
+        let jobs_completed_total = IntCounterVec::new(
+            Opts::new(
+                "fuxi_dist_jobs_completed_total",
+                "已收到 final report 的 job 总数（按 ok/失败拆）",
+            ),
+            &["cli", "ok"],
+        )
+        .expect("metric definition is well-formed");
+        let job_duration_ms = HistogramVec::new(
+            HistogramOpts::new(
+                "fuxi_dist_job_duration_ms",
+                "job 执行耗时（worker 上报，毫秒）",
+            )
+            .buckets(vec![
+                10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 30000.0, 120000.0,
+            ]),
+            &["cli"],
+        )
+        .expect("metric definition is well-formed");
+        let workers_registered = IntGauge::new(
+            "fuxi_dist_workers_registered",
+            "controller 已知 worker 节点数（含 stale 未 sweep 的）",
+        )
+        .expect("metric definition is well-formed");
+        let queue_depth = IntGauge::new(
+            "fuxi_dist_queue_depth",
+            "当前 global_queue 中等待派发的 job 数",
+        )
+        .expect("metric definition is well-formed");
+        let inflight_jobs = IntGaugeVec::new(
+            Opts::new(
+                "fuxi_dist_inflight_jobs",
+                "每个 worker 当前 inflight 的 job 数",
+            ),
+            &["node_id"],
+        )
+        .expect("metric definition is well-formed");
+        let workers_swept_total = IntCounter::new(
+            "fuxi_dist_workers_swept_total",
+            "sweep_stale 回收掉 inflight 的 worker 次数（不是 job 数）",
+        )
+        .expect("metric definition is well-formed");
+        let workers_max_concurrency = IntGaugeVec::new(
+            Opts::new(
+                "fuxi_dist_workers_max_concurrency",
+                "每个 worker 注册时声明的并发上限——配合 inflight_jobs 算 saturation",
+            ),
+            &["node_id"],
+        )
+        .expect("metric definition is well-formed");
+
+        // 全部 register 一遍——任一失败 = bug，构造期 panic 比 silent drop 强
+        registry
+            .register(Box::new(jobs_enqueued_total.clone()))
+            .expect("register jobs_enqueued_total");
+        registry
+            .register(Box::new(jobs_dispatched_total.clone()))
+            .expect("register jobs_dispatched_total");
+        registry
+            .register(Box::new(jobs_completed_total.clone()))
+            .expect("register jobs_completed_total");
+        registry
+            .register(Box::new(job_duration_ms.clone()))
+            .expect("register job_duration_ms");
+        registry
+            .register(Box::new(workers_registered.clone()))
+            .expect("register workers_registered");
+        registry
+            .register(Box::new(queue_depth.clone()))
+            .expect("register queue_depth");
+        registry
+            .register(Box::new(inflight_jobs.clone()))
+            .expect("register inflight_jobs");
+        registry
+            .register(Box::new(workers_swept_total.clone()))
+            .expect("register workers_swept_total");
+        registry
+            .register(Box::new(workers_max_concurrency.clone()))
+            .expect("register workers_max_concurrency");
+
+        Self {
+            registry,
+            jobs_enqueued_total,
+            jobs_dispatched_total,
+            jobs_completed_total,
+            job_duration_ms,
+            workers_registered,
+            queue_depth,
+            inflight_jobs,
+            workers_swept_total,
+            workers_max_concurrency,
+        }
+    }
+
+    /// Prometheus exposition 文本格式（text/plain; version=0.0.4）。
+    pub fn encode_text(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let encoder = TextEncoder::new();
+        // encode 失败只可能是 io 错（写 Vec 不会 io 错）——unwrap 安全
+        encoder
+            .encode(&self.registry.gather(), &mut buf)
+            .expect("encode metrics into Vec<u8> never fails");
+        buf
+    }
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// controller 进程内状态。
@@ -313,6 +470,7 @@ pub struct DistController {
     token: String,
     bus: EventBus,
     inner: Mutex<DistInner>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl DistController {
@@ -321,11 +479,20 @@ impl DistController {
             token,
             bus,
             inner: Mutex::new(DistInner::default()),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// 测试用：拿 EventBus 句柄 subscribe，断言 publish 行为。
+    /// 也允许其它子系统（TUI 拓扑面板）直接监听拓扑事件。
+    /// non-test 构建里若 δ #4 还没接，clippy 会报 dead_code，先 allow。
+    #[allow(dead_code)]
+    pub fn bus(&self) -> &EventBus {
+        &self.bus
     }
 
     /// 记录 / 更新一个 worker 的能力声明。
@@ -339,8 +506,9 @@ impl DistController {
     /// `max_concurrency=0` 被归一到 1，防止 worker 传 0 把自己锁死在永远不
     /// 接任务的状态。
     pub async fn register(&self, node_id: String, tags: Vec<String>, max_concurrency: u32) {
+        let normalized_concurrency = max_concurrency.max(1);
         let mut g = self.inner.lock().await;
-        let entry = g.nodes.entry(node_id).or_default();
+        let entry = g.nodes.entry(node_id.clone()).or_default();
         let now = Instant::now();
         entry.last_seen = Some(now);
         // 首次 register（重连不覆盖）——`registered_at` 给 `nodes_snapshot`
@@ -348,8 +516,27 @@ impl DistController {
         if entry.registered_at.is_none() {
             entry.registered_at = Some(now);
         }
-        entry.tags = tags;
-        entry.max_concurrency = max_concurrency.max(1);
+        entry.tags = tags.clone();
+        entry.max_concurrency = normalized_concurrency;
+        // 重连场景：register 也算"翻转回 alive"。先清掉 last_published_status，
+        // 让下一次 heartbeat 必发一条 alive（status diff 触发）；inflight diff
+        // 仍由 heartbeat 自身处理。
+        g.last_published_status.remove(&node_id);
+        let nodes_len = g.nodes.len() as i64;
+        drop(g);
+        self.metrics.workers_registered.set(nodes_len);
+        self.metrics
+            .workers_max_concurrency
+            .with_label_values(&[&node_id])
+            .set(normalized_concurrency as i64);
+        let _ = self.bus.publish(Event {
+            meta: EventMeta::now(),
+            kind: EventKind::WorkerRegistered {
+                node_id,
+                tags,
+                max_concurrency: normalized_concurrency,
+            },
+        });
     }
 
     /// 快照查询：返回 `node_id` 当前的 runtime 信息（`None` 表示从未 register）。
@@ -366,8 +553,8 @@ impl DistController {
     /// - **不暴露 `Instant`**——折成 `last_seen_ms_ago` / `registered_at_ms_ago`，
     ///   让 wire 类型保持可序列化、跨进程无歧义
     /// - `status` 字段：`alive` / `stale` / `unknown`，按 `last_seen` 与
-    ///   60s 阈值比较，与 `sweep_stale` 默认阈值对齐——TUI 标红的边界和
-    ///   controller 自我回收的边界是同一根线
+    ///   `STALE_THRESHOLD` (60s) 比较，与 `sweep_stale` 默认阈值对齐——TUI 标
+    ///   红的边界和 controller 自我回收的边界是同一根线
     pub async fn nodes_snapshot(&self) -> Vec<crate::ipc::NodeSnapshot> {
         const STALE_THRESHOLD: Duration = Duration::from_secs(60);
         let now = Instant::now();
@@ -436,9 +623,16 @@ impl DistController {
             cli,
             allowed_tools,
         };
+        let cli_label = cli_label_of(&job.cli);
         let mut g = self.inner.lock().await;
         g.global_queue.push_back(job);
+        let depth = g.global_queue.len() as i64;
         drop(g);
+        self.metrics
+            .jobs_enqueued_total
+            .with_label_values(&[&cli_label])
+            .inc();
+        self.metrics.queue_depth.set(depth);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
             kind: EventKind::Custom {
@@ -490,12 +684,23 @@ impl DistController {
             .expect("position just returned a valid index");
         g.inflight.insert(job.id.clone(), job.clone());
         // 写 worker.inflight——pull 是唯一入口，report/timeout 是出口
-        g.nodes
-            .get_mut(node_id)
-            .expect("entry was just touched")
-            .inflight
-            .push(job.id.clone());
+        let worker_inflight_len = {
+            let node = g.nodes.get_mut(node_id).expect("entry was just touched");
+            node.inflight.push(job.id.clone());
+            node.inflight.len() as i64
+        };
+        let depth = g.global_queue.len() as i64;
+        let cli_label = cli_label_of(&job.cli);
         drop(g);
+        self.metrics
+            .jobs_dispatched_total
+            .with_label_values(&[&cli_label, node_id])
+            .inc();
+        self.metrics.queue_depth.set(depth);
+        self.metrics
+            .inflight_jobs
+            .with_label_values(&[node_id])
+            .set(worker_inflight_len);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
             kind: EventKind::Custom {
@@ -515,13 +720,36 @@ impl DistController {
     pub async fn report(&self, req: DistReportReq) -> bool {
         let mut g = self.inner.lock().await;
         g.nodes.entry(req.node_id.clone()).or_default().last_seen = Some(Instant::now());
-        let existed = g.inflight.remove(&req.job_id).is_some();
+        let removed_job = g.inflight.remove(&req.job_id);
+        let existed = removed_job.is_some();
+        // 从 controller 端 inflight 拿 cli 标签；controller 重启后 race
+        // 收 report 时可能拿不到，回退到 "unknown" 不丢指标
+        let cli_label = removed_job
+            .as_ref()
+            .map(|j| cli_label_of(&j.cli))
+            .unwrap_or_else(|| "unknown".to_string());
         g.finished.insert(req.job_id.clone(), req.clone());
         // Phase 3b: 从 worker 的 inflight list 释放——否则 capacity 永远 0
-        if let Some(worker) = g.nodes.get_mut(&req.node_id) {
+        let worker_inflight_len = if let Some(worker) = g.nodes.get_mut(&req.node_id) {
             worker.inflight.retain(|id| id != &req.job_id);
-        }
+            worker.inflight.len() as i64
+        } else {
+            0
+        };
         drop(g);
+        let ok_label = if req.ok { "true" } else { "false" };
+        self.metrics
+            .jobs_completed_total
+            .with_label_values(&[&cli_label, ok_label])
+            .inc();
+        self.metrics
+            .job_duration_ms
+            .with_label_values(&[&cli_label])
+            .observe(req.duration_ms as f64);
+        self.metrics
+            .inflight_jobs
+            .with_label_values(&[&req.node_id])
+            .set(worker_inflight_len);
         let _ = self.bus.publish(Event {
             meta: EventMeta::now(),
             kind: EventKind::Custom {
@@ -619,6 +847,36 @@ impl DistController {
         let node = g.nodes.entry(node_id.to_string()).or_default();
         node.last_seen = Some(Instant::now());
         node.inflight = worker_inflight.clone();
+        let inflight_len = node.inflight.len() as i64;
+        let inflight_count = node.inflight.len() as u32;
+        // P6 采样：仅在 inflight_count 与上次发布不同 OR 状态翻转 (stale→alive)
+        // 才 publish——心跳 200ms × N worker 全发会百万级噪声。
+        let prev_count = g.last_published_inflight.get(node_id).copied();
+        let prev_status = g.last_published_status.get(node_id).copied();
+        let count_changed = prev_count != Some(inflight_count);
+        let status_flipped = prev_status != Some("alive");
+        let should_publish = count_changed || status_flipped;
+        if should_publish {
+            g.last_published_inflight
+                .insert(node_id.to_string(), inflight_count);
+            g.last_published_status.insert(node_id.to_string(), "alive");
+        }
+        drop(g);
+        // worker 是 inflight 权威——心跳到了就把 gauge 对齐
+        self.metrics
+            .inflight_jobs
+            .with_label_values(&[node_id])
+            .set(inflight_len);
+        if should_publish {
+            let _ = self.bus.publish(Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkerHeartbeatStateChanged {
+                    node_id: node_id.to_string(),
+                    inflight_count,
+                    status: fuxi_core::WorkerStatus::Alive,
+                },
+            });
+        }
         worker_inflight
             .into_iter()
             .filter(|jid| cancelled.contains(jid))
@@ -655,6 +913,10 @@ impl DistController {
             })
             .collect();
         let mut recycled = Vec::new();
+        let mut swept_nodes_with_jobs = 0u64;
+        // 先收集 (node_id, recycled_jobs) 全集——含空 jobs 的 dead worker，
+        // 因为 WorkerStaleSwept 事件需要给"worker 失联"信号面板，不只看 job 视角。
+        let mut publish_targets: Vec<(String, Vec<String>)> = Vec::with_capacity(dead.len());
         for nid in dead {
             let Some(node) = g.nodes.get_mut(&nid) else {
                 continue;
@@ -671,8 +933,35 @@ impl DistController {
                 g.global_queue.push_front(job);
             }
             if !jobs.is_empty() {
-                recycled.push((nid, jobs));
+                recycled.push((nid.clone(), jobs.clone()));
+                swept_nodes_with_jobs += 1;
             }
+            // 节点 inflight 已清——gauge 也跟着清
+            self.metrics
+                .inflight_jobs
+                .with_label_values(&[nid.as_str()])
+                .set(0);
+            // 标记 last_published_status=stale，让 worker 重连时下次心跳的
+            // status_flipped (stale→alive) 必发一条 WorkerHeartbeatStateChanged。
+            g.last_published_status.insert(nid.clone(), "stale");
+            publish_targets.push((nid, jobs));
+        }
+        let depth = g.global_queue.len() as i64;
+        drop(g);
+        self.metrics.queue_depth.set(depth);
+        if swept_nodes_with_jobs > 0 {
+            self.metrics
+                .workers_swept_total
+                .inc_by(swept_nodes_with_jobs);
+        }
+        for (nid, jobs) in publish_targets {
+            let _ = self.bus.publish(Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkerStaleSwept {
+                    node_id: nid,
+                    recycled_jobs: jobs,
+                },
+            });
         }
         recycled
     }
@@ -875,7 +1164,29 @@ pub fn router(ctrl: Arc<DistController>) -> Router {
         .route("/dist/progress", get(progress_get_handler))
         .route("/dist/cancel", post(cancel_handler))
         .route("/dist/heartbeat", post(heartbeat_handler))
+        // Prometheus scrape 端点。无 token——和 /dist/* 不同，metrics 暴露面
+        // 由部署侧（reverse proxy / firewall）控制。本地 dev 直接 curl 即可。
+        .route("/metrics", get(metrics_handler))
         .with_state(ctrl)
+}
+
+async fn metrics_handler(State(ctrl): State<Arc<DistController>>) -> impl IntoResponse {
+    let body = ctrl.metrics.encode_text();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    )
+}
+
+/// Job.cli 字段映射到 metric label——空串 = 老版默认走 codex，归一便于
+/// PromQL 过滤。未来加 cc/gemini 时不需要改这里，原样透传即可。
+fn cli_label_of(cli: &str) -> String {
+    if cli.is_empty() {
+        "codex".to_string()
+    } else {
+        cli.to_string()
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1799,6 +2110,217 @@ mod tests {
     async fn test_ctrl() -> Arc<DistController> {
         let bus = EventBus::with_memory_store().await.expect("bus");
         Arc::new(DistController::new("tok".into(), bus))
+    }
+
+    /// 排干 EventStream 一段时间（best-effort），把所有 worker_* 拓扑事件
+    /// 收集到 Vec<EventKind>。其它无关事件丢弃；用于断言 publish 行为。
+    async fn drain_worker_events(
+        bus: &EventBus,
+        budget: std::time::Duration,
+    ) -> Vec<fuxi_core::EventKind> {
+        use futures_util::StreamExt;
+        let mut s = bus.subscribe();
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut out = Vec::new();
+        loop {
+            let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remain.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remain, s.next()).await {
+                Ok(Some(Ok(ev))) => match &ev.kind {
+                    fuxi_core::EventKind::WorkerRegistered { .. }
+                    | fuxi_core::EventKind::WorkerHeartbeatStateChanged { .. }
+                    | fuxi_core::EventKind::WorkerStaleSwept { .. } => out.push(ev.kind),
+                    _ => {}
+                },
+                Ok(Some(Err(_))) => continue,
+                Ok(None) | Err(_) => break,
+            }
+        }
+        out
+    }
+
+    /// 同上，但在 budget 内**等到**第一个目标事件就返回；用于不耐烦场景。
+    async fn first_worker_event(
+        bus: &EventBus,
+        budget: std::time::Duration,
+    ) -> Option<fuxi_core::EventKind> {
+        use futures_util::StreamExt;
+        let mut s = bus.subscribe();
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remain.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remain, s.next()).await {
+                Ok(Some(Ok(ev))) => match ev.kind {
+                    fuxi_core::EventKind::WorkerRegistered { .. }
+                    | fuxi_core::EventKind::WorkerHeartbeatStateChanged { .. }
+                    | fuxi_core::EventKind::WorkerStaleSwept { .. } => return Some(ev.kind),
+                    _ => continue,
+                },
+                Ok(Some(Err(_))) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    }
+
+    /// P6 [γ]: register 触发 WorkerRegistered（节点 / tags / cap 字段保真）。
+    #[tokio::test]
+    async fn worker_registered_event_published_on_register() {
+        let ctrl = test_ctrl().await;
+        let bus = ctrl.bus().clone();
+        let probe = tokio::spawn(async move {
+            first_worker_event(&bus, std::time::Duration::from_secs(2)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        ctrl.register("nodeX".into(), vec!["cc".into(), "gpu".into()], 4)
+            .await;
+        let got = probe.await.expect("join").expect("event");
+        match got {
+            fuxi_core::EventKind::WorkerRegistered {
+                node_id,
+                tags,
+                max_concurrency,
+            } => {
+                assert_eq!(node_id, "nodeX");
+                assert_eq!(tags, vec!["cc".to_string(), "gpu".to_string()]);
+                assert_eq!(max_concurrency, 4);
+            }
+            other => panic!("expect WorkerRegistered, got {other:?}"),
+        }
+    }
+
+    /// P6 [γ]: 连续三次心跳同 inflight 列表，仅首次（status flip→alive）publish 一条。
+    #[tokio::test]
+    async fn worker_heartbeat_state_changed_only_on_diff() {
+        let ctrl = test_ctrl().await;
+        let bus = ctrl.bus().clone();
+        ctrl.register("n".into(), vec![], 2).await;
+        let _ = drain_worker_events(&bus, std::time::Duration::from_millis(50)).await;
+
+        let probe = {
+            let bus = bus.clone();
+            tokio::spawn(async move {
+                drain_worker_events(&bus, std::time::Duration::from_millis(300)).await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        ctrl.heartbeat("n", vec!["job-A".into()]).await;
+        ctrl.heartbeat("n", vec!["job-A".into()]).await;
+        ctrl.heartbeat("n", vec!["job-A".into()]).await;
+        let collected = probe.await.expect("join");
+        let hb_events: Vec<_> = collected
+            .iter()
+            .filter(|k| matches!(k, fuxi_core::EventKind::WorkerHeartbeatStateChanged { .. }))
+            .collect();
+        assert_eq!(
+            hb_events.len(),
+            1,
+            "三次同 inflight 心跳只应 publish 一次，实得 {}: {:?}",
+            hb_events.len(),
+            collected
+        );
+        match hb_events[0] {
+            fuxi_core::EventKind::WorkerHeartbeatStateChanged {
+                node_id,
+                inflight_count,
+                status,
+            } => {
+                assert_eq!(node_id, "n");
+                assert_eq!(*inflight_count, 1);
+                assert_eq!(*status, fuxi_core::WorkerStatus::Alive);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// P6 [γ]: inflight 数量变化（1→2→2→1）应触发 3 次 publish（中间 2→2 被采样掉）。
+    #[tokio::test]
+    async fn worker_heartbeat_publishes_on_inflight_count_diff() {
+        let ctrl = test_ctrl().await;
+        let bus = ctrl.bus().clone();
+        ctrl.register("n".into(), vec![], 5).await;
+        let _ = drain_worker_events(&bus, std::time::Duration::from_millis(50)).await;
+
+        let probe = {
+            let bus = bus.clone();
+            tokio::spawn(async move {
+                drain_worker_events(&bus, std::time::Duration::from_millis(400)).await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        ctrl.heartbeat("n", vec!["A".into()]).await;
+        ctrl.heartbeat("n", vec!["A".into(), "B".into()]).await;
+        ctrl.heartbeat("n", vec!["A".into(), "B".into()]).await;
+        ctrl.heartbeat("n", vec!["A".into()]).await;
+        let collected = probe.await.expect("join");
+        let hb_counts: Vec<u32> = collected
+            .iter()
+            .filter_map(|k| match k {
+                fuxi_core::EventKind::WorkerHeartbeatStateChanged { inflight_count, .. } => {
+                    Some(*inflight_count)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hb_counts,
+            vec![1, 2, 1],
+            "应发三条（首发 + 1→2 + 2→1），中间 2→2 被采样掉；实得 {hb_counts:?}"
+        );
+    }
+
+    /// P6 [γ]: sweep_stale 把超时 worker 的 inflight 回收时 publish WorkerStaleSwept。
+    #[tokio::test]
+    async fn worker_stale_swept_event_published_on_sweep() {
+        let ctrl = test_ctrl().await;
+        let bus = ctrl.bus().clone();
+        ctrl.register("dead".into(), vec![], 1).await;
+        ctrl.enqueue(
+            "dead".into(),
+            "t".into(),
+            "b".into(),
+            None,
+            vec![],
+            None,
+            "codex".into(),
+            vec![],
+        )
+        .await;
+        let _job = ctrl.pull("dead").await.expect("pulled");
+        let _ = drain_worker_events(&bus, std::time::Duration::from_millis(50)).await;
+
+        let probe = {
+            let bus = bus.clone();
+            tokio::spawn(async move {
+                drain_worker_events(&bus, std::time::Duration::from_millis(300)).await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let future = Instant::now() + Duration::from_secs(300);
+        let recycled = ctrl.sweep_stale(future, Duration::from_secs(30)).await;
+        assert_eq!(recycled.len(), 1);
+
+        let collected = probe.await.expect("join");
+        let swept: Vec<_> = collected
+            .iter()
+            .filter_map(|k| match k {
+                fuxi_core::EventKind::WorkerStaleSwept {
+                    node_id,
+                    recycled_jobs,
+                } => Some((node_id.clone(), recycled_jobs.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(swept.len(), 1, "expect 1 sweep event, got {swept:?}");
+        assert_eq!(swept[0].0, "dead");
+        assert_eq!(swept[0].1.len(), 1);
     }
 
     fn push(kind: ProgressKind, text: &str) -> ProgressPush {
@@ -3223,5 +3745,109 @@ mod tests {
 
         worker_b.abort();
         srv.abort();
+    }
+
+    // ── Phase 6 · prometheus metrics ──
+
+    /// 端到端：跑一遍 register → enqueue → pull → report 闭环，断言
+    /// 8 个核心 metric name 都出现在 /metrics 文本里。
+    #[tokio::test]
+    async fn metrics_endpoint_emits_all_core_series() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec!["codex".into()], 1).await;
+        let job_id = ctrl
+            .enqueue(
+                "nodeA".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let _job = ctrl.pull("nodeA").await.expect("job pulled");
+        let accepted = ctrl
+            .report(DistReportReq {
+                token: "tok".into(),
+                node_id: "nodeA".into(),
+                job_id: job_id.clone(),
+                ok: true,
+                output: "done".into(),
+                duration_ms: 42,
+            })
+            .await;
+        assert!(accepted);
+        let _ = ctrl
+            .sweep_stale(Instant::now(), Duration::from_secs(0))
+            .await;
+
+        let bytes = ctrl.metrics.encode_text();
+        let text = String::from_utf8(bytes).expect("metrics utf8");
+        for name in [
+            "fuxi_dist_jobs_enqueued_total",
+            "fuxi_dist_jobs_dispatched_total",
+            "fuxi_dist_jobs_completed_total",
+            "fuxi_dist_job_duration_ms",
+            "fuxi_dist_workers_registered",
+            "fuxi_dist_queue_depth",
+            "fuxi_dist_inflight_jobs",
+            "fuxi_dist_workers_swept_total",
+            "fuxi_dist_workers_max_concurrency",
+        ] {
+            assert!(text.contains(name), "/metrics 应包含 {name}\n----\n{text}");
+        }
+        // max_concurrency 来自 register 声明的容量
+        assert!(
+            text.contains("fuxi_dist_workers_max_concurrency{node_id=\"nodeA\"} 1"),
+            "max_concurrency gauge 应反映 register 声明值\n{text}"
+        );
+        assert!(
+            text.contains("fuxi_dist_jobs_enqueued_total{cli=\"codex\"} 1"),
+            "enqueue counter 应递增\n{text}"
+        );
+        assert!(
+            text.contains("fuxi_dist_jobs_completed_total{cli=\"codex\",ok=\"true\"} 1"),
+            "completed counter 应记 ok=true\n{text}"
+        );
+    }
+
+    /// histogram bucket 边界：42ms 应落在 le=50 及更大 bucket（cumulative）。
+    #[tokio::test]
+    async fn metrics_histogram_uses_configured_buckets() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("nodeA".into(), vec![], 1).await;
+        let job_id = ctrl
+            .enqueue(
+                "nodeA".into(),
+                "T".into(),
+                "B".into(),
+                None,
+                vec![],
+                None,
+                String::new(),
+                vec![],
+            )
+            .await;
+        let _ = ctrl.pull("nodeA").await.expect("job pulled");
+        ctrl.report(DistReportReq {
+            token: "tok".into(),
+            node_id: "nodeA".into(),
+            job_id,
+            ok: true,
+            output: String::new(),
+            duration_ms: 42,
+        })
+        .await;
+        let text = String::from_utf8(ctrl.metrics.encode_text()).unwrap();
+        assert!(
+            text.contains("fuxi_dist_job_duration_ms_bucket{cli=\"codex\",le=\"50\"} 1"),
+            "42ms 应落入 le=50 bucket\n{text}"
+        );
+        assert!(
+            text.contains("fuxi_dist_job_duration_ms_bucket{cli=\"codex\",le=\"10\"} 0"),
+            "42ms 不应落入 le=10 bucket\n{text}"
+        );
     }
 }

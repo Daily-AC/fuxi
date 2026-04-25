@@ -532,6 +532,20 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
             ..
         } => format!("[{deliverable_kind:?}] {}", truncate_preview(summary, 120)),
         ReviewRequestTimeout { waited_for_ms, .. } => format!("timeout {waited_for_ms}ms"),
+        WorkerRegistered {
+            node_id,
+            tags,
+            max_concurrency,
+        } => format!("{node_id} tags={tags:?} cap={max_concurrency}"),
+        WorkerHeartbeatStateChanged {
+            node_id,
+            inflight_count,
+            status,
+        } => format!("{node_id} inflight={inflight_count} {status}"),
+        WorkerStaleSwept {
+            node_id,
+            recycled_jobs,
+        } => format!("{node_id} recycled={}", recycled_jobs.len()),
     }
 }
 
