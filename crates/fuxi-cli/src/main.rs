@@ -62,9 +62,18 @@ enum Command {
     /// 【玄女工具】更漏——trigger 管理（cron / once / fs / webhook）。
     #[command(subcommand)]
     Cron(CronCmd),
+    /// IM 后端服务（家用部署：systemd 跑 `fuxi im start`）。
+    #[command(subcommand)]
+    Im(ImCmd),
     /// 【调试】打印启动 banner 后退出——给主人挑样式用。
     #[command(hide = true)]
     Banner,
+}
+
+#[derive(Debug, Subcommand)]
+enum ImCmd {
+    /// 启动 IM axum 服务（默认 :9100），含完整伏羲 platform。
+    Start(subcommands::ImStartArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -144,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
             CronCmd::List(args) => subcommands::run_cron_list(args).await,
             CronCmd::Fire(args) => subcommands::run_cron_fire(args).await,
             CronCmd::Remove(args) => subcommands::run_cron_remove(args).await,
+        },
+        Some(Command::Im(i)) => match i {
+            ImCmd::Start(args) => subcommands::run_im_start(args).await,
         },
     }
 }

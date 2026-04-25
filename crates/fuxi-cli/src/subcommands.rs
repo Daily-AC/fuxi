@@ -683,6 +683,16 @@ pub async fn run_cron_remove(args: CronRemoveArgs) -> Result<()> {
     print_response(resp)
 }
 
+// ── im start ──
+
+/// `fuxi im start` 的参数 re-export——main.rs 只 import `subcommands::ImStartArgs`，
+/// 真实装在 `crate::im::run` 里以保持 subcommands.rs 是薄壳约定。
+pub use crate::im::StartArgs as ImStartArgs;
+
+pub async fn run_im_start(args: ImStartArgs) -> Result<()> {
+    crate::im::run(args).await
+}
+
 // ── 共用渲染 ──
 
 /// 把 Response 打印到 stdout；Err 转成 anyhow 让 exit code 非零。
