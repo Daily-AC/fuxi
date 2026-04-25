@@ -16,9 +16,16 @@ export const TasksView: Component = () => {
 
   const [tasks, { refetch }] = createResource(async () => {
     const r = await client.fetchTasks(true);
-    await cacheTasks(r.tasks);
+    // cache 是优化路径，不阻塞 resource 完成。
+    // Bug 14A：之前 await cacheTasks(...) 在 iOS Safari 偶尔挂住
+    // （IndexedDB 首次访问），resource.loading 永远 true → "正在拉取……"卡死。
+    void cacheTasks(r.tasks).catch((err) => console.warn("cache tasks failed", err));
     return r.tasks;
   });
+
+  // 显式跟踪"是否完成过一次拉取"。Solid resource 的 loading 在 fetcher resolve
+  // 后立刻翻 false，但用 .latest 判更稳：第一次成功后永远 truthy（[] 也算）。
+  const fetched = (): boolean => tasks.state === "ready" || tasks.state === "errored";
 
   const sorted = (): TaskCardType[] => {
     const list = tasks() ?? cached();
@@ -52,7 +59,7 @@ export const TasksView: Component = () => {
         when={sorted().length > 0}
         fallback={
           <div class={styles.empty}>
-            <Show when={!tasks.loading} fallback={<span>正在拉取……</span>}>
+            <Show when={fetched()} fallback={<span data-testid="tasks-loading">正在拉取……</span>}>
               <p class={styles.emptyTitle}>当前没有任务</p>
               <p class={styles.emptyHint}>
                 在上方"跟玄女说"输入派活内容，玄女会自动开 root task。

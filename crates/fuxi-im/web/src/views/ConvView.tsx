@@ -9,61 +9,59 @@ import {
 import { useApi } from "~/components/ApiProvider";
 import { EventLine } from "~/components/EventLine";
 import { cacheEvents, loadCachedEvents } from "~/lib/idb";
+import { startReconnectingSocket, type ReconnectController } from "~/lib/reconnect";
 import type { EventKind } from "~/types/events";
 import styles from "./ConvView.module.css";
 
 // 跟玄女顶层对话流：WS /api/conv，全局事件（不带 task_id 的或 task_id 是 conv 顶层 task 的）。
+// Bug 14B：仅在本视图 mount 时建 WS；onCleanup 通过 controller.dispose() 同时
+// 关 socket + 取消重连 timer，防止离开页面后 setTimeout 起新连接酿成风暴。
 export const ConvView: Component = () => {
   const { client } = useApi();
   const [events, setEvents] = createSignal<EventKind[]>([]);
   const [connected, setConnected] = createSignal(false);
   const [streamingByAgent, setStreamingByAgent] = createSignal<Record<string, true>>({});
-  let ws: WebSocket | null = null;
+  let controller: ReconnectController | null = null;
   let scrollEnd: HTMLDivElement | undefined;
 
   onMount(async () => {
     const offline = await loadCachedEvents();
     if (offline.length > 0) setEvents(offline);
-    open();
+    controller = startReconnectingSocket(
+      () => client.openConvSocket(),
+      {
+        onOpen: () => setConnected(true),
+        onClose: () => setConnected(false),
+        onError: () => setConnected(false),
+        onMessage: (e) => {
+          try {
+            const ev = JSON.parse(e.data) as EventKind;
+            setEvents([...events(), ev]);
+            const k = (ev as { type: string }).type;
+            const agent = (ev as { agent?: string }).agent;
+            if (agent && (k === "agent_text_delta" || k === "agent_busy")) {
+              setStreamingByAgent({ ...streamingByAgent(), [agent]: true });
+            }
+            if (
+              agent &&
+              (k === "agent_responded" || k === "agent_idle" || k === "result_success")
+            ) {
+              const next = { ...streamingByAgent() };
+              delete next[agent];
+              setStreamingByAgent(next);
+            }
+            void cacheEvents([ev]);
+          } catch (err) {
+            console.warn("conv event parse failed", err);
+          }
+        },
+      },
+    );
   });
 
-  const open = (): void => {
-    ws = client.openConvSocket();
-    ws.addEventListener("open", () => setConnected(true));
-    ws.addEventListener("close", () => {
-      setConnected(false);
-      setTimeout(() => {
-        if (!ws || ws.readyState === WebSocket.CLOSED) open();
-      }, 1500);
-    });
-    ws.addEventListener("error", () => setConnected(false));
-    ws.addEventListener("message", (e) => {
-      try {
-        const ev = JSON.parse(e.data) as EventKind;
-        setEvents([...events(), ev]);
-        const k = (ev as { type: string }).type;
-        const agent = (ev as { agent?: string }).agent;
-        if (agent && (k === "agent_text_delta" || k === "agent_busy")) {
-          setStreamingByAgent({ ...streamingByAgent(), [agent]: true });
-        }
-        if (
-          agent &&
-          (k === "agent_responded" || k === "agent_idle" || k === "result_success")
-        ) {
-          const next = { ...streamingByAgent() };
-          delete next[agent];
-          setStreamingByAgent(next);
-        }
-        void cacheEvents([ev]);
-      } catch (err) {
-        console.warn("conv event parse failed", err);
-      }
-    });
-  };
-
   onCleanup(() => {
-    ws?.close();
-    ws = null;
+    controller?.dispose();
+    controller = null;
   });
 
   createEffect(() => {
