@@ -473,4 +473,88 @@ mod tests {
         let lines = md_to_lines("", Style::default(), &Theme::default());
         assert!(lines.is_empty());
     }
+
+    /// 单字符输入应产出一条非空 Line——回归保护：极小输入不该被段落收尾的
+    /// trailing-blank 清理误伤。
+    #[test]
+    fn single_char_input() {
+        let lines = md_to_lines("a", Style::default(), &Theme::default());
+        assert_eq!(lines.len(), 1, "单字符应产出一条 Line");
+        let body: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(body, "a");
+    }
+
+    /// 单段长行：渲染器本身不做换行（折行交给 ratatui 上层），但**必须**把 500
+    /// 字符完整保留在一条 Line 内，不丢字、不 panic、不爆栈。
+    #[test]
+    fn very_long_line_wraps() {
+        let src: String = "x".repeat(500);
+        let lines = md_to_lines(&src, Style::default(), &Theme::default());
+        assert_eq!(lines.len(), 1);
+        let body: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(body.len(), 500, "500 字符应原样保留");
+        assert!(body.chars().all(|c| c == 'x'));
+    }
+
+    /// blockquote 内嵌列表：每个 item 行应同时带 `┃ ` 前缀和 bullet。
+    #[test]
+    fn nested_list_in_blockquote() {
+        let out = render("> - item one\n> - item two");
+        let joined = out.join("\n");
+        assert!(
+            joined.contains("┃ ") && joined.contains("• item one"),
+            "blockquote 内的 list item 应同时出现 rail 前缀和 bullet，got:\n{joined}"
+        );
+        assert!(
+            joined.contains("• item two"),
+            "第二个 item 应渲染，got:\n{joined}"
+        );
+    }
+
+    /// 代码块内单行 200 字符——回归保护 markdown.rs:244-247 的 long-line
+    /// 路径：单行内容应进入一个 Span，长度精确保留。
+    #[test]
+    fn code_block_with_long_line() {
+        let long: String = "y".repeat(200);
+        let src = format!("```\n{long}\n```");
+        let lines = md_to_lines(&src, Style::default(), &Theme::default());
+        let body_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.len() == 200))
+            .expect("应存在长度 200 的 code span");
+        let body: String = body_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(body.len(), 200);
+        assert!(body.chars().all(|c| c == 'y'));
+    }
+
+    /// CJK 含中文标点的长行：确保 String 切片以 char 为单位，不会破中文 UTF-8
+    /// 字节边界。渲染器整段塞进 Span，文本应字节级完全等同输入。
+    #[test]
+    fn cjk_line_break() {
+        // 重复中文片段到一个较长 paragraph，包含中文标点（，。「」）
+        let chunk = "你好，世界。「测试」";
+        let src: String = chunk.repeat(20);
+        let lines = md_to_lines(&src, Style::default(), &Theme::default());
+        assert_eq!(lines.len(), 1);
+        let body: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // 字节数完全相同 = 没有破字符
+        assert_eq!(body.as_bytes(), src.as_bytes());
+        // 中文标点出现次数应保留
+        assert_eq!(body.matches('，').count(), 20);
+        assert_eq!(body.matches('「').count(), 20);
+    }
+
+    /// 空围栏代码块：` ``` \n``` ` 不应 panic，应输出至多一个空段（pop trailing
+    /// blank 之后允许为空）。
+    #[test]
+    fn empty_code_block() {
+        let lines = md_to_lines("```\n```", Style::default(), &Theme::default());
+        // 不应 panic；可允许 0 行（finish 把尾部空行 pop 干净）
+        for l in &lines {
+            for s in &l.spans {
+                let _ = s.content.as_ref();
+            }
+        }
+        assert!(lines.len() <= 1, "空 code block 不该堆出多行内容");
+    }
 }
