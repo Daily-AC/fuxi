@@ -4266,11 +4266,22 @@ async fn drive_tui(
     // 拓扑 panel 初始 snapshot——dist controller 启用时一次性拉全表灌进 ReplApp。
     // WHY 不轮询：公理 3，后续增量靠 EventBus WorkerRegistered/HeartbeatStateChanged/StaleSwept
     // 三事件推送。这里仅"开机第一帧 priming"，让 panel 不空。
+    //
+    // 顺序关键：**subscribe 必须在 snapshot 之前**，否则 [snapshot_at, subscribe_at]
+    // 时间窗内发生的事件会丢——controller 已应用进它的 nodes 表（snapshot 拿到了），
+    // 但 bus 上的事件没人订阅就被广播 drop，apply_snapshot 灌完后 TUI 永远比真实
+    // 状态老一拍。
+    //
+    // 把订阅放在 snapshot 之前则相反：[subscribe_at, snapshot_at] 内的事件会被
+    // broadcast 缓冲，主循环 select 第一轮就 drain 出来，叠在 snapshot 之上——
+    // 三个 ingest handler 都是幂等/最新覆盖语义（upsert / overwrite inflight /
+    // mark stale），重放无副作用。tokio broadcast 默认 cap 256，snapshot 量级
+    // < 100ms 不会 lag。
+    let mut stream = bus.subscribe();
     if let Some(ctrl) = &dist_ctrl {
         let snaps = ctrl.nodes_snapshot().await;
         app.apply_snapshot(snaps);
     }
-    let mut stream = bus.subscribe();
 
     let shelf = fuxi.clone_shelf();
 
@@ -7084,6 +7095,57 @@ mod tests {
         assert_eq!(app.nodes[1].inflight, 2);
         assert_eq!(app.nodes[1].max_concurrency, 4);
         assert_eq!(app.nodes[1].tags, vec!["cc".to_string()]);
+    }
+
+    /// race-fix 合约：subscribe-then-snapshot 后，被 broadcast 缓冲的"过去事件"
+    /// 重放叠在 snapshot 之上时，必须收敛到正确状态——三 ingest handler 必须
+    /// 幂等/最新覆盖。这条测试钉死该不变式。
+    ///
+    /// 场景：snapshot 报 inflight=2 alive，但实际 controller 在 snapshot 之后
+    /// 又收了一次心跳变 inflight=5 alive。subscribe 早于 snapshot 时，那条心跳
+    /// 事件已在 broadcast 缓冲，主循环 drain 出来 ingest 后 inflight 必须是 5。
+    #[test]
+    fn nodes_panel_replay_event_after_snapshot_converges_to_latest() {
+        let mut app = ReplApp::stub();
+        // 1. snapshot 灌"过去状态" inflight=2
+        app.apply_snapshot(vec![crate::ipc::NodeSnapshot {
+            node_id: "home".into(),
+            tags: vec!["cc".into()],
+            max_concurrency: 8,
+            inflight_count: 2,
+            inflight: vec!["j1".into(), "j2".into()],
+            last_seen_ms_ago: Some(500),
+            registered_at_ms_ago: Some(60_000),
+            status: "alive".into(),
+        }]);
+        assert_eq!(app.nodes[0].inflight, 2);
+
+        // 2. 重放"晚于 snapshot 的真实事件"——主循环 drain broadcast 缓冲会做这事
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerHeartbeatStateChanged {
+                node_id: "home".into(),
+                inflight_count: 5,
+                status: "alive".into(),
+            },
+        ));
+        assert_eq!(app.nodes[0].inflight, 5, "重放 HSC 事件后 inflight 必须收敛到 5");
+
+        // 3. 验"重放 register 事件"幂等：snapshot 已记 home，再来一条 register
+        // 不应重复插
+        app.ingest(&mk_ev(
+            None,
+            EventKind::WorkerRegistered {
+                node_id: "home".into(),
+                tags: vec!["cc".into(), "luban".into()],
+                max_concurrency: 16,
+            },
+        ));
+        assert_eq!(app.nodes.len(), 1, "重放 Registered 应幂等不重复插");
+        assert_eq!(app.nodes[0].max_concurrency, 16);
+        assert_eq!(app.nodes[0].tags, vec!["cc".to_string(), "luban".to_string()]);
+        // 关键：register 不该重置 inflight=0——保持心跳带过来的 5
+        assert_eq!(app.nodes[0].inflight, 5, "register 重连不应清 inflight");
     }
 
     #[test]
