@@ -2,6 +2,7 @@
 //!
 //! 目标：让远端机器主动连接 controller 拉任务并回传结果，不依赖 controller 入站到家宽。
 
+use crate::dist_event_client::NetworkBusClient;
 use anyhow::{Context, Result, anyhow};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
@@ -12,6 +13,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use fuxi_agent_codex::CodexEvent;
 use fuxi_agent_codex::parser::ItemPhase;
 use fuxi_core::event::{Event, EventKind, EventMeta};
+use fuxi_core::id::{AgentId, TaskId};
 use fuxi_events::EventBus;
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
@@ -1443,6 +1445,21 @@ pub(crate) async fn run_worker_with(
     let inflight: Arc<Mutex<HashMap<String, CancellationToken>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // γ: 跨节点 EventBus 桥接客户端。**per-worker 单实例**——所有 in-flight job
+    // 共享一个攒批 / retry / drop 队列，避免 per-job spawn flush_loop 的开销和
+    // batch 跨 job 边界被冲断（短 job 攒不满 batch_size 又 tick 没到 = 延迟塞家）。
+    // flush_loop JoinHandle 当前不显式 shutdown：run_worker_with 是无限 `loop`，
+    // 没有 graceful exit 路径；future 加 SIGTERM/CTRL-C 处理时再调
+    // `bus_client.shutdown(handle).await`。当前 process exit 直接 abort flush task。
+    let bus_client = Arc::new(NetworkBusClient::new(
+        client.clone(),
+        controller.clone(),
+        token.clone(),
+        args.node.clone(),
+    ));
+    let _bus_flush_handle = bus_client.clone().spawn_flush_loop();
+    let bus_client = Some(bus_client);
+
     // 心跳 task：除上报 inflight 外，**消费 ack 的 cancel_pending**——
     // worker 静默执行（无 progress push）时段也能 ~heartbeat interval 内拿到
     // cancel 信号，弥补只靠 push_progress.should_cancel 的盲区。
@@ -1552,12 +1569,14 @@ pub(crate) async fn run_worker_with(
         let args_for_factory = args.clone();
         let started = Instant::now();
 
+        let bus_c = bus_client.clone();
         jobs.spawn(async move {
             let ctx = WorkerCtx {
                 client: &client_c,
                 controller: &controller_c,
                 token: &token_c,
                 node_id: &node_c,
+                bus_client: bus_c.as_ref(),
             };
             // adapter 构造一旦 fail 就走失败 final report——和老路径行为一致。
             let run_result = match factory_c(&job.cli, &args_for_factory) {
@@ -1606,12 +1625,17 @@ fn build_codex_prompt_from_job(job: &DistJob) -> String {
     fuxi_agent_codex::compose_prompt(system, &job.title, &job.body)
 }
 
-/// worker 运行上下文——push progress 需要的 HTTP 目标。
+/// worker 运行上下文——push progress 需要的 HTTP 目标 + （γ）跨节点 EventBus
+/// 桥接客户端。
+///
+/// `bus_client` 是 Option：测试 / 老路径 / 暂未配 controller 跨节点 republish 时
+/// 为 None，job 跑完不发任何 fuxi Event 到 home。生产 worker 主循环 Some。
 pub(crate) struct WorkerCtx<'a> {
     client: &'a Client,
     controller: &'a str,
     token: &'a str,
     node_id: &'a str,
+    bus_client: Option<&'a Arc<NetworkBusClient>>,
 }
 
 /// 抽象 worker 端的 CLI 执行器——让 codex / claude-code / 未来 gemini 等都能
@@ -1796,6 +1820,46 @@ fn codex_event_to_push(ev: &CodexEvent) -> Option<ProgressPush> {
     }
 }
 
+/// γ：测试 helper——封装 run_codex_job 内 splice 的 parse + translate + enqueue 三步，
+/// 让 TDD 不必起 fake codex 子进程也能验证桥接行为。
+///
+/// 生产路径是 run_codex_job 循环里**内联**的同三步（不调本 fn——避免双消费同一行）。
+/// 改桥接行为时同步改两处；clippy 警告"函数已存在两份近似实现"是预期。
+#[cfg(test)]
+async fn codex_publish_line(
+    bus: &NetworkBusClient,
+    line: &str,
+    agent_id: AgentId,
+    task_id: Option<TaskId>,
+    state: &mut fuxi_agent_codex::TranslateState,
+    pid_hint: Option<u32>,
+) {
+    let Ok(ev) = fuxi_agent_codex::parse_line(line) else {
+        return;
+    };
+    for event in fuxi_agent_codex::translate(ev, agent_id, task_id, state, pid_hint) {
+        let _ = bus.enqueue(event).await;
+    }
+}
+
+/// γ：cc 路对称测试 helper——见 codex_publish_line 注释。
+#[cfg(test)]
+async fn cc_publish_line(
+    bus: &NetworkBusClient,
+    line: &str,
+    agent_id: AgentId,
+    task_id: Option<TaskId>,
+    state: &mut fuxi_agent_cc::TranslateState,
+    pid_hint: Option<u32>,
+) {
+    let Ok(ev) = fuxi_agent_cc::parse_line(line) else {
+        return;
+    };
+    for event in fuxi_agent_cc::translate(ev, agent_id, task_id, state, pid_hint) {
+        let _ = bus.enqueue(event).await;
+    }
+}
+
 /// 流式执行 codex 任务：spawn + 按行读 stdout + 增量 POST progress。
 ///
 /// 返回 `(ok, final_output)`——外层负责发 `/dist/report`。`final_output` 是
@@ -1824,6 +1888,20 @@ async fn run_codex_job(
         .spawn()
         .with_context(|| format!("spawn codex binary failed: {codex_bin}"))?;
 
+    // γ：per-job 子门客 identity + parser state。
+    // - agent_id：home 没有这个远端 sub-agent 的视图，新造一个 worker 侧 id；
+    //   home 端 TUI 看到的是 "(unknown agent on node X)" 直到 δ 加上 source_node_id
+    //   能把 worker node + agent_id 渲染成可识别名字。
+    // - task_id：同上——home 那侧的 TaskId 在 controller 端，worker 不持有；
+    //   起一个 worker-local TaskId 让 sentinel 的 AgentRequestReview 字段必填项有得填。
+    // - translate_state：cc/codex 都有跨事件状态（thinking 块 / responded_this_turn /
+    //   last_agent_message）。**per-job 新建 = job 边界即状态边界**——上 job 残留
+    //   的 responded_this_turn 不会污染下 job 的冷场景 result-only 回复。
+    let job_agent_id = AgentId::new();
+    let job_task_id = Some(TaskId::new());
+    let pid_hint = child.id();
+    let mut translate_state = fuxi_agent_codex::TranslateState::new();
+
     let stdout = child.stdout.take().context("codex stdout pipe missing")?;
     let stderr = child.stderr.take();
     let mut reader = BufReader::new(stdout).lines();
@@ -1846,18 +1924,33 @@ async fn run_codex_job(
             Ok(Ok(Some(line))) => {
                 if !line.trim().is_empty()
                     && let Ok(ev) = fuxi_agent_codex::parse_line(&line)
-                    && let Some(push) = codex_event_to_push(&ev)
                 {
-                    if matches!(push.kind, ProgressKind::AssistantText) {
-                        if !final_text.is_empty() {
-                            final_text.push('\n');
+                    if let Some(push) = codex_event_to_push(&ev) {
+                        if matches!(push.kind, ProgressKind::AssistantText) {
+                            if !final_text.is_empty() {
+                                final_text.push('\n');
+                            }
+                            final_text.push_str(&push.text);
                         }
-                        final_text.push_str(&push.text);
+                        if matches!(push.kind, ProgressKind::Error) {
+                            got_error = true;
+                        }
+                        buffer.push(push);
                     }
-                    if matches!(push.kind, ProgressKind::Error) {
-                        got_error = true;
+                    // γ：第二个消费者——translate 同一个 CodexEvent 成 fuxi Event 灌
+                    // 跨节点 bus。push_progress（gateway 兜底）和 bus（home 实时订阅）
+                    // 共享一次 parse_line 结果，state 跨调用累积（per-job）。
+                    if let Some(bus) = ctx.bus_client {
+                        for event in fuxi_agent_codex::translate(
+                            ev,
+                            job_agent_id,
+                            job_task_id,
+                            &mut translate_state,
+                            pid_hint,
+                        ) {
+                            let _ = bus.enqueue(event).await;
+                        }
                     }
-                    buffer.push(push);
                 }
             }
             Ok(Ok(None)) => eof = true,
@@ -2035,6 +2128,12 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         .spawn()
         .with_context(|| format!("spawn claude binary failed: {bin}"))?;
 
+    // γ：per-job 子门客 identity + parser state——见 run_codex_job 同段注释。
+    let job_agent_id = AgentId::new();
+    let job_task_id = Some(TaskId::new());
+    let pid_hint = child.id();
+    let mut translate_state = fuxi_agent_cc::TranslateState::new();
+
     let stdout = child.stdout.take().context("cc stdout pipe missing")?;
     let stderr = child.stderr.take();
     let mut reader = BufReader::new(stdout).lines();
@@ -2057,18 +2156,31 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
             Ok(Ok(Some(line))) => {
                 if !line.trim().is_empty()
                     && let Ok(ev) = fuxi_agent_cc::parse_line(&line)
-                    && let Some(push) = cc_event_to_push(&ev)
                 {
-                    if matches!(push.kind, ProgressKind::AssistantText) {
-                        if !final_text.is_empty() {
-                            final_text.push('\n');
+                    if let Some(push) = cc_event_to_push(&ev) {
+                        if matches!(push.kind, ProgressKind::AssistantText) {
+                            if !final_text.is_empty() {
+                                final_text.push('\n');
+                            }
+                            final_text.push_str(&push.text);
                         }
-                        final_text.push_str(&push.text);
+                        if matches!(push.kind, ProgressKind::Error) {
+                            got_error = true;
+                        }
+                        buffer.push(push);
                     }
-                    if matches!(push.kind, ProgressKind::Error) {
-                        got_error = true;
+                    // γ：第二个消费者——translate 同一 CcEvent 灌跨节点 bus。
+                    if let Some(bus) = ctx.bus_client {
+                        for event in fuxi_agent_cc::translate(
+                            ev,
+                            job_agent_id,
+                            job_task_id,
+                            &mut translate_state,
+                            pid_hint,
+                        ) {
+                            let _ = bus.enqueue(event).await;
+                        }
                     }
-                    buffer.push(push);
                 }
             }
             Ok(Ok(None)) => eof = true,
@@ -4114,5 +4226,151 @@ mod tests {
             "应记录 3 条 remote event；metrics:\n{text}"
         );
         srv.abort();
+    }
+
+    // ── γ：worker 子门客 stdout → translate → NetworkBusClient 桥接 ──
+    //
+    // 验路 Y 主张「不动 worker cancel/Child 所有权，只在解析层加第二个消费者」。
+    // 直接喂 raw stdout 行给 codex_publish_line / cc_publish_line，drain client 队列
+    // 断言事件类型 + 字段——不必起 mock controller / fake 子进程，runtime 开销 0。
+
+    fn gamma_dummy_bus() -> NetworkBusClient {
+        // controller 不可达 + 0 retry：测试只断 enqueue 入队，不该有 HTTP 出栈。
+        NetworkBusClient::with_config(
+            Client::new(),
+            "http://127.0.0.1:1".into(),
+            "tok".into(),
+            "node-test".into(),
+            64,
+            128, // batch_size 故意大，防止 enqueue 自动触发 flush_signal
+            Duration::from_secs(60),
+            vec![],
+        )
+    }
+
+    /// codex AgentMessage 行 → bus 拿到 AgentResponded（路 Y 最小切片）。
+    #[tokio::test]
+    async fn codex_publish_line_emits_agent_responded_to_bus() {
+        let bus = gamma_dummy_bus();
+        let agent = AgentId::new();
+        let task = Some(TaskId::new());
+        let mut state = fuxi_agent_codex::TranslateState::new();
+        let line =
+            r#"{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"hi"}}"#;
+        super::codex_publish_line(&bus, line, agent, task, &mut state, Some(99)).await;
+        let drained = bus.take_batch(16).await;
+        assert_eq!(drained.len(), 1, "agent_message 单行应只产 1 条 Event");
+        match &drained[0].kind {
+            EventKind::AgentResponded { text } => assert_eq!(text, "hi"),
+            other => panic!("expected AgentResponded, got {other:?}"),
+        }
+        assert_eq!(drained[0].meta.agent, Some(agent));
+        assert_eq!(drained[0].meta.task, task);
+    }
+
+    /// cc tool_use 行 → bus 拿到 ToolCallStarted。
+    #[tokio::test]
+    async fn cc_publish_line_emits_tool_call_started_to_bus() {
+        let bus = gamma_dummy_bus();
+        let agent = AgentId::new();
+        let task = Some(TaskId::new());
+        let mut state = fuxi_agent_cc::TranslateState::new();
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"cmd":"ls"}}]}}"#;
+        super::cc_publish_line(&bus, line, agent, task, &mut state, Some(42)).await;
+        let drained = bus.take_batch(16).await;
+        assert_eq!(drained.len(), 1);
+        match &drained[0].kind {
+            EventKind::ToolCallStarted { tool, args } => {
+                assert_eq!(tool, "Bash");
+                assert_eq!(args["cmd"], "ls");
+            }
+            other => panic!("expected ToolCallStarted, got {other:?}"),
+        }
+    }
+
+    /// Decision 13 sentinel：`AssistantText` 行装 `_fuxi:request_review` JSON →
+    /// bus 拿到 AgentRequestReview（**不**是 AgentResponded——sentinel suppresses）。
+    #[tokio::test]
+    async fn cc_publish_line_routes_request_review_sentinel_to_bus() {
+        let bus = gamma_dummy_bus();
+        let agent = AgentId::new();
+        let task = Some(TaskId::new());
+        let mut state = fuxi_agent_cc::TranslateState::new();
+        let sentinel_line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"{\"_fuxi\":\"request_review\",\"kind\":\"code_change\",\"summary\":\"小绿了\",\"artifact_ref\":\"sha:abc\"}"}]}}"#;
+        super::cc_publish_line(&bus, sentinel_line, agent, task, &mut state, Some(7)).await;
+        let drained = bus.take_batch(16).await;
+        assert_eq!(drained.len(), 1, "sentinel suppresses AgentResponded");
+        match &drained[0].kind {
+            EventKind::AgentRequestReview {
+                deliverable_kind,
+                summary,
+                artifact_ref,
+                ..
+            } => {
+                use fuxi_core::event::DeliverableKind;
+                assert_eq!(*deliverable_kind, DeliverableKind::CodeChange);
+                assert_eq!(summary, "小绿了");
+                assert_eq!(artifact_ref.as_deref(), Some("sha:abc"));
+            }
+            other => panic!("expected AgentRequestReview, got {other:?}"),
+        }
+    }
+
+    /// per-job state 隔离：上 job AssistantText 置 `responded_this_turn=true`
+    /// 不该污染下 job 的冷场景 ResultSuccess（否则 home 完全看不到回复）。
+    /// 走两个 fresh TranslateState 验证「new() 调用 = 状态边界」。
+    #[tokio::test]
+    async fn cc_publish_line_per_job_state_does_not_leak() {
+        let bus = gamma_dummy_bus();
+        let agent = AgentId::new();
+        let task = Some(TaskId::new());
+
+        // job 1：Assistant 流式回复后置 responded_this_turn=true
+        let mut state1 = fuxi_agent_cc::TranslateState::new();
+        super::cc_publish_line(
+            &bus,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"job1 reply"}]}}"#,
+            agent,
+            task,
+            &mut state1,
+            Some(1),
+        )
+        .await;
+        let _ = bus.take_batch(16).await; // drain job1 events
+
+        // job 2：fresh state——result-only 冷场景（cc 极短回复路径）必须发 AgentResponded
+        let mut state2 = fuxi_agent_cc::TranslateState::new();
+        super::cc_publish_line(
+            &bus,
+            r#"{"type":"result","subtype":"success","result":"job2 reply"}"#,
+            agent,
+            task,
+            &mut state2,
+            Some(2),
+        )
+        .await;
+        let drained = bus.take_batch(16).await;
+        // ResultSuccess 冷场景 → TaskStateChanged + AgentResponded（per cc translate 逻辑）
+        assert_eq!(
+            drained.len(),
+            2,
+            "fresh state job2 应发 TaskStateChanged + AgentResponded（冷场景）"
+        );
+        let has_responded = drained
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::AgentResponded { text } if text == "job2 reply"));
+        assert!(
+            has_responded,
+            "per-job 新 TranslateState 不应继承上 job 的 responded_this_turn 状态"
+        );
+    }
+
+    /// 坏 JSON 不该让 worker 崩——translate path 跟 push_progress path 一样静默 swallow。
+    #[tokio::test]
+    async fn codex_publish_line_swallows_invalid_json() {
+        let bus = gamma_dummy_bus();
+        let mut state = fuxi_agent_codex::TranslateState::new();
+        super::codex_publish_line(&bus, "{not json", AgentId::new(), None, &mut state, None).await;
+        assert_eq!(bus.queue_len().await, 0, "坏行不该入队");
     }
 }
