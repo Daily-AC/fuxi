@@ -127,7 +127,22 @@ pub async fn run(args: Args) -> Result<()> {
         // 当天那样手动补 report。60s 阈值 = 两次心跳间隔（worker 每 10s 发一次，6
         // 次不到是 60s）——给网络抖动留 buffer，但又不至于让挂机 job 无限霸位。
         crate::dist::spawn_sweep_task(ctrl.clone());
-        let merged = firehose_router.merge(crate::dist::router(ctrl.clone()));
+        // path 3 α: 有 HMAC secret env → 走鉴权 router；缺 secret 仅 warn 并回退
+        // 老版无鉴权路径（dev / migration 阶段保留），生产部署必须设置。
+        let dist_router_built = match crate::dist_auth::HmacSecret::from_env() {
+            Ok(secret) => {
+                let gate = crate::dist_auth::HmacGate::new(secret);
+                crate::dist::router_with_hmac(ctrl.clone(), gate)
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    %reason,
+                    "FUXI_DIST_HMAC_SECRET 未设置，/dist/* 暂以无鉴权方式运行——生产部署务必配置"
+                );
+                crate::dist::router(ctrl.clone())
+            }
+        };
+        let merged = firehose_router.merge(dist_router_built);
         (merged, Some(ctrl))
     } else {
         tracing::warn!(

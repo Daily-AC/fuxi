@@ -70,7 +70,6 @@ pub struct DistJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistEnqueueReq {
-    pub token: String,
     /// requester hint——见 `DistJob.node_id`。老版 gateway 会传自己的 --node 值，
     /// 新版会置空或当 `pinned_node` 用。
     pub node_id: String,
@@ -100,7 +99,6 @@ pub struct DistPullResp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistReportReq {
-    pub token: String,
     pub node_id: String,
     pub job_id: String,
     pub ok: bool,
@@ -115,7 +113,6 @@ pub struct DistReportResp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistJobStatusQuery {
-    pub token: String,
     pub job_id: String,
 }
 
@@ -130,7 +127,6 @@ pub struct DistJobStatusResp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistRegisterReq {
-    pub token: String,
     pub node_id: String,
     /// Worker 自报能力。gateway enqueue 若带 `required_tags` 必须是本集合的
     /// 子集才能被派给此 worker。典型：`["home", "codex", "gpu"]`。空集 =
@@ -154,7 +150,6 @@ pub struct DistRegisterResp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistPullQuery {
-    pub token: String,
     pub node_id: String,
 }
 
@@ -193,7 +188,6 @@ pub struct ProgressPush {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistProgressReq {
-    pub token: String,
     pub node_id: String,
     pub job_id: String,
     pub chunks: Vec<ProgressPush>,
@@ -217,7 +211,6 @@ pub struct DistProgressAck {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistCancelReq {
-    pub token: String,
     pub job_id: String,
 }
 
@@ -236,7 +229,6 @@ pub struct DistCancelResp {
 /// 频率约定：worker 每 10s 发一次；controller 30s 未收到视作 dead。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistHeartbeatReq {
-    pub token: String,
     pub node_id: String,
     /// worker 自身视角的 inflight job_ids。空 = 当前空闲。
     #[serde(default)]
@@ -263,7 +255,6 @@ pub struct DistHeartbeatResp {
 /// 共用本通道，将来若真要分开再加 keepalive 字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistEventReq {
-    pub token: String,
     pub node_id: String,
     #[serde(default)]
     pub events: Vec<Event>,
@@ -277,7 +268,6 @@ pub struct DistEventResp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistProgressQuery {
-    pub token: String,
     pub job_id: String,
     /// 只返回 seq > after 的 chunks。首次轮询传 0。
     pub after: u64,
@@ -520,6 +510,9 @@ impl Default for Metrics {
 
 /// controller 进程内状态。
 pub struct DistController {
+    /// 旧裸 token——path 3 起鉴权改走 HMAC（`dist_auth::HmacGate`），本字段
+    /// 仅作 `DistController::new` 旧 ctor 兼容；新代码不要读它做鉴权。
+    #[allow(dead_code)]
     token: String,
     bus: EventBus,
     inner: Mutex<DistInner>,
@@ -536,6 +529,9 @@ impl DistController {
         }
     }
 
+    /// 旧 token accessor——HMAC 取代后无生产 caller，保留供未迁移的 binary
+    /// 入口（up.rs / repl.rs 老路径）传透传字段。
+    #[allow(dead_code)]
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -1086,21 +1082,19 @@ impl DistController {
     }
 }
 
-fn unauthorized() -> (StatusCode, String) {
-    (StatusCode::UNAUTHORIZED, "invalid dist token".to_string())
-}
-
 fn forbidden_unknown_node() -> (StatusCode, String) {
     (StatusCode::FORBIDDEN, "node not registered".to_string())
 }
+
+// 注：所有 /dist/* 入口的 401 鉴权已下沉到 `crate::dist_auth::hmac_layer`
+// （path 3 α）；handler 自身只关心业务校验。如果 router 没挂 HMAC layer
+// （单测/旧路径直接 mount router 的场景），handler 行为退化到无鉴权——
+// 生产路径必走 `router_with_hmac`。
 
 async fn register_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistRegisterReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     ctrl.register(req.node_id, req.tags, req.max_concurrency)
         .await;
     Json(DistRegisterResp { ok: true }).into_response()
@@ -1110,9 +1104,6 @@ async fn enqueue_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistEnqueueReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     if req.title.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "title empty".to_string()).into_response();
     }
@@ -1135,9 +1126,6 @@ async fn pull_handler(
     State(ctrl): State<Arc<DistController>>,
     Query(q): Query<DistPullQuery>,
 ) -> impl IntoResponse {
-    if q.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     let job = ctrl.pull(&q.node_id).await;
     Json(DistPullResp { job }).into_response()
 }
@@ -1146,9 +1134,6 @@ async fn report_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistReportReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     let accepted = ctrl.report(req).await;
     Json(DistReportResp { accepted }).into_response()
 }
@@ -1157,9 +1142,6 @@ async fn job_status_handler(
     State(ctrl): State<Arc<DistController>>,
     Query(q): Query<DistJobStatusQuery>,
 ) -> impl IntoResponse {
-    if q.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     Json(ctrl.job_status(&q.job_id).await).into_response()
 }
 
@@ -1167,9 +1149,6 @@ async fn progress_post_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistProgressReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     let (accepted, last_seq, should_cancel) = ctrl
         .push_progress(&req.node_id, &req.job_id, req.chunks)
         .await;
@@ -1185,9 +1164,6 @@ async fn progress_get_handler(
     State(ctrl): State<Arc<DistController>>,
     Query(q): Query<DistProgressQuery>,
 ) -> impl IntoResponse {
-    if q.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     Json(ctrl.pull_progress_after(&q.job_id, q.after).await).into_response()
 }
 
@@ -1195,9 +1171,6 @@ async fn cancel_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistCancelReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     ctrl.cancel_job(&req.job_id).await;
     Json(DistCancelResp { accepted: true }).into_response()
 }
@@ -1206,9 +1179,6 @@ async fn event_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistEventReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     if !ctrl.has_node(&req.node_id).await {
         return forbidden_unknown_node().into_response();
     }
@@ -1220,9 +1190,6 @@ async fn heartbeat_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistHeartbeatReq>,
 ) -> impl IntoResponse {
-    if req.token != ctrl.token() {
-        return unauthorized().into_response();
-    }
     let cancel_pending = ctrl.heartbeat(&req.node_id, req.inflight).await;
     Json(DistHeartbeatResp {
         ok: true,
@@ -1276,6 +1243,31 @@ pub fn router(ctrl: Arc<DistController>) -> Router {
         .route("/dist/event", post(event_handler))
         // Prometheus scrape 端点。无 token——和 /dist/* 不同，metrics 暴露面
         // 由部署侧（reverse proxy / firewall）控制。本地 dev 直接 curl 即可。
+        .route("/metrics", get(metrics_handler))
+        .with_state(ctrl)
+}
+
+/// 生产路径用的 router——同 `router` 但所有 `/dist/*` 走 HMAC middleware。
+///
+/// `/metrics` 不在 layer 内：scrape 工具一般不挂签名，部署侧靠 firewall /
+/// reverse proxy 限制可见性。要把 metrics 也保护起来，调用方自行二次包一层。
+pub fn router_with_hmac(ctrl: Arc<DistController>, gate: crate::dist_auth::HmacGate) -> Router {
+    use axum::middleware::from_fn_with_state;
+    let dist = Router::new()
+        .route("/dist/register", post(register_handler))
+        .route("/dist/enqueue", post(enqueue_handler))
+        .route("/dist/pull", get(pull_handler))
+        .route("/dist/report", post(report_handler))
+        .route("/dist/job", get(job_status_handler))
+        .route("/dist/progress", post(progress_post_handler))
+        .route("/dist/progress", get(progress_get_handler))
+        .route("/dist/cancel", post(cancel_handler))
+        .route("/dist/heartbeat", post(heartbeat_handler))
+        .route("/dist/event", post(event_handler))
+        .with_state(ctrl.clone())
+        .layer(from_fn_with_state(gate, crate::dist_auth::hmac_layer));
+    Router::new()
+        .merge(dist)
         .route("/metrics", get(metrics_handler))
         .with_state(ctrl)
 }
@@ -1358,14 +1350,15 @@ fn resolve_token(token: Option<String>) -> Result<String> {
 }
 
 pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
-    let token = resolve_token(args.token)?;
+    // β 接入后 token 改为 HmacSecret 经 signed_post；当前 binding 只为兼容
+    // 旧 --token / FUXI_DIST_TOKEN env 的解析路径不立刻 break。
+    let _token = resolve_token(args.token)?;
     let body = args.body.join(" ");
     let client = Client::new();
     let url = format!("{}/dist/enqueue", args.controller.trim_end_matches('/'));
     let resp = client
         .post(url)
         .json(&DistEnqueueReq {
-            token,
             node_id: args.node,
             title: args.title,
             body,
@@ -1430,15 +1423,19 @@ pub(crate) async fn run_worker_with(
 ) -> Result<()> {
     let controller = args.controller.trim_end_matches('/').to_string();
     let client = Client::new();
-    client
-        .post(format!("{controller}/dist/register"))
-        .json(&DistRegisterReq {
-            token: token.clone(),
-            node_id: args.node.clone(),
-            tags: args.tags.clone(),
-            max_concurrency: args.max_concurrency,
-        })
-        .send()
+    // HMAC 共享密钥——与 controller / daemon 同 env。从 env 加载放在 register
+    // 之前：缺 secret 直接 fail-fast，避免 worker 启动后所有出站 request 才 401。
+    let secret = std::sync::Arc::new(
+        crate::dist_auth::HmacSecret::from_env()
+            .map_err(|e| anyhow!("worker HMAC secret: {e}"))?,
+    );
+    let register_url = format!("{controller}/dist/register");
+    let register_req = DistRegisterReq {
+        node_id: args.node.clone(),
+        tags: args.tags.clone(),
+        max_concurrency: args.max_concurrency,
+    };
+    crate::dist_auth_client::signed_post(&client, &secret, &register_url, &register_req)
         .await
         .context("dist register request failed")?
         .error_for_status()
@@ -1457,6 +1454,7 @@ pub(crate) async fn run_worker_with(
         client.clone(),
         controller.clone(),
         token.clone(),
+        secret.clone(),
         args.node.clone(),
     ));
     let _bus_flush_handle = bus_client.clone().spawn_flush_loop();
@@ -1467,10 +1465,11 @@ pub(crate) async fn run_worker_with(
     // cancel 信号，弥补只靠 push_progress.should_cancel 的盲区。
     {
         let hb_inflight = inflight.clone();
-        let hb_token = token.clone();
         let hb_node = args.node.clone();
         let hb_controller = controller.clone();
         let hb_client = client.clone();
+        let hb_secret = secret.clone();
+        let hb_url = format!("{hb_controller}/dist/heartbeat");
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(heartbeat_interval);
             loop {
@@ -1480,15 +1479,12 @@ pub(crate) async fn run_worker_with(
                     g.keys().cloned().collect()
                 };
                 let req = DistHeartbeatReq {
-                    token: hb_token.clone(),
                     node_id: hb_node.clone(),
                     inflight: snapshot,
                 };
-                let resp = hb_client
-                    .post(format!("{hb_controller}/dist/heartbeat"))
-                    .json(&req)
-                    .send()
-                    .await;
+                let resp =
+                    crate::dist_auth_client::signed_post(&hb_client, &hb_secret, &hb_url, &req)
+                        .await;
                 let Ok(resp) = resp else { continue };
                 let Ok(ack) = resp.json::<DistHeartbeatResp>().await else {
                     continue;
@@ -1521,7 +1517,7 @@ pub(crate) async fn run_worker_with(
 
         let pull = client
             .get(format!("{controller}/dist/pull"))
-            .query(&[("token", token.as_str()), ("node_id", args.node.as_str())])
+            .query(&[("node_id", args.node.as_str())])
             .send()
             .await;
         let resp = match pull {
@@ -1602,10 +1598,11 @@ pub(crate) async fn run_worker_with(
             // 先从本地 inflight 移除——下次心跳就不会再把 job_id 报给 controller。
             // 再发 final report 给 controller，对 capacity 释放权威。
             inflight_c.lock().await.remove(&job.id);
+            // β 接入后 token_c 改为 HmacSecret 经 signed_post；当前留绑定，编译态等价。
+            let _ = &token_c;
             let _ = client_c
                 .post(format!("{controller_c}/dist/report"))
                 .json(&DistReportReq {
-                    token: token_c,
                     node_id: node_c,
                     job_id: job.id.clone(),
                     ok,
@@ -1742,11 +1739,12 @@ async fn flush_progress(ctx: &WorkerCtx<'_>, job_id: &str, chunks: Vec<ProgressP
     if chunks.is_empty() {
         return false;
     }
+    // β 接入后 ctx.token 改 HmacSecret 经 signed_post；当前 binding 只为兼容。
+    let _ = ctx.token;
     let resp = ctx
         .client
         .post(format!("{}/dist/progress", ctx.controller))
         .json(&DistProgressReq {
-            token: ctx.token.to_string(),
             node_id: ctx.node_id.to_string(),
             job_id: job_id.to_string(),
             chunks,
@@ -2292,9 +2290,11 @@ mod tests {
     /// worker 端反序列化不应失败。
     #[test]
     fn dist_enqueue_req_deserializes_without_system_prompt() {
+        // path 3 起 `token` 字段已移除——HMAC 签名取代之。serde 会忽略未知字段，
+        // 老 controller / 老脚本仍带 `token` payload 不会反序列化失败。
         let raw = r#"{"token":"t","node_id":"n","title":"T","body":"B"}"#;
         let req: DistEnqueueReq = serde_json::from_str(raw).expect("decode");
-        assert_eq!(req.token, "t");
+        assert_eq!(req.node_id, "n");
         assert!(req.system_prompt.is_none());
     }
 
@@ -2310,7 +2310,6 @@ mod tests {
     #[test]
     fn dist_enqueue_req_round_trips_system_prompt() {
         let req = DistEnqueueReq {
-            token: "t".into(),
             node_id: "n".into(),
             title: "T".into(),
             body: "B".into(),
@@ -2640,7 +2639,6 @@ mod tests {
         // 在收到 final report 前 done=false
         assert!(!ctrl.pull_progress_after("job-1", 0).await.done);
         ctrl.report(DistReportReq {
-            token: "tok".into(),
             node_id: "nodeA".into(),
             job_id: "job-1".into(),
             ok: true,
@@ -2748,7 +2746,6 @@ mod tests {
     #[tokio::test]
     async fn progress_req_round_trips_via_serde() {
         let req = DistProgressReq {
-            token: "t".into(),
             node_id: "n".into(),
             job_id: "j".into(),
             chunks: vec![push(ProgressKind::ToolCall, "ls -la")],
@@ -3039,7 +3036,6 @@ mod tests {
         let _j2 = enq_simple(&ctrl, "j2").await;
         let _ = ctrl.pull("nodeA").await.expect("take j1");
         ctrl.report(DistReportReq {
-            token: "tok".into(),
             node_id: "nodeA".into(),
             job_id: j1,
             ok: true,
@@ -3075,7 +3071,6 @@ mod tests {
     #[test]
     fn dist_enqueue_req_round_trips_tag_and_pin_fields() {
         let req = DistEnqueueReq {
-            token: "t".into(),
             node_id: "hint".into(),
             title: "T".into(),
             body: "B".into(),
@@ -3354,7 +3349,6 @@ mod tests {
     #[test]
     fn dist_heartbeat_req_serde_round_trip() {
         let req = DistHeartbeatReq {
-            token: "t".into(),
             node_id: "n".into(),
             inflight: vec!["job-1".into(), "job-2".into()],
         };
@@ -3383,7 +3377,6 @@ mod tests {
     #[test]
     fn dist_register_req_round_trips_new_fields() {
         let req = DistRegisterReq {
-            token: "t".into(),
             node_id: "n".into(),
             tags: vec!["home".into(), "gpu".into()],
             max_concurrency: 4,
@@ -3990,7 +3983,6 @@ mod tests {
         let _job = ctrl.pull("nodeA").await.expect("job pulled");
         let accepted = ctrl
             .report(DistReportReq {
-                token: "tok".into(),
                 node_id: "nodeA".into(),
                 job_id: job_id.clone(),
                 ok: true,
@@ -4052,7 +4044,6 @@ mod tests {
             .await;
         let _ = ctrl.pull("nodeA").await.expect("job pulled");
         ctrl.report(DistReportReq {
-            token: "tok".into(),
             node_id: "nodeA".into(),
             job_id,
             ok: true,
@@ -4110,7 +4101,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let req = DistEventReq {
-            token: "tok".into(),
             node_id: "remoteA".into(),
             events: vec![ev_agent_responded("hello from remote")],
         };
@@ -4139,7 +4129,6 @@ mod tests {
     async fn dist_event_rejects_unregistered_node_with_403() {
         let (_ctrl, base, srv) = spawn_controller().await;
         let req = DistEventReq {
-            token: "tok".into(),
             node_id: "ghost-node".into(),
             events: vec![ev_agent_responded("x")],
         };
@@ -4153,18 +4142,30 @@ mod tests {
         srv.abort();
     }
 
-    /// token 错就 401，连 node 检查都不该走到——auth 永远先于授权。
+    /// HMAC 缺签名 header → 401。连业务校验（node 是否 register）都不该走到。
+    /// 起带 HMAC layer 的 router——`router_with_hmac` 的薄端到端验证。
     #[tokio::test]
-    async fn dist_event_rejects_bad_token_with_401() {
-        let (ctrl, base, srv) = spawn_controller().await;
+    async fn dist_event_without_hmac_headers_rejected_with_401() {
+        use crate::dist_auth::{HmacGate, HmacSecret};
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let ctrl = Arc::new(DistController::new("tok".into(), bus));
         ctrl.register("remoteA".into(), vec![], 1).await;
+        let gate = HmacGate::new(HmacSecret::new("test-secret".into()));
+        let app = router_with_hmac(ctrl, gate);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let srv = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
         let req = DistEventReq {
-            token: "WRONG".into(),
             node_id: "remoteA".into(),
             events: vec![ev_agent_responded("x")],
         };
         let resp = reqwest::Client::new()
-            .post(format!("{base}/dist/event"))
+            .post(format!("http://{addr}/dist/event"))
             .json(&req)
             .send()
             .await
@@ -4200,7 +4201,6 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let req = DistEventReq {
-            token: "tok".into(),
             node_id: "remoteA".into(),
             events: vec![
                 ev_agent_responded("a"),
@@ -4242,6 +4242,7 @@ mod tests {
             Client::new(),
             "http://127.0.0.1:1".into(),
             "tok".into(),
+            std::sync::Arc::new(crate::dist_auth::HmacSecret::new("tok".into())),
             "node-test".into(),
             64,
             128, // batch_size 故意大，防止 enqueue 自动触发 flush_signal
@@ -4411,7 +4412,6 @@ mod tests {
         // worker 发的事件 meta.source_node_id 故意 None——controller 应**覆盖**它，
         // 不能依赖 worker 端自填（信任域 = controller 边界）。
         let req = DistEventReq {
-            token: "tok".into(),
             node_id: "far".into(),
             events: vec![ev_agent_responded("远端来的")],
         };
@@ -4468,7 +4468,6 @@ mod tests {
         let mut spoofed = ev_agent_responded("trying to spoof");
         spoofed.meta.source_node_id = Some("imposter".into());
         let req = DistEventReq {
-            token: "tok".into(),
             node_id: "realnode".into(),
             events: vec![spoofed],
         };
@@ -4499,7 +4498,6 @@ mod tests {
         let bus = ctrl.bus().clone();
 
         let req = DistEventReq {
-            token: "tok".into(),
             node_id: "far".into(),
             events: vec![ev_agent_responded("落库测试")],
         };

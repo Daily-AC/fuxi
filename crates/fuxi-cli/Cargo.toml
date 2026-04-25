@@ -52,6 +52,19 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # /metrics endpoint 用单层 prometheus crate（自带 TextEncoder + Registry）
 # 不上 metrics + metrics-exporter-prometheus 双层，多一层 indirection 没收益。
 prometheus = { version = "0.13", default-features = false }
+# dist HMAC 鉴权（path 3）
+secrecy.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+lru.workspace = true
+# axum middleware body 读取要 hyper Bytes + http_body_util 的 collect
+http-body-util = "0.1"
+bytes = "1"
+# 常量时间比较——签名比对必须用 ct_eq 防 timing oracle
+subtle = "2"
+# nonce 用十六进制随机数；hex 同时用于签名输出格式
+hex = "0.4"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
