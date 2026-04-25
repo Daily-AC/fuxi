@@ -59,6 +59,15 @@ clap = { version = "4.5", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"
 
+# auth / secrets
+# 包裹 HMAC secret 防 panic / Debug 路径泄漏（path 3 dist HMAC 鉴权）
+secrecy = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+# bounded LRU 给 nonce 去重缓存——超出窗口的 nonce 由 timestamp gate 拦，
+# LRU size=10000 是 belt-and-braces，避免极端高并发下 nonce 集合无界增长
+lru = "0.12"
+
 # internal
 fuxi-core = { path = "crates/fuxi-core" }
 fuxi-events = { path = "crates/fuxi-events" }

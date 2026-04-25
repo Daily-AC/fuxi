@@ -232,7 +232,21 @@ pub async fn run(args: Args) -> Result<()> {
     let (app_router, dist_ctrl) = if let Some(token) = dist_token {
         let dist_ctrl = Arc::new(crate::dist::DistController::new(token, bus.clone()));
         crate::dist::spawn_sweep_task(dist_ctrl.clone());
-        let router = app_router.merge(crate::dist::router(dist_ctrl.clone()));
+        // path 3 α: 同 up.rs——有 HMAC secret env 走鉴权 router；缺则 warn + 老版无鉴权
+        let dist_router_built = match crate::dist_auth::HmacSecret::from_env() {
+            Ok(secret) => {
+                let gate = crate::dist_auth::HmacGate::new(secret);
+                crate::dist::router_with_hmac(dist_ctrl.clone(), gate)
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    %reason,
+                    "FUXI_DIST_HMAC_SECRET 未设置，/dist/* 暂以无鉴权方式运行——生产部署务必配置"
+                );
+                crate::dist::router(dist_ctrl.clone())
+            }
+        };
+        let router = app_router.merge(dist_router_built);
         (router, Some(dist_ctrl))
     } else {
         (app_router, None)
