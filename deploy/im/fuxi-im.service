@@ -8,6 +8,16 @@ User=e0-7
 # $HOME 必须显式设置——`fuxi im start` 用 $HOME 解析 ~/.fuxi/{events,im}.db、
 # ~/.fuxi/im_hmac.key、~/.fuxi/im_vapid.json、~/.local/share/fuxi/im-web 等路径。
 Environment=HOME=/home/e0-7
+# PATH：systemd 默认 PATH 不含 ~/.local/bin，但玄女自启 spawn cc 需要找到
+# `/home/e0-7/.local/bin/claude`。保持用户登录 shell 的 PATH 顺序。
+Environment=PATH=/home/e0-7/.cargo/bin:/home/e0-7/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Clash TUN 模式拦本地反连——cc 反连 fuxi-im SDK URL 必须绕过本地代理（CLAUDE.md
+# 公约 + sia/src/core/cc-process.ts 同坑）。
+Environment=NO_PROXY=127.0.0.1,localhost
+# WorkingDirectory：让玄女自启时 fuxi-skills 的 `cwd/roles/` 查找路径命中
+# `/home/e0-7/fuxi/roles/`（rsync 落地处）。否则 systemd 默认 cwd=/ 找不到
+# roles/xuannv/ROLE.md → 玄女自启失败 → /api/conv 返 503。
+WorkingDirectory=/home/e0-7/fuxi
 # RUST_LOG 默认走 fuxi 自己的 init_tracing；如需调试解开下一行
 # Environment=RUST_LOG=info,fuxi=debug,fuxi_im=debug
 ExecStart=/home/e0-7/.local/bin/fuxi im start

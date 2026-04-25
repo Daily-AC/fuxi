@@ -63,8 +63,9 @@ pub struct StartArgs {
     /// PWA dist 目录。默认 `$HOME/.local/share/fuxi/im-web`（install.sh 推到此）。
     #[arg(long = "web-root")]
     pub web_root: Option<PathBuf>,
-    /// 是否给门客分配 worktree。默认开。
-    #[arg(long, default_value_t = true)]
+    /// 是否给门客分配 worktree。家用部署默认**关**——home 上没 git repo 当 workspace；
+    /// fuxi up（开发用）那边默认 true 不变。`--allocate-worktree=true` 可重开。
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub allocate_worktree: bool,
 }
 
@@ -215,7 +216,9 @@ pub async fn run(args: StartArgs) -> Result<()> {
         Err(e) => {
             // 即便自启失败也别让整个 daemon 死——降级到"等 REPL 起玄女"路径，
             // 让 push hooks 的 wait_for_xuannv 继续轮询兜底，IM API 仍可用。
-            tracing::warn!(error = %e, role = %xuannv_role,
+            // `error = ?e` 走 Debug 拿完整 anyhow caused-by chain——`%e` Display
+            // 只露最外层 context（"玄女 spawn 失败"），ssh 部署调试时根因不可见。
+            tracing::warn!(error = ?e, role = %xuannv_role,
                 "玄女自启失败，降级等 REPL 启动；PWA /api/conv 在玄女就位前会 503");
         }
     }
