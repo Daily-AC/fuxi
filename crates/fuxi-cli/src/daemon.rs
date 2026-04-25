@@ -101,6 +101,9 @@ impl Daemon {
                 }
                 res = listener.accept() => {
                     let (stream, _) = res.context("accept")?;
+                    // Unix socket 没 peer addr，pid 是唯一能拿到的对端身份——给"连
+                    // Command 都解不出来"的早期失败留个抓手。
+                    let peer_pid = stream.peer_cred().ok().and_then(|c| c.pid());
                     let fuxi = fuxi.clone();
                     let store = store.clone();
                     let keeper = keeper.clone();
@@ -109,7 +112,7 @@ impl Daemon {
                     let shutdown_hook = shutdown_hook.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_conn(stream, fuxi, bus, store, keeper, oracle, shutdown_hook).await {
-                            tracing::warn!(error = %e, "connection handler errored");
+                            tracing::warn!(error = %e, peer_pid = ?peer_pid, "connection handler errored");
                         }
                     });
                 }
@@ -149,13 +152,135 @@ async fn handle_conn(
     }
 
     let resp = match serde_json::from_str::<Command>(trimmed) {
-        Ok(cmd) => dispatch_command(fuxi, bus, store, keeper, oracle, cmd, shutdown_hook).await,
-        Err(e) => Response::err(format!("解析命令失败: {e}")),
+        Ok(cmd) => {
+            // 先抽元信息（command_kind / agent_id / task_id），dispatch_command
+            // 会 move 走 cmd——拷一份短 id 给 ctx 不影响热路径。
+            let ctx = command_log_ctx(&cmd);
+            let resp = dispatch_command(fuxi, bus, store, keeper, oracle, cmd, shutdown_hook).await;
+            if let Response::Err { error } = &resp {
+                tracing::warn!(
+                    error = %error,
+                    command_kind = ctx.kind,
+                    agent_id = ?ctx.agent_id,
+                    task_id = ?ctx.task_id,
+                    "ipc 命令执行失败"
+                );
+            }
+            resp
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, payload_len = trimmed.len(), "ipc 请求 JSON 解析失败");
+            Response::err(format!("解析命令失败: {e}"))
+        }
     };
     let out = serde_json::to_string(&resp)? + "\n";
     tx.write_all(out.as_bytes()).await?;
     tx.flush().await?;
     Ok(())
+}
+
+/// 从 [`Command`] 抽出供 tracing 用的元信息——拷一份短 id，让 dispatch 能 move 走 cmd。
+struct CommandLogCtx {
+    kind: &'static str,
+    agent_id: Option<String>,
+    task_id: Option<String>,
+}
+
+fn command_log_ctx(cmd: &Command) -> CommandLogCtx {
+    match cmd {
+        Command::Ping => CommandLogCtx {
+            kind: "ping",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::Spawn { .. } => CommandLogCtx {
+            kind: "spawn",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::Dispatch {
+            agent_id, task_id, ..
+        } => CommandLogCtx {
+            kind: "dispatch",
+            agent_id: Some(agent_id.clone()),
+            task_id: task_id.clone(),
+        },
+        Command::Intervene { agent_id, .. } => CommandLogCtx {
+            kind: "intervene",
+            agent_id: Some(agent_id.clone()),
+            task_id: None,
+        },
+        Command::Status { agent_id } => CommandLogCtx {
+            kind: "status",
+            agent_id: agent_id.clone(),
+            task_id: None,
+        },
+        Command::List => CommandLogCtx {
+            kind: "list",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::Kill { agent_id } => CommandLogCtx {
+            kind: "kill",
+            agent_id: Some(agent_id.clone()),
+            task_id: None,
+        },
+        Command::BlockTask { task_id, .. } => CommandLogCtx {
+            kind: "block_task",
+            agent_id: None,
+            task_id: Some(task_id.clone()),
+        },
+        Command::ResumeTask { task_id, .. } => CommandLogCtx {
+            kind: "resume_task",
+            agent_id: None,
+            task_id: Some(task_id.clone()),
+        },
+        Command::EmitEvent { .. } => CommandLogCtx {
+            kind: "emit_event",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::Shutdown => CommandLogCtx {
+            kind: "shutdown",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::CronAdd { .. } => CommandLogCtx {
+            kind: "cron_add",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::CronOnce { .. } => CommandLogCtx {
+            kind: "cron_once",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::CronWatch { .. } => CommandLogCtx {
+            kind: "cron_watch",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::CronWebhook { .. } => CommandLogCtx {
+            kind: "cron_webhook",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::CronList => CommandLogCtx {
+            kind: "cron_list",
+            agent_id: None,
+            task_id: None,
+        },
+        Command::CronFire { id } => CommandLogCtx {
+            kind: "cron_fire",
+            agent_id: None,
+            task_id: Some(id.clone()),
+        },
+        Command::CronRemove { id } => CommandLogCtx {
+            kind: "cron_remove",
+            agent_id: None,
+            task_id: Some(id.clone()),
+        },
+    }
 }
 
 async fn dispatch_command(
