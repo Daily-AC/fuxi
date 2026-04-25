@@ -22,6 +22,7 @@ mod command_registry;
 mod daemon;
 mod demo;
 mod dist;
+mod dist_event_client;
 mod draft_stash;
 mod extractor_hook;
 mod ipc;
