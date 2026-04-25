@@ -1,0 +1,9 @@
+.wrap {
+  display: inline;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.body {
+  display: inline;
+}

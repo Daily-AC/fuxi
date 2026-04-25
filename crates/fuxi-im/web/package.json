@@ -1,0 +1,40 @@
+{
+  "name": "fuxi-im-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "fuxi-im PWA · Solid + Vite，三视图：任务卡片 / 玄女对话 / 单任务 chat",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx,.js,.cjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install --with-deps chromium"
+  },
+  "dependencies": {
+    "@solidjs/router": "^0.15.3",
+    "idb": "^8.0.0",
+    "solid-js": "^1.9.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@solidjs/testing-library": "^0.8.10",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@types/node": "^22.10.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "eslint-plugin-solid": "^0.14.5",
+    "globals": "^15.14.0",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vite-plugin-pwa": "^0.21.1",
+    "vite-plugin-solid": "^2.11.0",
+    "vitest": "^2.1.8"
+  }
+}
