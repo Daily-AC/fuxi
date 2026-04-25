@@ -1,0 +1,27 @@
+[package]
+name = "fuxi-im"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲 IM 后端：axum 服务暴露任务/对话/intervene 给 PWA 移动端"
+
+[dependencies]
+fuxi-core.workspace = true
+fuxi-events.workspace = true
+fuxi-orchestrator.workspace = true
+tokio = { workspace = true, features = ["full"] }
+axum.workspace = true
+tower = { workspace = true }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+fuxi-workspace.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1"

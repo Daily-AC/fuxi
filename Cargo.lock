@@ -969,6 +969,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuxi-im"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fuxi-core",
+ "fuxi-events",
+ "fuxi-orchestrator",
+ "fuxi-workspace",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
 name = "fuxi-memory"
 version = "0.1.0"
 dependencies = [
@@ -3127,6 +3148,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
