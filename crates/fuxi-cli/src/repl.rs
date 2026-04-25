@@ -1299,7 +1299,7 @@ impl ReplApp {
                 inflight_count,
                 status,
             } => {
-                self.apply_node_heartbeat(node_id, *inflight_count, status);
+                self.apply_node_heartbeat(node_id, *inflight_count, *status);
             }
             EventKind::WorkerStaleSwept {
                 node_id,
@@ -1345,15 +1345,11 @@ impl ReplApp {
         &mut self,
         node_id: &str,
         inflight_count: u32,
-        status: &str,
+        status: fuxi_core::WorkerStatus,
     ) {
         if let Some(node) = self.nodes.iter_mut().find(|n| n.node_id == node_id) {
             node.inflight = inflight_count;
-            node.status = match status {
-                "alive" => NodeStatus::Alive,
-                "stale" => NodeStatus::Stale,
-                _ => NodeStatus::Unknown,
-            };
+            node.status = node_status_from_enum(status);
             node.last_event_at = Instant::now();
         }
     }
@@ -1380,11 +1376,7 @@ impl ReplApp {
                     .last_seen_ms_ago
                     .and_then(|ms| now.checked_sub(Duration::from_millis(ms)))
                     .unwrap_or(now);
-                let status = match s.status.as_str() {
-                    "alive" => NodeStatus::Alive,
-                    "stale" => NodeStatus::Stale,
-                    _ => NodeStatus::Unknown,
-                };
+                let status = decode_node_status(&s.status);
                 NodeView {
                     node_id: s.node_id,
                     status,
@@ -4215,6 +4207,32 @@ fn humanize_elapsed_live(d: Duration) -> String {
     }
 }
 
+/// γ `WorkerStatus` enum → 本地 TUI `NodeStatus` 的 1:1 映射。
+/// 编译期保证完备：γ 加新变体时此处会编译失败，逼使 TUI 同步——比 string match
+/// 加 fallback 更安全，team-lead review 拍板的方向。
+fn node_status_from_enum(s: fuxi_core::WorkerStatus) -> NodeStatus {
+    match s {
+        fuxi_core::WorkerStatus::Alive => NodeStatus::Alive,
+        fuxi_core::WorkerStatus::Stale => NodeStatus::Stale,
+    }
+}
+
+/// 把 α `NodeSnapshot.status` 字符串解成本地 enum。
+/// **wire 端仍是 String**（α/daemon 沿用，方便人肉看 JSON），所以 TUI 端要兜
+/// 未知值——降级为 `Stale` + tracing warn：保守标红 + trace 留底，team-lead
+/// review 要求"future 扩值不静默漏"。
+fn decode_node_status(status: &str) -> NodeStatus {
+    match status {
+        "alive" => NodeStatus::Alive,
+        "stale" => NodeStatus::Stale,
+        "unknown" => NodeStatus::Unknown,
+        other => {
+            tracing::warn!(received = other, "未知 worker status 字符串，降级为 Stale");
+            NodeStatus::Stale
+        }
+    }
+}
+
 async fn drive_tui(
     bus: EventBus,
     fuxi: Arc<Fuxi>,
@@ -7024,7 +7042,7 @@ mod tests {
             EventKind::WorkerHeartbeatStateChanged {
                 node_id: "home".into(),
                 inflight_count: 2,
-                status: "alive".into(),
+                status: fuxi_core::WorkerStatus::Alive,
             },
         ));
         assert_eq!(app.nodes[0].inflight, 2);
@@ -7035,7 +7053,7 @@ mod tests {
             EventKind::WorkerHeartbeatStateChanged {
                 node_id: "home".into(),
                 inflight_count: 0,
-                status: "stale".into(),
+                status: fuxi_core::WorkerStatus::Stale,
             },
         ));
         assert_eq!(app.nodes[0].inflight, 0);
@@ -7047,7 +7065,7 @@ mod tests {
             EventKind::WorkerHeartbeatStateChanged {
                 node_id: "ghost".into(),
                 inflight_count: 5,
-                status: "alive".into(),
+                status: fuxi_core::WorkerStatus::Alive,
             },
         ));
         assert_eq!(app.nodes.len(), 1, "无 register 的心跳不该凭空建节点");
@@ -7126,10 +7144,13 @@ mod tests {
             EventKind::WorkerHeartbeatStateChanged {
                 node_id: "home".into(),
                 inflight_count: 5,
-                status: "alive".into(),
+                status: fuxi_core::WorkerStatus::Alive,
             },
         ));
-        assert_eq!(app.nodes[0].inflight, 5, "重放 HSC 事件后 inflight 必须收敛到 5");
+        assert_eq!(
+            app.nodes[0].inflight, 5,
+            "重放 HSC 事件后 inflight 必须收敛到 5"
+        );
 
         // 3. 验"重放 register 事件"幂等：snapshot 已记 home，再来一条 register
         // 不应重复插
@@ -7143,9 +7164,25 @@ mod tests {
         ));
         assert_eq!(app.nodes.len(), 1, "重放 Registered 应幂等不重复插");
         assert_eq!(app.nodes[0].max_concurrency, 16);
-        assert_eq!(app.nodes[0].tags, vec!["cc".to_string(), "luban".to_string()]);
+        assert_eq!(
+            app.nodes[0].tags,
+            vec!["cc".to_string(), "luban".to_string()]
+        );
         // 关键：register 不该重置 inflight=0——保持心跳带过来的 5
         assert_eq!(app.nodes[0].inflight, 5, "register 重连不应清 inflight");
+    }
+
+    /// `decode_node_status` 合约：已知值精确映射；未知值降级为 Stale（保守标红）
+    /// 而非静默吞为 Unknown——团队约定：γ 加新 status 字符串时 TUI 必须能感知。
+    #[test]
+    fn decode_node_status_maps_known_and_falls_back_to_stale() {
+        assert_eq!(decode_node_status("alive"), NodeStatus::Alive);
+        assert_eq!(decode_node_status("stale"), NodeStatus::Stale);
+        assert_eq!(decode_node_status("unknown"), NodeStatus::Unknown);
+        // future-proofing：γ 加 "draining" / "rebalancing" 等新 status 时
+        // TUI 不会假装"很好"——保守标 Stale 把眼神拉到这个 worker 上
+        assert_eq!(decode_node_status("draining"), NodeStatus::Stale);
+        assert_eq!(decode_node_status(""), NodeStatus::Stale);
     }
 
     #[test]
@@ -7164,7 +7201,7 @@ mod tests {
             EventKind::WorkerHeartbeatStateChanged {
                 node_id: "laptop".into(),
                 inflight_count: 3,
-                status: "alive".into(),
+                status: fuxi_core::WorkerStatus::Alive,
             },
         ));
         app.ingest(&mk_ev(
