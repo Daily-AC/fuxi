@@ -1,13 +1,28 @@
-//! 系统事件 → 玄女唤醒桥。
+//! 系统事件 → 玄女唤醒桥（Decision 13 attention filter）。
 //!
 //! 订阅 EventBus，把"玄女该知情"的系统事件转成自然语言 prompt，通过
 //! [`Intervener::intervene`] 追加到玄女对话。
 //!
-//! 公理对应：
-//! - #1 显式沟通 —— Trigger 到期/门客死亡这类系统事件默认没人告诉玄女，
-//!   桥补上这条通路。
-//! - #2 玄女永远有知情权 —— 门客下线必须让玄女知道，由她判断是否续派。
-//! - #3 真实时不轮询 —— 桥通过 bus.subscribe() 被动接收推送。
+//! ## 白名单（触发 intervene 的事件类型）
+//!
+//! Decision 13 起从"广播一切"改为"白名单 push"——中间事件继续 publish
+//! 进 EventBus（公理 #2 知情权 = 可查），但桥默认 silent，**只**这五类
+//! 占用玄女 attention：
+//!
+//! - [`EventKind::TriggerFired`] —— 调度入口（cron / webhook）
+//! - [`EventKind::AgentDead`] —— 门客失联兜底（非玄女 + 非 internal role）
+//! - [`EventKind::OrchestratorCcReceived`] —— 用户→门客抄送
+//! - [`EventKind::AgentRequestReview`] —— 门客主动 nudge（核心，B1 唯一推送通路）
+//! - [`EventKind::ReviewRequestTimeout`] —— nudge 漏看后兜底
+//!
+//! 其余事件（AgentResponded / ToolCallStarted / ToolCallFinished /
+//! TaskStateChanged 等）由 Firehose 渲染、SQLite 持久化、玄女想看
+//! 自己 recall——但不主动 push。
+//!
+//! ## 公理对应
+//! - #1 显式沟通 —— 白名单事件经 intervene 注入玄女对话，TUI 看不算到
+//! - #2 知情权（重定义为"可查"）—— 中间事件依然全量入 EventBus + SQLite
+//! - #3 真实时不轮询 —— 桥通过 `bus.subscribe()` 被动接收推送
 //!
 //! ## 为什么接 `OrchestratorCcReceived`（2026-04-20 修 Bug 7）
 //!
@@ -27,20 +42,21 @@ use crate::fuxi::Fuxi;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use fuxi_core::DeliverableKind;
 use fuxi_core::event::{Event, EventKind};
-use fuxi_core::id::AgentId;
+use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-/// 内部 role 白名单：这些门客的生命周期事件**不抄送**给玄女。
+/// 内部 role 黑名单：这些门客的 [`EventKind::AgentDead`] **不抄送**给玄女。
 ///
-/// 为什么：extractor 是 M2.5 自动后台跑的"幕后工"——每个 task Done 都
-/// spawn 一个 extractor → extractor 自己 Done 又被桥抄送给玄女 → 玄女被
-/// 自递归噪音淹没（2026-04-20 用户实测发现，玄女自己在 transcript 里诊
-/// 断出"bridge 过滤漏洞"）。这类 role 玄女不需要逐个知道完成。
+/// 为什么：extractor 是 M2.5 自动后台跑的"幕后工"——其生死属平台级
+/// 自管理（spawn/reap 由 hook 控制），玄女不应被这种噪音占 attention。
+/// 历史上 TaskStateChanged Done 路径也走这层过滤，但 Decision 13 之后
+/// TaskDone 整段不再触发 intervene，故仅 AgentDead 一处用得到。
 const INTERNAL_ROLES: &[&str] = &["extractor"];
 
 fn is_internal_role(role: &str) -> bool {
@@ -139,16 +155,53 @@ fn build_death_prompt(agent_id: AgentId, role: &str, cause: &str) -> String {
     format!("门客 {agent_id}（role={role}）已下线，原因：{cause}。请判断是否续派或告知用户。")
 }
 
-fn build_task_done_prompt(agent_id: AgentId, role: &str, done: bool) -> String {
-    let verb = if done { "完成" } else { "被取消" };
-    format!(
-        "门客 {agent_id}（role={role}）任务已{verb}。请直接向用户汇报结果或派新活，不要额外轮询状态。"
-    )
-}
-
 fn build_cc_prompt(to_worker: AgentId, role: &str, text: &str) -> String {
     format!(
         "[CC] 用户直接对门客 {to_worker}（role={role}）说：「{text}」。\n\n你未被点名，仅为抄送留痕（公理 #2：你永远有知情权）。无需主动回话，除非判断需介入。"
+    )
+}
+
+fn deliverable_kind_tag(k: DeliverableKind) -> &'static str {
+    // 与 EventKind 枚举 serde rename_all=snake_case 字面对齐——让玄女
+    // prompt 里出现的标签和事件 JSON 里完全一致，便于跨视图（TUI / SQLite recall）
+    // 用同一个搜索词关联同一笔 deliverable。
+    match k {
+        DeliverableKind::ResearchSummary => "research_summary",
+        DeliverableKind::CodeChange => "code_change",
+        DeliverableKind::TestResult => "test_result",
+        DeliverableKind::DecisionRequest => "decision_request",
+        DeliverableKind::ErrorBlock => "error_block",
+    }
+}
+
+fn build_request_review_prompt(
+    agent: AgentId,
+    role: &str,
+    kind: DeliverableKind,
+    summary: &str,
+    artifact_ref: Option<&str>,
+) -> String {
+    let mut prompt = format!(
+        "[REVIEW_REQUEST] 门客 {agent}（role={role}）呈递 deliverable_kind={tag} 待审。\n\n摘要：{summary}",
+        tag = deliverable_kind_tag(kind),
+    );
+    if let Some(r) = artifact_ref {
+        prompt.push_str(&format!("\n\n附件：{r}"));
+    }
+    prompt.push_str(
+        "\n\n[INSTRUCTION: 该门客主动找你审阅。判断是否接受 / 改派 / 让他续做，并向用户汇报或追问]",
+    );
+    prompt
+}
+
+fn build_review_timeout_prompt(
+    agent: AgentId,
+    role: &str,
+    task: TaskId,
+    waited_for_ms: u64,
+) -> String {
+    format!(
+        "[REVIEW_TIMEOUT] 门客 {agent}（role={role}）的审阅请求超时未送达——已等 {waited_for_ms}ms（task={task}）。\n\n这通常意味着你前一段时间忙到忽略了门客 nudge。请回到该 task 现场补审，或主动 recall 该门客的最近事件了解进度。",
     )
 }
 
@@ -250,56 +303,71 @@ async fn handle_event(
                 warn!(error = %e, "bridge: intervene(AgentDead) 失败");
             }
         }
-        EventKind::TaskStateChanged {
-            to: fuxi_core::task::TaskState::Done,
-            ..
-        }
-        | EventKind::TaskStateChanged {
-            to: fuxi_core::task::TaskState::Cancelled,
-            ..
+        EventKind::AgentRequestReview {
+            agent,
+            task: _,
+            deliverable_kind,
+            ref summary,
+            ref artifact_ref,
         } => {
-            // 2026-04-20 用户实测发现：鲁班完活不通知玄女（公理 #2 漏洞）。
-            // 桥在这里补上——但只处理非玄女门客的任务完成事件。
-            let Some(agent_id) = ev.meta.agent else {
-                return;
-            };
-            if agent_id == xuannv_id {
-                return; // 玄女自己的 task done 不触发（会回响）
-            }
-            let done = matches!(
-                ev.kind,
-                EventKind::TaskStateChanged {
-                    to: fuxi_core::task::TaskState::Done,
-                    ..
-                }
-            );
+            // Decision 13 核心：门客主动 nudge 是占玄女 attention 的唯一通路。
+            // 不去重 / 不限频——门客侧自决何时 nudge；桥不替他做产品决策。
             let role = intervener
-                .role_of(agent_id)
+                .role_of(agent)
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
-            // 内部 role（如 extractor）的 Task Done 不抄玄女——自动后台工作，
-            // 每轮抄送会递归淹没她（2026-04-20 用户实测 + 玄女自诊）。
-            if is_internal_role(&role) {
-                debug!(%agent_id, %role, ?ev.meta.task, "TaskStateChanged 内部 role，跳过抄送");
-                return;
-            }
             let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
             let interrupt_first = should_interrupt_worker_report(lag_ms);
             info!(
-                %agent_id,
+                %agent,
                 %role,
-                task = ?ev.meta.task,
-                done,
+                kind = deliverable_kind_tag(deliverable_kind),
                 lag_ms,
                 interrupt_first,
-                "bridge: 转发门客任务终态回报到玄女"
+                "bridge: 转发 AgentRequestReview 到玄女"
             );
-            let prompt = build_task_done_prompt(agent_id, &role, done);
+            let prompt = build_request_review_prompt(
+                agent,
+                &role,
+                deliverable_kind,
+                summary,
+                artifact_ref.as_deref(),
+            );
             if let Err(e) = intervener
                 .intervene(xuannv_id, interrupt_first, &prompt)
                 .await
             {
-                warn!(error = %e, "bridge: intervene(TaskDone) 失败");
+                // 注意：失败仅 warn——retry + ReviewRequestTimeout 兜底是 task #4 的活。
+                warn!(error = %e, "bridge: intervene(AgentRequestReview) 失败");
+            }
+        }
+        EventKind::ReviewRequestTimeout {
+            agent,
+            task,
+            waited_for_ms,
+            ..
+        } => {
+            // 兜底事件：原 AgentRequestReview 玄女漏看了——这条更要 push 进去。
+            let role = intervener
+                .role_of(agent)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
+            let interrupt_first = should_interrupt_worker_report(lag_ms);
+            info!(
+                %agent,
+                %role,
+                waited_for_ms,
+                lag_ms,
+                interrupt_first,
+                "bridge: 转发 ReviewRequestTimeout 到玄女"
+            );
+            let prompt = build_review_timeout_prompt(agent, &role, task, waited_for_ms);
+            if let Err(e) = intervener
+                .intervene(xuannv_id, interrupt_first, &prompt)
+                .await
+            {
+                warn!(error = %e, "bridge: intervene(ReviewRequestTimeout) 失败");
             }
         }
         EventKind::OrchestratorCcReceived {
@@ -678,22 +746,23 @@ mod tests {
         );
     }
 
-    /// 内部 role（extractor）的 Task Done **不**触发 intervene。
-    /// 修 2026-04-21 雪崩：M2.5 extractor 自递归 → 玄女 transcript 被噪音淹没。
+    /// Decision 13 后 TaskStateChanged → Done/Cancelled 不再抄送玄女（任何 role）。
+    /// 中间过程 silent，门客需用 AgentRequestReview 主动 nudge 才会占 attention。
+    /// 此 test 替代历史的 extractor_task_done_is_not_copied_to_xuannv 回归点。
     #[tokio::test]
-    async fn extractor_task_done_is_not_copied_to_xuannv() {
+    async fn task_done_no_longer_copies_to_xuannv() {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let xuannv = AgentId::new();
-        let extractor = AgentId::new();
+        let worker = AgentId::new();
 
         let mock = MockIntervener::new();
-        mock.set_role(extractor, "extractor").await;
+        mock.set_role(worker, "luban").await;
 
         let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut meta = EventMeta::now();
-        meta.agent = Some(extractor);
+        meta.agent = Some(worker);
         meta.task = Some(fuxi_core::id::TaskId::new());
         bus.publish(Event {
             meta,
@@ -707,8 +776,153 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             mock.snapshot().await.is_empty(),
-            "extractor Done 不应抄送给玄女（自递归保护）"
+            "Decision 13 后 TaskDone 默认 silent，门客需主动 AgentRequestReview"
         );
+    }
+
+    /// 中间事件（AgentResponded / ToolCallStarted / ToolCallFinished）默认 silent
+    /// —— attention filter 白名单生效（Decision 13）。
+    #[tokio::test]
+    async fn bridge_silent_on_middle_event() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut m1 = EventMeta::now();
+        m1.agent = Some(worker);
+        bus.publish(Event {
+            meta: m1,
+            kind: EventKind::AgentResponded {
+                text: "中间产物 1".into(),
+            },
+        })
+        .expect("publish AgentResponded");
+
+        let mut m2 = EventMeta::now();
+        m2.agent = Some(worker);
+        bus.publish(Event {
+            meta: m2,
+            kind: EventKind::ToolCallStarted {
+                tool: "Read".into(),
+                args: serde_json::json!({}),
+            },
+        })
+        .expect("publish ToolCallStarted");
+
+        let mut m3 = EventMeta::now();
+        m3.agent = Some(worker);
+        bus.publish(Event {
+            meta: m3,
+            kind: EventKind::ToolCallFinished {
+                tool: "Read".into(),
+                ok: true,
+                output_preview: "ok".into(),
+            },
+        })
+        .expect("publish ToolCallFinished");
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "中间事件不能触发 intervene（Decision 13 attention filter）"
+        );
+    }
+
+    /// 门客发 AgentRequestReview → 桥触发 intervene 玄女一次，
+    /// prompt 含 deliverable_kind + summary + role + artifact_ref。
+    #[tokio::test]
+    async fn bridge_triggers_intervene_on_request_review() {
+        use fuxi_core::DeliverableKind;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = fuxi_core::id::TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: DeliverableKind::CodeChange,
+                summary: "重构 dispatch pump 完工，待审".into(),
+                artifact_ref: Some("commit:abc1234".into()),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "AgentRequestReview 应触发 intervene 一次");
+        let (target, _interrupt_first, text) = &calls[0];
+        assert_eq!(*target, xuannv);
+        assert!(
+            text.contains("code_change"),
+            "prompt 含 deliverable_kind: {text}"
+        );
+        assert!(
+            text.contains("重构 dispatch pump 完工，待审"),
+            "prompt 含 summary: {text}"
+        );
+        assert!(text.contains("luban"), "prompt 含 role: {text}");
+        assert!(
+            text.contains("commit:abc1234"),
+            "prompt 含 artifact_ref: {text}"
+        );
+    }
+
+    /// ReviewRequestTimeout（兜底）→ 桥触发 intervene 玄女，告知她漏了一次审阅。
+    #[tokio::test]
+    async fn bridge_triggers_intervene_on_review_timeout() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = fuxi_core::id::TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::ReviewRequestTimeout {
+                original_event_id: uuid::Uuid::new_v4(),
+                agent: worker,
+                task,
+                waited_for_ms: 1700,
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "ReviewRequestTimeout 应触发 intervene 一次");
+        let (target, _, text) = &calls[0];
+        assert_eq!(*target, xuannv);
+        assert!(
+            text.contains("超时") || text.contains("timeout"),
+            "prompt 提及超时: {text}"
+        );
+        assert!(text.contains("luban"), "prompt 含 role: {text}");
     }
 
     /// 内部 role（extractor）AgentDead 也**不**触发——后台自管理生命周期。
