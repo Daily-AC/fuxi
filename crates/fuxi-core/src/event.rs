@@ -13,6 +13,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// 门客向玄女呈递的 deliverable 类别（Decision 13 §4 初版枚举）。
+/// 决定了玄女审阅时的展示模板与优先级；后续可扩展，但**新加 variant
+/// 必须同步更门客 system prompt 的触发指南**（避免门客发出"无法分类"的 deliverable）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableKind {
+    ResearchSummary,
+    CodeChange,
+    TestResult,
+    DecisionRequest,
+    ErrorBlock,
+}
+
 /// An event is always `{ meta, kind }`—meta is how the bus locates it,
 /// kind is what happened.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +212,31 @@ pub enum EventKind {
         need: String,
     },
 
+    // ── deliverable 边界 nudge（Decision 13）─────────────────
+    /// 门客主动呼叫玄女审阅 deliverable——B1 attention 模型下**唯一**会
+    /// 触发玄女主动消费的事件（中间事件玄女默认 silent，公理 2 重新定义为
+    /// "可查"而非"必读"）。`artifact_ref` 可空：纯摘要类（如 ResearchSummary）
+    /// 可只附 `summary`；CodeChange 类应填 commit sha 或 diff path。
+    AgentRequestReview {
+        agent: AgentId,
+        task: TaskId,
+        deliverable_kind: DeliverableKind,
+        summary: String,
+        artifact_ref: Option<String>,
+    },
+    /// `AgentRequestReview` 玄女在限时内未消费——兜底事件（Decision 13 §代价 3）。
+    /// 由门客侧 retry 层或玄女订阅层超时检测发出，让玄女批量补审 / 让门客
+    /// 决定是否继续阻塞。`waited_for_ms` 用毫秒整数：跨语言 / JSON 友好，
+    /// 比 `chrono::Duration` 的 ISO8601 串更直观。`original_event_id` 与
+    /// `OrchestratorCcReceived::original_intervention_id` 同样用裸 Uuid，
+    /// 不引入新 `EventId` 类型；事件 id 在 `EventMeta::id` 即是 Uuid。
+    ReviewRequestTimeout {
+        original_event_id: Uuid,
+        agent: AgentId,
+        task: TaskId,
+        waited_for_ms: u64,
+    },
+
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
     /// minimum—prefer adding a typed variant.
@@ -247,6 +285,92 @@ mod tests {
         assert!(json.contains("画图门客"));
         let back: Event = serde_json::from_str(&json).expect("de");
         matches!(back.kind, EventKind::NoRoleMatched { .. });
+    }
+
+    #[test]
+    fn agent_request_review_roundtrip() {
+        let agent = AgentId::new();
+        let task = TaskId::new();
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::AgentRequestReview {
+                agent,
+                task,
+                deliverable_kind: DeliverableKind::CodeChange,
+                summary: "已修 NULL 指针解引用".into(),
+                artifact_ref: Some("commit:abc1234".into()),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("agent_request_review"));
+        assert!(json.contains("code_change"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        match back.kind {
+            EventKind::AgentRequestReview {
+                agent: a,
+                task: t,
+                deliverable_kind,
+                summary,
+                artifact_ref,
+            } => {
+                assert_eq!(a, agent);
+                assert_eq!(t, task);
+                assert_eq!(deliverable_kind, DeliverableKind::CodeChange);
+                assert_eq!(summary, "已修 NULL 指针解引用");
+                assert_eq!(artifact_ref.as_deref(), Some("commit:abc1234"));
+            }
+            other => panic!("不是 AgentRequestReview: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_request_timeout_roundtrip() {
+        let original = Uuid::new_v4();
+        let agent = AgentId::new();
+        let task = TaskId::new();
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::ReviewRequestTimeout {
+                original_event_id: original,
+                agent,
+                task,
+                waited_for_ms: 30_000,
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("review_request_timeout"));
+        assert!(json.contains("30000"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        match back.kind {
+            EventKind::ReviewRequestTimeout {
+                original_event_id,
+                agent: a,
+                task: t,
+                waited_for_ms,
+            } => {
+                assert_eq!(original_event_id, original);
+                assert_eq!(a, agent);
+                assert_eq!(t, task);
+                assert_eq!(waited_for_ms, 30_000);
+            }
+            other => panic!("不是 ReviewRequestTimeout: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deliverable_kind_serde_snake_case() {
+        for (kind, expect) in [
+            (DeliverableKind::ResearchSummary, "\"research_summary\""),
+            (DeliverableKind::CodeChange, "\"code_change\""),
+            (DeliverableKind::TestResult, "\"test_result\""),
+            (DeliverableKind::DecisionRequest, "\"decision_request\""),
+            (DeliverableKind::ErrorBlock, "\"error_block\""),
+        ] {
+            let json = serde_json::to_string(&kind).expect("ser");
+            assert_eq!(json, expect);
+            let back: DeliverableKind = serde_json::from_str(&json).expect("de");
+            assert_eq!(back, kind);
+        }
     }
 
     #[test]

@@ -315,6 +315,8 @@ pub(crate) fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         SkillRejected { .. } => "skill_rejected",
         SkillActivated { .. } => "skill_activated",
         NoRoleMatched { .. } => "no_role_matched",
+        AgentRequestReview { .. } => "agent_request_review",
+        ReviewRequestTimeout { .. } => "review_request_timeout",
         Custom { .. } => "custom",
     }
 }
