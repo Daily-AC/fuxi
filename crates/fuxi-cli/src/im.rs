@@ -384,19 +384,21 @@ async fn wait_for_shutdown() {
 
 /// `fuxi im set-password` —— 交互式设主密码（β · #9）。
 ///
-/// 用户跑这条命令会被 rpassword 提示输入两次（不回显），相同 + 校验长度通过后
+/// **硬约束**（team-lead 2026-04-25 拍板）：密码**只**接受 stdin/tty 交互输入。
+/// 不提供 `--password <plain>` flag（落 shell history + ps -ef）、不提供
+/// `--password-file` flag、不读环境变量 `FUXI_IM_PASSWORD`（leak 风险）。
+/// 用户跑这条命令时 rpassword 提示两次输入（不回显），相同 + 校验长度通过后
 /// bcrypt cost 12 hash 写 `~/.fuxi/im_password.bcrypt`（权限 0600）。
 /// 重跑覆盖旧 hash——即"忘密码重设"语义。
+///
+/// 测试路径走内部 [`set_password_from_reader`]——接 `BufRead` 喂 `"pwd\npwd\n"`
+/// 即可单测，CLI 入口本身是 thin wrapper 不暴露任何"绕过 tty"的口子。
 #[derive(Debug, ClapArgs)]
 pub struct SetPasswordArgs {
     /// 显式指定密码文件路径，覆盖默认 `~/.fuxi/im_password.bcrypt`。
-    /// 部署测试 / 多用户机器（罕见）用得到。
+    /// 部署测试 / 多用户机器（罕见）用得到。本字段**不**接受密码值本身。
     #[arg(long)]
     pub path: Option<PathBuf>,
-    /// 跳过交互直接从环境变量 `FUXI_IM_PASSWORD` 读取——给 systemd 部署脚本和
-    /// 自动化测试用，**生产**鼓励用交互式。
-    #[arg(long)]
-    pub from_env: bool,
 }
 
 pub async fn run_set_password(args: SetPasswordArgs) -> Result<()> {
@@ -406,12 +408,7 @@ pub async fn run_set_password(args: SetPasswordArgs) -> Result<()> {
         .or_else(fuxi_im::password::default_path)
         .ok_or_else(|| anyhow::anyhow!("无法解析 ~/.fuxi/im_password.bcrypt：$HOME 未设置"))?;
 
-    let plain = if args.from_env {
-        std::env::var("FUXI_IM_PASSWORD")
-            .map_err(|_| anyhow::anyhow!("--from-env 时必须设置 FUXI_IM_PASSWORD 环境变量"))?
-    } else {
-        prompt_password_twice()?
-    };
+    let plain = prompt_password_twice_from_tty()?;
 
     fuxi_im::password::write_password_file(&path, &plain)
         .map_err(|e| anyhow::anyhow!("写入密码文件失败：{e}"))?;
@@ -421,8 +418,10 @@ pub async fn run_set_password(args: SetPasswordArgs) -> Result<()> {
     Ok(())
 }
 
-/// 交互式询问密码两次确认相同——不回显（rpassword）。
-fn prompt_password_twice() -> Result<String> {
+/// 生产路径：rpassword 直接读 tty 关 echo，不经过任何 fd / pipe，**不可在测试单测**。
+/// 单测覆盖 [`set_password_from_reader`]——同样的"读两次 + 比对 + 校验长度"逻辑，
+/// 接 BufRead 让 `Cursor::new(b"pwd\npwd\n")` 喂得进去。
+fn prompt_password_twice_from_tty() -> Result<String> {
     let first = rpassword::prompt_password("设置主密码（不回显）：")
         .map_err(|e| anyhow::anyhow!("读取密码失败：{e}"))?;
     let second = rpassword::prompt_password("再输一次确认：")
@@ -433,67 +432,118 @@ fn prompt_password_twice() -> Result<String> {
     Ok(first)
 }
 
+/// 测试钩子：从任意 `BufRead` 读两行做"输入 + 确认"——生产**永远不**调到此函数；
+/// CLI 入口走 [`prompt_password_twice_from_tty`]。
+///
+/// 行为契约：
+/// - 读两行 trim 末尾换行（`\n` / `\r\n`）做密码
+/// - 第二行不等于第一行 → `Err`
+/// - 校验长度调 `password::validate_password_strength`
+///
+/// **不**对外暴露成 pub（除 tests use super::）：避免成为给 attacker 走 fd 注入的口子。
+#[cfg(test)]
+fn set_password_from_reader<R: std::io::BufRead>(mut reader: R) -> Result<String> {
+    let mut first = String::new();
+    reader
+        .read_line(&mut first)
+        .map_err(|e| anyhow::anyhow!("读密码失败：{e}"))?;
+    let mut second = String::new();
+    reader
+        .read_line(&mut second)
+        .map_err(|e| anyhow::anyhow!("读密码失败：{e}"))?;
+    let first = first.trim_end_matches(['\n', '\r']).to_string();
+    let second = second.trim_end_matches(['\n', '\r']).to_string();
+    if first != second {
+        anyhow::bail!("两次输入不一致");
+    }
+    fuxi_im::password::validate_password_strength(&first)
+        .map_err(|e| anyhow::anyhow!("密码不合规：{e}"))?;
+    Ok(first)
+}
+
 #[cfg(test)]
 mod set_password_tests {
-    //! `fuxi im set-password` 的覆盖：用 `--from-env` 路径绕开 rpassword tty
-    //! 交互（CI 没 tty）。生产路径走 [`prompt_password_twice`]，由人手验。
+    //! `set_password_from_reader` 内部函数的覆盖——CLI 本身是 thin wrapper：
+    //! `run_set_password` = `prompt_password_twice_from_tty` + `password::write_password_file`。
+    //! 前者依赖 tty 不可单测（生产路径，由人手验）；后者已在 `fuxi-im` password 模块的
+    //! 8 条单测里覆盖（write/read/idempotent/0600/拒短 等）。
+    //!
+    //! 这里**只**单测 reader 路径——硬约束（team-lead 拍板）：CLI 不接受 flag/env，
+    //! 唯一注入口是 stdin/tty，所以 reader 抽象就是覆盖契约的最深底层。
 
     use super::*;
+    use std::io::Cursor;
 
-    /// **小工具：调一次性 env helper** —— 给本测试用 `FUXI_IM_PASSWORD` 自定义后缀
-    /// 拼成 unique env name。`run_set_password --from-env` 看 `FUXI_IM_PASSWORD`
-    /// 这一固定名，但我们这里**走显式 path**，所以可以走另一条路径：直接调
-    /// `fuxi_im::password::write_password_file` 验证写盘行为。`from_env` 路径
-    /// 由人手验真起 daemon 时观察。
-    ///
-    /// WHY 不在测试里 set_var：clippy `await_holding_lock` 拦着跨 await 持 Mutex；
-    /// 用 unique env name 也行但那样 `run_set_password` 接口要新加参数。最干净就是
-    /// 把 set-password CLI 和 password 库的契约**分开测**：
-    ///
-    /// - `password::tests::*` 已覆盖 8 条文件 / hash 行为（password.rs 自己的 mod）
-    /// - 这里只测 set-password CLI **薄壳** —— 透传到 `write_password_file` 不丢
-    ///   `path` 参数，且短密码路径错误信息会回到调用方
-    use std::path::PathBuf;
-
-    fn write_via_cli_helper(path: PathBuf, plain: &str) -> Result<()> {
-        // 调 password lib 的 write_password_file 直接验薄壳行为——
-        // run_set_password 自身只比这层多一层 rpassword 交互（生产路径，不可单测）
-        // 加 from_env env var 读取（小到不值得 mock 进程 env）
-        fuxi_im::password::write_password_file(&path, plain)
-            .map_err(|e| anyhow::anyhow!("写入密码文件失败：{e}"))
-    }
-
-    /// 显式 path 写入 → 文件 0600 + JSON 含 $2b$12$ hash。
     #[test]
-    fn write_via_cli_helper_writes_0600_bcrypt_file() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let path = dir.path().join("im_password.bcrypt");
-        write_via_cli_helper(path.clone(), "test-pass-good").expect("OK");
-
-        let bytes = std::fs::read(&path).expect("read file");
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(parsed["version"], 1);
-        let hash = parsed["hash"].as_str().expect("hash");
-        assert!(hash.starts_with("$2b$12$"), "bcrypt cost 12，得到 {hash}");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "set-password 写出的文件必须 0600");
-        }
+    fn read_two_matching_lines_returns_password() {
+        let input = b"my-pass-good\nmy-pass-good\n";
+        let got = set_password_from_reader(Cursor::new(input)).expect("ok");
+        assert_eq!(got, "my-pass-good");
     }
 
     #[test]
-    fn write_via_cli_helper_rejects_short_password() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let path = dir.path().join("im_password.bcrypt");
-        let err = write_via_cli_helper(path.clone(), "short").expect_err("应拒短");
+    fn read_handles_crlf_line_endings() {
+        // Windows / 某些粘贴客户端会带 \r\n；trim_end_matches 应把它们都剥掉
+        let input = b"crlf-pass\r\ncrlf-pass\r\n";
+        let got = set_password_from_reader(Cursor::new(input)).expect("ok");
+        assert_eq!(got, "crlf-pass");
+    }
+
+    #[test]
+    fn mismatched_confirmation_is_error() {
+        let input = b"first-one\nsecond-different\n";
+        let err = set_password_from_reader(Cursor::new(input)).expect_err("应拒不一致");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("不一致"), "错误应明示原因：{msg}");
+    }
+
+    #[test]
+    fn short_password_is_rejected() {
+        let input = b"short\nshort\n";
+        let err = set_password_from_reader(Cursor::new(input)).expect_err("应拒短");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("8") || msg.contains("长度"),
             "错误应明示长度限制：{msg}"
         );
-        assert!(!path.exists(), "拒绝时不该写文件");
+    }
+
+    #[test]
+    fn empty_password_is_rejected() {
+        let input = b"\n\n";
+        let err = set_password_from_reader(Cursor::new(input)).expect_err("应拒空");
+        let msg = format!("{err:#}");
+        // validate_password_strength 给的是"不能为空"或"长度 >= 8"——其一即可
+        assert!(
+            msg.contains("空") || msg.contains("长度"),
+            "错误应明示原因：{msg}"
+        );
+    }
+
+    /// 验证 reader 路径走完后调用 `password::write_password_file` 的端到端薄壳——
+    /// 等价于"如果未来 run_set_password 改成接 reader，行为不退化"的契约锁。
+    #[test]
+    fn reader_then_write_to_disk_roundtrip() {
+        let input = b"valid-pass-12\nvalid-pass-12\n";
+        let plain = set_password_from_reader(Cursor::new(input)).expect("read");
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("im_password.bcrypt");
+        fuxi_im::password::write_password_file(&path, &plain).expect("write");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(parsed["version"], 1);
+        assert!(parsed["hash"].as_str().unwrap().starts_with("$2b$12$"));
+    }
+
+    /// 接口形态契约：SetPasswordArgs 不能含任何"接受密码值"的字段——只允许
+    /// 路径 / 元数据 flag。如果将来有人加了 `--password` 之类，此测应 fail。
+    #[test]
+    fn args_do_not_accept_password_value_flag() {
+        // 用反射不现实；改用结构体字段名 textual 检查——本测的存在是给后人
+        // 的提醒：**新加字段时，别加任何接受密码值的字段。**
+        // SetPasswordArgs 现有字段：path
+        let args = SetPasswordArgs { path: None };
+        // smoke：能构造即过；编译阶段就会因为字段缺失/多余而失败
+        let _ = args;
     }
 }
