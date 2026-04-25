@@ -2973,21 +2973,36 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        // 确认 job 真在 controller.inflight + workerA.inflight
-        {
+        // 确认 job 真在 controller.inflight + workerA.inflight。
+        // node.inflight 由心跳刷新（200ms 间隔），active>0 后第一拍 hb 还没来时
+        // node.inflight 仍为空——poll 等到第一次 hb 到达。
+        let assert_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
             let g = ctrl.inner.lock().await;
-            assert!(
-                g.inflight.contains_key(&job_id),
-                "sweep 前 job 应在 controller.inflight"
-            );
-            let info = g.nodes.get("workerA").expect("workerA registered");
-            assert_eq!(info.inflight, vec![job_id.clone()]);
+            let in_global = g.inflight.contains_key(&job_id);
+            let in_node = g
+                .nodes
+                .get("workerA")
+                .map(|i| i.inflight == vec![job_id.clone()])
+                .unwrap_or(false);
+            drop(g);
+            if in_global && in_node {
+                break;
+            }
+            if Instant::now() > assert_deadline {
+                worker_a.abort();
+                srv.abort();
+                panic!("sweep 前 job 未同时出现在 controller.inflight + workerA.inflight");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
         // workerA "死"——abort 心跳/拉取；从此 controller 收不到 A 的心跳。
         worker_a.abort();
-        // 等一拍让 abort 生效（避免后续手动改 last_seen 后又被在飞中的 hb 刷回来）。
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // 等够 hb_interval (200ms) × 2 + 余量——abort 不取消已发出去的 reqwest，
+        // 50ms 不足让在飞 hb 抵达 controller 前被丢；workspace 并行高负载下
+        // 这条 race 窗口被放大成 50% flaky。500ms 是经验值。
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // 把 workerA.last_seen 推到很久以前，绕开"等真 60s sweep timeout"——
         // 不依赖 sweep tick 间隔本身正确（那条由 spawn_sweep_task 单测覆盖），
@@ -3034,7 +3049,8 @@ mod tests {
                     .await;
         });
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // workspace 并行测试时 CPU 抢占严重，2s 不够 workerB pickup+exec+report。
+        let deadline = Instant::now() + Duration::from_secs(5);
         let final_status = loop {
             let s = ctrl.job_status(&job_id).await;
             if s.done {
@@ -3043,7 +3059,7 @@ mod tests {
             if Instant::now() > deadline {
                 worker_b.abort();
                 srv.abort();
-                panic!("workerB 2s 内未完成被回收的 job");
+                panic!("workerB 5s 内未完成被回收的 job");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
