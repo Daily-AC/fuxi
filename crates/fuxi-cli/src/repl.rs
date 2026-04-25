@@ -4487,6 +4487,7 @@ mod tests {
             kind_tag,
             summary: summary.into(),
             color: Color::Reset,
+            source_node_id: None,
             ingested_at: Instant::now(),
         }
     }
