@@ -22,7 +22,14 @@ interface FuxiSchema extends DBSchema {
 
 let dbPromise: Promise<IDBPDatabase<FuxiSchema>> | null = null;
 
-function db(): Promise<IDBPDatabase<FuxiSchema>> {
+/** IndexedDB 在测试环境（jsdom）没实现；隐私模式 Safari 也可能拒绝。
+ *  这里把所有缓存操作降级为 no-op，让 UI 永远跑得动。*/
+function idbAvailable(): boolean {
+  return typeof indexedDB !== "undefined";
+}
+
+function db(): Promise<IDBPDatabase<FuxiSchema>> | null {
+  if (!idbAvailable()) return null;
   if (!dbPromise) {
     dbPromise = openDB<FuxiSchema>(DB_NAME, DB_VERSION, {
       upgrade(d) {
@@ -35,20 +42,28 @@ function db(): Promise<IDBPDatabase<FuxiSchema>> {
           es.createIndex("by-task", "task_id");
         }
       },
+    }).catch((err) => {
+      console.warn("idb open failed, falling back to memory-only", err);
+      // 抛回让上游 catch；调用方有 .catch() 兜底。
+      throw err;
     });
   }
   return dbPromise;
 }
 
 export async function cacheTasks(tasks: TaskCard[]): Promise<void> {
-  const d = await db();
+  const p = db();
+  if (!p) return;
+  const d = await p;
   const tx = d.transaction("tasks", "readwrite");
   for (const t of tasks) await tx.store.put(t);
   await tx.done;
 }
 
 export async function loadCachedTasks(): Promise<TaskCard[]> {
-  const d = await db();
+  const p = db();
+  if (!p) return [];
+  const d = await p;
   const all = await d.getAllFromIndex("tasks", "by-updated");
   return all.reverse();
 }
@@ -61,7 +76,9 @@ function eventKey(e: EventKind): string {
 
 export async function cacheEvents(events: EventKind[]): Promise<void> {
   if (events.length === 0) return;
-  const d = await db();
+  const p = db();
+  if (!p) return;
+  const d = await p;
   const tx = d.transaction("events", "readwrite");
   for (const e of events) {
     const key = eventKey(e);
@@ -83,7 +100,9 @@ export async function cacheEvents(events: EventKind[]): Promise<void> {
 }
 
 export async function loadCachedEvents(taskId?: string): Promise<EventKind[]> {
-  const d = await db();
+  const p = db();
+  if (!p) return [];
+  const d = await p;
   if (taskId) {
     const matches = await d.getAllFromIndex("events", "by-task", taskId);
     return matches.map(stripKey);
