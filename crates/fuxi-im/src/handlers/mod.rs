@@ -11,3 +11,6 @@ pub mod health;
 pub mod intervene;
 pub mod push;
 pub mod tasks;
+
+// γ · WS 通用循环 + cursor 解析 + 事件流构造——`conv` / `tasks` 共用。
+pub(crate) mod ws_common;
