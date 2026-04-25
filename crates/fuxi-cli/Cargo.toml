@@ -49,6 +49,9 @@ base64 = "0.22"
 # Markdown 渲染——assistant 文本走 commonmark → Ratatui Spans；只用 parse 能力，
 # 不要 html 渲染 feature，减小依赖面。
 pulldown-cmark = { version = "0.13", default-features = false }
+# /metrics endpoint 用单层 prometheus crate（自带 TextEncoder + Registry）
+# 不上 metrics + metrics-exporter-prometheus 双层，多一层 indirection 没收益。
+prometheus = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
