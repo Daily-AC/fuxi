@@ -250,6 +250,29 @@ pub struct DistHeartbeatResp {
     pub cancel_pending: Vec<String>,
 }
 
+/// 远端 worker → controller 的事件转发批量。
+///
+/// 让运行在远端机器的子门客（cc/codex/...）产生的事件能流回 controller 主 bus，
+/// TUI/IPC/firehose 才看得见。worker 内部 buffer + retry + drop policy 由 [β]
+/// 的 NetworkBusClient 负责，本 endpoint 只做最小服务端：auth + 节点白名单 +
+/// 原样 republish。
+///
+/// **空批合法**——worker 心跳式打开 keepalive 时也会触发空批；当心跳行为
+/// 共用本通道，将来若真要分开再加 keepalive 字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistEventReq {
+    pub token: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub events: Vec<Event>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistEventResp {
+    /// controller 实际成功 publish 的条数。worker 据此对账（< len 时进入降级）。
+    pub accepted: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistProgressQuery {
     pub token: String,
@@ -335,6 +358,10 @@ pub struct Metrics {
     pub inflight_jobs: IntGaugeVec,
     pub workers_swept_total: IntCounter,
     pub workers_max_concurrency: IntGaugeVec,
+    /// 远端 worker 通过 `/dist/event` 转发进来的事件总条数（按 source node 拆）。
+    pub remote_events_received_total: IntCounterVec,
+    /// `/dist/event` 收到事件但 publish 到 bus 失败的条数（writer 关闭等极端 case）。
+    pub remote_events_publish_failed_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -403,6 +430,22 @@ impl Metrics {
             &["node_id"],
         )
         .expect("metric definition is well-formed");
+        let remote_events_received_total = IntCounterVec::new(
+            Opts::new(
+                "fuxi_dist_remote_events_received_total",
+                "通过 /dist/event 从远端 worker 收到的事件总条数",
+            ),
+            &["node_id"],
+        )
+        .expect("metric definition is well-formed");
+        let remote_events_publish_failed_total = IntCounterVec::new(
+            Opts::new(
+                "fuxi_dist_remote_events_publish_failed_total",
+                "/dist/event 收到但 publish 到 bus 失败的事件条数（极端 case）",
+            ),
+            &["node_id"],
+        )
+        .expect("metric definition is well-formed");
 
         // 全部 register 一遍——任一失败 = bug，构造期 panic 比 silent drop 强
         registry
@@ -432,6 +475,12 @@ impl Metrics {
         registry
             .register(Box::new(workers_max_concurrency.clone()))
             .expect("register workers_max_concurrency");
+        registry
+            .register(Box::new(remote_events_received_total.clone()))
+            .expect("register remote_events_received_total");
+        registry
+            .register(Box::new(remote_events_publish_failed_total.clone()))
+            .expect("register remote_events_publish_failed_total");
 
         Self {
             registry,
@@ -444,6 +493,8 @@ impl Metrics {
             inflight_jobs,
             workers_swept_total,
             workers_max_concurrency,
+            remote_events_received_total,
+            remote_events_publish_failed_total,
         }
     }
 
@@ -993,10 +1044,50 @@ impl DistController {
             }
         }
     }
+
+    /// 远端 worker 转发的一批事件 → controller 主 bus 原样 publish。
+    ///
+    /// 调用前 endpoint 已校验 token 与 node 注册；本方法只关心 publish + 计数。
+    /// `node_id` 仅用作 metric label；事件本身的 `EventMeta` 不被改写——
+    /// TODO（δ #4）：等 `EventMeta.source_node_id` 落地后这里 set Some(node_id)，
+    /// 让 TUI 能从 meta 区分本地 vs 远端事件，无需依赖外部上下文。
+    pub fn republish_remote_events(&self, node_id: &str, events: Vec<Event>) -> usize {
+        let total = events.len() as u64;
+        let mut accepted = 0usize;
+        let mut failed = 0u64;
+        for ev in events {
+            match self.bus.publish(ev) {
+                Ok(()) => accepted += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        if total > 0 {
+            self.metrics
+                .remote_events_received_total
+                .with_label_values(&[node_id])
+                .inc_by(total);
+        }
+        if failed > 0 {
+            self.metrics
+                .remote_events_publish_failed_total
+                .with_label_values(&[node_id])
+                .inc_by(failed);
+        }
+        accepted
+    }
+
+    /// 仅给 endpoint 用：判断 node_id 是否曾 register。未注册 → 403 拒收陌生流量。
+    pub async fn has_node(&self, node_id: &str) -> bool {
+        self.inner.lock().await.nodes.contains_key(node_id)
+    }
 }
 
 fn unauthorized() -> (StatusCode, String) {
     (StatusCode::UNAUTHORIZED, "invalid dist token".to_string())
+}
+
+fn forbidden_unknown_node() -> (StatusCode, String) {
+    (StatusCode::FORBIDDEN, "node not registered".to_string())
 }
 
 async fn register_handler(
@@ -1107,6 +1198,20 @@ async fn cancel_handler(
     Json(DistCancelResp { accepted: true }).into_response()
 }
 
+async fn event_handler(
+    State(ctrl): State<Arc<DistController>>,
+    Json(req): Json<DistEventReq>,
+) -> impl IntoResponse {
+    if req.token != ctrl.token() {
+        return unauthorized().into_response();
+    }
+    if !ctrl.has_node(&req.node_id).await {
+        return forbidden_unknown_node().into_response();
+    }
+    let accepted = ctrl.republish_remote_events(&req.node_id, req.events);
+    Json(DistEventResp { accepted }).into_response()
+}
+
 async fn heartbeat_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistHeartbeatReq>,
@@ -1164,6 +1269,7 @@ pub fn router(ctrl: Arc<DistController>) -> Router {
         .route("/dist/progress", get(progress_get_handler))
         .route("/dist/cancel", post(cancel_handler))
         .route("/dist/heartbeat", post(heartbeat_handler))
+        .route("/dist/event", post(event_handler))
         // Prometheus scrape 端点。无 token——和 /dist/* 不同，metrics 暴露面
         // 由部署侧（reverse proxy / firewall）控制。本地 dev 直接 curl 即可。
         .route("/metrics", get(metrics_handler))
@@ -3849,5 +3955,164 @@ mod tests {
             text.contains("fuxi_dist_job_duration_ms_bucket{cli=\"codex\",le=\"10\"} 0"),
             "42ms 不应落入 le=10 bucket\n{text}"
         );
+    }
+
+    // ── P2 [α]: /dist/event endpoint ────────────────────────────────
+
+    fn ev_agent_responded(text: &str) -> fuxi_core::Event {
+        fuxi_core::Event {
+            meta: fuxi_core::EventMeta::now(),
+            kind: fuxi_core::EventKind::AgentResponded {
+                text: text.to_string(),
+            },
+        }
+    }
+
+    /// 远端 worker POST /dist/event 一批已注册节点 → controller 转发到本地 bus，
+    /// 订阅者能收到原 event（kind 完整保真）。
+    #[tokio::test]
+    async fn dist_event_publish_to_bus_when_authorized() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        ctrl.register("remoteA".into(), vec![], 1).await;
+        let bus = ctrl.bus().clone();
+
+        // probe 必须在 POST 之前 subscribe，broadcast 不留历史
+        let probe = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut s = bus.subscribe();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remain.is_zero() {
+                    return None;
+                }
+                if let Ok(Some(Ok(ev))) = tokio::time::timeout(remain, s.next()).await
+                    && matches!(ev.kind, fuxi_core::EventKind::AgentResponded { .. })
+                {
+                    return Some(ev);
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let req = DistEventReq {
+            token: "tok".into(),
+            node_id: "remoteA".into(),
+            events: vec![ev_agent_responded("hello from remote")],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: DistEventResp = resp.json().await.expect("decode");
+        assert_eq!(body.accepted, 1);
+
+        let got = probe.await.expect("join").expect("event");
+        match got.kind {
+            fuxi_core::EventKind::AgentResponded { text, .. } => {
+                assert_eq!(text, "hello from remote");
+            }
+            other => panic!("expect AgentResponded, got {other:?}"),
+        }
+        srv.abort();
+    }
+
+    /// 未 register 的 node_id 一律 403——拒收陌生流量是 P2 安全前提。
+    #[tokio::test]
+    async fn dist_event_rejects_unregistered_node_with_403() {
+        let (_ctrl, base, srv) = spawn_controller().await;
+        let req = DistEventReq {
+            token: "tok".into(),
+            node_id: "ghost-node".into(),
+            events: vec![ev_agent_responded("x")],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+        srv.abort();
+    }
+
+    /// token 错就 401，连 node 检查都不该走到——auth 永远先于授权。
+    #[tokio::test]
+    async fn dist_event_rejects_bad_token_with_401() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        ctrl.register("remoteA".into(), vec![], 1).await;
+        let req = DistEventReq {
+            token: "WRONG".into(),
+            node_id: "remoteA".into(),
+            events: vec![ev_agent_responded("x")],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+        srv.abort();
+    }
+
+    /// batch：一次 POST 多条 event 全部 publish；accepted 正确反映条数。
+    #[tokio::test]
+    async fn dist_event_handles_batch() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        ctrl.register("remoteA".into(), vec![], 1).await;
+        let bus = ctrl.bus().clone();
+
+        let probe = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut s = bus.subscribe();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let mut got = Vec::new();
+            loop {
+                let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remain.is_zero() || got.len() >= 3 {
+                    return got;
+                }
+                if let Ok(Some(Ok(ev))) = tokio::time::timeout(remain, s.next()).await
+                    && let fuxi_core::EventKind::AgentResponded { text, .. } = &ev.kind
+                {
+                    got.push(text.clone());
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let req = DistEventReq {
+            token: "tok".into(),
+            node_id: "remoteA".into(),
+            events: vec![
+                ev_agent_responded("a"),
+                ev_agent_responded("b"),
+                ev_agent_responded("c"),
+            ],
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/dist/event"))
+            .json(&req)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: DistEventResp = resp.json().await.expect("decode");
+        assert_eq!(body.accepted, 3);
+
+        let got = probe.await.expect("join");
+        assert_eq!(got, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        // metrics 计数对齐：3 条 received，0 条 failed
+        let text = String::from_utf8(ctrl.metrics.encode_text()).unwrap();
+        assert!(
+            text.contains("fuxi_dist_remote_events_received_total{node_id=\"remoteA\"} 3"),
+            "应记录 3 条 remote event；metrics:\n{text}"
+        );
+        srv.abort();
     }
 }
