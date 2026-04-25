@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0a0a0a" rx="96" />
+  <g transform="translate(256 256)">
+    <circle r="120" fill="none" stroke="#5fd3a8" stroke-width="6" />
+    <text x="0" y="22" text-anchor="middle" fill="#e8e8e8" font-family="PingFang SC, sans-serif" font-size="180" font-weight="600">伏</text>
+  </g>
+</svg>
