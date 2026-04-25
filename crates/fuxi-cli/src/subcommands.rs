@@ -410,6 +410,12 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
         TaskDispatched { to } => format!("to={to}"),
         ThinkingStarted => "thinking".to_string(),
         ThinkingFinished => "thinking done".to_string(),
+        AgentRequestReview {
+            deliverable_kind,
+            summary,
+            ..
+        } => format!("[{deliverable_kind:?}] {}", truncate_preview(summary, 120)),
+        ReviewRequestTimeout { waited_for_ms, .. } => format!("timeout {waited_for_ms}ms"),
     }
 }
 

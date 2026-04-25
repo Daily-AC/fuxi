@@ -303,6 +303,8 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         SkillRejected { .. } => "skill_rejected",
         SkillActivated { .. } => "skill_activated",
         NoRoleMatched { .. } => "no_role_matched",
+        AgentRequestReview { .. } => "agent_request_review",
+        ReviewRequestTimeout { .. } => "review_request_timeout",
         Custom { .. } => "custom",
     }
 }
@@ -626,6 +628,77 @@ mod tests {
                 "trigger_failed",
             ]
         );
+    }
+
+    /// Decision 13 基础：B1 deliverable 边界 nudge 两变体的 kind_tag + SQLite roundtrip。
+    /// 加 EventKind 变体时必须同步更 kind_tag；此测试做门禁。
+    #[tokio::test]
+    async fn persists_deliverable_boundary_variants() {
+        use fuxi_core::DeliverableKind;
+        let store = EventStore::connect_memory().await.expect("connect");
+        let agent = AgentId::new();
+        let task = TaskId::new();
+        let review = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::AgentRequestReview {
+                agent,
+                task,
+                deliverable_kind: DeliverableKind::ResearchSummary,
+                summary: "调研完成：3 种方案对比".into(),
+                artifact_ref: None,
+            },
+        };
+        let original_id = review.meta.id;
+        let timeout = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::ReviewRequestTimeout {
+                original_event_id: original_id,
+                agent,
+                task,
+                waited_for_ms: 60_000,
+            },
+        };
+        store.append(&review).await.expect("append review");
+        store.append(&timeout).await.expect("append timeout");
+
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(tags, vec!["agent_request_review", "review_request_timeout"]);
+
+        // payload 字段保真——尤其 deliverable_kind 的 snake_case 标签和 waited_for_ms 整数。
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        assert_eq!(got.len(), 2);
+        match &got[0].kind {
+            EventKind::AgentRequestReview {
+                deliverable_kind,
+                summary,
+                artifact_ref,
+                ..
+            } => {
+                assert_eq!(*deliverable_kind, DeliverableKind::ResearchSummary);
+                assert_eq!(summary, "调研完成：3 种方案对比");
+                assert!(artifact_ref.is_none());
+            }
+            other => panic!("expect AgentRequestReview，得到 {other:?}"),
+        }
+        match &got[1].kind {
+            EventKind::ReviewRequestTimeout {
+                original_event_id,
+                waited_for_ms,
+                ..
+            } => {
+                assert_eq!(*original_event_id, original_id);
+                assert_eq!(*waited_for_ms, 60_000);
+            }
+            other => panic!("expect ReviewRequestTimeout，得到 {other:?}"),
+        }
     }
 
     /// M3.6 回归保护：删掉 TaskDelivered/TaskCancelled 变体后，task 终态

@@ -413,6 +413,26 @@ fn summarize(k: &EventKind) -> String {
         SkillRejected { role, reason } => format!("role={role} reason={}", one_line(reason, 40)),
         SkillActivated { role } => format!("role={role}"),
         NoRoleMatched { need } => format!("need={}", one_line(need, 50)),
+        AgentRequestReview {
+            agent,
+            deliverable_kind,
+            summary,
+            ..
+        } => format!(
+            "review← {} [{:?}]: {}",
+            short_id(&agent.to_string()),
+            deliverable_kind,
+            one_line(summary, 40)
+        ),
+        ReviewRequestTimeout {
+            agent,
+            waited_for_ms,
+            ..
+        } => format!(
+            "review✗ {} timeout {}ms",
+            short_id(&agent.to_string()),
+            waited_for_ms
+        ),
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -457,6 +477,12 @@ fn color_for(k: &EventKind) -> Color {
         UserInterventionSent { .. }
         | TaskInterventionApplied { .. }
         | OrchestratorCcReceived { .. } => Color::Yellow,
+
+        // deliverable 边界（Decision 13）—— review 请求是玄女 attention 唯一入口，
+        // 用 LightYellow 与"介入家族"的 Yellow 区分；timeout 走 LightRed 与
+        // AgentInterrupted 同级，提醒"该看了"。
+        AgentRequestReview { .. } => Color::LightYellow,
+        ReviewRequestTimeout { .. } => Color::LightRed,
 
         // 招贤一族 —— 醒目的红，因为是"生新 role"的高权限动作。
         SkillStaged { .. }
