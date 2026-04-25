@@ -1340,6 +1340,10 @@ async fn run_codex_job(
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // 与 cc 路径对齐（run_cc_job）：外层 tokio::select! 在心跳 ack cancel
+        // 时 drop 整个 future，若不 kill_on_drop，tokio Command 只释放句柄，
+        // 子 codex 进程会变僵尸。Decision 12 的 cancel 路径靠这条在 OS 层兜底。
+        .kill_on_drop(true)
         .spawn()
         .with_context(|| format!("spawn codex binary failed: {codex_bin}"))?;
 
