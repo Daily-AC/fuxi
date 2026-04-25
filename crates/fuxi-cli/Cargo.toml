@@ -22,6 +22,9 @@ fuxi-skills.workspace = true
 fuxi-memory.workspace = true
 fuxi-scheduler.workspace = true
 tokio = { workspace = true, features = ["full"] }
+# CancellationToken：Decision 12 worker 真并发后给每个 in-flight job 发 cancel 信号
+# （heartbeat ack 的 cancel_pending 路径 + 静默期 cancel 兜底）
+tokio-util = { workspace = true }
 async-trait.workspace = true
 clap.workspace = true
 anyhow.workspace = true
