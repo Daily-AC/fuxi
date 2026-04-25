@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub const DIST_TOKEN_ENV: &str = "FUXI_DIST_TOKEN";
@@ -838,7 +840,8 @@ pub struct DistEnqueueArgs {
     pub body: Vec<String>,
 }
 
-#[derive(Debug, ClapArgs)]
+// Clone 给 worker 主循环 spawn job task 时用——args 要 move 进 'static task。
+#[derive(Debug, Clone, ClapArgs)]
 pub struct DistWorkerArgs {
     #[arg(long)]
     pub controller: String,
@@ -911,8 +914,39 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
     Ok(())
 }
 
+/// adapter factory 类型——给定 cli 名 + 配置返回 trait object。生产路径
+/// 用 `select_adapter` 默认实现；测试可注入快速 mock 验证 worker loop 自身
+/// 的并发 / cancel 语义而不真起 codex/cc 子进程。
+pub(crate) type AdapterFactory =
+    Arc<dyn Fn(&str, &DistWorkerArgs) -> Result<Box<dyn CliAdapter>> + Send + Sync>;
+
+/// 心跳间隔。Decision 12 决议后心跳兼任"静默期 cancel 派送"路径——
+/// 抽成常量便于测试用更短间隔避免 1×10s 等待。
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
 pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
     let token = resolve_token(args.token.clone())?;
+    let factory: AdapterFactory =
+        Arc::new(|cli, args| select_adapter(cli, args).map(|a| a as Box<dyn CliAdapter>));
+    run_worker_with(args, token, factory, HEARTBEAT_INTERVAL).await
+}
+
+/// worker 主循环（Decision 12 真并发版）。
+///
+/// 与旧版本最大不同：每个 in-flight job 走 `tokio::spawn` + `JoinSet`，
+/// 配合 per-job `CancellationToken` 接受心跳 ack 的 `cancel_pending`。
+/// `inflight` map 同时承担两个职责：
+///   1. 心跳 task 上报 worker 真实状态给 controller（heartbeat req 带的 inflight 列表）
+///   2. heartbeat ack 拿到 cancel_pending 时按 job_id 找 token 触发 cancel
+///
+/// pull 节奏由本地 `jobs.len() < args.max_concurrency` 控制——controller 端
+/// 也基于 `node.inflight.len()` 拦截 capacity，两侧冗余但对账靠 heartbeat。
+pub(crate) async fn run_worker_with(
+    args: DistWorkerArgs,
+    token: String,
+    adapter_factory: AdapterFactory,
+    heartbeat_interval: Duration,
+) -> Result<()> {
     let controller = args.controller.trim_end_matches('/').to_string();
     let client = Client::new();
     client
@@ -929,15 +963,12 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
         .error_for_status()
         .context("dist register non-2xx")?;
 
-    // Phase 3c-2 · worker 端 inflight 跟踪 + 心跳任务。
-    //
-    // 主循环 pull 到 job 时 insert、report 之前 remove——让 controller 能
-    // 经心跳对账得到真实状态，不依赖 pull/report 两侧往返包都不丢。
-    //
-    // 心跳 task 每 10s 发一次，controller 30s 阈值 = 3 次丢包才开始怀疑
-    // worker 死。第一次心跳立即发，让 controller 知道我刚起、inflight 是空。
-    let inflight: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
-        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+    let inflight: Arc<Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // 心跳 task：除上报 inflight 外，**消费 ack 的 cancel_pending**——
+    // worker 静默执行（无 progress push）时段也能 ~heartbeat interval 内拿到
+    // cancel 信号，弥补只靠 push_progress.should_cancel 的盲区。
     {
         let hb_inflight = inflight.clone();
         let hb_token = token.clone();
@@ -945,31 +976,53 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
         let hb_controller = controller.clone();
         let hb_client = client.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            let mut tick = tokio::time::interval(heartbeat_interval);
             loop {
                 tick.tick().await;
                 let snapshot: Vec<String> = {
                     let g = hb_inflight.lock().await;
-                    g.iter().cloned().collect()
+                    g.keys().cloned().collect()
                 };
                 let req = DistHeartbeatReq {
                     token: hb_token.clone(),
                     node_id: hb_node.clone(),
                     inflight: snapshot,
                 };
-                let _ = hb_client
+                let resp = hb_client
                     .post(format!("{hb_controller}/dist/heartbeat"))
                     .json(&req)
                     .send()
                     .await;
-                // 忽略 ack 的 cancel_pending——cancel 主路径是 push_progress
-                // 的 should_cancel（run_codex_job 内已实装）。未来 worker 支持
-                // 并发多 job 时再用 ack 路径定向 kill 某个 child。
+                let Ok(resp) = resp else { continue };
+                let Ok(ack) = resp.json::<DistHeartbeatResp>().await else {
+                    continue;
+                };
+                if ack.cancel_pending.is_empty() {
+                    continue;
+                }
+                // 命中本 worker inflight 的 token 直接 cancel——adapter 外层
+                // `select!` 分支会退出，task 走"被取消"final report。未命中
+                // 的 job_id 静默忽略（job 已结束 / 从未在本 worker 上跑）。
+                let g = hb_inflight.lock().await;
+                for jid in ack.cancel_pending {
+                    if let Some(tok) = g.get(&jid) {
+                        tok.cancel();
+                    }
+                }
             }
         });
     }
 
+    let mut jobs: JoinSet<()> = JoinSet::new();
+    let max_concurrency = args.max_concurrency.max(1) as usize;
+
     loop {
+        // 容量满 → 阻塞在 join_next 直到任一 task 完成；这把"何时 pull 下一个"
+        // 与"何时把上一批结果落 controller"自然耦合，不需要额外 throttle。
+        while jobs.len() >= max_concurrency {
+            let _ = jobs.join_next().await;
+        }
+
         let pull = client
             .get(format!("{controller}/dist/pull"))
             .query(&[("token", token.as_str()), ("node_id", args.node.as_str())])
@@ -1005,36 +1058,65 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
         };
 
         let job_id = job.id.clone();
-        inflight.lock().await.insert(job_id.clone());
+        let cancel_tok = CancellationToken::new();
+        inflight
+            .lock()
+            .await
+            .insert(job_id.clone(), cancel_tok.clone());
+
+        // 把 ctx 字段在 spawn 前 owned 化——WorkerCtx 是借用 view，
+        // 跨 task 传所有权才 'static 安全。
+        let client_c = client.clone();
+        let controller_c = controller.clone();
+        let token_c = token.clone();
+        let node_c = args.node.clone();
+        let inflight_c = inflight.clone();
+        let factory_c = adapter_factory.clone();
+        let args_for_factory = args.clone();
         let started = Instant::now();
-        let ctx = WorkerCtx {
-            client: &client,
-            controller: &controller,
-            token: &token,
-            node_id: &args.node,
-        };
-        // Phase 4b: 按 job.cli 派到对应 adapter。空串走 codex（老版 gateway 兼容）。
-        let run = match select_adapter(&job.cli, &args) {
-            Ok(adapter) => adapter.run(&ctx, &job).await,
-            Err(e) => Err(e),
-        };
-        let (ok, output) = match run {
-            Ok(pair) => pair,
-            Err(e) => (false, format!("worker run error: {e}")),
-        };
-        inflight.lock().await.remove(&job_id);
-        let _ = client
-            .post(format!("{controller}/dist/report"))
-            .json(&DistReportReq {
-                token: token.clone(),
-                node_id: args.node.clone(),
-                job_id,
-                ok,
-                output,
-                duration_ms: started.elapsed().as_millis(),
-            })
-            .send()
-            .await;
+
+        jobs.spawn(async move {
+            let ctx = WorkerCtx {
+                client: &client_c,
+                controller: &controller_c,
+                token: &token_c,
+                node_id: &node_c,
+            };
+            // adapter 构造一旦 fail 就走失败 final report——和老路径行为一致。
+            let run_result = match factory_c(&job.cli, &args_for_factory) {
+                Ok(adapter) => {
+                    tokio::select! {
+                        biased;
+                        // cancel 优先：避免 token 已 cancel 后还浪费一轮 adapter
+                        // 启动开销（spawn child 之类）。
+                        _ = cancel_tok.cancelled() => {
+                            Ok((false, "cancelled by controller (heartbeat)".to_string()))
+                        }
+                        r = adapter.run(&ctx, &job) => r,
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let (ok, output) = match run_result {
+                Ok(pair) => pair,
+                Err(e) => (false, format!("worker run error: {e}")),
+            };
+            // 先从本地 inflight 移除——下次心跳就不会再把 job_id 报给 controller。
+            // 再发 final report 给 controller，对 capacity 释放权威。
+            inflight_c.lock().await.remove(&job.id);
+            let _ = client_c
+                .post(format!("{controller_c}/dist/report"))
+                .json(&DistReportReq {
+                    token: token_c,
+                    node_id: node_c,
+                    job_id: job.id.clone(),
+                    ok,
+                    output,
+                    duration_ms: started.elapsed().as_millis(),
+                })
+                .send()
+                .await;
+        });
     }
 }
 
@@ -1048,7 +1130,7 @@ fn build_codex_prompt_from_job(job: &DistJob) -> String {
 }
 
 /// worker 运行上下文——push progress 需要的 HTTP 目标。
-struct WorkerCtx<'a> {
+pub(crate) struct WorkerCtx<'a> {
     client: &'a Client,
     controller: &'a str,
     token: &'a str,
@@ -1069,7 +1151,7 @@ struct WorkerCtx<'a> {
 /// - 对 `ProgressAck.should_cancel=true` 要响应：杀 child、走 ok=false
 ///   "cancelled" 的终态
 #[async_trait::async_trait]
-trait CliAdapter: Send + Sync {
+pub(crate) trait CliAdapter: Send + Sync {
     /// 名称要和 `DistJob.cli` 字段对齐。当前支持 `"codex"`；`"claude-code"`
     /// 由 Phase 4c 的 `CcAdapter` 接入。
     // bin target 下 run_worker 只调 run(); name() 供测试 / 未来日志和 4b
@@ -2413,5 +2495,247 @@ mod tests {
         let back: DistRegisterReq = serde_json::from_str(&s).unwrap();
         assert_eq!(back.tags, vec!["home", "gpu"]);
         assert_eq!(back.max_concurrency, 4);
+    }
+
+    // ── Decision 12 · worker 真并发 + 静默期 cancel 经心跳 ack ──
+    //
+    // 这两个测试起一个真 axum controller + 真 worker loop（spawn 在 task 里），
+    // 不 mock controller 协议；只在 adapter 这一层用 stub 替换 codex/cc 子进程。
+    // 这样能验证 worker 主循环 + 心跳 ack cancel 真的端到端走通，而不是只
+    // 验单元逻辑。
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 测试用的 fake adapter：按构造时给的"行为"决定 run() 怎么返回。
+    /// 用 Arc 共享计数 + Notify 让测试侧可以观察"几个 job 同时在跑"。
+    struct StubAdapter {
+        behavior: StubBehavior,
+        active: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    enum StubBehavior {
+        /// sleep 后 ok 返回——验证并发用。
+        Sleep(Duration),
+        /// 长 sleep 但响应外部 cancel（adapter.run 自身**不**消费 token——
+        /// 让 worker 外层 select 在 token cancelled 时退出 adapter.run future）。
+        SleepResponsiveToOuterCancel(Duration),
+    }
+
+    #[async_trait::async_trait]
+    impl CliAdapter for StubAdapter {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        async fn run(&self, _ctx: &WorkerCtx<'_>, _job: &DistJob) -> Result<(bool, String)> {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            // RAII guard 保证无论 path（正常 return / future drop by select cancel）
+            // active 都正确减回——避免测试假 fail。
+            struct Guard<'a>(&'a AtomicUsize);
+            impl Drop for Guard<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let _g = Guard(&self.active);
+            match self.behavior {
+                StubBehavior::Sleep(d) => {
+                    tokio::time::sleep(d).await;
+                    Ok((true, "stub done".into()))
+                }
+                StubBehavior::SleepResponsiveToOuterCancel(d) => {
+                    tokio::time::sleep(d).await;
+                    Ok((true, "should have been cancelled".into()))
+                }
+            }
+        }
+    }
+
+    /// 起一个 axum dist controller 在随机端口；返回 (controller arc, base url, server task)。
+    /// 用 task spawn 而不是 block——让测试主体跑 worker loop / 客户端调用。
+    async fn spawn_controller() -> (Arc<DistController>, String, tokio::task::JoinHandle<()>) {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let ctrl = Arc::new(DistController::new("tok".into(), bus));
+        let app = router(ctrl.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        // 给 axum 一个微小窗口完成 listener accept-loop 的 ready，避免首次 POST race。
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (ctrl, format!("http://{addr}"), handle)
+    }
+
+    fn make_factory(adapter: Arc<StubAdapter>) -> super::AdapterFactory {
+        let inner = adapter;
+        Arc::new(move |_cli, _args| {
+            // 这里 Box 一个新 trait object 包装同一份共享 active 计数。
+            // 不能直接 `Box::new(*inner.clone())` 因为 StubAdapter 不 Clone；
+            // 借 Arc deref 重新组装即可。
+            let cloned = StubAdapter {
+                behavior: inner.behavior.clone(),
+                active: inner.active.clone(),
+            };
+            Ok(Box::new(cloned) as Box<dyn CliAdapter>)
+        })
+    }
+
+    /// max_concurrency=2 时，两个慢 job 应**并行**而非串行：wall clock < 1.5s
+    /// 即说明二者重叠跑了；旧的串行实现会 ≥2s。
+    #[tokio::test]
+    async fn worker_runs_two_jobs_concurrently() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        let active = Arc::new(AtomicUsize::new(0));
+        let stub = Arc::new(StubAdapter {
+            behavior: StubBehavior::Sleep(Duration::from_secs(1)),
+            active: active.clone(),
+        });
+
+        let args = DistWorkerArgs {
+            controller: base.clone(),
+            node: "nodeP".into(),
+            token: Some("tok".into()),
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 50,
+            tags: vec![],
+            max_concurrency: 2,
+        };
+        let factory = make_factory(stub);
+
+        // 派两条 job——必须先 enqueue 再 spawn worker，否则 worker 先 register 后
+        // capacity_left 可用但还没 job，会进入 poll 死循环（OK，但慢）。
+        let j1 = enq_simple(&ctrl, "job1").await;
+        let j2 = enq_simple(&ctrl, "job2").await;
+
+        let worker_handle = tokio::spawn(async move {
+            // worker_with 是无限循环，测试侧靠 abort 终止。
+            let _ = super::run_worker_with(args, "tok".into(), factory, Duration::from_millis(200))
+                .await;
+        });
+
+        // 等"两个 job 同时在跑"——peak_active==2 后才开始计 elapsed。
+        // 这剔除了 axum/register/pull 的初始化噪音（约 100-200ms），让
+        // 测试断言专注 worker 真并发本身的耗时。
+        let pickup_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if active.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            if Instant::now() > pickup_deadline {
+                worker_handle.abort();
+                srv.abort();
+                panic!("3s 内 active 未 ≥2（仍是串行 / capacity 拦了 / register 失败）");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // 两 job 都 in-flight 后开始测墙时——并发跑完应 ~1s（Sleep(1s)），
+        // 串行得 2s。给 1.5s 容忍调度抖动 + 200ms axum overhead。
+        let started = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let s1 = ctrl.job_status(&j1).await;
+            let s2 = ctrl.job_status(&j2).await;
+            if s1.done && s2.done {
+                break;
+            }
+            if Instant::now() > deadline {
+                worker_handle.abort();
+                srv.abort();
+                panic!(
+                    "两 job 在 3s 内未都 done（j1.done={}, j2.done={}）",
+                    s1.done, s2.done
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let elapsed = started.elapsed();
+        worker_handle.abort();
+        srv.abort();
+
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "两 job 并发跑（已 in-flight）后应 < 1.5s 完成，实际 {elapsed:?}（说明仍是串行）"
+        );
+    }
+
+    /// 静默执行（不 push progress）的 job 也应能在 ~heartbeat interval 内被
+    /// cancel：controller cancel_job → 下次心跳 ack 带 cancel_pending → worker
+    /// 触发 token cancel → adapter.run future 被 select 抢断 → final report 失败。
+    #[tokio::test]
+    async fn cancel_in_silent_period_via_heartbeat_ack() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        let active = Arc::new(AtomicUsize::new(0));
+        let stub = Arc::new(StubAdapter {
+            // 5s "silent"——adapter 内不 push progress，老路径完全没法 cancel。
+            behavior: StubBehavior::SleepResponsiveToOuterCancel(Duration::from_secs(5)),
+            active: active.clone(),
+        });
+        let factory = make_factory(stub);
+
+        let args = DistWorkerArgs {
+            controller: base.clone(),
+            node: "nodeQ".into(),
+            token: Some("tok".into()),
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 50,
+            tags: vec![],
+            max_concurrency: 1,
+        };
+
+        let job_id = enq_simple(&ctrl, "silent").await;
+
+        // 心跳 200ms——比生产 10s 短得多，让测试在秒级完成。
+        let worker_handle = tokio::spawn(async move {
+            let _ = super::run_worker_with(args, "tok".into(), factory, Duration::from_millis(200))
+                .await;
+        });
+
+        // 等 active==1（worker pull 到并 spawn task）
+        let pickup_deadline = Instant::now() + Duration::from_secs(2);
+        while active.load(Ordering::SeqCst) == 0 {
+            if Instant::now() > pickup_deadline {
+                worker_handle.abort();
+                srv.abort();
+                panic!("worker 1s 内未 pickup silent job");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // 让 worker 进入"adapter 跑了一会但还没有 progress" 的窗口
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let cancel_at = Instant::now();
+        ctrl.cancel_job(&job_id).await;
+
+        // 等 done——超时上限远小于 5s（说明真被中断）。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut final_status = None;
+        while Instant::now() < deadline {
+            let s = ctrl.job_status(&job_id).await;
+            if s.done {
+                final_status = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let elapsed_after_cancel = cancel_at.elapsed();
+        worker_handle.abort();
+        srv.abort();
+
+        let s = final_status.expect("job 在 2s 内未 done（heartbeat ack cancel 路径未生效）");
+        assert!(
+            elapsed_after_cancel < Duration::from_millis(800),
+            "cancel 后应 ~heartbeat interval (200ms) 内退出，实际 {elapsed_after_cancel:?}"
+        );
+        assert_eq!(s.ok, Some(false), "cancel 终态应 ok=false");
+        let out = s.output.unwrap_or_default();
+        assert!(
+            out.contains("cancelled"),
+            "终态 output 应标注 cancelled, 实际: {out}"
+        );
     }
 }
