@@ -1350,30 +1350,31 @@ fn resolve_token(token: Option<String>) -> Result<String> {
 }
 
 pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
-    // β 接入后 token 改为 HmacSecret 经 signed_post；当前 binding 只为兼容
-    // 旧 --token / FUXI_DIST_TOKEN env 的解析路径不立刻 break。
-    let _token = resolve_token(args.token)?;
+    // CLI 入口也走 HMAC——controller 端 hmac_layer 不区分调用方身份，凡 /dist/*
+    // 都过签。token resolve 仍调一次保留早失败：旧 --token / FUXI_DIST_TOKEN
+    // 缺失时先报清晰错，避免飞到 controller 才 401。
+    let _ = resolve_token(args.token);
+    let secret = crate::dist_auth::HmacSecret::from_env()
+        .map_err(|e| anyhow!("dist enqueue HMAC secret: {e}"))?;
     let body = args.body.join(" ");
     let client = Client::new();
     let url = format!("{}/dist/enqueue", args.controller.trim_end_matches('/'));
-    let resp = client
-        .post(url)
-        .json(&DistEnqueueReq {
-            node_id: args.node,
-            title: args.title,
-            body,
-            // CLI 入口裸派，不组装 role 心智——gateway agent 路径才会填。
-            system_prompt: None,
-            // CLI 同样不带 tags / pin——派工走全局 queue，谁空闲谁取。
-            // 若真要定点派，用户用 `fuxi spawn --node` 走 gateway 路径。
-            required_tags: Vec::new(),
-            pinned_node: None,
-            // CLI 入口不指定 cli——worker 按默认（codex）跑；若用户就想
-            // 在分布式命令行直派 cc，Phase 4b 之后可扩 `fuxi dist enqueue --cli cc`。
-            cli: String::new(),
-            allowed_tools: Vec::new(),
-        })
-        .send()
+    let req = DistEnqueueReq {
+        node_id: args.node,
+        title: args.title,
+        body,
+        // CLI 入口裸派，不组装 role 心智——gateway agent 路径才会填。
+        system_prompt: None,
+        // CLI 同样不带 tags / pin——派工走全局 queue，谁空闲谁取。
+        // 若真要定点派，用户用 `fuxi spawn --node` 走 gateway 路径。
+        required_tags: Vec::new(),
+        pinned_node: None,
+        // CLI 入口不指定 cli——worker 按默认（codex）跑；若用户就想
+        // 在分布式命令行直派 cc，Phase 4b 之后可扩 `fuxi dist enqueue --cli cc`。
+        cli: String::new(),
+        allowed_tools: Vec::new(),
+    };
+    let resp = crate::dist_auth_client::signed_post(&client, &secret, &url, &req)
         .await
         .context("dist enqueue request failed")?
         .error_for_status()
@@ -1400,9 +1401,12 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
     let token = resolve_token(args.token.clone())?;
+    let secret = std::sync::Arc::new(
+        crate::dist_auth::HmacSecret::from_env().map_err(|e| anyhow!("worker HMAC secret: {e}"))?,
+    );
     let factory: AdapterFactory =
         Arc::new(|cli, args| select_adapter(cli, args).map(|a| a as Box<dyn CliAdapter>));
-    run_worker_with(args, token, factory, HEARTBEAT_INTERVAL).await
+    run_worker_with(args, token, secret, factory, HEARTBEAT_INTERVAL).await
 }
 
 /// worker 主循环（Decision 12 真并发版）。
@@ -1418,17 +1422,12 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
 pub(crate) async fn run_worker_with(
     args: DistWorkerArgs,
     token: String,
+    secret: std::sync::Arc<crate::dist_auth::HmacSecret>,
     adapter_factory: AdapterFactory,
     heartbeat_interval: Duration,
 ) -> Result<()> {
     let controller = args.controller.trim_end_matches('/').to_string();
     let client = Client::new();
-    // HMAC 共享密钥——与 controller / daemon 同 env。从 env 加载放在 register
-    // 之前：缺 secret 直接 fail-fast，避免 worker 启动后所有出站 request 才 401。
-    let secret = std::sync::Arc::new(
-        crate::dist_auth::HmacSecret::from_env()
-            .map_err(|e| anyhow!("worker HMAC secret: {e}"))?,
-    );
     let register_url = format!("{controller}/dist/register");
     let register_req = DistRegisterReq {
         node_id: args.node.clone(),
@@ -1515,11 +1514,14 @@ pub(crate) async fn run_worker_with(
             let _ = jobs.join_next().await;
         }
 
-        let pull = client
-            .get(format!("{controller}/dist/pull"))
-            .query(&[("node_id", args.node.as_str())])
-            .send()
-            .await;
+        let pull_url = format!("{controller}/dist/pull");
+        let pull = crate::dist_auth_client::signed_get(
+            &client,
+            &secret,
+            &pull_url,
+            &[("node_id", args.node.as_str())],
+        )
+        .await;
         let resp = match pull {
             Ok(r) => match r.error_for_status() {
                 Ok(ok) => ok,
@@ -1561,6 +1563,7 @@ pub(crate) async fn run_worker_with(
         let client_c = client.clone();
         let controller_c = controller.clone();
         let token_c = token.clone();
+        let secret_c = secret.clone();
         let node_c = args.node.clone();
         let inflight_c = inflight.clone();
         let factory_c = adapter_factory.clone();
@@ -1572,6 +1575,7 @@ pub(crate) async fn run_worker_with(
             let ctx = WorkerCtx {
                 client: &client_c,
                 controller: &controller_c,
+                secret: &secret_c,
                 token: &token_c,
                 node_id: &node_c,
                 bus_client: bus_c.as_ref(),
@@ -1598,19 +1602,21 @@ pub(crate) async fn run_worker_with(
             // 先从本地 inflight 移除——下次心跳就不会再把 job_id 报给 controller。
             // 再发 final report 给 controller，对 capacity 释放权威。
             inflight_c.lock().await.remove(&job.id);
-            // β 接入后 token_c 改为 HmacSecret 经 signed_post；当前留绑定，编译态等价。
-            let _ = &token_c;
-            let _ = client_c
-                .post(format!("{controller_c}/dist/report"))
-                .json(&DistReportReq {
-                    node_id: node_c,
-                    job_id: job.id.clone(),
-                    ok,
-                    output,
-                    duration_ms: started.elapsed().as_millis(),
-                })
-                .send()
-                .await;
+            let report_url = format!("{controller_c}/dist/report");
+            let report_req = DistReportReq {
+                node_id: node_c,
+                job_id: job.id.clone(),
+                ok,
+                output,
+                duration_ms: started.elapsed().as_millis(),
+            };
+            let _ = crate::dist_auth_client::signed_post(
+                &client_c,
+                &secret_c,
+                &report_url,
+                &report_req,
+            )
+            .await;
         });
     }
 }
@@ -1632,6 +1638,11 @@ fn build_codex_prompt_from_job(job: &DistJob) -> String {
 pub(crate) struct WorkerCtx<'a> {
     client: &'a Client,
     controller: &'a str,
+    /// HMAC 共享密钥——`flush_progress` 等出站调用经 `signed_post` 走签名。
+    /// `Arc` 让跨 task 共享 0 拷贝。
+    secret: &'a Arc<crate::dist_auth::HmacSecret>,
+    /// 旧字段——生产 authn 已切 HMAC，仅 mock test fixture 兼容；新代码不要读。
+    #[allow(dead_code)]
     token: &'a str,
     node_id: &'a str,
     bus_client: Option<&'a Arc<NetworkBusClient>>,
@@ -1739,18 +1750,13 @@ async fn flush_progress(ctx: &WorkerCtx<'_>, job_id: &str, chunks: Vec<ProgressP
     if chunks.is_empty() {
         return false;
     }
-    // β 接入后 ctx.token 改 HmacSecret 经 signed_post；当前 binding 只为兼容。
-    let _ = ctx.token;
-    let resp = ctx
-        .client
-        .post(format!("{}/dist/progress", ctx.controller))
-        .json(&DistProgressReq {
-            node_id: ctx.node_id.to_string(),
-            job_id: job_id.to_string(),
-            chunks,
-        })
-        .send()
-        .await;
+    let url = format!("{}/dist/progress", ctx.controller);
+    let req = DistProgressReq {
+        node_id: ctx.node_id.to_string(),
+        job_id: job_id.to_string(),
+        chunks,
+    };
+    let resp = crate::dist_auth_client::signed_post(ctx.client, ctx.secret, &url, &req).await;
     match resp {
         Ok(r) if r.status().is_success() => r
             .json::<DistProgressAck>()
@@ -3459,6 +3465,13 @@ mod tests {
         (ctrl, format!("http://{addr}"), handle)
     }
 
+    /// β path 3: worker 测试用的 HMAC secret——controller 端 router 不挂
+    /// hmac_layer（测试 spawn_controller 用 `dist::router`，无 layer），所以
+    /// secret 内容在测试中不验签，仅满足 `run_worker_with` 的入参约束。
+    fn test_secret() -> Arc<crate::dist_auth::HmacSecret> {
+        Arc::new(crate::dist_auth::HmacSecret::new("test".into()))
+    }
+
     fn make_factory(adapter: Arc<StubAdapter>) -> super::AdapterFactory {
         let inner = adapter;
         Arc::new(move |_cli, _args| {
@@ -3503,8 +3516,14 @@ mod tests {
 
         let worker_handle = tokio::spawn(async move {
             // worker_with 是无限循环，测试侧靠 abort 终止。
-            let _ = super::run_worker_with(args, "tok".into(), factory, Duration::from_millis(200))
-                .await;
+            let _ = super::run_worker_with(
+                args,
+                "tok".into(),
+                test_secret(),
+                factory,
+                Duration::from_millis(200),
+            )
+            .await;
         });
 
         // 等"两个 job 同时在跑"——peak_active==2 后才开始计 elapsed。
@@ -3581,8 +3600,14 @@ mod tests {
 
         // 心跳 200ms——比生产 10s 短得多，让测试在秒级完成。
         let worker_handle = tokio::spawn(async move {
-            let _ = super::run_worker_with(args, "tok".into(), factory, Duration::from_millis(200))
-                .await;
+            let _ = super::run_worker_with(
+                args,
+                "tok".into(),
+                test_secret(),
+                factory,
+                Duration::from_millis(200),
+            )
+            .await;
         });
 
         // 等 active==1（worker pull 到并 spawn task）
@@ -3735,7 +3760,8 @@ mod tests {
         // 心跳 100ms——中断/恢复窗口要按 hb 间隔决议。
         let hb_interval = Duration::from_millis(100);
         let worker_handle = tokio::spawn(async move {
-            let _ = super::run_worker_with(args, "tok".into(), factory, hb_interval).await;
+            let _ = super::run_worker_with(args, "tok".into(), test_secret(), factory, hb_interval)
+                .await;
         });
 
         // 派一条 job，等它跑完，验证基线通畅。
@@ -3846,9 +3872,14 @@ mod tests {
 
         // worker_a 起 + 拉到 job
         let worker_a = tokio::spawn(async move {
-            let _ =
-                super::run_worker_with(args_a, "tok".into(), factory_a, Duration::from_millis(200))
-                    .await;
+            let _ = super::run_worker_with(
+                args_a,
+                "tok".into(),
+                test_secret(),
+                factory_a,
+                Duration::from_millis(200),
+            )
+            .await;
         });
         let pickup_deadline = Instant::now() + Duration::from_secs(2);
         while active.load(Ordering::SeqCst) == 0 {
@@ -3930,9 +3961,14 @@ mod tests {
             max_concurrency: 1,
         };
         let worker_b = tokio::spawn(async move {
-            let _ =
-                super::run_worker_with(args_b, "tok".into(), factory_b, Duration::from_millis(200))
-                    .await;
+            let _ = super::run_worker_with(
+                args_b,
+                "tok".into(),
+                test_secret(),
+                factory_b,
+                Duration::from_millis(200),
+            )
+            .await;
         });
 
         // workspace 并行测试时 CPU 抢占严重，2s 不够 workerB pickup+exec+report。

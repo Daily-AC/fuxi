@@ -27,6 +27,8 @@
 #![allow(dead_code)]
 
 use crate::dist::{DistEventReq, DistEventResp};
+use crate::dist_auth::HmacSecret;
+use crate::dist_auth_client::signed_post;
 use fuxi_core::event::Event;
 use reqwest::Client;
 use std::collections::VecDeque;
@@ -86,17 +88,29 @@ struct Inner {
 struct Transport {
     client: Client,
     controller: String,
+    /// HMAC 共享密钥——`post_once` 走 `signed_post` 时签名所需。
+    secret: Arc<HmacSecret>,
+    /// 旧字段保留，便于尚未迁移的 mock test 构造同一 ctor 不破。生产路径
+    /// 已不再读取——authn 走 `secret`。
+    #[allow(dead_code)]
     token: String,
     node_id: String,
 }
 
 impl NetworkBusClient {
     /// 用 worker 上下文构造——`flush_loop` 启动前调用。
-    pub fn new(client: Client, controller: String, token: String, node_id: String) -> Self {
+    pub fn new(
+        client: Client,
+        controller: String,
+        token: String,
+        secret: Arc<HmacSecret>,
+        node_id: String,
+    ) -> Self {
         Self::with_config(
             client,
             controller,
             token,
+            secret,
             node_id,
             DEFAULT_QUEUE_CAP,
             DEFAULT_BATCH_SIZE,
@@ -111,6 +125,7 @@ impl NetworkBusClient {
         client: Client,
         controller: String,
         token: String,
+        secret: Arc<HmacSecret>,
         node_id: String,
         queue_cap: usize,
         batch_size: usize,
@@ -132,6 +147,7 @@ impl NetworkBusClient {
             transport: Transport {
                 client,
                 controller,
+                secret,
                 token,
                 node_id,
             },
@@ -286,16 +302,11 @@ impl NetworkBusClient {
     /// 单次 POST。返回 Err 触发 retry。
     async fn post_once(&self, events: &[Event]) -> Result<(), String> {
         let req = DistEventReq {
-            token: self.transport.token.clone(),
             node_id: self.transport.node_id.clone(),
             events: events.to_vec(),
         };
-        let resp = self
-            .transport
-            .client
-            .post(format!("{}/dist/event", self.transport.controller))
-            .json(&req)
-            .send()
+        let url = format!("{}/dist/event", self.transport.controller);
+        let resp = signed_post(&self.transport.client, &self.transport.secret, &url, &req)
             .await
             .map_err(|e| format!("send: {e}"))?;
         let status = resp.status();
@@ -336,6 +347,7 @@ mod tests {
             Client::new(),
             "http://127.0.0.1:1".into(),
             "tok".into(),
+            Arc::new(HmacSecret::new("test".into())),
             "node".into(),
             queue_cap,
             batch_size,
@@ -549,6 +561,7 @@ mod tests {
             Client::new(),
             base,
             "tok".into(),
+            Arc::new(HmacSecret::new("test".into())),
             "nodeB".into(),
             32,
             16,
@@ -576,6 +589,7 @@ mod tests {
             Client::new(),
             base,
             "tok".into(),
+            Arc::new(HmacSecret::new("test".into())),
             "nodeB".into(),
             32,
             16,
@@ -611,6 +625,7 @@ mod tests {
             Client::new(),
             base,
             "tok".into(),
+            Arc::new(HmacSecret::new("test".into())),
             "nodeB".into(),
             32,
             16,
@@ -668,6 +683,7 @@ mod tests {
             Client::new(),
             base,
             "tok".into(),
+            Arc::new(HmacSecret::new("test".into())),
             "nodeB".into(),
             32,
             16,
