@@ -190,11 +190,23 @@ impl BenchHarness {
 }
 
 /// 起一个 controller + n_workers 个 worker，每个 worker `max_concurrency=worker_concurrency`，
-/// 全用 sleep_ms 的 stub adapter（共享 active 计数）。
+/// 全用 sleep_ms 的 stub adapter（共享 active 计数）。worker 拉 job 的 poll_ms 默认 20。
 pub async fn spawn_controller_with_workers(
     n_workers: usize,
     worker_concurrency: u32,
     sleep_ms: u64,
+) -> BenchHarness {
+    spawn_controller_with_workers_tuned(n_workers, worker_concurrency, sleep_ms, 20).await
+}
+
+/// 同 `spawn_controller_with_workers` 但显式选 `poll_ms`——throughput bench
+/// 用 5ms 把 worker idle wait 摊薄到不污染 fuxi infrastructure overhead 数字
+/// （默认 50ms 在 10ms sleep job 场景会让 idle wait 主导 wall_time）。
+pub async fn spawn_controller_with_workers_tuned(
+    n_workers: usize,
+    worker_concurrency: u32,
+    sleep_ms: u64,
+    poll_ms: u64,
 ) -> BenchHarness {
     let (ctrl, base, server) = spawn_controller().await;
     let active = Arc::new(AtomicUsize::new(0));
@@ -208,7 +220,7 @@ pub async fn spawn_controller_with_workers(
             token: Some("bench-tok".into()),
             codex_bin: "codex".into(),
             cc_bin: "claude".into(),
-            poll_ms: 20,
+            poll_ms,
             tags: vec![],
             max_concurrency: worker_concurrency,
         };

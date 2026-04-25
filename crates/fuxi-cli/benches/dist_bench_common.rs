@@ -8,8 +8,8 @@
 #![allow(dead_code, unused_imports)]
 
 pub use fuxi_cli::bench_support::{
-    BenchHarness, BenchSection, spawn_controller_with_workers, stub_adapter_with_sleep,
-    write_baseline_report,
+    BenchHarness, BenchSection, spawn_controller_with_workers, spawn_controller_with_workers_tuned,
+    stub_adapter_with_sleep, write_baseline_report,
 };
 
 /// 报告输出路径——`docs/benchmarks/baseline-<UTC date>.md`。聚合 bench 主入
