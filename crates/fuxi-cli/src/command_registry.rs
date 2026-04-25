@@ -58,6 +58,8 @@ pub enum CommandAction {
     Theme(Option<String>),
     Kill,
     Status,
+    /// `/nodes` 打开远端 worker 拓扑 overlay（P6）。F6 等价快捷键。
+    Nodes,
 }
 
 /// 一条命令的全部元数据。
@@ -258,6 +260,14 @@ pub fn register_default() -> CommandRegistry {
         arg_names: vec![],
         category: CommandCategory::Agent,
         action: CommandAction::Status,
+    });
+    reg.register(Command {
+        slash: "/nodes",
+        keybind: Some("F6"),
+        description: "查看远端 worker 拓扑（alive/stale/inflight）",
+        arg_names: vec![],
+        category: CommandCategory::Agent,
+        action: CommandAction::Nodes,
     });
     reg
 }
