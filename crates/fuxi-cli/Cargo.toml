@@ -60,6 +60,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # /metrics endpoint 用单层 prometheus crate（自带 TextEncoder + Registry）
 # 不上 metrics + metrics-exporter-prometheus 双层，多一层 indirection 没收益。
 prometheus = { version = "0.13", default-features = false }
+# 分布式 dist_jobs 持久化（path 4 α）：controller 重启后从 SQLite 重放 in-flight job。
+# 不进 fuxi-events——dist 是 cli 层概念；直接引 workspace sqlx 即可。
+sqlx.workspace = true
 # dist HMAC 鉴权（path 3）
 secrecy.workspace = true
 hmac.workspace = true

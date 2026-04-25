@@ -27,6 +27,7 @@ pub mod dist;
 pub mod dist_auth;
 pub mod dist_auth_client;
 pub mod dist_event_client;
+pub mod dist_persistence;
 pub mod draft_stash;
 pub mod extractor_hook;
 pub mod ipc;
