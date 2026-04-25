@@ -190,7 +190,8 @@ impl NetworkBusClient {
     }
 
     /// 取出最多 `n` 条事件——flush_loop 一个 batch 调用。空 vec 表示无事件。
-    async fn take_batch(&self, n: usize) -> Vec<Event> {
+    /// `pub(crate)`：γ 路 worker 桥接的单测直接 drain 队列断言内容，不必起 mock controller。
+    pub(crate) async fn take_batch(&self, n: usize) -> Vec<Event> {
         let mut g = self.inner.lock().await;
         let take = g.queue.len().min(n);
         g.queue.drain(..take).collect()
