@@ -43,13 +43,21 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use fuxi_core::DeliverableKind;
-use fuxi_core::event::{Event, EventKind};
+use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
+
+/// AgentRequestReview retry 退避序列（毫秒，指数退避）。
+///
+/// 暴露 `pub(crate)` 让单测 + delta 的 e2e fixture 直接复用——若 timeout
+/// 预算调整，改这一处即可（delta 算 sum + buffer 作 timeout 等待预算）。
+/// 当前 sum = 1700ms（200+500+1000），delta 用 2.5s 留余量。
+pub(crate) const REVIEW_RETRY_BACKOFF_MS: &[u64] = &[200, 500, 1000];
 
 /// 内部 role 黑名单：这些门客的 [`EventKind::AgentDead`] **不抄送**给玄女。
 ///
@@ -205,6 +213,37 @@ fn build_review_timeout_prompt(
     )
 }
 
+/// AgentRequestReview 投递重试——首发 + 按 `backoff_ms` 序列指数退避 retry。
+///
+/// 全部失败时返 `Err`；调用方负责发 [`EventKind::ReviewRequestTimeout`] 兜底。
+/// 拆出独立函数方便单测（生产传 [`REVIEW_RETRY_BACKOFF_MS`]，测试传 `&[1, 2, 4]` 等）。
+pub(crate) async fn try_intervene_with_retry(
+    intervener: &dyn Intervener,
+    target: AgentId,
+    prompt: &str,
+    backoff_ms: &[u64],
+) -> Result<()> {
+    // 首发——若成功直接返回，不进 retry。
+    let mut last_err = match intervener.intervene(target, true, prompt).await {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    for (idx, &ms) in backoff_ms.iter().enumerate() {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        match intervener.intervene(target, true, prompt).await {
+            Ok(()) => {
+                debug!(retry = idx + 1, "review intervene retry succeeded");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(retry = idx + 1, error = %e, "review intervene retry failed");
+                last_err = e;
+            }
+        }
+    }
+    Err(last_err)
+}
+
 /// 系统事件 → 玄女唤醒桥。
 pub struct SystemEventBridge;
 
@@ -230,14 +269,53 @@ impl SystemEventBridge {
         xuannv_id: AgentId,
         trigger_lookup: Arc<dyn TriggerLookup>,
     ) -> JoinHandle<()> {
+        Self::spawn_inner(
+            intervener,
+            bus,
+            xuannv_id,
+            trigger_lookup,
+            REVIEW_RETRY_BACKOFF_MS,
+        )
+    }
+
+    /// 测试专用：注入自定义 backoff（避免实测拖慢 1.7s）。
+    #[cfg(test)]
+    pub(crate) fn spawn_with_backoff_for_test(
+        intervener: Arc<dyn Intervener>,
+        bus: EventBus,
+        xuannv_id: AgentId,
+        trigger_lookup: Arc<dyn TriggerLookup>,
+        backoff_ms: &'static [u64],
+    ) -> JoinHandle<()> {
+        Self::spawn_inner(intervener, bus, xuannv_id, trigger_lookup, backoff_ms)
+    }
+
+    fn spawn_inner(
+        intervener: Arc<dyn Intervener>,
+        bus: EventBus,
+        xuannv_id: AgentId,
+        trigger_lookup: Arc<dyn TriggerLookup>,
+        backoff_ms: &'static [u64],
+    ) -> JoinHandle<()> {
         let mut sub = bus.subscribe();
+        // bus 既要喂 subscribe（已 move 进上面这行），又要在 handle_event 里用作 publish
+        // ReviewRequestTimeout 的句柄——clone 一份给闭包持。
+        let bus_for_handler = bus.clone();
         tokio::spawn(async move {
             while let Some(item) = sub.next().await {
                 let Ok(ev) = item else {
                     // 即使底层出错也尽量继续；具体 Lagged 已被 subscribe 过滤。
                     continue;
                 };
-                handle_event(&*intervener, &*trigger_lookup, xuannv_id, ev).await;
+                handle_event(
+                    &*intervener,
+                    &*trigger_lookup,
+                    xuannv_id,
+                    &bus_for_handler,
+                    backoff_ms,
+                    ev,
+                )
+                .await;
             }
             debug!("SystemEventBridge: 订阅流结束，退出");
         })
@@ -249,6 +327,8 @@ async fn handle_event(
     intervener: &dyn Intervener,
     trigger_lookup: &dyn TriggerLookup,
     xuannv_id: AgentId,
+    bus: &EventBus,
+    backoff_ms: &[u64],
     ev: Event,
 ) {
     match ev.kind {
@@ -305,7 +385,7 @@ async fn handle_event(
         }
         EventKind::AgentRequestReview {
             agent,
-            task: _,
+            task,
             deliverable_kind,
             ref summary,
             ref artifact_ref,
@@ -317,14 +397,12 @@ async fn handle_event(
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
             let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
-            let interrupt_first = should_interrupt_worker_report(lag_ms);
             info!(
                 %agent,
                 %role,
                 kind = deliverable_kind_tag(deliverable_kind),
                 lag_ms,
-                interrupt_first,
-                "bridge: 转发 AgentRequestReview 到玄女"
+                "bridge: 转发 AgentRequestReview 到玄女（带 retry）"
             );
             let prompt = build_request_review_prompt(
                 agent,
@@ -333,12 +411,29 @@ async fn handle_event(
                 summary,
                 artifact_ref.as_deref(),
             );
-            if let Err(e) = intervener
-                .intervene(xuannv_id, interrupt_first, &prompt)
-                .await
+            // AgentRequestReview 永远 interrupt——门客主动找玄女 = 高优先级
+            // attention 信号，不让中间 turn 把它挤晚。
+            let started = std::time::Instant::now();
+            if let Err(e) =
+                try_intervene_with_retry(intervener, xuannv_id, &prompt, backoff_ms).await
             {
-                // 注意：失败仅 warn——retry + ReviewRequestTimeout 兜底是 task #4 的活。
-                warn!(error = %e, "bridge: intervene(AgentRequestReview) 失败");
+                let waited_for_ms = started.elapsed().as_millis() as u64;
+                warn!(error = %e, %agent, waited_for_ms, "bridge: AgentRequestReview retry 全失败，发 ReviewRequestTimeout 兜底");
+                let mut meta = EventMeta::now();
+                meta.agent = ev.meta.agent;
+                meta.task = ev.meta.task;
+                meta.session = ev.meta.session;
+                if let Err(e) = bus.publish(Event {
+                    meta,
+                    kind: EventKind::ReviewRequestTimeout {
+                        original_event_id: ev.meta.id,
+                        agent,
+                        task,
+                        waited_for_ms,
+                    },
+                }) {
+                    warn!(error = %e, "bridge: publish ReviewRequestTimeout 失败");
+                }
             }
         }
         EventKind::ReviewRequestTimeout {
@@ -434,6 +529,9 @@ mod tests {
     struct MockIntervener {
         calls: Mutex<Vec<(AgentId, bool, String)>>,
         roles: Mutex<HashMap<AgentId, String>>,
+        /// 前 N 次 intervene 返 Err，第 N+1 次起返 Ok。
+        /// `None` = 全 Ok（默认）；`Some(usize::MAX)` = 永远失败。
+        fail_first_n: Mutex<Option<usize>>,
     }
 
     impl MockIntervener {
@@ -443,6 +541,16 @@ mod tests {
 
         async fn set_role(&self, id: AgentId, role: &str) {
             self.roles.lock().await.insert(id, role.to_string());
+        }
+
+        /// 让前 N 次 intervene 失败（用于 retry 测试）。
+        async fn set_fail_first_n(&self, n: usize) {
+            *self.fail_first_n.lock().await = Some(n);
+        }
+
+        /// 让所有 intervene 失败（用于 timeout 兜底测试）。
+        async fn set_fail_always(&self) {
+            *self.fail_first_n.lock().await = Some(usize::MAX);
         }
 
         async fn snapshot(&self) -> Vec<(AgentId, bool, String)> {
@@ -458,10 +566,22 @@ mod tests {
             interrupt_first: bool,
             text: &str,
         ) -> Result<()> {
-            self.calls
-                .lock()
-                .await
-                .push((agent_id, interrupt_first, text.to_string()));
+            // 先记录调用次数（无论成功失败都要数到，retry 才能验证次数）。
+            let call_idx = {
+                let mut calls = self.calls.lock().await;
+                calls.push((agent_id, interrupt_first, text.to_string()));
+                calls.len() - 1
+            };
+            let mut fail_lock = self.fail_first_n.lock().await;
+            if let Some(n) = *fail_lock {
+                if n == usize::MAX || call_idx < n {
+                    return Err(crate::error::OrchestratorError::Other(format!(
+                        "mock fail (call_idx={call_idx}, fail_first_n={n})"
+                    )));
+                }
+                // 已耗尽 fail 配额，consume 之后此 mock 之后都 Ok。
+                *fail_lock = None;
+            }
             Ok(())
         }
         async fn role_of(&self, agent_id: AgentId) -> Option<String> {
@@ -953,5 +1073,145 @@ mod tests {
             mock.snapshot().await.is_empty(),
             "extractor 死不应抄送给玄女"
         );
+    }
+
+    // ─── #4 retry + timeout 兜底 ──────────────────────────────
+
+    /// retry 第一次失败、第二次成功 → 共两次调用，最终 Ok。
+    /// 直接戳 `try_intervene_with_retry`，不走 bus，避免 bus 异步噪音。
+    #[tokio::test]
+    async fn review_intervene_retry_succeeds_on_second_try() {
+        let xuannv = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_fail_first_n(1).await;
+
+        // 极短 backoff（1+2ms）让测试不拖慢 CI——生产用 REVIEW_RETRY_BACKOFF_MS。
+        let result = try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4]).await;
+        assert!(result.is_ok(), "第二次应成功: {result:?}");
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 2, "共两次调用：第一次 fail + 第二次 ok");
+        assert!(calls.iter().all(|(t, _, _)| *t == xuannv));
+    }
+
+    /// retry 全失败 → 返 Err（兜底事件由 handle_event 决定 publish）。
+    #[tokio::test]
+    async fn review_intervene_retry_returns_err_when_all_fail() {
+        let xuannv = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_fail_always().await;
+
+        let result = try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4]).await;
+        assert!(result.is_err(), "全失败应返 Err");
+        let calls = mock.snapshot().await;
+        // backoff len = 3 → 共 1 (首发) + 3 (retry) = 4 次调用。
+        assert_eq!(calls.len(), 4, "首发 1 次 + retry 3 次 = 4 次：{calls:?}");
+    }
+
+    /// retry 全失败时 bridge publish ReviewRequestTimeout 兜底事件（核心断言）。
+    /// 用 spawn_with 走完整流：mock 全 fail → 桥 retry exhaust → bus 上能收到 ReviewRequestTimeout。
+    #[tokio::test]
+    async fn review_intervene_timeout_publishes_fallback_event() {
+        // 极小 buffer 不影响——我们只发 2 条，buffer=64 默认就够。
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        mock.set_fail_always().await;
+
+        // 在 bus 上单独订一个 sub 监听后续事件——必须先订阅再发，broadcast 漏发给晚到者。
+        let mut observer = bus.subscribe();
+
+        // 用极短 backoff 避免 1.7s 实测耗时——通过 cfg(test) 隐藏接口。
+        let _h = SystemEventBridge::spawn_with_backoff_for_test(
+            mock.clone(),
+            bus.clone(),
+            xuannv,
+            empty_lookup(),
+            &[1, 2, 4],
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = fuxi_core::id::TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        let original_event_id = meta.id;
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: DeliverableKind::CodeChange,
+                summary: "test fallback".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish AgentRequestReview");
+
+        // 期间桥跑：4 次 intervene 全 fail → publish ReviewRequestTimeout。
+        // 在 observer 上读到的事件流：第 1 条 = 我们刚 publish 的 AgentRequestReview；
+        // 后续应能等到一条 ReviewRequestTimeout。给 500ms 总预算（backoff sum ~7ms + 调度噪音）。
+        let mut saw_timeout = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, observer.next()).await {
+                Ok(Some(Ok(ev))) => {
+                    if let EventKind::ReviewRequestTimeout {
+                        original_event_id: oid,
+                        agent,
+                        task: t,
+                        waited_for_ms,
+                    } = &ev.kind
+                    {
+                        assert_eq!(*oid, original_event_id, "兜底事件须关联原 event id");
+                        assert_eq!(*agent, worker);
+                        assert_eq!(*t, task);
+                        assert!(*waited_for_ms > 0, "waited_for_ms > 0: {waited_for_ms}");
+                        saw_timeout = true;
+                        break;
+                    }
+                }
+                Ok(Some(Err(_))) => continue, // Lagged 或别的 recv 错——继续
+                Ok(None) => break,            // 流结束
+                Err(_) => break,              // 超时
+            }
+        }
+        assert!(saw_timeout, "retry 全 fail 应 publish ReviewRequestTimeout");
+
+        // 也验证：retry 的 4 次 intervene 都数到了——
+        // AgentRequestReview 首发 1 次 + retry 3 次 = 4 次 REVIEW_REQUEST。
+        // ReviewRequestTimeout 自身又触发 1 次 REVIEW_TIMEOUT intervene（白名单）——
+        // 共 5 次。这是预期：兜底事件本就要让玄女知情。
+        let calls = mock.snapshot().await;
+        let review_req_calls = calls
+            .iter()
+            .filter(|(_, _, t)| t.contains("[REVIEW_REQUEST]"))
+            .count();
+        assert_eq!(
+            review_req_calls, 4,
+            "AgentRequestReview 首发 1 + retry 3 = 4 次：{calls:?}"
+        );
+        let review_timeout_calls = calls
+            .iter()
+            .filter(|(_, _, t)| t.contains("[REVIEW_TIMEOUT]"))
+            .count();
+        assert!(
+            review_timeout_calls >= 1,
+            "兜底 ReviewRequestTimeout 也应触发一次 intervene：{calls:?}"
+        );
+    }
+
+    /// retry 序列被 const 暴露给 delta 的 e2e fixture 用，验证字面量。
+    #[test]
+    fn review_retry_backoff_const_matches_decision() {
+        assert_eq!(REVIEW_RETRY_BACKOFF_MS, &[200u64, 500, 1000]);
+        let total: u64 = REVIEW_RETRY_BACKOFF_MS.iter().sum();
+        assert_eq!(total, 1700, "delta 用此 sum 算 timeout 预算（2.5s 留余量）");
     }
 }
