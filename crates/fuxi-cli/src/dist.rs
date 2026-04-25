@@ -2738,4 +2738,319 @@ mod tests {
             "终态 output 应标注 cancelled, 实际: {out}"
         );
     }
+
+    // ── P1-δ · 韧性 e2e（心跳网络中断恢复 / sweep_stale 重派）──
+
+    /// 在 worker 与真 controller 之间插入一个**仅拦截 `/dist/heartbeat`** 的代理。
+    /// 切换 `block_hb` 为 true 时返 503 模拟链路抖动；其他路由始终透传。
+    /// 复用真 reqwest::Client 转发，避免重写 axum body 解析。
+    async fn spawn_hb_blocking_proxy(
+        upstream: String,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::body::Bytes;
+        use axum::http::{HeaderMap, Method, Uri};
+        use std::sync::atomic::AtomicBool;
+
+        #[derive(Clone)]
+        struct ProxyState {
+            upstream: String,
+            client: Client,
+            block_hb: Arc<AtomicBool>,
+        }
+
+        let block_hb = Arc::new(AtomicBool::new(false));
+        let state = ProxyState {
+            upstream,
+            client: Client::new(),
+            block_hb: block_hb.clone(),
+        };
+
+        // 单一 fallback handler 转发任意路径——只在 path == /dist/heartbeat 且
+        // block_hb=true 时返 503，模拟"controller 心跳通道拒包"。
+        async fn forward(
+            axum::extract::State(st): axum::extract::State<ProxyState>,
+            method: Method,
+            uri: Uri,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> axum::response::Response {
+            let path_q = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+            if uri.path() == "/dist/heartbeat"
+                && st.block_hb.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (StatusCode::SERVICE_UNAVAILABLE, "hb blocked by proxy").into_response();
+            }
+            let url = format!("{}{}", st.upstream, path_q);
+            let mut rb = st.client.request(method, &url);
+            // Host 头必须重写或不带——用上游内 reqwest 默认即可，所以剔除。
+            for (k, v) in headers.iter() {
+                if k.as_str().eq_ignore_ascii_case("host") {
+                    continue;
+                }
+                rb = rb.header(k, v);
+            }
+            let resp = match rb.body(body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return (StatusCode::BAD_GATEWAY, format!("proxy upstream err: {e}"))
+                        .into_response();
+                }
+            };
+            let status = resp.status();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            (status, bytes).into_response()
+        }
+
+        let app = Router::new().fallback(forward).with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy bind");
+        let addr = listener.local_addr().expect("proxy addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (format!("http://{addr}"), block_hb, handle)
+    }
+
+    /// 网络中断恢复：worker 在心跳通道被拒一段时间后链路恢复，仍能继续上报、
+    /// 拉新任务并完成。覆盖"短暂网络抖动不应让 worker 死掉"。
+    #[tokio::test]
+    async fn worker_heartbeat_network_interruption_recovers() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        let (proxy_url, hb_blocked, proxy_handle) = spawn_hb_blocking_proxy(base.clone()).await;
+        let active = Arc::new(AtomicUsize::new(0));
+        let stub = Arc::new(StubAdapter {
+            // 每 job 短跑——重点不在并发，而在中断窗口前后两轮 pull 都成功。
+            behavior: StubBehavior::Sleep(Duration::from_millis(100)),
+            active: active.clone(),
+        });
+        let factory = make_factory(stub);
+
+        let args = DistWorkerArgs {
+            controller: proxy_url.clone(),
+            node: "nodeR".into(),
+            token: Some("tok".into()),
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 50,
+            tags: vec![],
+            max_concurrency: 1,
+        };
+
+        // 心跳 100ms——中断/恢复窗口要按 hb 间隔决议。
+        let hb_interval = Duration::from_millis(100);
+        let worker_handle = tokio::spawn(async move {
+            let _ = super::run_worker_with(args, "tok".into(), factory, hb_interval).await;
+        });
+
+        // 派一条 job，等它跑完，验证基线通畅。
+        let j1 = enq_simple(&ctrl, "before-outage").await;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if ctrl.job_status(&j1).await.done {
+                break;
+            }
+            if Instant::now() > deadline {
+                worker_handle.abort();
+                proxy_handle.abort();
+                srv.abort();
+                panic!("中断前 baseline job 2s 未完成");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // baseline ok=true
+        assert_eq!(ctrl.job_status(&j1).await.ok, Some(true));
+
+        // 等 worker 至少发一次心跳让 controller.last_seen 被刷过——后面验证恢复后能再次刷。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let last_seen_pre = ctrl
+            .node_info("nodeR")
+            .await
+            .and_then(|n| n.last_seen)
+            .expect("节点 baseline 后应有 last_seen");
+
+        // 模拟链路中断：心跳通道返 503 持续 ~600ms（≈ 6 个心跳被拒）。
+        // 期间 pull / report 仍可走（其它路由透传），但心跳全失败。
+        hb_blocked.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        // 恢复
+        hb_blocked.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // 给恢复后至少 2 个心跳间隔 + 一点抖动，确保 last_seen 被新心跳刷新。
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let last_seen_post = ctrl
+            .node_info("nodeR")
+            .await
+            .and_then(|n| n.last_seen)
+            .expect("节点恢复后仍应在 controller 视图中");
+        assert!(
+            last_seen_post > last_seen_pre,
+            "恢复后心跳 last_seen 应有推进，pre={last_seen_pre:?} post={last_seen_post:?}"
+        );
+
+        // 派恢复后的 job，验证 worker 仍正常 pickup 且 inflight 对账正确。
+        let j2 = enq_simple(&ctrl, "after-outage").await;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if ctrl.job_status(&j2).await.done {
+                break;
+            }
+            if Instant::now() > deadline {
+                worker_handle.abort();
+                proxy_handle.abort();
+                srv.abort();
+                panic!("恢复后 job 2s 未完成（worker 卡死或 hb 路径未恢复）");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let s2 = ctrl.job_status(&j2).await;
+        assert_eq!(s2.ok, Some(true), "恢复后 job 应 ok=true");
+
+        // 终态：worker 既不残留 inflight，也未被 controller 视作死节点（last_seen 近）。
+        // 给最后一次心跳到达 controller 一个窗口（~hb_interval + jitter）。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let info = ctrl.node_info("nodeR").await.unwrap();
+        assert!(
+            info.inflight.is_empty(),
+            "终态 inflight 应清空, 实际: {:?}",
+            info.inflight
+        );
+
+        worker_handle.abort();
+        proxy_handle.abort();
+        srv.abort();
+    }
+
+    /// sweep_stale 后被孤立 job 重派给 live worker 完成。覆盖"worker 突死，
+    /// 已派出的 job 不会永远卡住"——controller 把它捞回 queue 前端，下一个
+    /// 可派 worker 拉走完成。
+    #[tokio::test]
+    async fn sweep_stale_redispatches_orphaned_job() {
+        let (ctrl, base, srv) = spawn_controller().await;
+        let active = Arc::new(AtomicUsize::new(0));
+
+        // worker_a 跑一个永远不会自然结束的任务（5s sleep），让它在被 sweep
+        // 前一直占着 job——这样 sweep 才有"orphan" 可回收。
+        let stub_a = Arc::new(StubAdapter {
+            behavior: StubBehavior::SleepResponsiveToOuterCancel(Duration::from_secs(5)),
+            active: active.clone(),
+        });
+        let factory_a = make_factory(stub_a);
+        let args_a = DistWorkerArgs {
+            controller: base.clone(),
+            node: "workerA".into(),
+            token: Some("tok".into()),
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 50,
+            tags: vec![],
+            max_concurrency: 1,
+        };
+
+        let job_id = enq_simple(&ctrl, "orphaned").await;
+
+        // worker_a 起 + 拉到 job
+        let worker_a = tokio::spawn(async move {
+            let _ =
+                super::run_worker_with(args_a, "tok".into(), factory_a, Duration::from_millis(200))
+                    .await;
+        });
+        let pickup_deadline = Instant::now() + Duration::from_secs(2);
+        while active.load(Ordering::SeqCst) == 0 {
+            if Instant::now() > pickup_deadline {
+                worker_a.abort();
+                srv.abort();
+                panic!("workerA 1s 内未 pickup orphaned job");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // 确认 job 真在 controller.inflight + workerA.inflight
+        {
+            let g = ctrl.inner.lock().await;
+            assert!(
+                g.inflight.contains_key(&job_id),
+                "sweep 前 job 应在 controller.inflight"
+            );
+            let info = g.nodes.get("workerA").expect("workerA registered");
+            assert_eq!(info.inflight, vec![job_id.clone()]);
+        }
+
+        // workerA "死"——abort 心跳/拉取；从此 controller 收不到 A 的心跳。
+        worker_a.abort();
+        // 等一拍让 abort 生效（避免后续手动改 last_seen 后又被在飞中的 hb 刷回来）。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // 把 workerA.last_seen 推到很久以前，绕开"等真 60s sweep timeout"——
+        // 不依赖 sweep tick 间隔本身正确（那条由 spawn_sweep_task 单测覆盖），
+        // 这里直接调 sweep_stale 验证算法 + 后续派工链路。
+        {
+            let mut g = ctrl.inner.lock().await;
+            let node = g.nodes.get_mut("workerA").expect("A registered");
+            node.last_seen = Some(Instant::now() - Duration::from_secs(120));
+        }
+        let recycled = ctrl
+            .sweep_stale(Instant::now(), Duration::from_secs(30))
+            .await;
+        assert_eq!(recycled.len(), 1, "应仅回收 workerA");
+        assert_eq!(recycled[0].0, "workerA");
+        assert_eq!(recycled[0].1, vec![job_id.clone()]);
+        // job 已从 controller.inflight 移走、回到 queue 前端
+        {
+            let g = ctrl.inner.lock().await;
+            assert!(!g.inflight.contains_key(&job_id), "sweep 后 inflight 应清");
+            let head = g.global_queue.front().expect("queue 应有 orphan job");
+            assert_eq!(head.id, job_id, "orphan 应 push_front 到 queue 头");
+        }
+
+        // worker_b 起，应能拉到同一 job 完成（短任务，ok=true）。
+        let active_b = Arc::new(AtomicUsize::new(0));
+        let stub_b = Arc::new(StubAdapter {
+            behavior: StubBehavior::Sleep(Duration::from_millis(80)),
+            active: active_b.clone(),
+        });
+        let factory_b = make_factory(stub_b);
+        let args_b = DistWorkerArgs {
+            controller: base.clone(),
+            node: "workerB".into(),
+            token: Some("tok".into()),
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 50,
+            tags: vec![],
+            max_concurrency: 1,
+        };
+        let worker_b = tokio::spawn(async move {
+            let _ =
+                super::run_worker_with(args_b, "tok".into(), factory_b, Duration::from_millis(200))
+                    .await;
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let final_status = loop {
+            let s = ctrl.job_status(&job_id).await;
+            if s.done {
+                break s;
+            }
+            if Instant::now() > deadline {
+                worker_b.abort();
+                srv.abort();
+                panic!("workerB 2s 内未完成被回收的 job");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(final_status.ok, Some(true), "重派后应 ok=true");
+        assert_eq!(
+            final_status.node_id.as_deref(),
+            Some("workerB"),
+            "终态 node_id 应是 workerB"
+        );
+
+        worker_b.abort();
+        srv.abort();
+    }
 }
