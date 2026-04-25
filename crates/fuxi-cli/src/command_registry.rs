@@ -60,6 +60,11 @@ pub enum CommandAction {
     Status,
     /// `/nodes` 打开远端 worker 拓扑 overlay（P6）。F6 等价快捷键。
     Nodes,
+    /// `/pair` 生成一次性 6 位 PIN，120s 内允许手机 PWA 通过 `/api/auth/pair` 完成
+    /// 设备配对（β · Decision 14 D）。
+    Pair,
+    /// `/devices` 列出已签发 device token；带 `revoke <id>` 子命令吊销。
+    Devices(Option<String>),
 }
 
 /// 一条命令的全部元数据。
@@ -269,6 +274,22 @@ pub fn register_default() -> CommandRegistry {
         category: CommandCategory::Agent,
         action: CommandAction::Nodes,
     });
+    reg.register(Command {
+        slash: "/pair",
+        keybind: None,
+        description: "为新手机生成一次性 PIN（120s 有效）配对 IM PWA",
+        arg_names: vec![],
+        category: CommandCategory::Agent,
+        action: CommandAction::Pair,
+    });
+    reg.register(Command {
+        slash: "/devices",
+        keybind: None,
+        description: "列出已配对设备，支持 /devices revoke <token_id>",
+        arg_names: vec!["[revoke <id>]".to_string()],
+        category: CommandCategory::Agent,
+        action: CommandAction::Devices(None),
+    });
     reg
 }
 
@@ -381,7 +402,7 @@ mod tests {
     fn default_registry_covers_required_commands() {
         let reg = register_default();
         for slash in [
-            "/help", "/clear", "/quit", "/theme", "/tree", "/kill", "/status",
+            "/help", "/clear", "/quit", "/theme", "/tree", "/kill", "/status", "/pair", "/devices",
         ] {
             assert!(
                 reg.find_by_slash(slash).is_some(),
@@ -389,6 +410,20 @@ mod tests {
                 slash
             );
         }
+    }
+
+    #[test]
+    fn pair_and_devices_are_in_agent_category() {
+        let reg = register_default();
+        let pair = reg.find_by_slash("/pair").expect("/pair 必在");
+        assert_eq!(pair.category, CommandCategory::Agent);
+        assert_eq!(pair.action, CommandAction::Pair);
+        assert!(pair.arg_names.is_empty());
+
+        let dev = reg.find_by_slash("/devices").expect("/devices 必在");
+        assert_eq!(dev.category, CommandCategory::Agent);
+        assert_eq!(dev.action, CommandAction::Devices(None));
+        assert_eq!(dev.arg_names, vec!["[revoke <id>]".to_string()]);
     }
 
     #[test]

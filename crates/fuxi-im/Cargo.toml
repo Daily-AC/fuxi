@@ -18,6 +18,26 @@ serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+chrono.workspace = true
+uuid = { workspace = true }
+sqlx.workspace = true
+# γ · WS handler 用 StreamExt + Stream 做事件流 select。
+futures-util.workspace = true
+# β · HMAC-SHA256 device token；与 fuxi-cli/dist_auth 同协议族（公理 #6 借鉴不借代码）
+hmac.workspace = true
+sha2.workspace = true
+secrecy.workspace = true
+# 常量时间签名比较防 timing oracle（与 fuxi-cli 同版本）
+subtle = "2"
+# token 编码 base64url（不带 padding）
+base64 = "0.22"
+# 6 位 PIN + 32 字节 HMAC key 随机源
+rand = "0.8"
+# δ · async fn in trait + dyn dispatch（PushSender / hooks）
+async-trait.workspace = true
+# δ · VAPID + Web Push（hyper-client 复用 fuxi 已有 hyper 系；
+# 默认 isahc 关掉以避第二个 HTTP 栈）
+web-push = { version = "0.11", default-features = false, features = ["hyper-client"] }
 
 [dev-dependencies]
 fuxi-workspace.workspace = true
@@ -25,3 +45,7 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
+# γ WS 端到端测试：起真实 axum + 真实 ws/http 客户端，照抄 firehose/tests 模式。
+tokio-tungstenite.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+url = "2"
