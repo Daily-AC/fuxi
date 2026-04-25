@@ -33,6 +33,11 @@ pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// 暂时不可用——玄女未就绪、密码未设等"现在不能服务，但路径正确"。
+    /// 走 503，PWA 应在 N 秒后重试。
+    #[error("service unavailable: {0}")]
+    Unavailable(String),
+
     /// 未实装——给 β/γ/δ 的 stub handler 用，避免 panic。
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
@@ -44,6 +49,11 @@ pub enum Error {
     /// 下层事件总线错误。
     #[error("events: {0}")]
     Events(#[from] fuxi_events::Error),
+
+    /// 编排层错误透传——`/api/intervene` `/api/dispatch` 调 Fuxi 时常见。
+    /// `AgentNotFound` 在 IntoResponse 单独翻 503（玄女未起场景，PWA 应能区分）。
+    #[error("orchestrator: {0}")]
+    Orchestrator(#[from] fuxi_orchestrator::OrchestratorError),
 
     /// 兜底——内部错误，对客户端隐藏细节。
     #[error("internal: {0}")]
@@ -61,7 +71,13 @@ impl Error {
             Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
-            Error::Io(_) | Error::Events(_) | Error::Internal(_) => {
+            // 玄女不在 → 503（让 PWA 区分"路由错"和"暂时不可用，请重试"）；
+            // 其余编排错走 500。
+            Error::Unavailable(_)
+            | Error::Orchestrator(fuxi_orchestrator::OrchestratorError::AgentNotFound(_)) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Error::Io(_) | Error::Events(_) | Error::Orchestrator(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
@@ -82,9 +98,14 @@ impl IntoResponse for Error {
             Error::BadRequest(_) => "bad_request",
             Error::Unauthorized(_) => "unauthorized",
             Error::NotFound(_) => "not_found",
+            Error::Unavailable(_) => "unavailable",
             Error::NotImplemented(_) => "not_implemented",
             Error::Json(_) => "json",
             Error::Events(_) => "events",
+            Error::Orchestrator(fuxi_orchestrator::OrchestratorError::AgentNotFound(_)) => {
+                "xuannv_unavailable"
+            }
+            Error::Orchestrator(_) => "orchestrator",
             Error::Internal(_) => "internal",
         };
         let body = ErrorBody {
