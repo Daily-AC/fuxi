@@ -35,11 +35,15 @@ export interface Upload {
   sha256: string;
 }
 
-/** intervene 阶段 3 扩 attachments 字段（β 配合）。*/
+/** intervene 阶段 3 扩 attachments 字段（β 配合）。
+ *  阶段 #N3 扩 `target`：私聊页发给特定 worker 时带 worker agent uuid；
+ *  缺省（玄女主对话）走老路径不带 target。β #N5 落后才真消费这个字段。*/
 export interface InterveneRequestV2 {
   text: string;
   task_id?: TaskId | null;
   attachments?: string[];
+  /** 私聊页 → worker agent uuid。玄女主对话留空。*/
+  target?: string;
 }
 
 // ---------- 阶段 4 · 任务 sheet 视图模型（β #21 契约目标） ----------
