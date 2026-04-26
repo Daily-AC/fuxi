@@ -3,32 +3,37 @@
 // .impeccable.md 是源头，这里跟它对齐。
 
 export const tokens = {
-  // surfaces
-  bg: "#0a0a0a",
-  surface: "#161616",
-  surfaceElevated: "#1c1c1c",
-  border: "#262626",
-  borderStrong: "#333333",
+  // surfaces · 暖灰棕（Claude Code 风），不是冷黑
+  bg: "#1F1E1B",
+  surface: "#2A2925",
+  surfaceElevated: "#33312D",
+  border: "#3A3835",
+  borderStrong: "#48453F",
 
-  // text
-  textPrimary: "#f4f4f5",
-  textSecondary: "#a1a1aa",
-  textMuted: "#71717a",
+  // text · 奶白米白
+  textPrimary: "#F5F1E8",
+  textSecondary: "#B8B0A0",
+  textMuted: "#807868",
 
-  // accent + role tints
-  accent: "#22d3ee", // fuxi cyan
-  accentDim: "#0e7490",
-  xuannv: "#a78bfa",
-  luban: "#fbbf24",
-  pusong: "#34d399",
+  // accent · Anthropic 橙
+  accent: "#D97757",
+  accentSubtle: "#3F2E26", // hover/active 暗底
+  accentDim: "#3F2E26", // 兼容字段，指向同一暗调
+  onAccent: "#1A0F08", // accent 底上的文字色，深棕，跟 #D97757 对比 ≥ 4.5:1
 
-  // chat bubbles
-  userBubble: "#1e3a5f",
+  // role 角色色（暖系协调）
+  xuannv: "#C4A8E8",
+  luban: "#E5A547",
+  pusong: "#A0C277",
+
+  // chat bubbles · 棕调暗底
+  userBubble: "#3D332A",
+  userBubbleText: "#F5F1E8",
 
   // semantic state
-  success: "#10b981",
-  warning: "#f59e0b",
-  danger: "#ef4444",
+  success: "#88B47B",
+  warning: "#E5B047",
+  danger: "#D97777",
 
   // typography
   fontSans: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif',

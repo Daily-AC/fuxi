@@ -4,27 +4,37 @@
  */
 
 :root {
-  --bg: #0a0a0a;
-  --surface: #161616;
-  --surface-elevated: #1c1c1c;
-  --border: #262626;
-  --border-strong: #333333;
+  /* surfaces · 暖灰棕（Claude Code 风） */
+  --bg: #1F1E1B;
+  --surface: #2A2925;
+  --surface-elevated: #33312D;
+  --border: #3A3835;
+  --border-strong: #48453F;
 
-  --text-primary: #f4f4f5;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
+  /* text · 奶白米白 */
+  --text-primary: #F5F1E8;
+  --text-secondary: #B8B0A0;
+  --text-muted: #807868;
 
-  --accent: #22d3ee;
-  --accent-dim: #0e7490;
-  --xuannv: #a78bfa;
-  --luban: #fbbf24;
-  --pusong: #34d399;
+  /* accent · Anthropic 橙 */
+  --accent: #D97757;
+  --accent-subtle: #3F2E26;
+  --accent-dim: #3F2E26; /* 兼容旧引用 */
+  --on-accent: #1A0F08; /* accent 底上的文字色，深棕保证 ≥ 4.5:1 对比 */
 
-  --user-bubble: #1e3a5f;
+  /* role 角色色（暖系） */
+  --xuannv: #C4A8E8;
+  --luban: #E5A547;
+  --pusong: #A0C277;
 
-  --success: #10b981;
-  --warning: #f59e0b;
-  --danger: #ef4444;
+  /* user bubble · 棕调 */
+  --user-bubble: #3D332A;
+  --user-bubble-text: #F5F1E8;
+
+  /* state */
+  --success: #88B47B;
+  --warning: #E5B047;
+  --danger: #D97777;
 
   --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC",
     system-ui, sans-serif;
