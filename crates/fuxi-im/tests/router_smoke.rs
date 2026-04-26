@@ -3,7 +3,7 @@
 //! 只验"骨架装得上 + 三条最小契约成立"，不碰 β/γ/δ 的业务逻辑。
 //! 三条契约：
 //!   1. `GET /healthz` → 200 + body `"ok"`（layer 豁免）
-//!   2. `GET /api/tasks?root=1` 带合法 cookie → 200 + JSON 数组
+//!   2. `GET /api/tasks?root=1` 带合法 cookie → 200 + `{ running, completed }` JSON
 //!   3. 不存在路由 → 404
 //!
 //! #15 之后：`/api/*` 在 router 上强制带合法 cookie——本测试用注入 secret + 手签
@@ -121,7 +121,10 @@ async fn api_tasks_root_returns_json_array() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-    assert!(v.is_array(), "expect json array, got {v}");
+    // β · #21 后契约改成 `{ running: [], completed: [] }`
+    assert!(v.is_object(), "expect json object, got {v}");
+    assert!(v["running"].is_array(), "running 应是数组：{v}");
+    assert!(v["completed"].is_array(), "completed 应是数组：{v}");
 }
 
 #[tokio::test]

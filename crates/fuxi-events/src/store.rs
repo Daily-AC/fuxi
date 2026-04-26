@@ -168,6 +168,27 @@ impl EventStore {
         Ok(out)
     }
 
+    /// 列出 events 表里 distinct 的 task id（全部历史）—— 给 IM 后端 `/api/tasks`
+    /// 重建 task 列表用。返回顺序：按"该 task 最早事件"的 rowid 升序，让玄女
+    /// 派发顺序天然成为 task 列表顺序。
+    ///
+    /// 该接口拉的是 task id（uuid 字符串），handler 自行 parse + 调
+    /// `history_for_task` 拿每条 task 的事件做语义聚合。
+    pub async fn list_task_ids(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT task FROM events WHERE task IS NOT NULL \
+             GROUP BY task ORDER BY MIN(rowid) ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let task: String = row.try_get("task")?;
+            out.push(task);
+        }
+        Ok(out)
+    }
+
     /// 取最近 `limit` 条事件，按 `rowid` 倒序（最新在前）。
     ///
     /// 给 `fuxi events`（M3.7）救急 CLI 用——绕开 daemon 直读 SQLite 看尾巴。

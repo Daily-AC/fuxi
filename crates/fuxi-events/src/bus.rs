@@ -201,6 +201,12 @@ impl EventBus {
         self.inner.store.history_for_task(task).await
     }
 
+    /// 列出所有曾出现过的 task id —— 给 IM `/api/tasks` 重建任务列表用。
+    /// 薄包装 `EventStore::list_task_ids`。
+    pub async fn list_task_ids(&self) -> Result<Vec<String>> {
+        self.inner.store.list_task_ids().await
+    }
+
     fn maybe_emit_lag_sentinel(&self, pending: usize) {
         // 为什么计数器：避免同一时刻狂刷 lag 哨兵反而加剧拥塞。
         let prev = self
