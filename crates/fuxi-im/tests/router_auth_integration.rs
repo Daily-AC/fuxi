@@ -316,3 +316,30 @@ async fn api_uploads_get_without_cookie_returns_401() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// β · #27 镜像端点也强制鉴权
+#[tokio::test]
+async fn api_workers_events_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let resp = app
+        .oneshot(req(
+            "/api/workers/00000000-0000-0000-0000-000000000000/events",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_workers_conv_ws_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let resp = app
+        .oneshot(req(
+            "/api/workers/00000000-0000-0000-0000-000000000000/conv",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

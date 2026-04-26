@@ -39,6 +39,15 @@ pub fn build(state: AppState) -> Router {
         .route("/api/conv", get(handlers::conv::conv_ws))
         // β · #17 IM 层聊天记录拉取（首屏预加载 + 翻页）
         .route("/api/conv/messages", get(handlers::conv::messages))
+        // β · #27 私聊页镜像端点（重设计 #N5）—— /api/conv 同模式按 agent 过滤
+        .route(
+            "/api/workers/{agent_id}/events",
+            get(handlers::workers::worker_events),
+        )
+        .route(
+            "/api/workers/{agent_id}/conv",
+            get(handlers::workers::worker_conv_ws),
+        )
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
         // β · #17 文件上传 / 下载
