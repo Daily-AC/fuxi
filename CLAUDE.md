@@ -91,7 +91,7 @@ fuxi/
 - SQLite WAL 模式在 macOS 上有偶发 `BUSY`——retry 封装进 EventStore，不往外抛。
 - **macOS tempdir symlink**：`TempDir::new()` 返回 `/var/folders/...`，但 `git worktree list --porcelain` 返回 `/private/var/folders/...`。列表比对**两侧都要 `canonicalize()`**，否则匹配失败。
 - **Codex model fallback 已改空串**（2026-04-20 `08358fa`）：`DEFAULT_MODEL_FALLBACK = ""` 不传 `-m`，让 codex 按登录账号自选。硬编任何具体模型都会在某种 auth 下被拒。API key 用户须 `export FUXI_CODEX_MODEL=<model>` 覆盖。
-- **Codex exec 不支持 follow-up**：`send_message` 直接返回 `CoreError::Other`。codex 门客是 spawn-per-dispatch 模式，不像 cc 那样支持同 session 续写。要多轮对话得换 codex `conversation` API（另一套）。
+- **Codex exec follow-up 限制**（2026-04-26 修措辞，原版"不支持 follow-up"误导过 IM 私聊页设计）：codex worker **busy 时**不支持 `send_message` follow-up（`agent-codex/src/agent.rs:165` 硬返 `CoreError::Other`）。**idle 时** intervene 入口走 degrade-dispatch 是正常路径（`orchestrator/src/fuxi.rs:553-592`），起新 codex 进程跑用户的话，用户视角无感。所以上层（PWA / 玄女 dispatch / etc）**不需要特殊处理 codex 类型**——只在 4xx 时给统一 toast「门客正忙，等这轮跑完再发」即可。要"同 session 多轮续写"得换 codex `conversation` API（另一套，目前未集成）。
 - **新 agent 适配器三条铁律**（S1/S2/S3 教训，commit `360a31e` 修掉的）：
   1. 必须提供 `launch_with_id(id, ...)`——不能自己 `AgentId::new()`，否则 `AgentSpawning`/`AgentReady` 属不同 id
   2. 任何事件 pump 要保证"无论怎么退出都摊回 Idle"，否则 shelf 永久 Busy
