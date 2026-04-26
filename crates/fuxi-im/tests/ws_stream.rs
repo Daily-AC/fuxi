@@ -17,6 +17,10 @@ use axum::http::{Request, StatusCode};
 use futures_util::StreamExt;
 use fuxi_core::{AgentId, Event, EventKind, EventMeta, TaskId};
 use fuxi_events::EventBus;
+use fuxi_im::auth::{COOKIE_NAME, HmacSecret, fresh_claims, sign_token};
+use fuxi_im::devices::DeviceStore;
+use fuxi_im::pair::PendingPairs;
+use fuxi_im::state::ImAuth;
 use fuxi_im::{AppState, router};
 use fuxi_orchestrator::Fuxi;
 use fuxi_workspace::GitWorktreeWorkspace;
@@ -26,6 +30,7 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::process::Command;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tower::ServiceExt;
 use url::Url;
@@ -65,11 +70,16 @@ async fn run_git(cwd: &std::path::Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?} failed");
 }
 
-/// 启 IM server——返回 base url、bus、xuannv_id（已注入）和 server handle。
+/// 启 IM server——返回 base url、bus、xuannv_id（已注入）、server handle 和
+/// 一个合法 cookie 字符串（`fuxi_im_token=...`）。`/api/*` 调用都要带它。
+///
+/// #15 之后：router 强制鉴权，所有真 server e2e 测试必须带 cookie。注入显式
+/// secret + 同 secret 签 token 是测试 helper 的固定模式。
 async fn spawn_im() -> (
     String,
     EventBus,
     AgentId,
+    String,
     TempDir,
     tokio::task::JoinHandle<()>,
 ) {
@@ -81,8 +91,21 @@ async fn spawn_im() -> (
     let xuannv_id = AgentId::new();
     fuxi.set_xuannv(xuannv_id).await;
 
-    let state = AppState::new(fuxi);
+    let secret = HmacSecret::from_string("ws-test-key".into());
+    let secret_arc = Arc::new(secret);
+    let im_auth = ImAuth {
+        secret: secret_arc.clone(),
+        pairs: Arc::new(PendingPairs::new()),
+        devices: None::<DeviceStore>,
+        password_path: None,
+        login_guard: Arc::new(fuxi_im::lockout::LoginGuard::new()),
+    };
+    let state = AppState::new(fuxi).with_im_auth(im_auth);
     let app = router(state);
+
+    let claims = fresh_claims("ws-test-device".into(), "ws-test".into());
+    let token = sign_token(&secret_arc, &claims).expect("sign");
+    let cookie = format!("{COOKIE_NAME}={token}");
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -90,7 +113,25 @@ async fn spawn_im() -> (
         axum::serve(listener, app).await.expect("serve");
     });
     let base = format!("http://{addr}");
-    (base, bus, xuannv_id, dir, h)
+    (base, bus, xuannv_id, cookie, dir, h)
+}
+
+/// 用合法 cookie 建 WebSocket 连接——所有 `/api/conv` `/api/tasks/.../stream`
+/// 测试都过这个 helper。
+async fn ws_connect_with_cookie(
+    url: &str,
+    cookie: &str,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+) {
+    let mut req = url.into_client_request().expect("ws into client request");
+    req.headers_mut().insert(
+        "Cookie",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(cookie)
+            .expect("cookie header value"),
+    );
+    connect_async(req).await.expect("ws connect")
 }
 
 fn agent_event(agent: AgentId, text: &str) -> Event {
@@ -142,9 +183,9 @@ async fn next_event(
 
 #[tokio::test]
 async fn ws_conv_streams_xuannv_events_live() {
-    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
     let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
-    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
     let (_w, mut r) = ws.split();
 
     // 给 server 一点时间订上 broadcast——不是轮询，是握手延迟。
@@ -162,9 +203,9 @@ async fn ws_conv_streams_xuannv_events_live() {
 
 #[tokio::test]
 async fn ws_conv_filters_out_other_agents() {
-    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
     let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
-    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
     let (_w, mut r) = ws.split();
 
     tokio::time::sleep(Duration::from_millis(120)).await;
@@ -186,7 +227,7 @@ async fn ws_conv_filters_out_other_agents() {
 
 #[tokio::test]
 async fn ws_conv_replay_from_cursor_then_tails_live() {
-    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
 
     // 先发三条历史；anchor = a。
     let a = agent_event(xuannv, "a");
@@ -205,7 +246,7 @@ async fn ws_conv_replay_from_cursor_then_tails_live() {
         anchor
     );
     let url = Url::parse(&url_s).expect("parse");
-    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
     let (_w, mut r) = ws.split();
 
     // 应严格在 a 之后——先 b、再 c。
@@ -232,7 +273,7 @@ async fn ws_conv_replay_from_cursor_then_tails_live() {
 
 #[tokio::test]
 async fn ws_task_stream_filters_by_task_id() {
-    let (base, bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
 
     let task_a = TaskId::new();
     let task_b = TaskId::new();
@@ -243,7 +284,7 @@ async fn ws_task_stream_filters_by_task_id() {
         task_a
     );
     let url = Url::parse(&url_s).expect("parse");
-    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
     let (_w, mut r) = ws.split();
     tokio::time::sleep(Duration::from_millis(120)).await;
 
@@ -266,9 +307,9 @@ async fn ws_task_stream_filters_by_task_id() {
 async fn ws_conv_survives_broadcast_lag() {
     // broadcast Lagged 不挂订阅链——CLAUDE.md 强调的坑。
     // 做法：扔大量事件 → server WS loop 应继续运行、客户端能继续读到后续事件。
-    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
     let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
-    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
     let (_w, mut r) = ws.split();
     tokio::time::sleep(Duration::from_millis(120)).await;
 
@@ -311,9 +352,9 @@ async fn ws_conv_survives_broadcast_lag() {
 async fn ws_event_kind_serde_roundtrip_preserves_tag_union() {
     // 防 wire format 退化：服务端下发的就是 `EventKind` 的 `#[serde(tag="type")]`，
     // 客户端拿到 JSON 反序列化回 `Event` 必须 OK，且 type tag 是 snake_case。
-    let (base, bus, xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
     let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
-    let (ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
     let (_w, mut r) = ws.split();
     tokio::time::sleep(Duration::from_millis(120)).await;
 
@@ -366,7 +407,7 @@ async fn ws_event_kind_serde_roundtrip_preserves_tag_union() {
 
 #[tokio::test]
 async fn http_task_events_returns_history_with_pagination() {
-    let (base, bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
     let task = TaskId::new();
 
     // 灌 5 条 task 事件 + 1 条噪声（不同 task）。
@@ -382,7 +423,12 @@ async fn http_task_events_returns_history_with_pagination() {
     let http = reqwest::Client::new();
     // 默认（无 from）：返全部 5 条该 task 历史，限 limit=3。
     let url = format!("{base}/api/tasks/{task}/events?limit=3");
-    let resp = http.get(&url).send().await.expect("get");
+    let resp = http
+        .get(&url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let evs: Vec<Event> = resp.json().await.expect("json");
     assert_eq!(evs.len(), 3, "limit=3 应只返 3 条");
@@ -402,7 +448,7 @@ async fn http_task_events_returns_history_with_pagination() {
 
 #[tokio::test]
 async fn http_task_events_with_cursor_returns_strictly_after() {
-    let (base, bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let (base, bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
     let task = TaskId::new();
 
     let a = task_event(task, "a");
@@ -416,7 +462,12 @@ async fn http_task_events_with_cursor_returns_strictly_after() {
 
     let http = reqwest::Client::new();
     let url = format!("{base}/api/tasks/{task}/events?from={anchor}");
-    let resp = http.get(&url).send().await.expect("get");
+    let resp = http
+        .get(&url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let evs: Vec<Event> = resp.json().await.expect("json");
     assert_eq!(evs.len(), 2, "anchor 之后 2 条");
@@ -432,27 +483,46 @@ async fn http_task_events_with_cursor_returns_strictly_after() {
 
 #[tokio::test]
 async fn http_task_events_rejects_bad_cursor() {
-    let (base, _bus, _xuannv, _dir, _srv) = spawn_im().await;
+    let (base, _bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
     let task = TaskId::new();
     let http = reqwest::Client::new();
     let url = format!("{base}/api/tasks/{task}/events?from=not-a-uuid");
-    let resp = http.get(&url).send().await.expect("get");
+    let resp = http
+        .get(&url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 /// 路由级冒烟：α 留的 `/api/tasks` 不动；γ 不该破坏它。
 #[tokio::test]
 async fn list_tasks_root_still_returns_array() {
-    let (_base, _bus, _xuannv, _dir, _srv) = spawn_im().await;
-    // 用 oneshot 拿一份独立的 router 验契约——避免和 server 的 listener 抢端口。
+    // 注：spawn_im() 在这里只是历史习惯——不需要起真 server，本测用 oneshot 即可。
+    // 单独起 router + 注入 secret + 手签 cookie 验"layer 不拦合法请求 + handler 返数组"。
     let bus = EventBus::with_memory_store().await.expect("bus");
-    let (_dir2, ws) = make_workspace().await;
+    let (_dir, ws) = make_workspace().await;
     let fuxi = Arc::new(Fuxi::new(bus, ws));
-    let app = router(AppState::new(fuxi));
+    let secret = HmacSecret::from_string("oneshot-key".into());
+    let secret_arc = Arc::new(secret);
+    let im_auth = ImAuth {
+        secret: secret_arc.clone(),
+        pairs: Arc::new(PendingPairs::new()),
+        devices: None::<DeviceStore>,
+        password_path: None,
+        login_guard: Arc::new(fuxi_im::lockout::LoginGuard::new()),
+    };
+    let app = router(AppState::new(fuxi).with_im_auth(im_auth));
+    let claims = fresh_claims("oneshot-device".into(), "oneshot".into());
+    let token = sign_token(&secret_arc, &claims).expect("sign");
+    let cookie = format!("{COOKIE_NAME}={token}");
+
     let resp = app
         .oneshot(
             Request::builder()
                 .uri("/api/tasks?root=1")
+                .header(axum::http::header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
         )
