@@ -1,0 +1,57 @@
+/* bottom tab bar · v3 spec §A
+ * 56px 高 · 3 项 [玄女][任务][节点] · 触控 ≥ 48px · active 橙色
+ * 不用 emoji / Unicode block 装饰 / shadow / gradient
+ */
+
+.bar {
+  flex-shrink: 0;
+  display: flex;
+  height: calc(56px + env(safe-area-inset-bottom, 0));
+  padding-bottom: env(safe-area-inset-bottom, 0);
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.tab {
+  flex: 1;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 48px;
+  padding: 6px 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: color var(--transition-fast);
+}
+
+.tab:active {
+  background: var(--surface);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.tab[aria-selected="true"] .dot {
+  background: var(--accent);
+  transform: scale(1.15);
+}
+
+.label {
+  font-size: var(--size-meta);
+  letter-spacing: 0.4px;
+  line-height: 1;
+}

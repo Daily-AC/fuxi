@@ -5,79 +5,77 @@ import {
   setApiOverride,
   useApi,
   type NavRoute,
-  type PageIndex,
+  type TabIndex,
 } from "~/components/ApiProvider";
 import { createMockApi } from "../mocks/api";
 import { type Component, createSignal, onMount } from "solid-js";
 
 afterEach(() => setApiOverride(null));
 
-const Probe: Component<{ onState: (s: { page: PageIndex; nav: NavRoute }) => void }> = (
+const Probe: Component<{ onState: (s: { tab: TabIndex; nav: NavRoute }) => void }> = (
   props,
 ) => {
-  const { currentPage, navRoute } = useApi();
+  const { activeTab, navRoute } = useApi();
   const [_t, setT] = createSignal(0);
   onMount(() => {
     setT(1);
   });
-  // 用 effect 让外部观察
   return (
     <div
       data-testid="probe"
       ref={() => {
-        // 每次 currentPage / navRoute 变化时通知
-        // 简化：mount 后立即报一次（外部测试也可手动操作 setActiveSheet 后查 props.onState）
-        props.onState({ page: currentPage(), nav: navRoute() });
+        props.onState({ tab: activeTab(), nav: navRoute() });
         void _t();
       }}
     />
   );
 };
 
-describe("ApiProvider · nav state", () => {
-  it("默认 currentPage=1（玄女）", () => {
+describe("ApiProvider · nav state (v3)", () => {
+  it("默认 activeTab=0（玄女）", () => {
     setApiOverride(createMockApi());
-    let captured: { page: PageIndex; nav: NavRoute } | null = null;
+    let captured: { tab: TabIndex; nav: NavRoute } | null = null;
     const { unmount } = render(() => (
       <ApiProvider initialAuth="in">
         <Probe onState={(s) => (captured = s)} />
       </ApiProvider>
     ));
     expect(captured).not.toBeNull();
-    expect(captured!.page).toBe(1);
+    expect(captured!.tab).toBe(0);
     expect(captured!.nav).toBeNull();
     unmount();
   });
 
-  it("initialPage prop 钉死起始页", () => {
+  it("initialTab prop 钉死起始 tab", () => {
     setApiOverride(createMockApi());
-    let captured: { page: PageIndex; nav: NavRoute } | null = null;
+    let captured: { tab: TabIndex; nav: NavRoute } | null = null;
     const { unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialPage={2}>
+      <ApiProvider initialAuth="in" initialTab={1}>
         <Probe onState={(s) => (captured = s)} />
       </ApiProvider>
     ));
-    expect(captured!.page).toBe(2);
+    expect(captured!.tab).toBe(1);
     unmount();
   });
 
-  it("setCurrentPage / navPush / navPop 互不打架", () => {
+  it("setActiveTab + 任务 tab 下 navPush · 闭环", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
-      const { setCurrentPage, navPush, navPop, currentPage, navRoute } = useApi();
+      const { setActiveTab, navPush, navPop, activeTab, navRoute } = useApi();
       onMount(() => {
-        setCurrentPage(2);
-        navPush({ kind: "worker", agent_id: "abc-123", role_display: "鲁班" });
+        setActiveTab(1); // 任务 tab
+        navPush({ kind: "task", task_id: "t-uuid", title: "查 ERP" });
       });
+      const navId = (): string => {
+        const r = navRoute();
+        if (!r) return "null";
+        return r.kind === "task" ? r.task_id : r.agent_id;
+      };
       return (
         <div>
-          <span data-testid="page-now">{String(currentPage())}</span>
-          <span data-testid="nav-now">{navRoute()?.agent_id ?? "null"}</span>
-          <button
-            type="button"
-            data-testid="pop"
-            onClick={() => navPop()}
-          >
+          <span data-testid="tab-now">{String(activeTab())}</span>
+          <span data-testid="nav-now">{navId()}</span>
+          <button type="button" data-testid="pop" onClick={() => navPop()}>
             pop
           </button>
         </div>
@@ -88,11 +86,60 @@ describe("ApiProvider · nav state", () => {
         <Wired />
       </ApiProvider>
     ));
-    expect(getByTestId("page-now").textContent).toBe("2");
-    expect(getByTestId("nav-now").textContent).toBe("abc-123");
+    expect(getByTestId("tab-now").textContent).toBe("1");
+    expect(getByTestId("nav-now").textContent).toBe("t-uuid");
     getByTestId("pop").click();
     expect(getByTestId("nav-now").textContent).toBe("null");
-    expect(getByTestId("page-now").textContent).toBe("2"); // pop 不动 page
+    expect(getByTestId("tab-now").textContent).toBe("1"); // pop 不动 tab
+    unmount();
+  });
+
+  it("navPush 在非任务 tab 下 noop（防御 misuse）", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { setActiveTab, navPush, navRoute } = useApi();
+      onMount(() => {
+        setActiveTab(0); // 玄女 tab
+        navPush({ kind: "task", task_id: "should-not-push" });
+      });
+      const id = (): string => {
+        const r = navRoute();
+        if (!r) return "null";
+        return r.kind === "task" ? r.task_id : r.agent_id;
+      };
+      return <span data-testid="nav-now">{id()}</span>;
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("nav-now").textContent).toBe("null");
+    unmount();
+  });
+
+  it("切 tab 自动清 navRoute（避免跨 tab 残留二层 push）", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { setActiveTab, navPush, navRoute } = useApi();
+      onMount(() => {
+        setActiveTab(1);
+        navPush({ kind: "task", task_id: "t-1" });
+        setActiveTab(0); // 切到玄女 tab → 应清 nav
+      });
+      const id = (): string => {
+        const r = navRoute();
+        if (!r) return "null";
+        return r.kind === "task" ? r.task_id : r.agent_id;
+      };
+      return <span data-testid="nav-now">{id()}</span>;
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("nav-now").textContent).toBe("null");
     unmount();
   });
 });

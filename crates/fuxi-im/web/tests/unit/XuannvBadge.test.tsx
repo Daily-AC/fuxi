@@ -13,19 +13,19 @@ afterEach(() => {
 function setup(overview: TasksOverview | undefined) {
   const api = createMockApi({ tasksOverview: overview });
   setApiOverride(api);
-  let getPage: () => number = () => -1;
-  const PageProbe: Component = () => {
-    const { currentPage } = useApi();
-    getPage = () => currentPage();
+  let getTab: () => number = () => -1;
+  const TabProbe: Component = () => {
+    const { activeTab } = useApi();
+    getTab = () => activeTab();
     return null;
   };
   const tools = render(() => (
-    <ApiProvider initialAuth="in" initialPage={1}>
+    <ApiProvider initialAuth="in" initialTab={0}>
       <XuannvPage />
-      <PageProbe />
+      <TabProbe />
     </ApiProvider>
   ));
-  return { api, getPage: () => getPage(), ...tools };
+  return { api, getTab: () => getTab(), ...tools };
 }
 
 describe("XuannvPage · sticky badge \"✓ 抄送 N 门客\" (#N4)", () => {
@@ -76,7 +76,7 @@ describe("XuannvPage · sticky badge \"✓ 抄送 N 门客\" (#N4)", () => {
     unmount();
   });
 
-  it("tap badge · setCurrentPage(2) swipe 到任务树页", async () => {
+  it("tap badge · setActiveTab(1) 切到任务 tab (v3)", async () => {
     const overview: TasksOverview = {
       running: [
         {
@@ -91,11 +91,11 @@ describe("XuannvPage · sticky badge \"✓ 抄送 N 门客\" (#N4)", () => {
       ],
       completed: [],
     };
-    const { findByTestId, getPage, unmount } = setup(overview);
+    const { findByTestId, getTab, unmount } = setup(overview);
     const badge = await findByTestId("cc-badge");
-    expect(getPage()).toBe(1);
+    expect(getTab()).toBe(0);
     fireEvent.click(badge);
-    await waitFor(() => expect(getPage()).toBe(2));
+    await waitFor(() => expect(getTab()).toBe(1));
     unmount();
   });
 

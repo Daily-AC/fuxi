@@ -5,7 +5,7 @@
   background: var(--bg);
 }
 
-/* Page header · 给 dots（位于 pager root，绝对定位 32px）留出顶部空间
+/* Page header · v3 用 bottom tab bar 后无需为顶部 pager dots 留空间
  * 标题/状态居中，sticky badge 绝对定位右侧（不挤压居中布局）。*/
 .header {
   position: relative;
@@ -14,8 +14,7 @@
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: calc(40px + max(var(--space-2), env(safe-area-inset-top))) var(--space-4)
-    var(--space-2);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-2);
   border-bottom: 1px solid var(--border);
   background: var(--bg);
 }
