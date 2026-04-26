@@ -403,13 +403,14 @@ test("Pager · 切任务页 · 看到 mock 数据 + 切回玄女", async ({ page
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
 
-  // pager dot 切到任务页（v2 shell 重构后 sheet 升级成 page）
+  // pager dot 切到任务页（C 方案两级行卡片，#N2）
   await page.getByTestId("pager-dot-2").click();
   await expect(page.getByTestId("page-tasks")).toBeVisible();
   await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("修 ERP 客户列表");
   await expect(page.getByTestId("member-a-luban")).toContainText("鲁班");
   await expect(page.getByTestId("member-a-luban")).toContainText("cargo test --lib");
-  await expect(page.getByTestId("member-a-luban")).toContainText("1.2k");
+  // C 方案 completed 默认折叠 sticky tail，需展开才看到 c1 卡
+  await page.getByTestId("tasks-completed-tail").click();
   await expect(page.getByTestId("task-card-c1")).toContainText("升级 deps");
   // dot 1 切回玄女
   await page.getByTestId("pager-dot-1").click();
@@ -468,7 +469,7 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
 
-test("#26 · completed 卡也显 members + tool_call + last_event_summary", async ({ page }) => {
+test("#N2 · completed 卡折叠 sticky tail · 展开后显 members + tool 副文本", async ({ page }) => {
   await page.addInitScript(() => {
     window.__FUXI_TASKS_OVERVIEW__ = {
       running: [],
@@ -504,16 +505,13 @@ test("#26 · completed 卡也显 members + tool_call + last_event_summary", asyn
   await page.getByTestId("pager-dot-2").click();
   await expect(page.getByTestId("page-tasks")).toBeVisible();
 
-  // completed 卡用统一 task-card 前缀
+  // C 方案 · completed 默认折叠 sticky tail
+  await expect(page.getByTestId("tasks-completed-tail")).toContainText("已完成 · 1 条");
+  // 展开
+  await page.getByTestId("tasks-completed-tail").click();
   await expect(page.getByTestId("task-card-c-dense")).toBeVisible();
-  // last_event_summary 行
-  await expect(page.getByTestId("task-summary-c-dense")).toContainText(
-    "鲁班 · cargo update · exit 0",
-  );
-  // completed 卡也展开 member
+  // 完整 members 显（spec C 方案 completed 也显 members）
   await expect(page.getByTestId("member-a-c-luban")).toContainText("鲁班");
-  // tool call 详情
-  await expect(page.getByTestId("member-tool-call")).toContainText("cargo update");
-  await expect(page.getByTestId("member-tool-call")).toContainText("exit 0");
-  await expect(page.getByTestId("member-tool-call")).toContainText("0:08");
+  // 副文本 = last_tool_call.tool（C 方案不再单独显 tokens / exit 码 / 时长，改 #N3 私聊页才显详）
+  await expect(page.getByTestId("member-a-c-luban")).toContainText("cargo update");
 });
