@@ -28,12 +28,22 @@ pub struct MemberCard {
     pub agent_id: String,
     pub role: String,
     pub role_display: String,
-    /// 当前活动短描述——最近一次 ToolCall 概括（"cargo test"），或最近 AgentText 头 30 字。
+    /// 当前活动短描述——最近一次 ToolCall 概括（`Bash: cargo test`）或最近 AgentText
+    /// 头 30 字。**保留旧字段**（前 ε 任务 sheet `#26` 在用）—— 新设计的"任务树页"
+    /// 用 `last_tool_call`，旧 sheet 还在过渡，不删 activity 避免破契约。
     pub activity: Option<String>,
     /// 该 agent 累计 token 用量。v1 没有该数据源——预留 None。
     pub tokens: Option<u64>,
-    /// busy / idle / thinking
+    /// **重设计 spec**（#N2 任务树页）三态：`"busy" | "idle" | "dead"`。
+    /// thinking 现归属 busy 子态——任务树页不区分（只在私聊页气泡里展示 thinking）。
     pub status: String,
+    /// 重设计 #25：最近一次工具调用的概括，如 `"Bash · grep server/api/v1.go"`。
+    /// **只**取 ToolCall 事件（不 fallback 到 text）—— 任务树用它直观显示门客在干啥。
+    /// `None` = 该 member 还没发过工具调用。
+    pub last_tool_call: Option<String>,
+    /// 重设计 #25：task 派给 worker 时附的 description。从 `TaskCreated.description` 拿。
+    /// 任务级 description 同 task 内所有 member 共用。
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,16 +69,20 @@ pub struct ListTasksResponse {
 #[derive(Debug, Default, Clone)]
 struct TaskAccumulator {
     title: Option<String>,
+    /// 重设计 #25：task description（派活时附的诉求）—— member 卡片继承同一份。
+    description: Option<String>,
     created_at: Option<DateTime<Utc>>,
     last_active_at: Option<DateTime<Utc>>,
     /// task 终态：None = 仍 running；Some(Done) = completed；Some(其它) = failed/cancelled
     terminal_state: Option<TaskState>,
     /// 派给的 agent ids（保序去重）
     member_ids: Vec<AgentId>,
-    /// 每个 agent 的最近 tool call 简述
+    /// 每个 agent 的最近 tool call 简述（"Bash: cmd"，旧 activity 字段用）
     agent_activity: HashMap<AgentId, String>,
     /// 每个 agent 的最近文本响应（fallback activity）
     agent_last_text: HashMap<AgentId, String>,
+    /// 重设计 #25：每个 agent 的最近 tool call（"Bash · cmd" 格式，spec 严格分隔符）
+    agent_last_tool_call: HashMap<AgentId, String>,
     /// thinking 状态：True 表示正在 thinking；False/None 表示 idle 或 busy 工具中
     agent_thinking: HashMap<AgentId, bool>,
 }
@@ -80,8 +94,13 @@ impl TaskAccumulator {
         self.last_active_at = Some(self.last_active_at.map_or(at, |existing| existing.max(at)));
 
         match &ev.kind {
-            EventKind::TaskCreated { title, .. } => {
+            EventKind::TaskCreated { title, description } => {
                 self.title = Some(title.clone());
+                // description 可能为空字符串（玄女派活时偶尔不附详情）—— 转 None 让前端
+                // 直接判 nullable 而非 ""
+                if !description.is_empty() {
+                    self.description = Some(description.clone());
+                }
                 if self.created_at.is_none() {
                     self.created_at = Some(at);
                 }
@@ -103,6 +122,9 @@ impl TaskAccumulator {
                 if let Some(agent) = ev.meta.agent {
                     self.agent_activity
                         .insert(agent, summarize_tool_call(tool, args));
+                    // 重设计 #25：last_tool_call 用 "·" 分隔（spec 严格格式）
+                    self.agent_last_tool_call
+                        .insert(agent, summarize_tool_call_dot(tool, args));
                     self.agent_thinking.insert(agent, false);
                 }
             }
@@ -127,9 +149,19 @@ impl TaskAccumulator {
     }
 }
 
-/// 把 tool 调用 condense 成 ~40 char 短描述。
+/// 把 tool 调用 condense 成 ~40 char 短描述（旧 activity 字段格式：`Bash: cmd`）。
 fn summarize_tool_call(tool: &str, args: &serde_json::Value) -> String {
-    // 尝试取常见参数：command / cmd / file_path / pattern / url——拼成 "tool: hint"
+    summarize_tool_call_with_sep(tool, args, ": ")
+}
+
+/// 重设计 #25 spec 格式：`Bash · cmd`（中间是 U+00B7 middle dot）。
+/// 任务树页 last_tool_call 用此格式。
+fn summarize_tool_call_dot(tool: &str, args: &serde_json::Value) -> String {
+    summarize_tool_call_with_sep(tool, args, " · ")
+}
+
+fn summarize_tool_call_with_sep(tool: &str, args: &serde_json::Value, sep: &str) -> String {
+    // 尝试取常见参数：command / cmd / file_path / pattern / url
     let hint = args
         .get("command")
         .or_else(|| args.get("cmd"))
@@ -140,7 +172,7 @@ fn summarize_tool_call(tool: &str, args: &serde_json::Value) -> String {
         .and_then(|v| v.as_str());
     match hint {
         Some(h) => {
-            let mut s = format!("{tool}: {h}");
+            let mut s = format!("{tool}{sep}{h}");
             truncate_chars(&mut s, 60);
             s
         }
@@ -165,14 +197,25 @@ fn truncate_chars(s: &mut String, limit: usize) {
     *s = format!("{truncated}…");
 }
 
-/// 把 ShelfStatus + thinking 推成 PWA 用的 "busy" / "idle" / "thinking" 字符串。
+/// 重设计 #25 spec：成员状态严格三态 `"busy" | "idle" | "dead"`。
+/// thinking 归 busy 子态——任务树页不区分（私聊页气泡里另渲染 thinking 卡）。
+///
+/// `thinking` 仍走 busy；只有 ShelfStatus::Dead 才映射 "dead"，
+/// 让前端能区分"门客挂了"vs"门客闲着"，否则之前 dead 当 idle 显示就是用户
+/// 反馈"门客没法 ping"也看不到红点的由来。
 fn member_status(shelf: Option<ShelfStatus>, thinking: bool) -> String {
-    match (shelf, thinking) {
-        (Some(ShelfStatus::Idle), _) => "idle".into(),
-        (_, true) => "thinking".into(),
-        (Some(ShelfStatus::Busy), false) => "busy".into(),
-        (Some(ShelfStatus::Dead), _) => "idle".into(), // 死了对前端就是不忙
-        (None, _) => "idle".into(),
+    match shelf {
+        Some(ShelfStatus::Dead) => "dead".into(),
+        Some(ShelfStatus::Idle) => "idle".into(),
+        Some(ShelfStatus::Busy) => "busy".into(),
+        // 不在 shelf——可能 GC 后还在事件流里有历史；视为 dead（前端可灰化）
+        None => {
+            if thinking {
+                "busy".into()
+            } else {
+                "dead".into()
+            }
+        }
     }
 }
 
@@ -231,12 +274,26 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
             acc.ingest(ev);
         }
 
-        // 玄女自身的 user-turn 之类不展示在 task list（user-turn task 派给玄女自己）
+        // **重设计 #25** filter user-turn：两条都加更稳
+        // 1. 直接 title 字面 == "user-turn"——玄女对话内部 task，不是真活
+        //    （bridge.rs intervene-degrade-dispatch 路径产生的）
+        // 2. member_ids 全是 xuannv（无门客 dispatch）—— 同样视为内部 task
+        let is_user_turn_title = acc
+            .title
+            .as_deref()
+            .map(|t| t == "user-turn")
+            .unwrap_or(false);
         let is_xuannv_self = match xuannv_id {
             Some(xn) => acc.member_ids.iter().all(|a| *a == xn) && !acc.member_ids.is_empty(),
             None => false,
         };
-        if is_xuannv_self {
+        // 完全没 dispatch（没派给任何门客）也跳——空壳 task 用户看不出意义
+        let no_real_member = acc.member_ids.is_empty()
+            || match xuannv_id {
+                Some(xn) => acc.member_ids.iter().all(|a| *a == xn),
+                None => false,
+            };
+        if is_user_turn_title || is_xuannv_self || no_real_member {
             continue;
         }
 
@@ -262,6 +319,7 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 .get(agent_id)
                 .or_else(|| acc.agent_last_text.get(agent_id))
                 .cloned();
+            let last_tool_call = acc.agent_last_tool_call.get(agent_id).cloned();
             members.push(MemberCard {
                 agent_id: agent_id.to_string(),
                 role: role.clone(),
@@ -269,6 +327,8 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 activity,
                 tokens: None,
                 status: member_status(shelf_status, thinking),
+                last_tool_call,
+                description: acc.description.clone(),
             });
         }
 
@@ -324,12 +384,17 @@ mod tests {
     }
 
     #[test]
-    fn member_status_priority() {
-        assert_eq!(member_status(Some(ShelfStatus::Idle), true), "idle");
-        assert_eq!(member_status(Some(ShelfStatus::Busy), true), "thinking");
+    fn member_status_three_states() {
+        // 重设计 #25：spec 严格三态 busy/idle/dead，thinking 归 busy
+        assert_eq!(member_status(Some(ShelfStatus::Idle), false), "idle");
+        assert_eq!(member_status(Some(ShelfStatus::Idle), true), "idle"); // shelf 说 idle 优先
         assert_eq!(member_status(Some(ShelfStatus::Busy), false), "busy");
-        assert_eq!(member_status(None, false), "idle");
-        assert_eq!(member_status(Some(ShelfStatus::Dead), false), "idle");
+        assert_eq!(member_status(Some(ShelfStatus::Busy), true), "busy"); // thinking 不再独立
+        assert_eq!(member_status(Some(ShelfStatus::Dead), false), "dead");
+        assert_eq!(member_status(Some(ShelfStatus::Dead), true), "dead");
+        // shelf 不在（GC 后）—— thinking=true 视为 busy；否则 dead
+        assert_eq!(member_status(None, true), "busy");
+        assert_eq!(member_status(None, false), "dead");
     }
 
     #[test]
@@ -423,6 +488,84 @@ mod tests {
                 .get(&agent)
                 .unwrap()
                 .contains("cargo test")
+        );
+    }
+
+    /// 重设计 #25：summarize_tool_call_dot 用 `·` 分隔，spec 严格格式。
+    #[test]
+    fn summarize_tool_call_dot_format() {
+        let s = summarize_tool_call_dot(
+            "Bash",
+            &serde_json::json!({"command": "grep server/api/v1.go"}),
+        );
+        assert_eq!(s, "Bash · grep server/api/v1.go");
+        // 无 hint 走 fallback
+        let s2 = summarize_tool_call_dot("WebSearch", &serde_json::json!({}));
+        assert_eq!(s2, "WebSearch");
+    }
+
+    /// 重设计 #25：accumulator description 从 TaskCreated 拿；空字符串转 None。
+    #[test]
+    fn accumulator_description_from_task_created() {
+        use fuxi_core::EventMeta;
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        let with_desc = Event {
+            meta: meta.clone(),
+            kind: EventKind::TaskCreated {
+                title: "T".into(),
+                description: "复现 + 修".into(),
+            },
+        };
+        let mut acc = TaskAccumulator::default();
+        acc.ingest(&with_desc);
+        assert_eq!(acc.description.as_deref(), Some("复现 + 修"));
+
+        // 空字符串 → None（避免前端拿到 "" 当合法值）
+        let empty_desc = Event {
+            meta,
+            kind: EventKind::TaskCreated {
+                title: "T".into(),
+                description: "".into(),
+            },
+        };
+        let mut acc2 = TaskAccumulator::default();
+        acc2.ingest(&empty_desc);
+        assert!(acc2.description.is_none());
+    }
+
+    /// 重设计 #25：last_tool_call 字段独立累积，跟 activity（旧字段）格式不同。
+    #[test]
+    fn accumulator_tracks_last_tool_call_separately() {
+        use fuxi_core::EventMeta;
+        let agent = AgentId::new();
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        meta.agent = Some(agent);
+        let tool = Event {
+            meta,
+            kind: EventKind::ToolCallStarted {
+                tool: "Bash".into(),
+                args: serde_json::json!({"command": "cargo test"}),
+            },
+        };
+        let mut acc = TaskAccumulator::default();
+        acc.ingest(&tool);
+        // 旧 activity 用 ":"
+        assert!(
+            acc.agent_activity
+                .get(&agent)
+                .unwrap()
+                .contains("Bash: cargo")
+        );
+        // 新 last_tool_call 用 "·"
+        assert!(
+            acc.agent_last_tool_call
+                .get(&agent)
+                .unwrap()
+                .contains("Bash · cargo")
         );
     }
 
