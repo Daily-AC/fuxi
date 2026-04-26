@@ -24,6 +24,8 @@ export interface MockState {
   tasks: TaskListResponse["tasks"];
   events: Record<string, EventKind[]>;
   intervenes: InterveneRequest[];
+  /** 控制 intervene 调用 status：每次消费一个，耗尽走最后一个。空 = 默认 200。*/
+  interveneSeq?: number[];
   dispatches: DispatchRequest[];
   pushed: PushSubscribeRequest[];
   vapid: VapidPubResponse;
@@ -108,6 +110,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       loginCalls: [],
       pairCalls: [],
     },
+    interveneSeq: initial?.interveneSeq,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -133,6 +136,8 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     }),
     intervene: async (req: InterveneRequest) => {
       state.intervenes.push(req);
+      const status = nextStatus(state.interveneSeq, 200);
+      if (status !== 200) throw new ApiError(status, statusMessage(status));
       return { ok: true };
     },
     dispatch: async (req: DispatchRequest): Promise<DispatchResponse> => {

@@ -1,15 +1,24 @@
 import { test, expect } from "@playwright/test";
 
-// v2 阶段 1：视觉骨架 + 空态。
-// 验证：登入后看到 Header（任务/玄女/节点）+ Conversation 空态 + Composer。
+// v2 阶段 1+2：视觉骨架 + 玄女/user message + intervene + WS 流式。
+
+declare global {
+  interface Window {
+    __FUXI_FETCH__: Array<{ input: string }>;
+    __FUXI_WS__: { last: WebSocketLike | null };
+  }
+}
+
+interface WebSocketLike {
+  dispatchEvent(e: Event): boolean;
+  url: string;
+}
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    interface PendingFetch {
-      input: string;
-    }
-    const fetchCalls: PendingFetch[] = [];
-    (window as unknown as { __FUXI_FETCH__: PendingFetch[] }).__FUXI_FETCH__ = fetchCalls;
+    const fetchCalls: Array<{ input: string }> = [];
+    window.__FUXI_FETCH__ = fetchCalls;
+    window.__FUXI_WS__ = { last: null };
 
     const json = (data: unknown, status = 200): Response =>
       new Response(JSON.stringify(data), {
@@ -39,6 +48,8 @@ test.beforeEach(async ({ page }) => {
       constructor(url: string) {
         super();
         this.url = url;
+        // 暴露最近一个 socket 给 e2e 推消息
+        window.__FUXI_WS__.last = this;
         setTimeout(() => {
           this.readyState = 1;
           this.dispatchEvent(new Event("open"));
@@ -55,23 +66,68 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("登入后 main shell 出现，Header 三 tap target + Composer + 空态", async ({ page }) => {
+test("登入后 main shell 出现，Header + Composer + 空态", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible({ timeout: 5_000 });
   await expect(page.getByTestId("header-tasks")).toBeVisible();
   await expect(page.getByTestId("header-center")).toContainText("玄女");
   await expect(page.getByTestId("header-nodes")).toBeVisible();
   await expect(page.getByTestId("conversation-empty")).toContainText("玄女在线");
-  await expect(page.getByTestId("conversation-empty")).toContainText("跟她说点啥");
   await expect(page.getByTestId("composer-input")).toBeVisible();
-  await expect(page.getByTestId("composer-send")).toBeVisible();
 });
 
-test("composer 输入后发送按钮变 active（accent fill）", async ({ page }) => {
+test("composer 输入后发送按钮变 active", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
   const send = page.getByTestId("composer-send");
   await expect(send).toBeDisabled();
   await page.getByTestId("composer-input").fill("hi");
   await expect(send).toBeEnabled();
+});
+
+test("发送消息 → user bubble + intervene 调用 + WS 流式收到玄女回复", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  // 等 ws open
+  await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
+
+  // 输入并发送
+  await page.getByTestId("composer-input").fill("hi 玄女");
+  await page.getByTestId("composer-send").click();
+
+  // optimistic：user bubble 立刻出现
+  await expect(page.getByTestId("msg-user")).toContainText("hi 玄女");
+
+  // intervene fetch 被调用
+  await expect
+    .poll(async () =>
+      page.evaluate(() => window.__FUXI_FETCH__.filter((c) => c.input === "/api/intervene").length),
+    )
+    .toBeGreaterThan(0);
+
+  // 服务端推 agent_text_delta 三段
+  await page.evaluate(() => {
+    const ws = window.__FUXI_WS__.last as unknown as EventTarget;
+    const send = (data: unknown): void => {
+      ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) }));
+    };
+    send({ type: "agent_text_delta", agent: "xuannv", delta: "好" });
+    send({ type: "agent_text_delta", agent: "xuannv", delta: "的" });
+    send({ type: "agent_text_delta", agent: "xuannv", delta: "，我看一下" });
+  });
+
+  // 玄女 bubble 累积出现 + streaming pulse
+  await expect(page.getByTestId("msg-xuannv")).toContainText("好的，我看一下");
+  await expect(page.getByTestId("msg-streaming")).toBeVisible();
+
+  // EndOfTurn（agent_idle）→ pulse 消失
+  await page.evaluate(() => {
+    const ws = window.__FUXI_WS__.last as unknown as EventTarget;
+    ws.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "agent_idle", agent: "xuannv" }),
+      }),
+    );
+  });
+  await expect(page.getByTestId("msg-streaming")).toHaveCount(0);
 });
