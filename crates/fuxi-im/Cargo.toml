@@ -10,7 +10,8 @@ fuxi-core.workspace = true
 fuxi-events.workspace = true
 fuxi-orchestrator.workspace = true
 tokio = { workspace = true, features = ["full"] }
-axum.workspace = true
+# `multipart` feature 给 Task #17 的文件上传 handler 用 axum::extract::Multipart
+axum = { workspace = true, features = ["multipart"] }
 tower = { workspace = true }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 serde.workspace = true
@@ -40,6 +41,10 @@ async-trait.workspace = true
 # δ · VAPID + Web Push（hyper-client 复用 fuxi 已有 hyper 系；
 # 默认 isahc 关掉以避第二个 HTTP 栈）
 web-push = { version = "0.11", default-features = false, features = ["hyper-client"] }
+# β · Task #17 文件上传：mime 类型校验 + axum 自带 Multipart 解析
+mime = "0.3"
+# β · Task #17 文件上传 + sha256 流式 hash（sha2 已在 hmac 路径引入复用）
+hex = "0.4"
 
 [dev-dependencies]
 fuxi-workspace.workspace = true

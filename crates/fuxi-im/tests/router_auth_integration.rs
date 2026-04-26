@@ -282,3 +282,37 @@ async fn api_conv_ws_without_cookie_returns_401() {
     let resp = app.oneshot(req("/api/conv", None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ─── #17 新加端点也强制鉴权 ────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_conv_messages_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let resp = app
+        .oneshot(req("/api/conv/messages?conv=xuannv", None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_upload_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/upload")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_uploads_get_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let resp = app
+        .oneshot(req("/api/uploads/anything", None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

@@ -164,9 +164,19 @@ pub async fn run(args: StartArgs) -> Result<()> {
     let vapid_for_hooks = Arc::new(vapid.clone());
     let im_push = ImPush::with_persistence(vapid, im_pool.clone());
 
+    // β · #17 IM 层聊天记录 + 文件上传 wiring
+    let conv_store = fuxi_im::conv_store::ConvStore::new(im_pool.clone());
+    let upload_root = fuxi_im::uploads::UploadStore::default_root()
+        .ok_or_else(|| anyhow::anyhow!("无法解析 ~/.fuxi/im_uploads：$HOME 未设置"))?;
+    std::fs::create_dir_all(&upload_root)
+        .with_context(|| format!("无法创建上传根目录: {}", upload_root.display()))?;
+    let upload_store = fuxi_im::uploads::UploadStore::new(im_pool.clone(), upload_root);
+
     let app_state = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
-        .with_im_push(im_push);
+        .with_im_push(im_push)
+        .with_conv_store(conv_store.clone())
+        .with_upload_store(upload_store);
 
     // 5. push hooks —— 订阅 EventBus 触发 web push（玄女 idle / task done）。
     //    必须在 fuxi 已 ready 之后挂；玄女 id 若此刻为 None 就 fallback 到内存
@@ -206,12 +216,23 @@ pub async fn run(args: StartArgs) -> Result<()> {
     //     这是部署期就该看到的错（roles 路径错配 / cc 没装），不该静默降级。
     let xuannv_role = std::env::var("FUXI_IM_XUANNV_ROLE")
         .unwrap_or_else(|_| crate::xuannv_bootstrap::DEFAULT_XUANNV_ROLE.to_string());
+    let mut conv_sync_handle: Option<tokio::task::JoinHandle<()>> = None;
     match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
         Ok(id) => {
             // set_xuannv 已经在 ensure_xuannv 里调用——上面 step 5 的 push_hooks_task
             // 内部 wait_for_xuannv 会在下一次 2s 轮询拿到这个 id（旧设计的轮询路径
             // 不动，避免 step 5 / 6.5 顺序耦合）。
             tracing::info!(xuannv = %id, role = %xuannv_role, "玄女自启完成");
+            // β · #17 conv_store sync hook —— 玄女上线后立刻订 EventBus 翻消息进 messages 表。
+            // `spawn_xuannv_sync` 是 async 函数，**返回前**完成 ensure_scope + subscribe，
+            // 这样玄女后续任何 publish 都不会丢。
+            let h = fuxi_im::conv_store::spawn_xuannv_sync(
+                Arc::new(conv_store.clone()),
+                bus.clone(),
+                id,
+            )
+            .await;
+            conv_sync_handle = Some(h);
         }
         Err(e) => {
             // 即便自启失败也别让整个 daemon 死——降级到"等 REPL 起玄女"路径，
@@ -220,6 +241,8 @@ pub async fn run(args: StartArgs) -> Result<()> {
             // 只露最外层 context（"玄女 spawn 失败"），ssh 部署调试时根因不可见。
             tracing::warn!(error = ?e, role = %xuannv_role,
                 "玄女自启失败，降级等 REPL 启动；PWA /api/conv 在玄女就位前会 503");
+            // 注：conv_store sync 没起——REPL 起玄女后用户得重启 daemon 才补上消息。
+            // 后续做"延迟 sync"：等 set_xuannv 完才挂 hook。Task #17 v0.1 不处理。
         }
     }
     let daemon = Daemon::new(
@@ -309,6 +332,9 @@ pub async fn run(args: StartArgs) -> Result<()> {
     fs_rig.join.abort();
     drop(fs_rig);
     push_hooks_task.abort();
+    if let Some(h) = conv_sync_handle {
+        h.abort();
+    }
 
     bus.publish(Event {
         meta: EventMeta::now(),

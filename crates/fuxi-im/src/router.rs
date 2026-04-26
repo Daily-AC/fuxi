@@ -37,8 +37,13 @@ pub fn build(state: AppState) -> Router {
             get(handlers::conv::task_stream_ws),
         )
         .route("/api/conv", get(handlers::conv::conv_ws))
+        // β · #17 IM 层聊天记录拉取（首屏预加载 + 翻页）
+        .route("/api/conv/messages", get(handlers::conv::messages))
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
+        // β · #17 文件上传 / 下载
+        .route("/api/upload", post(handlers::upload::upload))
+        .route("/api/uploads/{id}", get(handlers::upload::get_upload))
         .route("/api/auth/login", post(handlers::auth::login))
         .route("/api/auth/pair", post(handlers::auth::pair))
         .route("/api/push/subscribe", post(handlers::push::subscribe))

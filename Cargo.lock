@@ -225,6 +225,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -1352,8 +1353,10 @@ dependencies = [
  "fuxi-events",
  "fuxi-orchestrator",
  "fuxi-workspace",
+ "hex",
  "hmac",
  "http-body-util",
+ "mime",
  "rand 0.8.6",
  "reqwest",
  "secrecy",
@@ -2368,6 +2371,23 @@ checksum = "164eb3faeaecbd14b0b2a917c1b4d0c035097a9c559b0bed85c2cdd032bc8faa"
 dependencies = [
  "hybrid-array",
  "num-traits",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.0",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]

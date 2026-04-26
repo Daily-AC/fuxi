@@ -16,6 +16,7 @@ mod handlers;
 mod router;
 
 pub mod auth;
+pub mod conv_store;
 pub mod db;
 pub mod devices;
 pub mod error;
@@ -25,6 +26,7 @@ pub mod pair;
 pub mod password;
 pub mod push;
 pub mod state;
+pub mod uploads;
 
 pub use error::{Error, Result};
 pub use state::AppState;
