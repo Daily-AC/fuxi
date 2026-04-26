@@ -3,12 +3,18 @@
   bottom: 0;
   z-index: 9;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: var(--space-2);
-  min-height: var(--composer-h);
-  padding: 10px var(--space-3) calc(10px + env(safe-area-inset-bottom, 0));
   background: var(--bg);
   border-top: 1px solid var(--border);
+  padding: 10px var(--space-3) calc(10px + env(safe-area-inset-bottom, 0));
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
 }
 
 .input {
@@ -25,6 +31,33 @@
 
 .input:focus {
   border-color: var(--accent-dim);
+}
+
+.attachBtn {
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  font-size: var(--size-aux);
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.attachBtn:hover,
+.attachBtn:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.attachBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fileInput {
+  display: none;
 }
 
 .send {
@@ -50,4 +83,80 @@
 
 .send:disabled {
   cursor: not-allowed;
+}
+
+/* 附件 chip 行 · composer 上方 */
+.chipsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 8px 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-meta);
+  max-width: 240px;
+}
+
+.chipUploading {
+  border-color: var(--accent-subtle);
+}
+
+.chipDone {
+  border-color: var(--accent);
+}
+
+.chipError {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.chipName {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.chipMeta {
+  color: var(--text-muted);
+  font-feature-settings: "tnum";
+}
+
+.chipError .chipMeta {
+  color: var(--danger);
+}
+
+.chipRemove {
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: 14px;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.chipRemove:hover,
+.chipRemove:focus-visible {
+  color: var(--text-primary);
+  background: var(--surface-elevated);
+}
+
+.chipRemove:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.errBanner {
+  width: 100%;
+  font-size: var(--size-meta);
+  color: var(--danger);
+  padding: 4px var(--space-2);
 }

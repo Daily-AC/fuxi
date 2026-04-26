@@ -11,6 +11,7 @@ import {
 import type { Message } from "~/messages";
 import { UserBubble } from "~/components/messages/UserBubble";
 import { XuannvBubble } from "~/components/messages/XuannvBubble";
+import { FileMessage } from "~/components/messages/FileMessage";
 import styles from "./Conversation.module.css";
 
 // 主屏 chat scroll · padding 16/20，gap 14。空态居中淡字。
@@ -74,6 +75,7 @@ export const Conversation: Component<ConversationProps> = (props) => {
             {(msg) => {
               if (msg.kind === "user") return <UserBubble msg={msg} />;
               if (msg.kind === "xuannv") return <XuannvBubble msg={msg} />;
+              if (msg.kind === "file") return <FileMessage msg={msg} />;
               return null;
             }}
           </For>

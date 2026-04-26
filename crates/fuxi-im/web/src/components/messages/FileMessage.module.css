@@ -1,0 +1,43 @@
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.right {
+  align-items: flex-end;
+}
+
+.bubble {
+  max-width: 78%;
+  padding: var(--space-3);
+  border-radius: var(--radius-bubble);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.userBubble {
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+  border-top-right-radius: 4px;
+}
+
+.agentBubble {
+  background: var(--surface);
+  color: var(--text-primary);
+  border-top-left-radius: 4px;
+}
+
+.caption {
+  font-size: var(--size-body);
+  line-height: 1.45;
+}
+
+.attachments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}

@@ -6,6 +6,7 @@ declare global {
   interface Window {
     __FUXI_FETCH__: Array<{ input: string }>;
     __FUXI_WS__: { last: WebSocketLike | null };
+    __FUXI_HISTORY__?: unknown[];
   }
 }
 
@@ -37,8 +38,65 @@ test.beforeEach(async ({ page }) => {
       if (url === "/api/intervene") return json({ ok: true });
       if (url === "/api/push/vapid-pub") return json({ public_key: "stub" });
       if (url === "/api/push/subscribe") return json({ ok: true });
+      if (url.startsWith("/api/conv/messages")) {
+        const inj = (window as unknown as { __FUXI_HISTORY__?: unknown[] }).__FUXI_HISTORY__;
+        return json({ messages: inj ?? [], next_before: null });
+      }
       return realFetch(input as RequestInfo, init);
     };
+
+    // XHR mock for /api/upload —— Composer 用 XHR 拿 progress
+    class FakeXHR {
+      static UNSENT = 0;
+      static OPENED = 1;
+      static HEADERS_RECEIVED = 2;
+      static LOADING = 3;
+      static DONE = 4;
+      readyState = 0;
+      status = 0;
+      statusText = "";
+      response: unknown = null;
+      responseType = "";
+      withCredentials = false;
+      upload = new EventTarget();
+      private listeners = new Map<string, Array<(e: any) => void>>();
+      private url = "";
+      private method = "";
+      open(method: string, url: string): void {
+        this.method = method;
+        this.url = url;
+      }
+      addEventListener(t: string, fn: (e: any) => void): void {
+        const a = this.listeners.get(t) ?? [];
+        a.push(fn);
+        this.listeners.set(t, a);
+      }
+      send(_body?: unknown): void {
+        if (this.url === "/api/upload" && this.method === "POST") {
+          // 模拟一次进度 + load
+          (this.upload as EventTarget).dispatchEvent(
+            new ProgressEvent("progress", { loaded: 100, total: 100, lengthComputable: true }),
+          );
+          this.status = 200;
+          this.statusText = "OK";
+          this.response = {
+            id: `up-e2e-${Math.random().toString(36).slice(2, 6)}`,
+            name: "fixture.txt",
+            mime: "text/plain",
+            bytes: 100,
+            sha256: "sha",
+          };
+          this.readyState = 4;
+          for (const fn of this.listeners.get("load") ?? []) fn(new Event("load"));
+        } else {
+          // fallback
+          this.status = 0;
+          for (const fn of this.listeners.get("error") ?? []) fn(new Event("error"));
+        }
+      }
+    }
+    (window as unknown as { XMLHttpRequest: unknown }).XMLHttpRequest =
+      FakeXHR as unknown as typeof XMLHttpRequest;
 
     class FakeWS extends EventTarget {
       static OPEN = 1;
@@ -146,4 +204,130 @@ test("发送消息 → user bubble + intervene 调用 + WS 流式收到玄女回
     ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(ev) }));
   });
   await expect(page.getByTestId("msg-streaming")).toHaveCount(0);
+});
+
+test("玄女回 markdown 长文 → bubble 渲染 strong + code + link", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
+
+  await page.evaluate(() => {
+    const ws = window.__FUXI_WS__.last as unknown as EventTarget;
+    const md = [
+      "**好的**，我看了一下：",
+      "",
+      "- 用 `cargo test --lib`",
+      "- 文档：[link](https://example.com/docs)",
+      "",
+      "```",
+      "let x = 1;",
+      "```",
+    ].join("\n");
+    const ev = {
+      meta: {
+        id: "id-md",
+        at: new Date().toISOString(),
+        session: null,
+        agent: "f0d0f576-fa97-4a0c-9c25-test",
+        task: null,
+      },
+      kind: { type: "agent_responded", text: md },
+    };
+    ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(ev) }));
+  });
+
+  const bubble = page.getByTestId("msg-xuannv-text");
+  // strong 渲染
+  await expect(bubble.locator("strong")).toContainText("好的");
+  // inline code
+  await expect(bubble.locator("code").first()).toContainText("cargo test");
+  // link 强制 _blank + rel
+  const link = bubble.locator("a");
+  await expect(link).toHaveAttribute("target", "_blank");
+  await expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  // fenced code block
+  await expect(bubble.locator("pre code")).toContainText("let x = 1;");
+});
+
+test("XSS · 玄女回 <script> 不执行（被 sanitize）", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
+
+  let attacked = false;
+  page.on("dialog", async (d) => {
+    attacked = true;
+    await d.dismiss();
+  });
+
+  await page.evaluate(() => {
+    const ws = window.__FUXI_WS__.last as unknown as EventTarget;
+    const ev = {
+      meta: {
+        id: "id-xss",
+        at: new Date().toISOString(),
+        session: null,
+        agent: "f0d0f576-fa97-4a0c-9c25-test",
+        task: null,
+      },
+      kind: { type: "agent_responded", text: "<script>alert(1)</script>合法文本" },
+    };
+    ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(ev) }));
+  });
+
+  await expect(page.getByTestId("msg-xuannv-text")).toContainText("合法文本");
+  // 等一段确保 script 没执行
+  await page.waitForTimeout(200);
+  expect(attacked).toBe(false);
+  // bubble 内不应有 script tag
+  const scriptCount = await page.getByTestId("msg-xuannv-text").locator("script").count();
+  expect(scriptCount).toBe(0);
+});
+
+test("选 1 文件 → 提交 → user bubble + intervene 带 attachments", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
+
+  // 设附件
+  await page.getByTestId("composer-file-input").setInputFiles({
+    name: "screenshot.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("fake-bytes"),
+  });
+  // chip 出现（exclude remove 按钮，用 data-status 精确匹配）
+  await expect(page.locator('[data-testid^="composer-chip-c-"][data-status]')).toHaveCount(1);
+
+  // 输入说明 + 发
+  await page.getByTestId("composer-input").fill("看图");
+  await page.getByTestId("composer-send").click();
+
+  // user bubble 显示文字
+  await expect(page.getByTestId("msg-user")).toContainText("看图");
+  // user bubble 内带 chip
+  await expect(page.getByTestId("msg-user").locator('[data-testid^="attachment-chip-"]')).toHaveCount(1);
+
+  // intervene fetch 调用
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__FUXI_FETCH__.filter((c) => c.input === "/api/intervene").length),
+    )
+    .toBeGreaterThan(0);
+});
+
+test("历史预加载 · mock 5 条 stored message → 看到 5 条进入", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_HISTORY__ = [
+      { id: "h1", conv_id: "xuannv", role: "user", kind: "text", content: "之前的提问 A", ts: "2026-04-26T10:00:00Z" },
+      { id: "h2", conv_id: "xuannv", role: "xuannv", kind: "text", content: "之前的回答 A", ts: "2026-04-26T10:00:30Z" },
+      { id: "h3", conv_id: "xuannv", role: "user", kind: "text", content: "之前的提问 B", ts: "2026-04-26T10:01:00Z" },
+      { id: "h4", conv_id: "xuannv", role: "xuannv", kind: "text", content: "之前的回答 B", ts: "2026-04-26T10:01:30Z" },
+      { id: "h5", conv_id: "xuannv", role: "user", kind: "text", content: "之前的提问 C", ts: "2026-04-26T10:02:00Z" },
+    ];
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await expect(page.getByTestId("msg-user").first()).toContainText("之前的提问 A");
+  await expect(page.locator('[data-testid="msg-user"]')).toHaveCount(3);
+  await expect(page.locator('[data-testid="msg-xuannv"]')).toHaveCount(2);
 });

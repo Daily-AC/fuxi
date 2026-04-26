@@ -8,6 +8,11 @@ import type {
   TaskListResponse,
   VapidPubResponse,
 } from "~/types/events";
+import type {
+  ConversationHistoryResponse,
+  InterveneRequestV2,
+  Upload,
+} from "~/types/api";
 
 export interface LoginRequest {
   password: string;
@@ -27,7 +32,8 @@ export interface AuthResponse {
 export interface ApiClient {
   fetchTasks(rootOnly: boolean): Promise<TaskListResponse>;
   fetchTaskEvents(taskId: string, fromCursor?: string): Promise<EventHistoryResponse>;
-  intervene(req: InterveneRequest): Promise<{ ok: true }>;
+  /** 阶段 3 升级：intervene 接受可选 attachments。后端 β #17 兼容旧无 attachments。*/
+  intervene(req: InterveneRequest | InterveneRequestV2): Promise<{ ok: true }>;
   dispatch(req: DispatchRequest): Promise<DispatchResponse>;
   vapidPub(): Promise<VapidPubResponse>;
   pushSubscribe(sub: PushSubscribeRequest): Promise<{ ok: true }>;
@@ -35,6 +41,10 @@ export interface ApiClient {
   login(req: LoginRequest): Promise<AuthResponse>;
   /** 副路：PIN 配对（"忘密码 / 没设过"降级路径）。*/
   pair(req: PairRequest): Promise<AuthResponse>;
+  /** 拉持久化对话历史（从 im.db）。*/
+  fetchHistory(convId: string, limit: number, before?: string): Promise<ConversationHistoryResponse>;
+  /** 上传单文件，可选进度回调（0..1）。*/
+  uploadFile(file: File, onProgress?: (ratio: number) => void): Promise<Upload>;
   openConvSocket(): WebSocket;
   openTaskSocket(taskId: string): WebSocket;
 }
@@ -88,7 +98,40 @@ export function createHttpClient(): ApiClient {
       jsonFetch<AuthResponse>(`/api/auth/login`, { method: "POST", body: JSON.stringify(req) }),
     pair: (req) =>
       jsonFetch<AuthResponse>(`/api/auth/pair`, { method: "POST", body: JSON.stringify(req) }),
+    fetchHistory: (convId, limit, before) => {
+      const params = new URLSearchParams({ conv: convId, limit: String(limit) });
+      if (before) params.set("before", before);
+      return jsonFetch<ConversationHistoryResponse>(`/api/conv/messages?${params.toString()}`);
+    },
+    uploadFile: (file, onProgress) => uploadViaXhr(file, onProgress),
     openConvSocket: () => new WebSocket(wsUrl("/api/conv")),
     openTaskSocket: (taskId) => new WebSocket(wsUrl(`/api/tasks/${encodeURIComponent(taskId)}/stream`)),
   };
+}
+
+/** XHR upload —— 用 XHR 而非 fetch 是为了 progress 事件（fetch 不支持上传进度）。*/
+function uploadViaXhr(file: File, onProgress?: (ratio: number) => void): Promise<Upload> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    xhr.open("POST", "/api/upload");
+    xhr.withCredentials = true;
+    xhr.responseType = "json";
+    if (onProgress) {
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable && e.total > 0) onProgress(e.loaded / e.total);
+      });
+    }
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.response as Upload);
+      } else {
+        reject(new ApiError(xhr.status, xhr.statusText || "upload failed"));
+      }
+    });
+    xhr.addEventListener("error", () => reject(new ApiError(0, "network error")));
+    xhr.addEventListener("abort", () => reject(new ApiError(0, "aborted")));
+    xhr.send(fd);
+  });
 }
