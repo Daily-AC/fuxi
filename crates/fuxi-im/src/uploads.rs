@@ -21,17 +21,30 @@ pub const MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// 白名单 mime——服务端用 mime crate 校验客户端报的 Content-Type。
 /// 故意保守：用户场景就是手机粘贴图、传 PDF / 文本 / 视频，**不**收 zip 之外的二进制。
+///
+/// **iPhone 兼容**（#22 hotfix）：iOS 默认相机存 HEIC / HEIF；浏览器把 jpeg 别名
+/// 写成 image/jpg；Safari 也允许 svg；Windows 文件管理器把 zip 报成
+/// `application/x-zip-compressed`。这些情况 v0.1 第一版漏了，导致用户实测 400。
 pub const ALLOWED_MIMES: &[&str] = &[
+    // 图片
     "image/png",
     "image/jpeg",
+    "image/jpg", // 浏览器/某些设备的别名（正经是 image/jpeg）
     "image/gif",
     "image/webp",
+    "image/heic", // iPhone 主流格式（iOS 11+ 默认相机）
+    "image/heif", // 同上，HEIF 是规范名 / heic 是品牌名
+    "image/svg+xml",
+    // 文档
     "application/pdf",
     "application/json",
     "application/zip",
+    "application/x-zip-compressed", // Windows 文件管理器别名
+    // 媒体
     "video/mp4",
     "audio/mpeg",
     "audio/mp3",
+    // 文本
     "text/plain",
     "text/markdown",
     "text/csv",
@@ -82,6 +95,14 @@ impl UploadStore {
         owner_device: Option<&str>,
     ) -> Result<UploadRecord> {
         if bytes.len() > MAX_UPLOAD_BYTES {
+            tracing::warn!(
+                size_bytes = bytes.len(),
+                limit_bytes = MAX_UPLOAD_BYTES,
+                ?name,
+                ?mime,
+                magic = %magic_preview(bytes),
+                "upload rejected: 文件过大"
+            );
             return Err(Error::BadRequest(format!(
                 "文件过大（{} 字节，上限 {MAX_UPLOAD_BYTES}）",
                 bytes.len()
@@ -90,6 +111,13 @@ impl UploadStore {
         if let Some(m) = mime
             && !Self::mime_allowed(m)
         {
+            tracing::warn!(
+                mime = %m,
+                size_bytes = bytes.len(),
+                ?name,
+                magic = %magic_preview(bytes),
+                "upload rejected: mime 不在白名单（可能是 iPhone HEIC / Windows zip 别名等，看是否要扩 ALLOWED_MIMES）"
+            );
             return Err(Error::BadRequest(format!("mime 不在白名单：{m}")));
         }
 
@@ -196,17 +224,28 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<UploadRecord> {
     })
 }
 
+/// 头 16 字节 hex 预览——给 journal 排查 mime 不匹配时人眼对照 magic number。
+/// 例：HEIC 是 `00 00 00 18 66 74 79 70 68 65 69 63`（"ftypheic"）；JPEG 是 `ff d8 ff`；
+/// PNG 是 `89 50 4e 47`。比 mime 更可靠地认出文件类型。
+fn magic_preview(bytes: &[u8]) -> String {
+    let n = bytes.len().min(16);
+    hex::encode(&bytes[..n])
+}
+
 /// 给 mime 推荐扩展名——存盘文件名上挂上让 OS 文件管理器看着对路。
 /// 失败返 None；caller fallback "bin"。
 fn mime_to_ext(mime: Option<&str>) -> Option<&'static str> {
     match mime?.to_ascii_lowercase().as_str() {
         "image/png" => Some("png"),
-        "image/jpeg" => Some("jpg"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
         "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        "image/svg+xml" => Some("svg"),
         "application/pdf" => Some("pdf"),
         "application/json" => Some("json"),
-        "application/zip" => Some("zip"),
+        "application/zip" | "application/x-zip-compressed" => Some("zip"),
         "video/mp4" => Some("mp4"),
         "audio/mpeg" | "audio/mp3" => Some("mp3"),
         "text/plain" => Some("txt"),
@@ -237,6 +276,53 @@ mod tests {
         assert!(UploadStore::mime_allowed("application/pdf"));
         assert!(!UploadStore::mime_allowed("application/x-shellscript"));
         assert!(!UploadStore::mime_allowed(""));
+    }
+
+    /// #22 hotfix：iPhone 默认相机 HEIC / HEIF 必须放行。
+    #[test]
+    fn mime_allowed_heic() {
+        assert!(UploadStore::mime_allowed("image/heic"));
+        assert!(UploadStore::mime_allowed("image/heif"));
+        assert!(UploadStore::mime_allowed("Image/HEIC")); // 大小写不敏感
+    }
+
+    /// #22 hotfix：浏览器/某些设备把 jpeg 别名写成 image/jpg。
+    #[test]
+    fn mime_allowed_jpg_alias() {
+        assert!(UploadStore::mime_allowed("image/jpg"));
+        assert!(UploadStore::mime_allowed("image/jpeg"));
+    }
+
+    /// #22 hotfix：svg + Windows zip 别名。
+    #[test]
+    fn mime_allowed_svg_and_windows_zip() {
+        assert!(UploadStore::mime_allowed("image/svg+xml"));
+        assert!(UploadStore::mime_allowed("application/x-zip-compressed"));
+        assert!(UploadStore::mime_allowed("application/zip"));
+    }
+
+    /// #22 mime_to_ext 对新加的 mime 也要给对应扩展名。
+    #[test]
+    fn mime_to_ext_covers_heic_jpg_alias_svg() {
+        assert_eq!(mime_to_ext(Some("image/heic")), Some("heic"));
+        assert_eq!(mime_to_ext(Some("image/heif")), Some("heif"));
+        assert_eq!(mime_to_ext(Some("image/jpg")), Some("jpg"));
+        assert_eq!(mime_to_ext(Some("image/svg+xml")), Some("svg"));
+        assert_eq!(
+            mime_to_ext(Some("application/x-zip-compressed")),
+            Some("zip")
+        );
+    }
+
+    #[test]
+    fn magic_preview_short_and_long() {
+        assert_eq!(magic_preview(&[0xff, 0xd8, 0xff, 0xe0]), "ffd8ffe0");
+        // ≤16 字节全返；>16 字节只取前 16
+        let long: Vec<u8> = (0..32).collect();
+        let prev = magic_preview(&long);
+        assert_eq!(prev.len(), 32, "hex 长度 = 字节数 * 2");
+        // 第 16 字节是 0x0f，所以最后两字符是 "0f"
+        assert!(prev.ends_with("0f"));
     }
 
     #[tokio::test]
