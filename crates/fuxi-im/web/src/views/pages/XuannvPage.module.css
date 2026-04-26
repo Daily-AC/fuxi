@@ -5,8 +5,10 @@
   background: var(--bg);
 }
 
-/* Page header · 给 dots（位于 pager root，绝对定位 32px）留出顶部空间 */
+/* Page header · 给 dots（位于 pager root，绝对定位 32px）留出顶部空间
+ * 标题/状态居中，sticky badge 绝对定位右侧（不挤压居中布局）。*/
 .header {
+  position: relative;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -45,4 +47,49 @@
 .status {
   font-size: var(--size-meta);
   color: var(--text-muted);
+}
+
+/* #N4 sticky badge · "✓ 抄送 N 门客"
+ * 位置：header 右侧绝对定位，垂直对齐居中
+ * 视觉：muted 文字 + 橙色 √ icon
+ * 触控：≥ 44px 高（min-height）+ 横向 padding 撑开 hit area
+ */
+.ccBadge {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--touch);
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--size-meta);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.ccBadge:hover,
+.ccBadge:focus-visible {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+}
+
+.ccBadge:active {
+  background: var(--accent-subtle);
+}
+
+.ccCheck {
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+  font-size: var(--size-aux);
+  line-height: 1;
+}
+
+.ccText {
+  color: var(--text-secondary);
+  font-feature-settings: "tnum";
 }

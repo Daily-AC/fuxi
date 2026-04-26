@@ -20,7 +20,7 @@ interface WebSocketLike {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    const fetchCalls: Array<{ input: string }> = [];
+    const fetchCalls: Array<{ input: string; body?: string }> = [];
     window.__FUXI_FETCH__ = fetchCalls;
     window.__FUXI_WS__ = { last: null };
     window.__FUXI_WORKER_WS__ = { last: null, url: null };
@@ -489,6 +489,76 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
   await expect(page.getByTestId("page-nodes")).toBeVisible();
   await page.getByTestId("pager-dot-1").click();
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
+});
+
+// ===== #N4 玄女顶栏 sticky badge "✓ 抄送 N 门客" =====
+
+test("#N4 · running.length=2 → 玄女顶栏 badge 显 \"抄送 2 门客\"", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [],
+        },
+        {
+          id: "t2",
+          title: "y",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  const badge = page.getByTestId("cc-badge");
+  await expect(badge).toBeVisible();
+  await expect(badge).toContainText("抄送");
+  await expect(badge).toContainText("2");
+  await expect(badge).toContainText("门客");
+});
+
+test("#N4 · 空 running → badge 不显（隐藏空态）", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await expect(page.getByTestId("cc-badge")).toHaveCount(0);
+});
+
+test("#N4 · tap badge → swipe 到任务树页 (page 3)", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  // 起始 page 1 (玄女)
+  await expect(page.getByTestId("pager-dot-1")).toHaveAttribute("aria-current", "page");
+  await page.getByTestId("cc-badge").click();
+  // → page 2 (任务树)
+  await expect(page.getByTestId("pager-dot-2")).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
 });
 
 // ===== #N3 私聊页 · 橙色 modal + 任务 banner + intervene + 4xx toast =====

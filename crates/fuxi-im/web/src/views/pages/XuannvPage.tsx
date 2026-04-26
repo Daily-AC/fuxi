@@ -1,4 +1,6 @@
 import {
+  Show,
+  createResource,
   createSignal,
   onCleanup,
   onMount,
@@ -26,17 +28,26 @@ import styles from "./XuannvPage.module.css";
 // 设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §"页 2·玄女主对话"
 //
 // composer 走 intervene(xuannv, ...)（默认 active=Xuannv）。
-// 顶栏 sticky badge "已抄送 N 门客" 由 #N4 task 加。
+// 顶栏 sticky badge "✓ 抄送 N 门客"（#N4）：
+//   - 数据：N = tasksOverview.running.length（已 filter user-turn by β #25）
+//   - 仅当 N > 0 时显示
+//   - tap badge → setCurrentPage(2) swipe 到任务树
+//   - UI 兑现公理 2「玄女永远有知情权」
 
 const RETRY_DELAY_MS = 1500;
 const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv";
 
 export const XuannvPage: Component = () => {
-  const { client } = useApi();
+  const { client, setCurrentPage } = useApi();
 
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [online, setOnline] = createSignal(false);
+
+  // #N4 sticky badge · 抄送数 = running tasks 数
+  // 用 createResource 拉一次（任务变更走 WS 后续阶段，v1 mount 一次足够）
+  const [tasksOverview] = createResource(() => client.fetchTasksOverview());
+  const ccCount = (): number => tasksOverview()?.running.length ?? 0;
 
   let controller: ReconnectController | null = null;
 
@@ -140,6 +151,18 @@ export const XuannvPage: Component = () => {
           <span class={styles.dot} classList={{ [styles.dotOn ?? ""]: online() }} aria-hidden="true" />
           <span class={styles.status}>{online() ? "在线" : "重连中"}</span>
         </div>
+        <Show when={ccCount() > 0}>
+          <button
+            type="button"
+            class={styles.ccBadge}
+            onClick={() => setCurrentPage(2)}
+            data-testid="cc-badge"
+            aria-label={`查看 ${ccCount()} 个进行中任务`}
+          >
+            <span class={styles.ccCheck} aria-hidden="true">✓</span>
+            <span class={styles.ccText}>抄送 {ccCount()} 门客</span>
+          </button>
+        </Show>
       </header>
       <Conversation messages={messages} />
       <Composer onSubmit={handleSubmit} />
