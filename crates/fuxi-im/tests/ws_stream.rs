@@ -531,5 +531,8 @@ async fn list_tasks_root_still_returns_array() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(v.is_array());
+    // β · #21 后契约：`{ running, completed }` object（之前 α stub 返空数组）
+    assert!(v.is_object());
+    assert!(v["running"].is_array());
+    assert!(v["completed"].is_array());
 }

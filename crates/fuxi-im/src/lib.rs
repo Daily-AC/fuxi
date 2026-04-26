@@ -26,6 +26,7 @@ pub mod pair;
 pub mod password;
 pub mod push;
 pub mod state;
+pub mod tasks_view;
 pub mod uploads;
 
 pub use error::{Error, Result};
