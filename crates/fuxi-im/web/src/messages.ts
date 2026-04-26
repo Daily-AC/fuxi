@@ -111,13 +111,20 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
 
   // —— 整段：agent_text / agent_responded ——
   // 整段到达视为完结当前 bubble；如果没有进行中的，直接起一个非 streaming 的。
+  // Bug #24：text 为空（玄女这轮没产文字回复）→ 丢空 bubble，避免"玄女 16:55"灰圆残留。
   if (k.type === "agent_text" || k.type === "agent_responded") {
     const text = (k as { text?: string }).text ?? "";
+    const isEmpty = text.trim() === "";
     const last = lastStreamingXuannv(prev);
     if (last) {
+      if (isEmpty) {
+        // streaming bubble 结束但没文字 → 丢
+        return prev.slice(0, -1);
+      }
       const updated: XuannvMessage = { ...last, text, streaming: false };
       return [...prev.slice(0, -1), updated];
     }
+    if (isEmpty) return prev; // 没起 bubble + 空 text · noop
     const ts = parseTs(ev.meta.at);
     const next: XuannvMessage = {
       kind: "xuannv",
@@ -171,11 +178,17 @@ export function makeUserMessage(text: string, attachments?: Upload[]): UserMessa
 
 /** 把 im.db 历史的 StoredMessage 翻译成内部 Message。
  *  v1 简化：只识别 text / file；其它 kind（task_card / tool_call / error）阶段 4 处理。
+ *
+ *  Bug #24 防御：text 为空（包括只有空白字符）的玄女条目过滤掉，避免在 chat 里堆
+ *  "玄女 16:55" 空灰圆 bubble。β #17 旧版 conv_store 把没回复的 thinking turn 也
+ *  sync 进了 im.db；β #25 在做服务端侧过滤，前端这里是双保险。
+ *  user 空 text 同样不应该出现，兜底丢。
  */
 export function fromStoredMessage(s: StoredMessage): Message | null {
   const ts = parseTs(s.ts);
   if (s.kind === "text") {
     const text = typeof s.content === "string" ? s.content : "";
+    if (text.trim() === "") return null;
     if (s.role === "user") {
       return {
         kind: "user",

@@ -41,6 +41,44 @@ describe("fromStoredMessage", () => {
     });
   });
 
+  it("Bug #24 · text 空 玄女条目过滤为 null（防空 bubble 残留）", () => {
+    const s: StoredMessage = {
+      id: "empty-xn",
+      conv_id: "xuannv",
+      role: "xuannv",
+      agent_id: "x",
+      kind: "text",
+      content: "",
+      ts: "2026-04-26T12:00:00Z",
+    };
+    expect(fromStoredMessage(s)).toBeNull();
+  });
+
+  it("Bug #24 · text 仅空白字符（空格 / \\n） 玄女条目也过滤", () => {
+    const s: StoredMessage = {
+      id: "ws-xn",
+      conv_id: "xuannv",
+      role: "xuannv",
+      agent_id: "x",
+      kind: "text",
+      content: "   \n\t  ",
+      ts: "2026-04-26T12:00:00Z",
+    };
+    expect(fromStoredMessage(s)).toBeNull();
+  });
+
+  it("Bug #24 · text 空 user 条目同样过滤（兜底）", () => {
+    const s: StoredMessage = {
+      id: "empty-u",
+      conv_id: "xuannv",
+      role: "user",
+      kind: "text",
+      content: "",
+      ts: "2026-04-26T12:00:00Z",
+    };
+    expect(fromStoredMessage(s)).toBeNull();
+  });
+
   it("file kind → FileMessage（attachments 占位 Upload）", () => {
     const s: StoredMessage = {
       id: "m3",

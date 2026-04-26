@@ -132,6 +132,36 @@ describe("messages.applyEvent · ServerEvent 嵌套", () => {
     expect(applyEvent(before, { meta: {} } as unknown as ServerEvent)).toBe(before);
   });
 
+  it("Bug #24 · thinking_started → agent_responded \"\" · 丢空 bubble 不残留", () => {
+    let s: Message[] = [];
+    s = applyEvent(s, ev({ type: "thinking_started" }));
+    expect(s).toHaveLength(1);
+    s = applyEvent(s, ev({ type: "agent_responded", text: "" }));
+    expect(s).toHaveLength(0);
+  });
+
+  it("Bug #24 · thinking_started → agent_responded 空白字符 · 丢", () => {
+    let s: Message[] = [];
+    s = applyEvent(s, ev({ type: "thinking_started" }));
+    s = applyEvent(s, ev({ type: "agent_responded", text: "   \n  " }));
+    expect(s).toHaveLength(0);
+  });
+
+  it("Bug #24 · agent_responded 空 text 没 streaming bubble · noop", () => {
+    const before: Message[] = [];
+    const out = applyEvent(before, ev({ type: "agent_responded", text: "" }));
+    expect(out).toBe(before);
+  });
+
+  it("Bug #24 · 多轮空 turn 不堆 bubble", () => {
+    let s: Message[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      s = applyEvent(s, ev({ type: "thinking_started" }));
+      s = applyEvent(s, ev({ type: "agent_responded", text: "" }));
+    }
+    expect(s).toHaveLength(0);
+  });
+
   it("真实 fixture · 实测后端格式整段不崩", () => {
     const real: ServerEvent = {
       meta: {
