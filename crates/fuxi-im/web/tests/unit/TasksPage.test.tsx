@@ -4,7 +4,7 @@ import { ApiProvider, setApiOverride, useApi } from "~/components/ApiProvider";
 import { TasksPage } from "~/views/pages/TasksPage";
 import { createMockApi } from "../mocks/api";
 import type { TasksOverview } from "~/types/api";
-import { createEffect, onMount, type Component } from "solid-js";
+import { createEffect, type Component } from "solid-js";
 
 afterEach(() => setApiOverride(null));
 
@@ -48,7 +48,7 @@ const RUNNING_FIXTURE: TasksOverview = {
   completed: [],
 };
 
-describe("TasksPage · C 方案", () => {
+describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
   it("空 overview · 显示空态", async () => {
     const { getByTestId, queryByTestId, unmount } = setup({ running: [], completed: [] });
     await new Promise((r) => setTimeout(r, 30));
@@ -67,13 +67,22 @@ describe("TasksPage · C 方案", () => {
     unmount();
   });
 
-  it("member 行 · role 加粗 + 副文本（last_tool_call.tool + args）+ chev ›", async () => {
+  it("member 行 · role 加粗 + 副文本（last_tool_call.tool + args）· 不再有 chev ›", async () => {
     const { getByTestId, unmount } = setup(RUNNING_FIXTURE);
     await new Promise((r) => setTimeout(r, 30));
     const lubanRow = getByTestId("member-a-luban");
     expect(lubanRow.textContent).toContain("鲁班");
     expect(lubanRow.textContent).toContain("grep server/api/v1.go");
-    expect(lubanRow.textContent).toContain("›");
+    expect(lubanRow.textContent).not.toContain("›");
+    unmount();
+  });
+
+  it("member 行 inspection-only · v3 不可 tap（无 button）", async () => {
+    const { getByTestId, unmount } = setup(RUNNING_FIXTURE);
+    await new Promise((r) => setTimeout(r, 30));
+    const row = getByTestId("member-a-luban");
+    expect(row.tagName.toLowerCase()).toBe("li");
+    expect(row.querySelector("button")).toBeNull();
     unmount();
   });
 
@@ -84,27 +93,19 @@ describe("TasksPage · C 方案", () => {
     unmount();
   });
 
-  it("点 task header · 折叠 members（aria-expanded false）", async () => {
-    const { getByTestId, queryByTestId, unmount } = setup(RUNNING_FIXTURE);
-    await new Promise((r) => setTimeout(r, 30));
-    const head = getByTestId("task-card-head-task-uuid-12345678");
-    expect(head.getAttribute("aria-expanded")).toBe("true");
-    fireEvent.click(head);
-    expect(head.getAttribute("aria-expanded")).toBe("false");
-    expect(queryByTestId("member-a-luban")).toBeNull();
-    unmount();
-  });
-
-  it("点 member 行 · navPush({ kind: worker, agent_id, role_display })", async () => {
+  it("点 task card header · navPush({ kind: task, task_id, title })", async () => {
     const api = createMockApi({ tasksOverview: RUNNING_FIXTURE });
     setApiOverride(api);
-    let pushed: { agent: string | null; role: string | null } = { agent: null, role: null };
+    let pushed: { task_id: string | null; title: string | null } = {
+      task_id: null,
+      title: null,
+    };
     const Probe: Component = () => {
       const { navRoute } = useApi();
       createEffect(() => {
         const r = navRoute();
-        if (r?.kind === "worker") {
-          pushed = { agent: r.agent_id, role: r.role_display ?? null };
+        if (r?.kind === "task") {
+          pushed = { task_id: r.task_id, title: r.title ?? null };
         }
       });
       return null;
@@ -116,32 +117,18 @@ describe("TasksPage · C 方案", () => {
       </ApiProvider>
     ));
     await new Promise((r) => setTimeout(r, 30));
-    fireEvent.click(getByTestId("member-a-luban").querySelector("button")!);
+    fireEvent.click(getByTestId("task-card-head-task-uuid-12345678"));
     await new Promise((r) => setTimeout(r, 10));
-    expect(pushed.agent).toBe("a-luban");
-    expect(pushed.role).toBe("鲁班");
+    expect(pushed.task_id).toBe("task-uuid-12345678");
+    expect(pushed.title).toBe("查 ERP API");
     unmount();
   });
 
-  it("active 高亮 · navRoute 匹配的 member 行挂 data-active=true", async () => {
-    const api = createMockApi({ tasksOverview: RUNNING_FIXTURE });
-    setApiOverride(api);
-    const ActivateLuban: Component = () => {
-      const { navPush } = useApi();
-      onMount(() => {
-        navPush({ kind: "worker", agent_id: "a-luban", role_display: "鲁班" });
-      });
-      return null;
-    };
-    const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={1}>
-        <TasksPage />
-        <ActivateLuban />
-      </ApiProvider>
-    ));
+  it("v3 · members 始终展开（无 expand/collapse 切换）", async () => {
+    const { getByTestId, unmount } = setup(RUNNING_FIXTURE);
     await new Promise((r) => setTimeout(r, 30));
-    expect(getByTestId("member-a-luban").getAttribute("data-active")).toBe("true");
-    expect(getByTestId("member-a-pusong").getAttribute("data-active")).toBeNull();
+    expect(getByTestId("member-a-luban")).toBeTruthy();
+    expect(getByTestId("member-a-pusong")).toBeTruthy();
     unmount();
   });
 
@@ -191,7 +178,6 @@ describe("TasksPage · C 方案", () => {
     };
     const { container, unmount } = setup(overview);
     await new Promise((r) => setTimeout(r, 30));
-    // 排除 task-card-head-* button 的 testid
     const cards = Array.from(
       container.querySelectorAll('[data-testid^="task-card-"]'),
     ).filter((el) => !el.getAttribute("data-testid")?.startsWith("task-card-head-"));

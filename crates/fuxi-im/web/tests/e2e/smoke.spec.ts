@@ -561,6 +561,48 @@ test("#N4 · tap badge → swipe 到任务树页 (page 3)", async ({ page }) => 
   await expect(page.getByTestId("page-tasks")).toBeVisible();
 });
 
+// ===== #N3' / #38 任务卡片 tap → push 任务 thread (v3 stub) =====
+
+test("#N3' · 任务卡片 tap → push Layer 2 thread placeholder", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "task-erp",
+          title: "查 ERP API",
+          status: "running",
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 12_000,
+          members: [
+            {
+              agent_id: "a-luban",
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-tasks").click();
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
+
+  // 点任务卡 header → push thread placeholder
+  await page.getByTestId("task-card-head-task-erp").click();
+  await expect(page.getByTestId("task-thread-stub")).toBeVisible();
+  await expect(page.getByTestId("task-thread-stub")).toContainText("查 ERP API");
+
+  // ‹ 列表 pop 回任务列表
+  await page.getByTestId("task-thread-back").click();
+  await expect(page.getByTestId("task-thread-stub")).toHaveCount(0);
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
+});
+
 // ===== #N3 v2 私聊页 e2e 已删 (v3 supersede 后 per-worker push 概念去除) =====
 // 私聊页源码 src/views/pages/WorkerPage.tsx 暂留作 v2.x 备用（per spec），但 e2e 流不再走。
 // 任务 thread (#39/#N4') 实装后会有新的 task-thread-* 一族 e2e 替代这里。
