@@ -8,9 +8,11 @@ import { ApiProvider, useApi, type PageIndex } from "./components/ApiProvider";
 import { LoginView } from "./components/LoginView";
 import { Pager } from "./components/Pager";
 import { NavigationStack } from "./components/NavigationStack";
+import { Toast } from "./components/Toast";
 import { NodesPage } from "./views/pages/NodesPage";
 import { XuannvPage } from "./views/pages/XuannvPage";
 import { TasksPage } from "./views/pages/TasksPage";
+import { WorkerPage } from "./views/pages/WorkerPage";
 import styles from "./App.module.css";
 
 // 顶层 shell · 设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §B
@@ -27,6 +29,7 @@ export const App: Component = (): JSX.Element => {
   return (
     <ApiProvider>
       <AuthGate />
+      <Toast />
     </ApiProvider>
   );
 };
@@ -53,36 +56,11 @@ const PAGE_LABELS = ["节点", "玄女", "任务树"];
 const MainShell: Component = () => {
   const { currentPage, setCurrentPage, navRoute, navPop } = useApi();
 
-  // 私聊页 placeholder · #N3 才真接 WS / intervene。给 NavigationStack 喂占位，
-  // 包含 "‹ 玄女" 返回按钮触发 navPop，让 shell 闭环可测。
+  // 私聊页 #N3 · WorkerPage 走橙色 + 任务 banner + 真消息流；β #N5 镜像端点已落。
   const renderTop = (): JSX.Element | undefined => {
     const r = navRoute();
     if (!r) return undefined;
-    return (
-      <div class={styles.workerStub} data-testid="worker-stub">
-        <header class={styles.workerHead}>
-          <button
-            type="button"
-            class={styles.backBtn}
-            onClick={() => navPop()}
-            data-testid="worker-back"
-            aria-label="返回玄女"
-          >
-            ‹ 玄女
-          </button>
-          <span class={styles.workerTitle}>{r.role_display ?? "门客"}</span>
-          <span class={styles.workerHeadRight} aria-hidden="true" />
-        </header>
-        <div class={styles.workerBody}>
-          <p class={styles.workerStubMsg}>
-            私聊页 placeholder（#N3 实装橙色识别 + 任务 banner + 真消息流）。
-          </p>
-          <p class={styles.workerStubAgent}>
-            <span class="agent-id">{r.agent_id}</span>
-          </p>
-        </div>
-      </div>
-    );
+    return <WorkerPage agent_id={r.agent_id} role_display={r.role_display} />;
   };
 
   const onIndexChange = (i: number): void => {

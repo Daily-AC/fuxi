@@ -105,6 +105,8 @@ export interface MockApi extends ApiClient {
   pushConv(ev: ServerEvent): void;
   /** 主动推一条事件给指定 task socket */
   pushTask(taskId: string, ev: ServerEvent): void;
+  /** 主动推一条事件给指定 worker socket（#N3 / #30 私聊页用） */
+  pushWorker(agentId: string, ev: ServerEvent): void;
 }
 
 export function createMockApi(initial?: Partial<MockState>): MockApi {
@@ -138,6 +140,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
 
   let convSocket: FakeSocket | null = null;
   const taskSockets = new Map<string, FakeSocket>();
+  const workerSockets = new Map<string, FakeSocket>();
 
   return {
     state,
@@ -146,6 +149,9 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     },
     pushTask(taskId, ev) {
       taskSockets.get(taskId)?.push(ev);
+    },
+    pushWorker(agentId, ev) {
+      workerSockets.get(agentId)?.push(ev);
     },
     fetchTasks: async () => ({ tasks: state.tasks }),
     fetchTaskEvents: async (taskId): Promise<EventHistoryResponse> => ({
@@ -185,6 +191,10 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     },
     fetchTasksOverview: async (): Promise<TasksOverview> =>
       state.tasksOverview ?? { running: [], completed: [] },
+    fetchWorkerEvents: async (agentId: string): Promise<EventHistoryResponse> => ({
+      events: state.events[`worker:${agentId}`] ?? [],
+      next_cursor: null,
+    }),
     uploadFile: async (file: File, onProgress?: (r: number) => void): Promise<Upload> => {
       if (state.uploadFail) throw new ApiError(500, "upload failed");
       onProgress?.(0.5);
@@ -208,6 +218,12 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     openTaskSocket: (taskId) => {
       const s = new FakeSocket();
       taskSockets.set(taskId, s);
+      queueMicrotask(() => s.open());
+      return s as unknown as WebSocket;
+    },
+    openWorkerSocket: (agentId) => {
+      const s = new FakeSocket();
+      workerSockets.set(agentId, s);
       queueMicrotask(() => s.open());
       return s as unknown as WebSocket;
     },

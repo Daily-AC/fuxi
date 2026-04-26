@@ -57,7 +57,65 @@ export interface FileMessage {
   ts: number;
 }
 
-export type Message = UserMessage | XuannvMessage | FileMessage;
+/** 门客（worker）气泡 · #N3 私聊页用。
+ *  视觉上跟 XuannvMessage 同结构（左对齐 + who 标签 + bubble），但 who 走橙色 + role_display 渲染。
+ *  agent uuid 必填（私聊页单 agent 上下文）。*/
+export interface WorkerMessage {
+  kind: "worker";
+  id: string;
+  agent: string;
+  role?: ConversationRole;
+  /** UI 显示用的角色名（"鲁班" / "蒲松" / "墨子" ...）。*/
+  role_display?: string;
+  text: string;
+  streaming: boolean;
+  ts: number;
+}
+
+/** 工具调用卡 · ToolStarted/ToolFinished 配对折叠成单条 ToolCallMessage。
+ *  tap 展开看 stdout（前 20 行截断）。
+ *  v1 实装只显折叠条 + 状态点；展开 stdout 留交互 stub（只读 output 字段）。*/
+export interface ToolCallMessage {
+  kind: "tool_call";
+  id: string;
+  agent: string;
+  tool: string;
+  args_summary?: string | null;
+  status: "running" | "ok" | "err";
+  duration_ms?: number | null;
+  /** 简化：只存最后一次 ToolFinished 的 output。*/
+  output?: string | null;
+  ts: number;
+}
+
+/** Thinking 折叠条 · 灰色斜体 `▸ 思考 Ns`，tap 展开。
+ *  ThinkingStarted 起一条 streaming，ThinkingDone 标完结 + duration。*/
+export interface ThinkingMessage {
+  kind: "thinking";
+  id: string;
+  agent: string;
+  duration_ms?: number | null;
+  streaming: boolean;
+  ts: number;
+}
+
+/** 状态变更 marker · 居中 muted 行 `─ 鲁班 idle ─`。
+ *  来源：task_completed / agent_idle（filter 内白名单）。*/
+export interface StatusMarker {
+  kind: "marker";
+  id: string;
+  text: string;
+  ts: number;
+}
+
+export type Message =
+  | UserMessage
+  | XuannvMessage
+  | FileMessage
+  | WorkerMessage
+  | ToolCallMessage
+  | ThinkingMessage
+  | StatusMarker;
 
 function parseTs(iso?: string | null): number {
   if (!iso) return Date.now();
@@ -253,4 +311,256 @@ export function markUserMessage(
   patch: Partial<Pick<UserMessage, "pending" | "error">>,
 ): Message[] {
   return prev.map((m) => (m.kind === "user" && m.id === id ? { ...m, ...patch } : m));
+}
+
+// ============================================================================
+// 私聊页（#N3）专用 reducer · `applyWorkerEvent`
+// ----------------------------------------------------------------------------
+// 跟玄女 reducer 的差异：
+//   - 单 agent 上下文：所有 bubble 都属于 props.agent；非该 agent 的事件直接丢
+//     （后端 #N5 已 server-side filter，前端再防一次）
+//   - AssistantText/agent_responded → WorkerMessage（不是 XuannvMessage）
+//   - ToolStarted + ToolFinished 配对成 ToolCallMessage（折叠卡）
+//   - ThinkingStarted/Done → ThinkingMessage 折叠条
+//   - task_completed / agent_idle → StatusMarker 居中
+//   - UserInterventionSent { target == agent } → 右侧 user bubble（用户自己发给该 worker）
+// 渲染规则源：spec §"私聊页·渲染规则"
+// ============================================================================
+
+export interface WorkerReducerCtx {
+  /** 该私聊页绑定的 worker agent uuid。 */
+  agent: string;
+  /** UI 显示名（"鲁班" 等），用于 WorkerMessage.role_display。可选。 */
+  role_display?: string;
+}
+
+function lastStreamingWorker(prev: Message[]): WorkerMessage | null {
+  const last = prev[prev.length - 1];
+  return last && last.kind === "worker" && last.streaming ? last : null;
+}
+
+function lastStreamingThinking(prev: Message[]): ThinkingMessage | null {
+  const last = prev[prev.length - 1];
+  return last && last.kind === "thinking" && last.streaming ? last : null;
+}
+
+function startWorkerBubble(
+  prev: Message[],
+  ev: ServerEvent,
+  ctx: WorkerReducerCtx,
+  initialText: string,
+): Message[] {
+  const ts = parseTs(ev.meta.at);
+  const next: WorkerMessage = {
+    kind: "worker",
+    id: ev.meta.id || `w-${ts}-${prev.length}`,
+    agent: ctx.agent,
+    role_display: ctx.role_display,
+    text: initialText,
+    streaming: true,
+    ts,
+  };
+  return [...prev, next];
+}
+
+/** 找到 prev 里最近一条匹配 (agent, tool) 的 running ToolCallMessage 用于 ToolFinished 配对。
+ *  没找到返 -1（finished 对不上 started 时降级直接插一条 ok 卡）。*/
+function findRunningToolIdx(prev: Message[], agent: string, tool: string): number {
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const m = prev[i];
+    if (
+      m &&
+      m.kind === "tool_call" &&
+      m.agent === agent &&
+      m.tool === tool &&
+      m.status === "running"
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+export function applyWorkerEvent(
+  prev: Message[],
+  ev: ServerEvent,
+  ctx: WorkerReducerCtx,
+): Message[] {
+  if (!ev || !ev.kind || typeof ev.kind.type !== "string") return prev;
+  const k = ev.kind;
+  const ts = parseTs(ev.meta.at);
+  const evAgent = ev.meta.agent ?? null;
+
+  // —— UserInterventionSent · 看 target 不看 meta.agent（spec §渲染规则） ——
+  // 私聊页只接 target == ctx.agent 的；server-side 应已 filter，这里再防一次。
+  if (k.type === "user_intervention_sent") {
+    const target = (k as { target?: string }).target;
+    if (target !== ctx.agent) return prev;
+    const text = (k as { text?: string }).text ?? "";
+    if (text.trim() === "") return prev;
+    // optimistic 已渲染过的不重复（id 重复时 mergeMessages 会去重；这里直接 push 让 dedupe 处理）
+    const id = ev.meta.id || `u-${ts}-${prev.length}`;
+    const already = prev.some((m) => m.id === id);
+    if (already) return prev;
+    const next: UserMessage = {
+      kind: "user",
+      id,
+      text,
+      pending: false,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // 下面所有事件都要求 meta.agent == ctx.agent；不匹配丢
+  if (evAgent !== ctx.agent) return prev;
+
+  // —— 流式 thinking（折叠条 + 完结时填 duration） ——
+  if (k.type === "thinking_started") {
+    if (lastStreamingThinking(prev)) return prev;
+    const id = ev.meta.id || `th-${ts}-${prev.length}`;
+    const next: ThinkingMessage = {
+      kind: "thinking",
+      id,
+      agent: ctx.agent,
+      streaming: true,
+      ts,
+    };
+    return [...prev, next];
+  }
+  if (k.type === "thinking_finished") {
+    const last = lastStreamingThinking(prev);
+    if (!last) return prev;
+    const dur = ts - last.ts;
+    const updated: ThinkingMessage = {
+      ...last,
+      streaming: false,
+      duration_ms: dur >= 0 ? dur : null,
+    };
+    return [...prev.slice(0, -1), updated];
+  }
+
+  // —— 文本 delta / 整段 ——
+  if (k.type === "agent_text_delta") {
+    const delta = (k as { delta?: string }).delta ?? "";
+    const last = lastStreamingWorker(prev);
+    if (last) {
+      const updated: WorkerMessage = { ...last, text: last.text + delta };
+      return [...prev.slice(0, -1), updated];
+    }
+    return startWorkerBubble(prev, ev, ctx, delta);
+  }
+  if (k.type === "agent_text" || k.type === "agent_responded") {
+    const text = (k as { text?: string }).text ?? "";
+    const isEmpty = text.trim() === "";
+    const last = lastStreamingWorker(prev);
+    if (last) {
+      if (isEmpty) return prev.slice(0, -1);
+      const updated: WorkerMessage = { ...last, text, streaming: false };
+      return [...prev.slice(0, -1), updated];
+    }
+    if (isEmpty) return prev;
+    const next: WorkerMessage = {
+      kind: "worker",
+      id: ev.meta.id || `w-${ts}-${prev.length}`,
+      agent: ctx.agent,
+      role_display: ctx.role_display,
+      text,
+      streaming: false,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // —— 工具调用配对：tool_call + tool_result 折叠成单卡 ——
+  // 注意：spec 用 ToolStarted/ToolFinished，wire 实际 EventKind 是 tool_call/tool_result
+  // （types/events.ts §28），保持兼容。
+  if (k.type === "tool_call") {
+    const tool = (k as { tool?: string }).tool ?? "tool";
+    const argsRaw = (k as { input?: unknown }).input;
+    const args = stringifyArgs(argsRaw);
+    const next: ToolCallMessage = {
+      kind: "tool_call",
+      id: ev.meta.id || `tc-${ts}-${prev.length}`,
+      agent: ctx.agent,
+      tool,
+      args_summary: args,
+      status: "running",
+      ts,
+    };
+    return [...prev, next];
+  }
+  if (k.type === "tool_result") {
+    const tool = (k as { tool?: string }).tool ?? "tool";
+    const ok = Boolean((k as { ok?: boolean }).ok);
+    const output = stringifyOutput((k as { output?: unknown }).output);
+    const idx = findRunningToolIdx(prev, ctx.agent, tool);
+    if (idx >= 0) {
+      const running = prev[idx] as ToolCallMessage;
+      const updated: ToolCallMessage = {
+        ...running,
+        status: ok ? "ok" : "err",
+        duration_ms: ts - running.ts,
+        output,
+      };
+      const next = prev.slice();
+      next[idx] = updated;
+      return next;
+    }
+    // 未配上 started · 直接插一条完结态卡
+    const next: ToolCallMessage = {
+      kind: "tool_call",
+      id: ev.meta.id || `tc-${ts}-${prev.length}`,
+      agent: ctx.agent,
+      tool,
+      status: ok ? "ok" : "err",
+      duration_ms: 0,
+      output,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // —— 状态变更 marker ——
+  if (k.type === "agent_idle") {
+    const text = `${ctx.role_display ?? "门客"} idle`;
+    return appendMarker(prev, ev, text, ts);
+  }
+  if (k.type === "task_completed") {
+    const summary = (k as { summary?: string }).summary;
+    const text = summary ? `任务完成 · ${summary}` : "任务完成";
+    return appendMarker(prev, ev, text, ts);
+  }
+
+  return prev;
+}
+
+function appendMarker(prev: Message[], ev: ServerEvent, text: string, ts: number): Message[] {
+  const id = ev.meta.id || `mk-${ts}-${prev.length}`;
+  // 防重：相同 id 不再 push
+  if (prev.some((m) => m.id === id)) return prev;
+  const next: StatusMarker = { kind: "marker", id, text, ts };
+  return [...prev, next];
+}
+
+function stringifyArgs(input: unknown): string | null {
+  if (input == null) return null;
+  if (typeof input === "string") return input;
+  try {
+    const s = JSON.stringify(input);
+    if (!s) return null;
+    return s.length > 80 ? `${s.slice(0, 77)}...` : s;
+  } catch {
+    return null;
+  }
+}
+
+function stringifyOutput(output: unknown): string | null {
+  if (output == null) return null;
+  if (typeof output === "string") return output;
+  try {
+    return JSON.stringify(output, null, 2);
+  } catch {
+    return null;
+  }
 }

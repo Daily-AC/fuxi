@@ -4,10 +4,12 @@ import { test, expect } from "@playwright/test";
 
 declare global {
   interface Window {
-    __FUXI_FETCH__: Array<{ input: string }>;
+    __FUXI_FETCH__: Array<{ input: string; body?: string }>;
     __FUXI_WS__: { last: WebSocketLike | null };
+    __FUXI_WORKER_WS__: { last: WebSocketLike | null; url: string | null };
     __FUXI_HISTORY__?: unknown[];
     __FUXI_TASKS_OVERVIEW__?: unknown;
+    __FUXI_INTERVENE_NEXT_STATUS__?: number;
   }
 }
 
@@ -21,6 +23,7 @@ test.beforeEach(async ({ page }) => {
     const fetchCalls: Array<{ input: string }> = [];
     window.__FUXI_FETCH__ = fetchCalls;
     window.__FUXI_WS__ = { last: null };
+    window.__FUXI_WORKER_WS__ = { last: null, url: null };
 
     const json = (data: unknown, status = 200): Response =>
       new Response(JSON.stringify(data), {
@@ -31,7 +34,8 @@ test.beforeEach(async ({ page }) => {
     const realFetch = window.fetch.bind(window);
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      fetchCalls.push({ input: url });
+      const body = typeof init?.body === "string" ? init.body : undefined;
+      fetchCalls.push({ input: url, body });
       if (url.startsWith("/api/tasks")) {
         if (url.includes("/events")) return json({ events: [], next_cursor: null });
         // fetchTasks(rootOnly=true) 用作 auth probe，走 ?root=1，返 v1 shape
@@ -42,7 +46,20 @@ test.beforeEach(async ({ page }) => {
         ).__FUXI_TASKS_OVERVIEW__;
         return json(overview ?? { running: [], completed: [] });
       }
-      if (url === "/api/intervene") return json({ ok: true });
+      if (url === "/api/intervene") {
+        const next = (window as unknown as { __FUXI_INTERVENE_NEXT_STATUS__?: number })
+          .__FUXI_INTERVENE_NEXT_STATUS__;
+        if (typeof next === "number" && next !== 200) {
+          (window as unknown as { __FUXI_INTERVENE_NEXT_STATUS__?: number })
+            .__FUXI_INTERVENE_NEXT_STATUS__ = undefined;
+          return json({ error: "busy" }, next);
+        }
+        return json({ ok: true });
+      }
+      if (url.startsWith("/api/workers/")) {
+        // /api/workers/:agent_id/events  · 私聊页历史
+        return json({ events: [], next_cursor: null });
+      }
       if (url === "/api/push/vapid-pub") return json({ public_key: "stub" });
       if (url === "/api/push/subscribe") return json({ ok: true });
       if (url.startsWith("/api/conv/messages")) {
@@ -115,6 +132,11 @@ test.beforeEach(async ({ page }) => {
         this.url = url;
         // 暴露最近一个 socket 给 e2e 推消息
         window.__FUXI_WS__.last = this;
+        // 私聊页 socket 单独 expose · /api/workers/:id/conv
+        if (url.includes("/api/workers/")) {
+          window.__FUXI_WORKER_WS__.last = this;
+          window.__FUXI_WORKER_WS__.url = url;
+        }
         setTimeout(() => {
           this.readyState = 1;
           this.dispatchEvent(new Event("open"));
@@ -467,6 +489,205 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
   await expect(page.getByTestId("page-nodes")).toBeVisible();
   await page.getByTestId("pager-dot-1").click();
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
+});
+
+// ===== #N3 私聊页 · 橙色 modal + 任务 banner + intervene + 4xx toast =====
+
+test("#N3 · 任务树点门客 → push 私聊页（橙顶栏 + 任务 banner + composer placeholder 跟鲁班说）", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "task-erp",
+          title: "查 ERP API",
+          status: "running",
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 12_000,
+          members: [
+            {
+              agent_id: "a-luban-uuid",
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+
+  await page.getByTestId("pager-dot-2").click();
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
+  await page.getByTestId("member-a-luban-uuid").click();
+
+  // 私聊页 push 上来
+  await expect(page.getByTestId("page-worker")).toBeVisible();
+  await expect(page.getByTestId("page-worker")).toHaveAttribute("data-agent-id", "a-luban-uuid");
+  await expect(page.getByTestId("worker-back")).toContainText("玄女");
+
+  // 任务 banner 拉取并显示标题 + 时长 + 状态
+  await expect(page.getByTestId("worker-task-banner")).toContainText("查 ERP API");
+  await expect(page.getByTestId("worker-task-banner")).toContainText("0:12");
+  await expect(page.getByTestId("worker-task-banner")).toContainText("进行中");
+
+  // composer placeholder 是 "跟鲁班说……"（私聊页内的 composer）
+  await expect(
+    page.getByTestId("page-worker").getByTestId("composer-input"),
+  ).toHaveAttribute("placeholder", /鲁班/);
+
+  // 顶栏返回 → pop
+  await page.getByTestId("worker-back").click();
+  await expect(page.getByTestId("page-worker")).toHaveCount(0);
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
+});
+
+test("#N3 · 私聊页发送 → user bubble + intervene 带 target=agent_id", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-luban-2",
+              role: "luban",
+              role_display: "鲁班",
+              status: "idle",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("pager-dot-2").click();
+  await page.getByTestId("member-a-luban-2").click();
+  await expect(page.getByTestId("page-worker")).toBeVisible();
+
+  const workerPage = page.getByTestId("page-worker");
+  await workerPage.getByTestId("composer-input").fill("查接口");
+  await workerPage.getByTestId("composer-send").click();
+
+  await expect(workerPage.getByTestId("msg-user")).toContainText("查接口");
+
+  // 读 __FUXI_FETCH__ 拿 intervene body（addInitScript 的 fetch override 已记录 body）
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const c = window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene");
+        return c?.body ?? "";
+      }),
+    )
+    .toContain('"target":"a-luban-2"');
+  const body = await page.evaluate(() =>
+    window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene")?.body ?? "",
+  );
+  expect(body).toContain('"text":"查接口"');
+});
+
+test("#N3 · 私聊页 intervene 4xx → toast \"门客正忙\"", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-mo",
+              role: "mozi",
+              role_display: "墨子",
+              status: "busy",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    window.__FUXI_INTERVENE_NEXT_STATUS__ = 409;
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("pager-dot-2").click();
+  await page.getByTestId("member-a-mo").click();
+  await expect(page.getByTestId("page-worker")).toBeVisible();
+
+  const workerPage = page.getByTestId("page-worker");
+  await workerPage.getByTestId("composer-input").fill("插一句");
+  await workerPage.getByTestId("composer-send").click();
+
+  await expect(page.getByTestId("toast")).toBeVisible();
+  await expect(page.getByTestId("toast")).toContainText("门客正忙");
+});
+
+test("#N3 · 私聊页 WS agent_responded → worker bubble (橙 who)", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-ws-luban",
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("pager-dot-2").click();
+  await page.getByTestId("member-a-ws-luban").click();
+  await expect(page.getByTestId("page-worker")).toBeVisible();
+
+  // 等 worker socket 建好
+  await page.waitForFunction(() => window.__FUXI_WORKER_WS__.last !== null);
+
+  // 推 agent_responded（meta.agent 必须 == 该 worker 的 uuid，否则 reducer 丢）
+  await page.evaluate(() => {
+    const ws = window.__FUXI_WORKER_WS__.last as unknown as EventTarget;
+    const ev = {
+      meta: {
+        id: "id-ws-1",
+        at: new Date().toISOString(),
+        session: null,
+        agent: "a-ws-luban",
+        task: null,
+      },
+      kind: { type: "agent_responded", text: "查到了 12 条" },
+    };
+    ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(ev) }));
+  });
+
+  await expect(page.getByTestId("msg-worker")).toContainText("查到了 12 条");
+  await expect(page.getByTestId("msg-worker")).toContainText("鲁班");
 });
 
 test("#N2 · completed 卡折叠 sticky tail · 展开后显 members + tool 副文本", async ({ page }) => {
