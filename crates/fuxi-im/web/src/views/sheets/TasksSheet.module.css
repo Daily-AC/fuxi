@@ -60,6 +60,11 @@
   gap: var(--space-3);
 }
 
+/* 已完成卡 · 压暗一档 + 仍显完整 members（#26） */
+.cardDim {
+  opacity: 0.72;
+}
+
 .cardHead {
   display: flex;
   align-items: baseline;
@@ -93,13 +98,31 @@
   flex-shrink: 0;
 }
 
+/* 整 task 最近事件摘要 · 树状缩进用 padding-left + 1px border-left（无 unicode 装饰） */
+.summary {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .members {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
+}
+
+/* 单 member 块 · 包 main row + 可选 toolcall 二级行 */
+.memberBlock {
+  display: flex;
+  flex-direction: column;
 }
 
 .memberRow {
@@ -138,32 +161,47 @@
   justify-self: end;
 }
 
-.completedRow {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: 10px var(--space-3);
-  border-bottom: 1px solid var(--border);
-  font-size: var(--size-aux);
-}
-
-.completedHead {
-  color: var(--text-secondary);
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-.completedTitle {
+/* member toolcall 二级行 · CSS 缩进模拟 TUI 树状（不引入 ┌─└ unicode）。
+ * padding-left 24px 跟 dot 8 + name 60 + gap 大致对齐；border-left 1px 在缩进处画细竖线。
+ */
+.toolCall {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  margin-top: 2px;
+  margin-left: 24px;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+  line-height: 1.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.completedDuration {
+.toolName {
+  color: var(--text-secondary);
+}
+
+.toolArgs {
+  color: var(--text-muted);
+}
+
+.toolSep {
+  color: var(--text-muted);
+}
+
+.toolDuration {
   color: var(--text-muted);
   font-feature-settings: "tnum";
-  flex-shrink: 0;
+}
+
+.exitOk {
+  color: var(--success);
+}
+
+.exitFail {
+  color: var(--danger);
+}
+
+.exitRunning {
+  color: var(--accent);
 }
