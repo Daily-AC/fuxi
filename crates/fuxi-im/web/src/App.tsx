@@ -23,6 +23,8 @@ import { LoginView } from "./components/LoginView";
 import { Header } from "./components/Header";
 import { Composer } from "./components/Composer";
 import { Conversation } from "./views/Conversation";
+import { TasksSheet } from "./views/sheets/TasksSheet";
+import { NodesSheet } from "./views/sheets/NodesSheet";
 import styles from "./App.module.css";
 
 // 顶层 shell：未登入 → LoginView；登入 → Header + Conversation + Composer。
@@ -63,14 +65,10 @@ const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv"; // 主对话固定 id（β #17 采用此 conv_id 作 fixed top-level）
 
 const MainShell: Component = () => {
-  const { client } = useApi();
+  const { client, setActiveSheet } = useApi();
 
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [online, setOnline] = createSignal(false);
-  const [_tasksOpen, setTasksOpen] = createSignal(false);
-  const [_nodesOpen, setNodesOpen] = createSignal(false);
-  void _tasksOpen;
-  void _nodesOpen;
 
   let controller: ReconnectController | null = null;
 
@@ -176,11 +174,13 @@ const MainShell: Component = () => {
     <div class={styles.shell} data-testid="main-shell">
       <Header
         online={online()}
-        onOpenTasks={() => setTasksOpen(true)}
-        onOpenNodes={() => setNodesOpen(true)}
+        onOpenTasks={() => setActiveSheet("tasks")}
+        onOpenNodes={() => setActiveSheet("nodes")}
       />
       <Conversation messages={messages} />
       <Composer onSubmit={handleSubmit} />
+      <TasksSheet />
+      <NodesSheet />
     </div>
   );
 };

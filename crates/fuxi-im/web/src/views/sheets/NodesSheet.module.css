@@ -1,0 +1,124 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  margin: 0;
+}
+
+.errMsg {
+  color: var(--danger);
+  font-size: var(--size-aux);
+  margin: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.sectionLabel {
+  margin: 0;
+  font-size: var(--size-aux);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.nodeCard {
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.nodeHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.nodeName {
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.nodeStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.statusDotOn {
+  background: var(--success);
+}
+
+.statusText {
+  font-feature-settings: "tnum";
+}
+
+.agents {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agentRow {
+  display: grid;
+  grid-template-columns: 8px 1fr auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 0;
+  min-height: var(--touch);
+  border-bottom: 1px solid var(--border);
+}
+
+.agentRow:last-child {
+  border-bottom: 0;
+}
+
+.agentDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  justify-self: center;
+}
+
+.agentName {
+  font-size: var(--size-aux);
+  color: var(--text-primary);
+}
+
+.agentStatusText {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+}
+
+.agentTokens {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  font-feature-settings: "tnum";
+}

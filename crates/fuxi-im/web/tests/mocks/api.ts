@@ -14,6 +14,7 @@ import type {
   ConversationHistoryResponse,
   InterveneRequestV2,
   StoredMessage,
+  TasksOverview,
   Upload,
 } from "~/types/api";
 
@@ -41,6 +42,8 @@ export interface MockState {
   /** 控制 uploadFile 行为：fail=true 时抛 500，否则按 next id 序列返回。*/
   uploadFail?: boolean;
   uploads: Upload[];
+  /** 阶段 4 任务 sheet · /api/tasks 返回值。空时跑空状态。*/
+  tasksOverview?: TasksOverview;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -125,6 +128,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     history: initial?.history,
     uploadFail: initial?.uploadFail,
     uploads: [],
+    tasksOverview: initial?.tasksOverview,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -179,6 +183,8 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       const list = state.history?.[convId] ?? [];
       return { messages: list, next_before: null };
     },
+    fetchTasksOverview: async (): Promise<TasksOverview> =>
+      state.tasksOverview ?? { running: [], completed: [] },
     uploadFile: async (file: File, onProgress?: (r: number) => void): Promise<Upload> => {
       if (state.uploadFail) throw new ApiError(500, "upload failed");
       onProgress?.(0.5);
