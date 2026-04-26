@@ -2,15 +2,20 @@
 //!
 //! 只验"骨架装得上 + 三条最小契约成立"，不碰 β/γ/δ 的业务逻辑。
 //! 三条契约：
-//!   1. `GET /healthz` → 200 + body `"ok"`
-//!   2. `GET /api/tasks?root=1` → 200 + JSON 数组（骨架阶段允许空数组）
+//!   1. `GET /healthz` → 200 + body `"ok"`（layer 豁免）
+//!   2. `GET /api/tasks?root=1` 带合法 cookie → 200 + JSON 数组
 //!   3. 不存在路由 → 404
 //!
-//! 后续 teammate 给 router 挂模块时，本文件不需要改——它锚的是不变契约。
+//! #15 之后：`/api/*` 在 router 上强制带合法 cookie——本测试用注入 secret + 手签
+//! token 模拟登入后的请求。详细鉴权契约见 `tests/router_auth_integration.rs`。
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use fuxi_events::EventBus;
+use fuxi_im::auth::{COOKIE_NAME, HmacSecret, fresh_claims, sign_token};
+use fuxi_im::devices::DeviceStore;
+use fuxi_im::pair::PendingPairs;
+use fuxi_im::state::ImAuth;
 use fuxi_im::{AppState, router};
 use fuxi_orchestrator::Fuxi;
 use fuxi_workspace::GitWorktreeWorkspace;
@@ -57,17 +62,31 @@ async fn run_git(cwd: &std::path::Path, args: &[&str]) {
 }
 
 /// 装配一份骨架 router——内置一个真的 `Fuxi`（零 worker 启动），保证签名兼容。
-async fn build_router() -> (TempDir, axum::Router) {
+/// 返回 (tempdir, router, cookie_for_authenticated_request)。cookie 用注入的 secret
+/// 签出来——给 `/api/*` 测试用。
+async fn build_router() -> (TempDir, axum::Router, String) {
     let bus = EventBus::with_memory_store().await.expect("bus");
     let (dir, ws) = make_workspace().await;
     let fuxi = Arc::new(Fuxi::new(bus, ws));
-    let state = AppState::new(fuxi);
-    (dir, router(state))
+    let secret = HmacSecret::from_string("smoke-key".into());
+    let secret_arc = Arc::new(secret);
+    let im_auth = ImAuth {
+        secret: secret_arc.clone(),
+        pairs: Arc::new(PendingPairs::new()),
+        devices: None::<DeviceStore>,
+        password_path: None,
+        login_guard: Arc::new(fuxi_im::lockout::LoginGuard::new()),
+    };
+    let state = AppState::new(fuxi).with_im_auth(im_auth);
+    let claims = fresh_claims("smoke-device".into(), "smoke".into());
+    let token = sign_token(&secret_arc, &claims).expect("sign");
+    let cookie = format!("{COOKIE_NAME}={token}");
+    (dir, router(state), cookie)
 }
 
 #[tokio::test]
 async fn healthz_returns_ok() {
-    let (_dir, app) = build_router().await;
+    let (_dir, app, _cookie) = build_router().await;
 
     let resp = app
         .oneshot(
@@ -86,12 +105,13 @@ async fn healthz_returns_ok() {
 
 #[tokio::test]
 async fn api_tasks_root_returns_json_array() {
-    let (_dir, app) = build_router().await;
+    let (_dir, app, cookie) = build_router().await;
 
     let resp = app
         .oneshot(
             Request::builder()
                 .uri("/api/tasks?root=1")
+                .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -106,7 +126,7 @@ async fn api_tasks_root_returns_json_array() {
 
 #[tokio::test]
 async fn unknown_route_is_404() {
-    let (_dir, app) = build_router().await;
+    let (_dir, app, _cookie) = build_router().await;
 
     let resp = app
         .oneshot(
@@ -118,5 +138,6 @@ async fn unknown_route_is_404() {
         .await
         .unwrap();
 
+    // 404 而非 401——middleware `!path.starts_with("/api/")` 分支放行非 /api 路径
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
