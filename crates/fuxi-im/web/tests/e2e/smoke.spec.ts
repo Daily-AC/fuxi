@@ -131,14 +131,30 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("登入后 main shell 出现，Header + Composer + 空态", async ({ page }) => {
+test("登入后 main shell · Pager 3 页 + page 2 玄女默认 + Composer 空态", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByTestId("header-tasks")).toBeVisible();
-  await expect(page.getByTestId("header-center")).toContainText("玄女");
-  await expect(page.getByTestId("header-nodes")).toBeVisible();
+  // Pager 渲 3 页 + 3 dots
+  await expect(page.getByTestId("pager")).toBeVisible();
+  await expect(page.getByTestId("pager-dot-0")).toBeVisible();
+  await expect(page.getByTestId("pager-dot-1")).toBeVisible();
+  await expect(page.getByTestId("pager-dot-2")).toBeVisible();
+  // page 2 = 玄女 默认 active
+  await expect(page.getByTestId("pager-dot-1")).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await expect(page.getByTestId("conversation-empty")).toContainText("玄女在线");
   await expect(page.getByTestId("composer-input")).toBeVisible();
+});
+
+test("Pager · 点 dot 0 切节点页 / 点 dot 2 切任务树", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("pager-dot-0").click();
+  await expect(page.getByTestId("pager-dot-0")).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("page-nodes")).toBeVisible();
+  await page.getByTestId("pager-dot-2").click();
+  await expect(page.getByTestId("pager-dot-2")).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
 });
 
 test("composer 输入后发送按钮变 active", async ({ page }) => {
@@ -341,7 +357,7 @@ test("历史预加载 · mock 5 条 stored message → 看到 5 条进入", asyn
 
 // ===== 阶段 4 · 任务 sheet + 节点 sheet =====
 
-test("Header 任务 tap → TasksSheet 弹出 + 看到 mock 数据 + 关闭按钮", async ({ page }) => {
+test("Pager · 切任务页 · 看到 mock 数据 + 切回玄女", async ({ page }) => {
   await page.addInitScript(() => {
     window.__FUXI_TASKS_OVERVIEW__ = {
       running: [
@@ -387,19 +403,20 @@ test("Header 任务 tap → TasksSheet 弹出 + 看到 mock 数据 + 关闭按�
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
 
-  await page.getByTestId("header-tasks").click();
-  await expect(page.getByTestId("tasks-sheet")).toBeVisible();
+  // pager dot 切到任务页（v2 shell 重构后 sheet 升级成 page）
+  await page.getByTestId("pager-dot-2").click();
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
   await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("修 ERP 客户列表");
   await expect(page.getByTestId("member-a-luban")).toContainText("鲁班");
   await expect(page.getByTestId("member-a-luban")).toContainText("cargo test --lib");
   await expect(page.getByTestId("member-a-luban")).toContainText("1.2k");
   await expect(page.getByTestId("task-card-c1")).toContainText("升级 deps");
-
-  await page.getByTestId("tasks-sheet-close").click();
-  await expect(page.getByTestId("tasks-sheet")).toHaveCount(0);
+  // dot 1 切回玄女
+  await page.getByTestId("pager-dot-1").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
 
-test("Header 节点 tap → NodesSheet 弹出 + 聚合 home 节点 + 背景关闭", async ({ page }) => {
+test("Pager · 切节点页 · 聚合 home 节点 + agents 列表（dot 0）", async ({ page }) => {
   await page.addInitScript(() => {
     window.__FUXI_TASKS_OVERVIEW__ = {
       running: [
@@ -433,26 +450,22 @@ test("Header 节点 tap → NodesSheet 弹出 + 聚合 home 节点 + 背景关�
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
 
-  await page.getByTestId("header-nodes").click();
-  await expect(page.getByTestId("nodes-sheet")).toBeVisible();
+  await page.getByTestId("pager-dot-0").click();
+  await expect(page.getByTestId("page-nodes")).toBeVisible();
   await expect(page.getByTestId("node-home")).toContainText("home");
   await expect(page.getByTestId("node-agent-a-luban")).toContainText("鲁班");
   await expect(page.getByTestId("node-agent-a-luban")).toContainText("1.5k");
-
-  // 背景点击关闭
-  await page.getByTestId("nodes-sheet-backdrop").click();
-  await expect(page.getByTestId("nodes-sheet")).toHaveCount(0);
 });
 
-test("混合切换 · 任务 sheet 关闭后再开节点 sheet", async ({ page }) => {
+test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.getByTestId("header-tasks").click();
-  await expect(page.getByTestId("tasks-sheet")).toBeVisible();
-  await page.getByTestId("tasks-sheet-close").click();
-  await expect(page.getByTestId("tasks-sheet")).toHaveCount(0);
-  await page.getByTestId("header-nodes").click();
-  await expect(page.getByTestId("nodes-sheet")).toBeVisible();
+  await page.getByTestId("pager-dot-2").click();
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
+  await page.getByTestId("pager-dot-0").click();
+  await expect(page.getByTestId("page-nodes")).toBeVisible();
+  await page.getByTestId("pager-dot-1").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
 
 test("#26 · completed 卡也显 members + tool_call + last_event_summary", async ({ page }) => {
@@ -488,10 +501,10 @@ test("#26 · completed 卡也显 members + tool_call + last_event_summary", asyn
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.getByTestId("header-tasks").click();
-  await expect(page.getByTestId("tasks-sheet")).toBeVisible();
+  await page.getByTestId("pager-dot-2").click();
+  await expect(page.getByTestId("page-tasks")).toBeVisible();
 
-  // completed 卡用统一 task-card 前缀（不再 task-completed-）
+  // completed 卡用统一 task-card 前缀
   await expect(page.getByTestId("task-card-c-dense")).toBeVisible();
   // last_event_summary 行
   await expect(page.getByTestId("task-summary-c-dense")).toContainText(

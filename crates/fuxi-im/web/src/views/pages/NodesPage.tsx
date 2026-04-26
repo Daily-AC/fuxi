@@ -6,13 +6,12 @@ import {
   type Component,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
-import { BottomSheet } from "~/components/BottomSheet";
 import { colorForTaskRole, formatTokens } from "~/lib/format-task";
 import type { TaskMember, TasksOverview } from "~/types/api";
-import styles from "./NodesSheet.module.css";
+import styles from "./NodesPage.module.css";
 
-// 节点 sheet · v1 mock：从 /api/tasks 返回的 members 反推单 "home" 节点。
-// 多节点（erp-laptop / home-old）等 B 路分布式 ship 后再扩。
+// Page 1 · 节点 · 设计 spec §"页 1·节点（沿用决策 14）"。
+// 内容沿用旧 NodesSheet（aggregateHomeNode 聚合逻辑），去 BottomSheet 容器，promote 成整页。
 
 interface NodeAgentRow {
   agent_id: string;
@@ -29,8 +28,8 @@ interface NodeView {
   agents: NodeAgentRow[];
 }
 
-/** 把 overview 聚合成单 home 节点。同 agent_id 出现多次（同 agent 在多个 task）→ tokens 累加；
- *  status 取最忙（busy > thinking > idle）。空 overview → 空节点（仍显示 "home offline"）。*/
+/** 把 overview 聚合成单 home 节点。同 agent_id 出现多次 → tokens 累加；
+ *  status 取最忙（busy > thinking > idle）。空 overview → 空节点。*/
 export function aggregateHomeNode(overview: TasksOverview | undefined): NodeView {
   const buckets = new Map<string, NodeAgentRow>();
   if (overview) {
@@ -76,21 +75,16 @@ function statusLabel(s: TaskMember["status"]): string {
   return "空闲";
 }
 
-export const NodesSheet: Component = () => {
-  const { activeSheet, setActiveSheet } = useApi();
-  const open = (): boolean => activeSheet() === "nodes";
-
+export const NodesPage: Component = () => {
   return (
-    <BottomSheet
-      open={open()}
-      onClose={() => setActiveSheet(null)}
-      title="节点"
-      testId="nodes-sheet"
-    >
-      <Show when={open()}>
+    <div class={styles.page} data-testid="page-nodes">
+      <header class={styles.header}>
+        <h1 class={styles.title}>节点</h1>
+      </header>
+      <div class={styles.body}>
         <RenderNodes />
-      </Show>
-    </BottomSheet>
+      </div>
+    </div>
   );
 };
 

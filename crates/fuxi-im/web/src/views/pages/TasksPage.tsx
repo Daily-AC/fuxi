@@ -5,7 +5,6 @@ import {
   type Component,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
-import { BottomSheet } from "~/components/BottomSheet";
 import {
   colorForTaskRole,
   formatDuration,
@@ -13,29 +12,26 @@ import {
   shortTaskId,
 } from "~/lib/format-task";
 import type { TaskGroupCard, TaskMember, ToolCallSummary } from "~/types/api";
-import styles from "./TasksSheet.module.css";
+import styles from "./TasksPage.module.css";
 
-// 任务 sheet · header「任务」+ body 分组「进行中」/「已完成」。
-// #26：completed 卡也全显 members + last_event_summary + member last_tool_call 详情，
-// 信息密度对齐 TUI 任务树。树状缩进用 CSS padding + border-left 模拟，不引入 ┌─└ unicode。
+// Page 3 · 任务树（v1 placeholder · 沿用阶段 4 扁平 members 渲染）
 //
-// open=false 时不渲染（BottomSheet 内已处理），所以 createResource 仅在 open 时跑——
-// 通过把 createResource 放在 RenderTasks 子组件里实现。
-export const TasksSheet: Component = () => {
-  const { activeSheet, setActiveSheet } = useApi();
-  const open = (): boolean => activeSheet() === "tasks";
+// 范围：#28 只做 shell 重构，把 TasksSheet 内容剥 BottomSheet 包装搬进 page。
+// 真 C 方案两级行卡片（spec §"页 3·任务树"）由 #29 重写本组件实现。
+//
+// 兼容：旧 TasksSheet 的渲染路径完全保留（task-card / member / tool-call testid 不变），
+// 旧测试（如有）继续 pass。
 
+export const TasksPage: Component = () => {
   return (
-    <BottomSheet
-      open={open()}
-      onClose={() => setActiveSheet(null)}
-      title="任务"
-      testId="tasks-sheet"
-    >
-      <Show when={open()}>
+    <div class={styles.page} data-testid="page-tasks">
+      <header class={styles.header}>
+        <h1 class={styles.title}>任务</h1>
+      </header>
+      <div class={styles.body}>
         <RenderTasks />
-      </Show>
-    </BottomSheet>
+      </div>
+    </div>
   );
 };
 
@@ -91,11 +87,6 @@ const TaskGroups: Component<{ overview: { running: TaskGroupCard[]; completed: T
   );
 };
 
-// 单 task 卡片 · 进行中 / 已完成共用，dim 时压暗一档。
-// 排版：
-//   顶行：[#id 16px · title 13px secondary · ... · duration 13px muted]
-//   summary 行（如有 last_event_summary）：13px muted，padding-left + 左 1px border 模拟树状
-//   members 列表：每 member 一行 grid + 可选下方 toolcall 二级行（padding-left + border-left 缩进）
 const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
   return (
     <article
@@ -129,9 +120,8 @@ const MemberRow: Component<{ member: TaskMember }> = (props) => {
   const dot = (): string => {
     if (props.member.status === "busy") return colorForTaskRole(props.member.role);
     if (props.member.status === "thinking") return "var(--accent)";
-    return "var(--text-muted)"; // idle
+    return "var(--text-muted)";
   };
-  // activity 优先取 last_tool_call.tool（更精准），fallback 到 activity 字段
   const activitySummary = (): string =>
     props.member.activity ?? props.member.last_tool_call?.tool ?? "";
   return (
@@ -154,8 +144,6 @@ const MemberRow: Component<{ member: TaskMember }> = (props) => {
 };
 
 const ToolCallRow: Component<{ call: ToolCallSummary }> = (props) => {
-  // 二级行 · 树状缩进用 padding-left + 1px border-left 实现，不引入 ┌─└ unicode 装饰。
-  // 内容：mono · tool · args · exit 码 · 时长
   const exit = (): string => {
     const e = props.call.exit;
     if (e === undefined || e === null) return "运行中";

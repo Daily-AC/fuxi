@@ -1,34 +1,22 @@
 import {
   Show,
-  createSignal,
-  onCleanup,
   onMount,
   type Component,
   type JSX,
 } from "solid-js";
-import { ApiError } from "~/lib/api";
-import { startReconnectingSocket, type ReconnectController } from "~/lib/reconnect";
-import {
-  applyEvent,
-  fromStoredMessage,
-  makeUserMessage,
-  markUserMessage,
-  mergeMessages,
-  type Message,
-} from "~/messages";
-import type { ServerEvent } from "~/types/events";
-import type { Upload } from "~/types/api";
-import { ApiProvider, useApi } from "./components/ApiProvider";
+import { ApiProvider, useApi, type PageIndex } from "./components/ApiProvider";
 import { LoginView } from "./components/LoginView";
-import { Header } from "./components/Header";
-import { Composer } from "./components/Composer";
-import { Conversation } from "./views/Conversation";
-import { TasksSheet } from "./views/sheets/TasksSheet";
-import { NodesSheet } from "./views/sheets/NodesSheet";
+import { Pager } from "./components/Pager";
+import { NavigationStack } from "./components/NavigationStack";
+import { NodesPage } from "./views/pages/NodesPage";
+import { XuannvPage } from "./views/pages/XuannvPage";
+import { TasksPage } from "./views/pages/TasksPage";
 import styles from "./App.module.css";
 
-// 顶层 shell：未登入 → LoginView；登入 → Header + Conversation + Composer。
-// 阶段 3：拉历史 + WS 流入去重 + intervene 带 attachments。
+// 顶层 shell · 设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §B
+//   未登入 → LoginView
+//   登入 → NavigationStack(base=Pager[节点·玄女·任务树], top=私聊页)
+// 私聊页 v1 留 push API stub，#N3 才真渲染。
 export const App: Component = (): JSX.Element => {
   onMount(() => {
     if ("serviceWorker" in navigator && import.meta.env.PROD) {
@@ -60,127 +48,62 @@ const AuthGate: Component = () => {
   );
 };
 
-const RETRY_DELAY_MS = 1500;
-const HISTORY_LIMIT = 50;
-const CONV_ID = "xuannv"; // 主对话固定 id（β #17 采用此 conv_id 作 fixed top-level）
+const PAGE_LABELS = ["节点", "玄女", "任务树"];
 
 const MainShell: Component = () => {
-  const { client, setActiveSheet } = useApi();
+  const { currentPage, setCurrentPage, navRoute, navPop } = useApi();
 
-  const [messages, setMessages] = createSignal<Message[]>([]);
-  const [online, setOnline] = createSignal(false);
-
-  let controller: ReconnectController | null = null;
-
-  const handleEvent = (ev: ServerEvent): void => {
-    setMessages((prev) => applyEvent(prev, ev));
-  };
-
-  // 历史预加载：mount 后立即拉一次 GET /api/conv/messages。
-  // β #17 还在做；fetch 失败时 silent fallback 到空状态，让 WS 推后续。
-  const loadHistory = async (): Promise<void> => {
-    try {
-      const r = await client.fetchHistory(CONV_ID, HISTORY_LIMIT);
-      const seeded = r.messages
-        .map(fromStoredMessage)
-        .filter((m): m is Message => m !== null);
-      if (seeded.length > 0) {
-        setMessages((prev) => mergeMessages(prev, seeded));
-      }
-    } catch (err) {
-      console.warn("history load failed (β #17 may not be ready)", err);
-    }
-  };
-
-  onMount(() => {
-    void loadHistory();
-    controller = startReconnectingSocket(
-      () => client.openConvSocket(),
-      {
-        onOpen: () => setOnline(true),
-        onClose: () => setOnline(false),
-        onError: () => setOnline(false),
-        onMessage: (e) => {
-          try {
-            const ev = JSON.parse(e.data) as ServerEvent;
-            handleEvent(ev);
-          } catch (err) {
-            console.warn("conv event parse failed", err);
-          }
-        },
-      },
+  // 私聊页 placeholder · #N3 才真接 WS / intervene。给 NavigationStack 喂占位，
+  // 包含 "‹ 玄女" 返回按钮触发 navPop，让 shell 闭环可测。
+  const renderTop = (): JSX.Element | undefined => {
+    const r = navRoute();
+    if (!r) return undefined;
+    return (
+      <div class={styles.workerStub} data-testid="worker-stub">
+        <header class={styles.workerHead}>
+          <button
+            type="button"
+            class={styles.backBtn}
+            onClick={() => navPop()}
+            data-testid="worker-back"
+            aria-label="返回玄女"
+          >
+            ‹ 玄女
+          </button>
+          <span class={styles.workerTitle}>{r.role_display ?? "门客"}</span>
+          <span class={styles.workerHeadRight} aria-hidden="true" />
+        </header>
+        <div class={styles.workerBody}>
+          <p class={styles.workerStubMsg}>
+            私聊页 placeholder（#N3 实装橙色识别 + 任务 banner + 真消息流）。
+          </p>
+          <p class={styles.workerStubAgent}>
+            <span class="agent-id">{r.agent_id}</span>
+          </p>
+        </div>
+      </div>
     );
-  });
-
-  onCleanup(() => {
-    controller?.dispose();
-    controller = null;
-  });
-
-  // 503 退避重试 1 次；其它 ApiError 标记 inline error。
-  const attemptIntervene = async (
-    text: string,
-    attachmentIds: string[],
-    msgId: string,
-  ): Promise<void> => {
-    const send = (): Promise<unknown> =>
-      client.intervene({ text, task_id: null, attachments: attachmentIds });
-    try {
-      await send();
-      setMessages((prev) => markUserMessage(prev, msgId, { pending: false, error: null }));
-      return;
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 503) {
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-        try {
-          await send();
-          setMessages((prev) =>
-            markUserMessage(prev, msgId, { pending: false, error: null }),
-          );
-          return;
-        } catch (err2) {
-          const msg =
-            err2 instanceof ApiError && err2.status === 503
-              ? "玄女后端不在 / 服务暂忙，稍后再试"
-              : err2 instanceof Error
-                ? err2.message
-                : "发送失败";
-          setMessages((prev) => markUserMessage(prev, msgId, { pending: false, error: msg }));
-          return;
-        }
-      }
-      const fallback =
-        err instanceof ApiError && err.status === 401
-          ? "未登入或会话过期"
-          : err instanceof Error
-            ? err.message
-            : "发送失败";
-      setMessages((prev) => markUserMessage(prev, msgId, { pending: false, error: fallback }));
-    }
   };
 
-  const handleSubmit = async (text: string, attachments: Upload[]): Promise<void> => {
-    // optimistic：立即插用户 bubble；输入 / chip 清空由 Composer 自己做
-    const m = makeUserMessage(text, attachments.length > 0 ? attachments : undefined);
-    setMessages((prev) => [...prev, m]);
-    void attemptIntervene(
-      text,
-      attachments.map((u) => u.id),
-      m.id,
-    );
+  const onIndexChange = (i: number): void => {
+    const clamped = Math.max(0, Math.min(2, i)) as PageIndex;
+    setCurrentPage(clamped);
   };
 
   return (
     <div class={styles.shell} data-testid="main-shell">
-      <Header
-        online={online()}
-        onOpenTasks={() => setActiveSheet("tasks")}
-        onOpenNodes={() => setActiveSheet("nodes")}
+      <NavigationStack
+        base={
+          <Pager
+            pages={[<NodesPage />, <XuannvPage />, <TasksPage />]}
+            pageLabels={PAGE_LABELS}
+            index={currentPage()}
+            onIndexChange={onIndexChange}
+          />
+        }
+        top={renderTop()}
+        onPop={navPop}
       />
-      <Conversation messages={messages} />
-      <Composer onSubmit={handleSubmit} />
-      <TasksSheet />
-      <NodesSheet />
     </div>
   );
 };
