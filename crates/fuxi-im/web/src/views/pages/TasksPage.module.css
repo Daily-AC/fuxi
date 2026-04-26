@@ -1,4 +1,7 @@
-/* Page · 整页 shell（容纳 page header + body 滚动区） */
+/* 任务树页 · C 方案两级行卡片 (#N2 / #29)
+ * 设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §"页 3·任务树"
+ */
+
 .page {
   display: flex;
   flex-direction: column;
@@ -24,7 +27,7 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: var(--space-4);
+  padding: 0 var(--space-4) var(--space-4);
 }
 
 .muted {
@@ -42,7 +45,7 @@
 .root {
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-4);
 }
 
 .section {
@@ -53,23 +56,12 @@
 
 .sectionLabel {
   margin: 0;
-  font-size: var(--size-aux);
+  font-size: var(--size-meta);
   font-weight: var(--weight-medium);
   color: var(--text-muted);
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
-}
-
-.muted {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-  margin: 0;
-}
-
-.errMsg {
-  color: var(--danger);
-  font-size: var(--size-aux);
-  margin: 0;
+  padding-left: var(--space-2);
 }
 
 .emptyAll {
@@ -91,158 +83,192 @@
   color: var(--text-muted);
 }
 
+/* ===== 任务卡 ===== */
+
 .card {
-  padding: var(--space-3) var(--space-4);
-  background: var(--surface);
+  background: #16110E; /* 比 surface 更深一档 · 任务卡专用，spec 钉的 */
   border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  border-radius: 10px; /* spec §"任务卡 · 圆角 10px" */
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
 }
 
-/* 已完成卡 · 压暗一档 + 仍显完整 members（#26） */
 .cardDim {
-  opacity: 0.72;
+  opacity: 0.65;
 }
 
+/* card header · tap 折叠/展开 · 整行可点 */
 .cardHead {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  min-height: var(--touch);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  width: 100%;
+}
+
+.cardHead:hover,
+.cardHead:focus-visible {
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .cardId {
-  font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
+  flex: 1;
+}
+
+.cardId .agent-id,
+.cardId :global(.agent-id) {
+  color: var(--text-muted);
+  font-size: var(--size-meta);
 }
 
 .cardTitle {
-  font-weight: var(--weight-medium);
-  color: var(--text-secondary);
-  font-size: var(--size-aux);
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.cardMeta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.memberCount {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.metaSep {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
 }
 
 .duration {
   font-size: var(--size-aux);
   color: var(--text-muted);
   font-feature-settings: "tnum";
-  flex-shrink: 0;
 }
 
-/* 整 task 最近事件摘要 · 树状缩进用 padding-left + 1px border-left（无 unicode 装饰） */
-.summary {
-  font-size: var(--size-aux);
-  color: var(--text-secondary);
-  padding-left: var(--space-3);
-  border-left: 1px solid var(--border);
-  line-height: 1.5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* ===== members 列表 ===== */
 
 .members {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-/* 单 member 块 · 包 main row + 可选 toolcall 二级行 */
-.memberBlock {
-  display: flex;
-  flex-direction: column;
+  border-top: 1px solid var(--border);
 }
 
 .memberRow {
-  display: grid;
-  grid-template-columns: 8px 60px 1fr auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.memberRow:last-child {
+  border-bottom: 0;
+}
+
+/* active 高亮 · 左 2px 橙边 + 浅橙背景（spec §"active 门客行高亮"） */
+.memberRowActive .memberBtn {
+  border-left-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.memberBtn {
+  display: flex;
   align-items: center;
-  gap: var(--space-2);
-  min-height: 28px;
+  gap: var(--space-3);
+  padding: 10px var(--space-4);
+  width: 100%;
+  min-height: 56px; /* spec ≥ 32px · 我们用 ≥44px 保证触控 + 副文本两行 */
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
-.memberDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  justify-self: center;
+.memberBtn:hover,
+.memberBtn:focus-visible {
+  background: rgba(255, 255, 255, 0.03);
 }
 
-.memberName {
-  font-size: var(--size-aux);
+.memberMain {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.memberRole {
+  font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
   color: var(--text-primary);
+  line-height: 1.2;
 }
 
-.memberActivity {
+.memberSub {
   font-size: var(--size-meta);
   color: var(--text-muted);
+  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.memberTokens {
-  font-size: var(--size-meta);
+.chev {
+  font-size: var(--size-title);
   color: var(--text-muted);
-  font-feature-settings: "tnum";
-  justify-self: end;
+  flex-shrink: 0;
+  font-weight: var(--weight-normal);
+  line-height: 1;
 }
 
-/* member toolcall 二级行 · CSS 缩进模拟 TUI 树状（不引入 ┌─└ unicode）。
- * padding-left 24px 跟 dot 8 + name 60 + gap 大致对齐；border-left 1px 在缩进处画细竖线。
- */
-.toolCall {
-  font-size: var(--size-meta);
+/* ===== 已完成 sticky tail ===== */
+
+.completedTail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  min-height: var(--touch);
+  width: 100%;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
   color: var(--text-muted);
-  margin-top: 2px;
-  margin-left: 24px;
-  padding-left: var(--space-3);
-  border-left: 1px solid var(--border);
-  line-height: 1.6;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: var(--size-aux);
+  text-align: left;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
 }
 
-.toolName {
+.completedTail:hover,
+.completedTail:focus-visible {
   color: var(--text-secondary);
+  border-color: var(--border-strong);
 }
 
-.toolArgs {
-  color: var(--text-muted);
-}
-
-.toolSep {
-  color: var(--text-muted);
-}
-
-.toolDuration {
-  color: var(--text-muted);
-  font-feature-settings: "tnum";
-}
-
-.exitOk {
-  color: var(--success);
-}
-
-.exitFail {
-  color: var(--danger);
-}
-
-.exitRunning {
-  color: var(--accent);
+.tailMark {
+  font-size: var(--size-body);
+  color: inherit;
 }
