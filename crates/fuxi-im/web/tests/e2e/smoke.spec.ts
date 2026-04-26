@@ -393,7 +393,7 @@ test("Header 任务 tap → TasksSheet 弹出 + 看到 mock 数据 + 关闭按�
   await expect(page.getByTestId("member-a-luban")).toContainText("鲁班");
   await expect(page.getByTestId("member-a-luban")).toContainText("cargo test --lib");
   await expect(page.getByTestId("member-a-luban")).toContainText("1.2k");
-  await expect(page.getByTestId("task-completed-c1")).toContainText("升级 deps");
+  await expect(page.getByTestId("task-card-c1")).toContainText("升级 deps");
 
   await page.getByTestId("tasks-sheet-close").click();
   await expect(page.getByTestId("tasks-sheet")).toHaveCount(0);
@@ -453,4 +453,54 @@ test("混合切换 · 任务 sheet 关闭后再开节点 sheet", async ({ page }
   await expect(page.getByTestId("tasks-sheet")).toHaveCount(0);
   await page.getByTestId("header-nodes").click();
   await expect(page.getByTestId("nodes-sheet")).toBeVisible();
+});
+
+test("#26 · completed 卡也显 members + tool_call + last_event_summary", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [],
+      completed: [
+        {
+          id: "c-dense",
+          title: "升级 deps",
+          status: "completed",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 200_000,
+          last_event_summary: "鲁班 · cargo update · exit 0",
+          members: [
+            {
+              agent_id: "a-c-luban",
+              role: "luban",
+              role_display: "鲁班",
+              tokens: 800,
+              status: "idle",
+              last_tool_call: {
+                tool: "cargo update",
+                exit: 0,
+                duration_ms: 8000,
+              },
+            },
+          ],
+        },
+      ],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("header-tasks").click();
+  await expect(page.getByTestId("tasks-sheet")).toBeVisible();
+
+  // completed 卡用统一 task-card 前缀（不再 task-completed-）
+  await expect(page.getByTestId("task-card-c-dense")).toBeVisible();
+  // last_event_summary 行
+  await expect(page.getByTestId("task-summary-c-dense")).toContainText(
+    "鲁班 · cargo update · exit 0",
+  );
+  // completed 卡也展开 member
+  await expect(page.getByTestId("member-a-c-luban")).toContainText("鲁班");
+  // tool call 详情
+  await expect(page.getByTestId("member-tool-call")).toContainText("cargo update");
+  await expect(page.getByTestId("member-tool-call")).toContainText("exit 0");
+  await expect(page.getByTestId("member-tool-call")).toContainText("0:08");
 });
