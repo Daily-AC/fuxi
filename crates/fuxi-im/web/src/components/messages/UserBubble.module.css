@@ -1,0 +1,30 @@
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.bubble {
+  max-width: 78%;
+  padding: 12px 14px;
+  background: var(--user-bubble);
+  color: var(--user-bubble-text);
+  border-radius: var(--radius-bubble);
+  font-size: var(--size-body);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top-right-radius: 4px;
+}
+
+.pending {
+  opacity: 0.65;
+}
+
+.error {
+  font-size: var(--size-meta);
+  color: var(--danger);
+  max-width: 78%;
+  text-align: right;
+}

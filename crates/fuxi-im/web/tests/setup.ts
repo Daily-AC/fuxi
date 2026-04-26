@@ -25,6 +25,11 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function () {};
 }
 
+if (!Element.prototype.scrollTo) {
+  // jsdom 不实现 scrollTo —— stub 防 Conversation 自动滚动测试爆
+  Element.prototype.scrollTo = function () {};
+}
+
 // Notification API stub
 if (typeof Notification === "undefined") {
   (globalThis as unknown as { Notification: { permission: string } }).Notification = {
