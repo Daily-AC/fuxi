@@ -4,7 +4,7 @@ import type {
   DispatchRequest,
   DispatchResponse,
   EventHistoryResponse,
-  EventKind,
+  ServerEvent,
   InterveneRequest,
   PushSubscribeRequest,
   TaskListResponse,
@@ -22,7 +22,7 @@ export interface AuthScript {
 
 export interface MockState {
   tasks: TaskListResponse["tasks"];
-  events: Record<string, EventKind[]>;
+  events: Record<string, ServerEvent[]>;
   intervenes: InterveneRequest[];
   /** 控制 intervene 调用 status：每次消费一个，耗尽走最后一个。空 = 默认 200。*/
   interveneSeq?: number[];
@@ -33,7 +33,7 @@ export interface MockState {
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
-  push(ev: EventKind): void;
+  push(ev: ServerEvent): void;
   addEventListener(type: string, fn: (e: any) => void): void;
   removeEventListener(type: string, fn: (e: any) => void): void;
   dispatchEvent(e: Event): boolean;
@@ -50,7 +50,7 @@ class FakeSocket implements MockSocket {
     this.fire("open", new Event("open"));
   }
 
-  push(ev: EventKind): void {
+  push(ev: ServerEvent): void {
     const e = new MessageEvent("message", { data: JSON.stringify(ev) });
     this.fire("message", e);
   }
@@ -88,9 +88,9 @@ class FakeSocket implements MockSocket {
 export interface MockApi extends ApiClient {
   state: MockState;
   /** 主动推一条事件给最近打开的 conv socket */
-  pushConv(ev: EventKind): void;
+  pushConv(ev: ServerEvent): void;
   /** 主动推一条事件给指定 task socket */
-  pushTask(taskId: string, ev: EventKind): void;
+  pushTask(taskId: string, ev: ServerEvent): void;
 }
 
 export function createMockApi(initial?: Partial<MockState>): MockApi {

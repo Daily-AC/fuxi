@@ -1,22 +1,32 @@
-// 内部消息模型 · v2 阶段 2 · 仅 user + xuannv 两类（门客 / task card / tool call 留阶段 3）。
+// 内部消息模型 · v2 阶段 2（wire fix） · 仅 user + xuannv 两类。
 //
-// 跟 EventKind 不是 1:1 ——
-// - user: 我们自己 optimistic 插入；server 也会回 user_message，但用同 stableId 去重（v1 简化：
-//   服务端 user_message 我们当 echo 忽略，避免重复渲染）
-// - xuannv: agent_text_delta 累积到 last 玄女 bubble；agent_text/agent_responded 整段替换；
-//   result_success / agent_idle / EndOfTurn 概念上完结当前 bubble（streaming=false）
+// **wire format 关键**：后端 γ 推的事件是 `{ meta, kind }` 嵌套：
+//   { meta: { id, at, agent, task, ... }, kind: { type: "agent_responded", text: "..." } }
+// agent uuid / task uuid / 时间戳都在 meta；事件 payload 在 kind（discriminated by type）。
+// reducer 必须用 `ev.kind.type` / `ev.meta.agent`，不是 flat。
 //
-// reduce 函数纯函数易测；UI 层只读 store 不知 EventKind 长什么样。
+// 玄女判定：
+//   meta.agent 是 uuid（不是 "xuannv" 字符串），无法靠名字判。v1 简化策略：
+//   conv WS 推过来的事件**都视为玄女主线**（因为 conv 端点本就只过滤"跟玄女对话"的事件流），
+//   将来 γ broaden 加门客后再扩 reducer。
+//
+// 后端实际事件：
+//   - user_intervention_sent · 我们 optimistic 已渲染，忽略
+//   - thinking_started · streaming 开始（玄女在想）
+//   - agent_responded · 整段回复，完结当前 streaming bubble
+//   - thinking_finished / agent_idle / result_success / task_completed · 完结
+//   - agent_text_delta · 真发 delta 时累积（cc haiku 当前不发，留给将来 sonnet/opus）
+//   - 其它（task_created / tool_call / custom / ...）阶段 2 noop，留阶段 3
 
-import type { EventKind } from "~/types/events";
+import type { ServerEvent } from "~/types/events";
 
 export interface UserMessage {
   kind: "user";
   id: string;
   text: string;
-  /** 503 重试期间 / 重试失败时挂 inline 错误。*/
+  /** 503 重试 / 重试失败时挂 inline 错误。*/
   error?: string | null;
-  /** 仍在等服务端回执（虚态），UI 可压暗或不挂时间戳。*/
+  /** 仍在等服务端回执（虚态）。*/
   pending?: boolean;
   ts: number;
 }
@@ -24,7 +34,8 @@ export interface UserMessage {
 export interface XuannvMessage {
   kind: "xuannv";
   id: string;
-  agent: string;
+  /** agent uuid（debug 用；UI 不暴露）。*/
+  agent: string | null;
   text: string;
   /** true 时 bubble 末尾挂 pulse dot。*/
   streaming: boolean;
@@ -33,86 +44,102 @@ export interface XuannvMessage {
 
 export type Message = UserMessage | XuannvMessage;
 
-// 玄女发言判定：role / agent 名字 fallback 到"是否 xuannv"
-function isXuannv(agent: string | undefined): boolean {
-  if (!agent) return false;
-  return agent === "xuannv" || agent === "玄女" || agent.startsWith("xuannv");
+function parseTs(iso?: string | null): number {
+  if (!iso) return Date.now();
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? Date.now() : t;
 }
 
-/** 从 EventKind 应用一条事件到 messages 列表，返回新列表。
- *  纯函数 —— 调用方负责赋回 store。*/
-export function applyEvent(prev: Message[], ev: EventKind): Message[] {
-  const kind = (ev as { type: string }).type;
-  const ts = parseTs(ev.ts);
+function lastStreamingXuannv(prev: Message[]): XuannvMessage | null {
+  const last = prev[prev.length - 1];
+  return last && last.kind === "xuannv" && last.streaming ? last : null;
+}
 
-  // 玄女流式增量
-  if (kind === "agent_text_delta") {
-    const e = ev as { agent: string; delta: string; id?: string };
-    if (!isXuannv(e.agent)) return prev;
-    const last = prev[prev.length - 1];
-    if (last && last.kind === "xuannv" && last.streaming && last.agent === e.agent) {
-      const updated: XuannvMessage = { ...last, text: last.text + e.delta };
-      return [...prev.slice(0, -1), updated];
-    }
-    // 没有进行中的 bubble：起新一个
-    const next: XuannvMessage = {
-      kind: "xuannv",
-      id: e.id ?? `xn-${ts}-${prev.length}`,
-      agent: e.agent,
-      text: e.delta,
-      streaming: true,
-      ts,
-    };
-    return [...prev, next];
+/** 起一个新的玄女 streaming bubble（thinking_started / 首段 delta 时用）。*/
+function startBubble(prev: Message[], ev: ServerEvent, initialText: string): Message[] {
+  const ts = parseTs(ev.meta.at);
+  const next: XuannvMessage = {
+    kind: "xuannv",
+    id: ev.meta.id || `xn-${ts}-${prev.length}`,
+    agent: ev.meta.agent ?? null,
+    text: initialText,
+    streaming: true,
+    ts,
+  };
+  return [...prev, next];
+}
+
+/** 把 ServerEvent 应用到 messages 列表，返回新列表。纯函数。*/
+export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
+  // 防御：wire 偶发缺字段时不要崩
+  if (!ev || !ev.kind || typeof ev.kind.type !== "string") return prev;
+  const k = ev.kind;
+
+  // —— 流式开始：thinking_started ——
+  // 玄女开始"想"了，立即起一个空白 streaming bubble 让用户看到 pulse。
+  if (k.type === "thinking_started") {
+    // 已经有进行中的 bubble 就不重起
+    if (lastStreamingXuannv(prev)) return prev;
+    return startBubble(prev, ev, "");
   }
 
-  // 玄女整段（agent_text / agent_responded）—— 整段到达视为完结当前 bubble
-  if (kind === "agent_text" || kind === "agent_responded") {
-    const e = ev as { agent: string; text: string; id?: string };
-    if (!isXuannv(e.agent)) return prev;
-    const last = prev[prev.length - 1];
-    if (last && last.kind === "xuannv" && last.streaming && last.agent === e.agent) {
-      // 同一 turn 的 final text，覆盖累积值（整段权威）
-      const updated: XuannvMessage = { ...last, text: e.text, streaming: false };
+  // —— 流式增量：agent_text_delta ——
+  if (k.type === "agent_text_delta") {
+    const delta = (k as { delta?: string }).delta ?? "";
+    const last = lastStreamingXuannv(prev);
+    if (last) {
+      const updated: XuannvMessage = { ...last, text: last.text + delta };
       return [...prev.slice(0, -1), updated];
     }
+    return startBubble(prev, ev, delta);
+  }
+
+  // —— 整段：agent_text / agent_responded ——
+  // 整段到达视为完结当前 bubble；如果没有进行中的，直接起一个非 streaming 的。
+  if (k.type === "agent_text" || k.type === "agent_responded") {
+    const text = (k as { text?: string }).text ?? "";
+    const last = lastStreamingXuannv(prev);
+    if (last) {
+      const updated: XuannvMessage = { ...last, text, streaming: false };
+      return [...prev.slice(0, -1), updated];
+    }
+    const ts = parseTs(ev.meta.at);
     const next: XuannvMessage = {
       kind: "xuannv",
-      id: e.id ?? `xn-${ts}-${prev.length}`,
-      agent: e.agent,
-      text: e.text,
+      id: ev.meta.id || `xn-${ts}-${prev.length}`,
+      agent: ev.meta.agent ?? null,
+      text,
       streaming: false,
       ts,
     };
     return [...prev, next];
   }
 
-  // 完结信号：标当前 streaming=false（不动 text）
+  // —— 完结信号：thinking_finished / agent_idle / result_success / result_error / task_completed ——
+  // 标当前 streaming=false（不动 text）。如果当前 bubble 还是空（仅 thinking_started 起来过
+  // 但还没收到任何 delta / responded），把它丢掉避免空白 bubble 残留。
   if (
-    kind === "agent_idle" ||
-    kind === "result_success" ||
-    kind === "result_error" ||
-    kind === "task_completed"
+    k.type === "thinking_finished" ||
+    k.type === "agent_idle" ||
+    k.type === "result_success" ||
+    k.type === "result_error" ||
+    k.type === "task_completed"
   ) {
-    const last = prev[prev.length - 1];
-    if (last && last.kind === "xuannv" && last.streaming) {
-      const updated: XuannvMessage = { ...last, streaming: false };
-      return [...prev.slice(0, -1), updated];
+    const last = lastStreamingXuannv(prev);
+    if (!last) return prev;
+    if (last.text === "") {
+      // 空 bubble · 丢弃
+      return prev.slice(0, -1);
     }
-    return prev;
+    const updated: XuannvMessage = { ...last, streaming: false };
+    return [...prev.slice(0, -1), updated];
   }
 
-  // 服务端 echo 的 user_message：v1 简化 —— 忽略，optimistic 已经渲染
-  if (kind === "user_message") return prev;
+  // —— 服务端 echo 自己的 user_intervention_sent · optimistic 已渲染 ——
+  if (k.type === "user_intervention_sent") return prev;
 
-  // 阶段 3 才管 tool_call / task_created / 门客 message —— 阶段 2 全 noop
+  // —— 阶段 3 才管 ——
   return prev;
-}
-
-function parseTs(iso?: string): number {
-  if (!iso) return Date.now();
-  const t = new Date(iso).getTime();
-  return Number.isNaN(t) ? Date.now() : t;
 }
 
 /** optimistic user message factory。*/

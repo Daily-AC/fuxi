@@ -105,29 +105,45 @@ test("发送消息 → user bubble + intervene 调用 + WS 流式收到玄女回
     )
     .toBeGreaterThan(0);
 
-  // 服务端推 agent_text_delta 三段
+  // 服务端推 agent_text_delta 三段（嵌套 wire format · { meta, kind }）
   await page.evaluate(() => {
     const ws = window.__FUXI_WS__.last as unknown as EventTarget;
-    const send = (data: unknown): void => {
-      ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(data) }));
+    const send = (kind: unknown): void => {
+      const ev = {
+        meta: {
+          id: `id-${Math.random().toString(36).slice(2, 8)}`,
+          at: new Date().toISOString(),
+          session: null,
+          agent: "f0d0f576-fa97-4a0c-9c25-test",
+          task: null,
+        },
+        kind,
+      };
+      ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(ev) }));
     };
-    send({ type: "agent_text_delta", agent: "xuannv", delta: "好" });
-    send({ type: "agent_text_delta", agent: "xuannv", delta: "的" });
-    send({ type: "agent_text_delta", agent: "xuannv", delta: "，我看一下" });
+    send({ type: "agent_text_delta", delta: "好" });
+    send({ type: "agent_text_delta", delta: "的" });
+    send({ type: "agent_text_delta", delta: "，我看一下" });
   });
 
   // 玄女 bubble 累积出现 + streaming pulse
   await expect(page.getByTestId("msg-xuannv")).toContainText("好的，我看一下");
   await expect(page.getByTestId("msg-streaming")).toBeVisible();
 
-  // EndOfTurn（agent_idle）→ pulse 消失
+  // EndOfTurn（agent_idle）→ pulse 消失（嵌套 wire format）
   await page.evaluate(() => {
     const ws = window.__FUXI_WS__.last as unknown as EventTarget;
-    ws.dispatchEvent(
-      new MessageEvent("message", {
-        data: JSON.stringify({ type: "agent_idle", agent: "xuannv" }),
-      }),
-    );
+    const ev = {
+      meta: {
+        id: "id-end",
+        at: new Date().toISOString(),
+        session: null,
+        agent: "f0d0f576-fa97-4a0c-9c25-test",
+        task: null,
+      },
+      kind: { type: "agent_idle" },
+    };
+    ws.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(ev) }));
   });
   await expect(page.getByTestId("msg-streaming")).toHaveCount(0);
 });
