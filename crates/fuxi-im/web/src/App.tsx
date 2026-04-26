@@ -14,7 +14,7 @@ import {
   markUserMessage,
   type Message,
 } from "~/messages";
-import type { EventKind } from "~/types/events";
+import type { ServerEvent } from "~/types/events";
 import { ApiProvider, useApi } from "./components/ApiProvider";
 import { LoginView } from "./components/LoginView";
 import { Header } from "./components/Header";
@@ -69,7 +69,7 @@ const MainShell: Component = () => {
 
   let controller: ReconnectController | null = null;
 
-  const handleEvent = (ev: EventKind): void => {
+  const handleEvent = (ev: ServerEvent): void => {
     setMessages((prev) => applyEvent(prev, ev));
   };
 
@@ -82,7 +82,7 @@ const MainShell: Component = () => {
         onError: () => setOnline(false),
         onMessage: (e) => {
           try {
-            const ev = JSON.parse(e.data) as EventKind;
+            const ev = JSON.parse(e.data) as ServerEvent;
             handleEvent(ev);
           } catch (err) {
             console.warn("conv event parse failed", err);

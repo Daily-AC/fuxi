@@ -1,10 +1,13 @@
-// IndexedDB 缓存层 —— 离线打开能立刻看到任务卡片快照 + 最近 100 条事件。
-// 不缓 user-private 的密钥/token；那些归 cookie。
+// IndexedDB 缓存层 —— 离线打开能立刻看到任务卡片快照 + 最近 N 条事件。
+// 当前 v2 阶段 1/2 暂未接历史回放（spec 简化），保留接口供阶段 4-5 历史接通时复用。
+// 不缓 user-private 的密钥 / token；那些归 cookie。
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { EventKind, TaskCard } from "~/types/events";
+import type { ServerEvent, TaskCard } from "~/types/events";
 
 const DB_NAME = "fuxi-im";
-const DB_VERSION = 1;
+// 注：schema 从 v1 改 v2 wire format（嵌套 meta/kind）；用户机器上的 v1 events 失效，
+// upgrade 时 clear events store 重建索引。
+const DB_VERSION = 2;
 const MAX_EVENTS = 100;
 
 interface FuxiSchema extends DBSchema {
@@ -14,16 +17,14 @@ interface FuxiSchema extends DBSchema {
     indexes: { "by-updated": string };
   };
   events: {
-    key: string; // synthetic: `${ts}|${id ?? ""}`
-    value: EventKind & { _key: string };
+    key: string; // synthetic: `${meta.at}|${meta.id}|${kind.type}`
+    value: ServerEvent & { _key: string; _task: string | null };
     indexes: { "by-task": string };
   };
 }
 
 let dbPromise: Promise<IDBPDatabase<FuxiSchema>> | null = null;
 
-/** IndexedDB 在测试环境（jsdom）没实现；隐私模式 Safari 也可能拒绝。
- *  这里把所有缓存操作降级为 no-op，让 UI 永远跑得动。*/
 function idbAvailable(): boolean {
   return typeof indexedDB !== "undefined";
 }
@@ -32,19 +33,22 @@ function db(): Promise<IDBPDatabase<FuxiSchema>> | null {
   if (!idbAvailable()) return null;
   if (!dbPromise) {
     dbPromise = openDB<FuxiSchema>(DB_NAME, DB_VERSION, {
-      upgrade(d) {
+      upgrade(d, oldVersion) {
         if (!d.objectStoreNames.contains("tasks")) {
           const ts = d.createObjectStore("tasks", { keyPath: "id" });
           ts.createIndex("by-updated", "updated_at");
         }
+        if (oldVersion < 2 && d.objectStoreNames.contains("events")) {
+          // wire fix · v1 缓存的 flat 事件已经无效，整 store 重建
+          d.deleteObjectStore("events");
+        }
         if (!d.objectStoreNames.contains("events")) {
           const es = d.createObjectStore("events", { keyPath: "_key" });
-          es.createIndex("by-task", "task_id");
+          es.createIndex("by-task", "_task");
         }
       },
     }).catch((err) => {
       console.warn("idb open failed, falling back to memory-only", err);
-      // 抛回让上游 catch；调用方有 .catch() 兜底。
       throw err;
     });
   }
@@ -68,13 +72,14 @@ export async function loadCachedTasks(): Promise<TaskCard[]> {
   return all.reverse();
 }
 
-function eventKey(e: EventKind): string {
-  const ts = e.ts ?? "";
-  const id = e.id ?? "";
-  return `${ts}|${id}|${(e as { type: string }).type}`;
+function eventKey(e: ServerEvent): string {
+  const at = e.meta?.at ?? "";
+  const id = e.meta?.id ?? "";
+  const t = e.kind?.type ?? "?";
+  return `${at}|${id}|${t}`;
 }
 
-export async function cacheEvents(events: EventKind[]): Promise<void> {
+export async function cacheEvents(events: ServerEvent[]): Promise<void> {
   if (events.length === 0) return;
   const p = db();
   if (!p) return;
@@ -82,9 +87,8 @@ export async function cacheEvents(events: EventKind[]): Promise<void> {
   const tx = d.transaction("events", "readwrite");
   for (const e of events) {
     const key = eventKey(e);
-    await tx.store.put({ ...e, _key: key });
+    await tx.store.put({ ...e, _key: key, _task: e.meta?.task ?? null });
   }
-  // 维持环形 max=100（per-store，整体；够 PWA 离线时显示一屏）
   const count = await tx.store.count();
   if (count > MAX_EVENTS) {
     const cursor = await tx.store.openCursor();
@@ -99,20 +103,21 @@ export async function cacheEvents(events: EventKind[]): Promise<void> {
   await tx.done;
 }
 
-export async function loadCachedEvents(taskId?: string): Promise<EventKind[]> {
+export async function loadCachedEvents(taskId?: string): Promise<ServerEvent[]> {
   const p = db();
   if (!p) return [];
   const d = await p;
   if (taskId) {
     const matches = await d.getAllFromIndex("events", "by-task", taskId);
-    return matches.map(stripKey);
+    return matches.map(stripMeta);
   }
   const all = await d.getAll("events");
-  return all.map(stripKey);
+  return all.map(stripMeta);
 }
 
-function stripKey(e: EventKind & { _key: string }): EventKind {
-  const { _key: _ignored, ...rest } = e;
-  void _ignored;
-  return rest as EventKind;
+function stripMeta(e: ServerEvent & { _key: string; _task: string | null }): ServerEvent {
+  const { _key: _k, _task: _t, ...rest } = e;
+  void _k;
+  void _t;
+  return rest as ServerEvent;
 }
