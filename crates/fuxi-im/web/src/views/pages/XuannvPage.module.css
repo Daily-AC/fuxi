@@ -1,0 +1,48 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+/* Page header · 给 dots（位于 pager root，绝对定位 32px）留出顶部空间 */
+.header {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: calc(40px + max(var(--space-2), env(safe-area-inset-top))) var(--space-4)
+    var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.title {
+  font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+.statusRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.dotOn {
+  background: var(--success);
+}
+
+.status {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}

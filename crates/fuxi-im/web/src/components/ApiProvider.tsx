@@ -12,8 +12,13 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
-/** 当前活跃 sheet 名（null = 关闭）。*/
-export type ActiveSheet = "tasks" | "nodes" | null;
+/** Pager 当前页索引：0=节点 / 1=玄女主对话 / 2=任务树。
+ *  设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §B */
+export type PageIndex = 0 | 1 | 2;
+
+/** NavigationStack 顶部的 push 路由（v1 只有"私聊门客"一种）。
+ *  null = 没 push，pager 直接见底。*/
+export type NavRoute = { kind: "worker"; agent_id: string; role_display?: string } | null;
 
 export interface ApiContextValue {
   client: ApiClient;
@@ -24,9 +29,17 @@ export interface ApiContextValue {
   markLoggedIn(): void;
   /** 标记登出（401 自动触发 / 未来"切换设备"用）。*/
   markLoggedOut(): void;
-  /** 当前打开的 sheet。Header tap target → 切；BottomSheet dismiss → 设 null。*/
-  activeSheet: Accessor<ActiveSheet>;
-  setActiveSheet(s: ActiveSheet): void;
+
+  /** 当前 pager 页（0=节点, 1=玄女, 2=任务树）。*/
+  currentPage: Accessor<PageIndex>;
+  setCurrentPage(p: PageIndex): void;
+
+  /** NavigationStack 当前路由（v1 只支持 0 或 1 层）。null = 没 push。*/
+  navRoute: Accessor<NavRoute>;
+  /** 推一个新路由（覆盖式 v1，下个 task #N3 才会实际渲染私聊页）。*/
+  navPush(route: NonNullable<NavRoute>): void;
+  /** 弹回 pager。*/
+  navPop(): void;
 }
 
 const ApiContext = createContext<ApiContextValue>();
@@ -41,6 +54,8 @@ export function setApiOverride(client: ApiClient | null): void {
 export interface ApiProviderProps {
   /** 测试入口：跳过 onMount 探测，直接钉死 authState。*/
   initialAuth?: AuthState;
+  /** 测试入口：钉死起始 page（默认 1=玄女）。*/
+  initialPage?: PageIndex;
 }
 
 export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
@@ -49,11 +64,10 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
   );
   const [auth, setAuth] = createSignal<AuthState>(props.initialAuth ?? "unknown");
-  const [activeSheet, setActiveSheet] = createSignal<ActiveSheet>(null);
+  const [currentPage, setCurrentPage] = createSignal<PageIndex>(props.initialPage ?? 1);
+  const [navRoute, setNavRoute] = createSignal<NavRoute>(null);
 
   // 探测登入态：试拉一次 fetchTasks（开销小、走 cookie middleware）。
-  // 401 → 未登入；其他错误（503 / 网络）→ 视为未登入但保留 LoginView 一次重试机会。
-  // β 落地后可以换成 GET /api/auth/me 更直白；目前免新增端点。
   const probe = async (): Promise<void> => {
     if (props.initialAuth) return;
     try {
@@ -88,8 +102,11 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         authState: auth,
         markLoggedIn: () => setAuth("in"),
         markLoggedOut: () => setAuth("out"),
-        activeSheet,
-        setActiveSheet,
+        currentPage,
+        setCurrentPage,
+        navRoute,
+        navPush: (route) => setNavRoute(route),
+        navPop: () => setNavRoute(null),
       }}
     >
       {props.children}
