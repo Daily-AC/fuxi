@@ -1,19 +1,11 @@
 .shell {
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  display: flex;
+  flex-direction: column;
   height: 100dvh;
-  background: var(--bg-0);
+  background: var(--bg);
 }
 
-.main {
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding-bottom: var(--space-4);
-}
-
-/* 探测期：纯底色，无 spinner（探测一次性 < 200ms，加 spinner 反而抖） */
 .probing {
   min-height: 100dvh;
-  background: var(--bg-0);
+  background: var(--bg);
 }

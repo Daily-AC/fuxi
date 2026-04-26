@@ -83,15 +83,15 @@ test.beforeEach(async ({ page }) => {
 test("未登入 → 显示 LoginView 不显示主 shell", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("login-view")).toBeVisible();
-  await expect(page.getByTestId("view-slot")).toHaveCount(0);
+  await expect(page.getByTestId("main-shell")).toHaveCount(0);
 });
 
-test("主密码 200 → 进入主屏，看到任务列表 view", async ({ page }) => {
+test("主密码 200 → 进入主屏，看到 main shell（v2）", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("login-password").fill("正确密码");
   await page.getByTestId("login-device-name").fill("e2e iPhone");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("tasks-view")).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByTestId("main-shell")).toBeVisible({ timeout: 5_000 });
   // login-view 应该消失
   await expect(page.getByTestId("login-view")).toHaveCount(0);
 });
@@ -124,5 +124,5 @@ test("点'忘了' → PIN 降级，配对 200 → 进主屏", async ({ page }) =
   await page.getByTestId("login-pin").fill("482917");
   await page.getByTestId("login-device-name").fill("配对设备");
   await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("tasks-view")).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByTestId("main-shell")).toBeVisible({ timeout: 5_000 });
 });
