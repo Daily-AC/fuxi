@@ -43,14 +43,18 @@ REMOTE_CARGO="/home/e0-7/.cargo/bin/cargo"
 # ── 模式 ────────────────────────────────────────────────────────────
 MODE=""
 REBUILD_WEB="0"
+WEB_ONLY="0"
 
 usage() {
     cat <<USAGE >&2
-用法：$0 (--dry-run|--apply) [--rebuild-web]
+用法：$0 (--dry-run|--apply) [--rebuild-web] [--web-only]
 
   --dry-run      打印每步将执行的命令但不执行
   --apply        真实执行
   --rebuild-web  即使 dist/ 已存在也强制 vite build
+  --web-only     仅 PWA 快速部署（rust 不动 / systemd 不重启 / nginx 不改 vhost）。
+                 路径：vite build → rsync dist → nginx reload；适合 ε 阶段性
+                 PWA 迭代。预期 ~30s。隐含 --rebuild-web。
 USAGE
     exit 2
 }
@@ -60,6 +64,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) MODE="dry"; shift ;;
         --apply)   MODE="apply"; shift ;;
         --rebuild-web) REBUILD_WEB="1"; shift ;;
+        --web-only) WEB_ONLY="1"; REBUILD_WEB="1"; shift ;;
         -h|--help) usage ;;
         *) echo "未知参数: $1" >&2; usage ;;
     esac
@@ -102,7 +107,25 @@ fi
 #   c) /etc/nginx/sites-enabled/im 不存在（避免误覆盖）
 #   d) 全 nginx 配置无人占 im.qmledmq.cn（c 只查 sites-enabled，conf.d/ 是盲点）
 # 任何一条失败即停——继续跑会半途崩，难收拾。
-if [[ "${MODE}" == "apply" ]]; then
+#
+# --web-only 模式跳过 a/b/c：service 在跑是预期（不重启），nginx vhost 已在
+# 也是预期（不改 vhost）。只保留 d 的"server_name 不被别处占用"作为最低 sanity。
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    echo
+    echo "  (--web-only) 跳过 preflight a/b/c（service 在跑、9100 占用、vhost 已在 都是预期）"
+    if [[ "${MODE}" == "apply" ]]; then
+        echo "  preflight d) 全 nginx 配置无人占 im.qmledmq.cn（兜底防被劫持）："
+        grep_out=$(ssh "${REMOTE_HOST}" 'sudo grep -rln "im.qmledmq.cn" /etc/nginx/ 2>/dev/null || true' 2>&1)
+        # web-only 模式期望 grep 命中**只**有 sites-enabled/im（我们自己装的），其它都是异常
+        unexpected=$(echo "${grep_out}" | grep -v "/etc/nginx/sites-enabled/im$" || true)
+        if [[ -n "${unexpected}" ]]; then
+            echo "    ${grep_out}"
+            echo "  !! 除 sites-enabled/im 外还有人占 im.qmledmq.cn——清掉再继续" >&2
+            exit 1
+        fi
+        echo "    (仅 sites-enabled/im 自己)"
+    fi
+elif [[ "${MODE}" == "apply" ]]; then
     echo
     echo "  preflight a) 远端无残留 fuxi 进程："
     # `pgrep -fa fuxi` 会把本条 ssh 命令自身也匹配进去（它的命令行含 "fuxi"
@@ -156,19 +179,23 @@ fi
 # 为何不本地 build：home 是 x86_64-linux，本机 macOS 编出来的 Mach-O 不能跑
 # （systemd status=203/EXEC）。最简方案：rsync 源码到 home，远端 cargo build。
 # 增量 build 缓存复用 home 的 ~/.cargo + target/，重跑很快。
-step "1. rsync 源码 + 远端 cargo build --release"
-# 同步源码：排除 target/、本地 web/node_modules、git 大对象、IDE 文件——
-# 只送编译需要的。--delete 让删除的文件远端也清掉，但留下 target/ 让缓存复用。
-run "rsync -az --delete \
-    --exclude '/target' \
-    --exclude '/.git' \
-    --exclude 'node_modules' \
-    --exclude '/crates/fuxi-im/web/test-results' \
-    --exclude '/crates/fuxi-im/web/playwright-report' \
-    --exclude '*.log' \
-    --exclude '/.claude' \
-    ${FUXI_ROOT}/ ${REMOTE_HOST}:${REMOTE_SRC_DIR}/"
-run "ssh ${REMOTE_HOST} 'cd ${REMOTE_SRC_DIR} && ${REMOTE_CARGO} build --release -p fuxi-cli'"
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    step "1. (--web-only) 跳过 rsync 源码 + cargo build"
+else
+    step "1. rsync 源码 + 远端 cargo build --release"
+    # 同步源码：排除 target/、本地 web/node_modules、git 大对象、IDE 文件——
+    # 只送编译需要的。--delete 让删除的文件远端也清掉，但留下 target/ 让缓存复用。
+    run "rsync -az --delete \
+        --exclude '/target' \
+        --exclude '/.git' \
+        --exclude 'node_modules' \
+        --exclude '/crates/fuxi-im/web/test-results' \
+        --exclude '/crates/fuxi-im/web/playwright-report' \
+        --exclude '*.log' \
+        --exclude '/.claude' \
+        ${FUXI_ROOT}/ ${REMOTE_HOST}:${REMOTE_SRC_DIR}/"
+    run "ssh ${REMOTE_HOST} 'cd ${REMOTE_SRC_DIR} && ${REMOTE_CARGO} build --release -p fuxi-cli'"
+fi
 
 # ── 2. PWA dist build（按需）────────────────────────────────────────
 step "2. PWA dist 检查 / build"
@@ -180,11 +207,15 @@ else
 fi
 
 # ── 3. 安装 fuxi binary（远端 cp 而非 scp）──────────────────────────
-step "3. 远端 cp ${REMOTE_BUILT_BIN} → ${REMOTE_BIN}"
-run "ssh ${REMOTE_HOST} 'mkdir -p $(dirname ${REMOTE_BIN})'"
-run "ssh ${REMOTE_HOST} 'cp ${REMOTE_BUILT_BIN} ${REMOTE_BIN} && chmod 755 ${REMOTE_BIN}'"
-# 跑一次 --version 兜底验证：架构对 + 没炸
-run "ssh ${REMOTE_HOST} '${REMOTE_BIN} --version'"
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    step "3. (--web-only) 跳过 binary 安装"
+else
+    step "3. 远端 cp ${REMOTE_BUILT_BIN} → ${REMOTE_BIN}"
+    run "ssh ${REMOTE_HOST} 'mkdir -p $(dirname ${REMOTE_BIN})'"
+    run "ssh ${REMOTE_HOST} 'cp ${REMOTE_BUILT_BIN} ${REMOTE_BIN} && chmod 755 ${REMOTE_BIN}'"
+    # 跑一次 --version 兜底验证：架构对 + 没炸
+    run "ssh ${REMOTE_HOST} '${REMOTE_BIN} --version'"
+fi
 
 # ── 4. 推送 PWA dist ────────────────────────────────────────────────
 step "4. rsync PWA dist → ${REMOTE_HOST}:${REMOTE_WEB}/"
@@ -193,27 +224,50 @@ run "ssh ${REMOTE_HOST} 'mkdir -p ${REMOTE_WEB}'"
 run "rsync -az --delete ${LOCAL_WEB_DIST}/ ${REMOTE_HOST}:${REMOTE_WEB}/"
 
 # ── 5. nginx vhost ──────────────────────────────────────────────────
-step "5. nginx vhost"
-run "scp ${NGINX_CONF} ${REMOTE_HOST}:/tmp/fuxi-im.nginx.conf"
-run "ssh ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.nginx.conf ${REMOTE_NGINX_TARGET}'"
-run "ssh ${REMOTE_HOST} 'sudo nginx -t'"
-run "ssh ${REMOTE_HOST} 'sudo systemctl reload nginx'"
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    step "5. (--web-only) 仅 nginx reload（不重写 vhost）"
+    # vhost 内容不改，但 reload 让 nginx 把新 dist 的文件描述符重 open——保险
+    # 起见走一次（cost 几十毫秒，避免 cache 行为偶发）。
+    run "ssh ${REMOTE_HOST} 'sudo systemctl reload nginx'"
+else
+    step "5. nginx vhost"
+    run "scp ${NGINX_CONF} ${REMOTE_HOST}:/tmp/fuxi-im.nginx.conf"
+    run "ssh ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.nginx.conf ${REMOTE_NGINX_TARGET}'"
+    run "ssh ${REMOTE_HOST} 'sudo nginx -t'"
+    run "ssh ${REMOTE_HOST} 'sudo systemctl reload nginx'"
+fi
 
 # ── 6. systemd unit ─────────────────────────────────────────────────
-step "6. systemd unit"
-run "scp ${SYSTEMD_UNIT} ${REMOTE_HOST}:/tmp/fuxi-im.service"
-run "ssh ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.service ${REMOTE_SYSTEMD_TARGET}'"
-run "ssh ${REMOTE_HOST} 'sudo systemctl daemon-reload'"
-run "ssh ${REMOTE_HOST} 'sudo systemctl enable --now fuxi-im'"
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    step "6. (--web-only) 跳过 systemd unit 安装 + restart"
+else
+    step "6. systemd unit"
+    run "scp ${SYSTEMD_UNIT} ${REMOTE_HOST}:/tmp/fuxi-im.service"
+    run "ssh ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.service ${REMOTE_SYSTEMD_TARGET}'"
+    run "ssh ${REMOTE_HOST} 'sudo systemctl daemon-reload'"
+    run "ssh ${REMOTE_HOST} 'sudo systemctl enable --now fuxi-im'"
+fi
 
 # ── 7. 验证 ─────────────────────────────────────────────────────────
 step "7. 验证"
-run "ssh ${REMOTE_HOST} 'systemctl status fuxi-im --no-pager | head -20'"
-run "curl -fsS --max-time 10 ${HEALTHZ_URL}"
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    # web-only：service 没重启，只验"还活着"+ "PWA 已换新 dist"（看 index.html 的 asset hash）
+    run "ssh ${REMOTE_HOST} 'systemctl is-active fuxi-im'"
+    run "curl -fsS --max-time 10 ${HEALTHZ_URL}"
+    # grep index-*.js 提示新 hash——team-lead 比对 vite build 输出确认
+    run "curl -fsS --max-time 10 ${PWA_URL} | grep -oE 'index-[A-Za-z0-9_-]+\\.js' | head -1"
+else
+    run "ssh ${REMOTE_HOST} 'systemctl status fuxi-im --no-pager | head -20'"
+    run "curl -fsS --max-time 10 ${HEALTHZ_URL}"
+fi
 echo
 echo "  最终验证（脚本不自动跑，需人工）："
 echo "    手机 Safari 打开: ${PWA_URL}"
-echo "    TUI 跑 /pair 拿 PIN → 手机配对 → 看到任务列表"
+if [[ "${WEB_ONLY}" == "1" ]]; then
+    echo "    PWA 应该刷新即生效；service worker 自动拉新 sw.js"
+else
+    echo "    TUI 跑 /pair 拿 PIN → 手机配对 → 看到任务列表"
+fi
 
 step "完成"
 case "${MODE}" in
