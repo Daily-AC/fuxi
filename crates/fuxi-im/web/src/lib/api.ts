@@ -11,6 +11,7 @@ import type {
 import type {
   ConversationHistoryResponse,
   InterveneRequestV2,
+  TasksOverview,
   Upload,
 } from "~/types/api";
 
@@ -43,6 +44,8 @@ export interface ApiClient {
   pair(req: PairRequest): Promise<AuthResponse>;
   /** 拉持久化对话历史（从 im.db）。*/
   fetchHistory(convId: string, limit: number, before?: string): Promise<ConversationHistoryResponse>;
+  /** 阶段 4 任务 sheet · 拉 running + completed 视图模型（β #21 目标契约）。*/
+  fetchTasksOverview(): Promise<TasksOverview>;
   /** 上传单文件，可选进度回调（0..1）。*/
   uploadFile(file: File, onProgress?: (ratio: number) => void): Promise<Upload>;
   openConvSocket(): WebSocket;
@@ -103,6 +106,7 @@ export function createHttpClient(): ApiClient {
       if (before) params.set("before", before);
       return jsonFetch<ConversationHistoryResponse>(`/api/conv/messages?${params.toString()}`);
     },
+    fetchTasksOverview: () => jsonFetch<TasksOverview>(`/api/tasks`),
     uploadFile: (file, onProgress) => uploadViaXhr(file, onProgress),
     openConvSocket: () => new WebSocket(wsUrl("/api/conv")),
     openTaskSocket: (taskId) => new WebSocket(wsUrl(`/api/tasks/${encodeURIComponent(taskId)}/stream`)),

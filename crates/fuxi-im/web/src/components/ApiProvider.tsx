@@ -12,6 +12,9 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
+/** 当前活跃 sheet 名（null = 关闭）。*/
+export type ActiveSheet = "tasks" | "nodes" | null;
+
 export interface ApiContextValue {
   client: ApiClient;
   pushPermission: Accessor<NotificationPermission | "unsupported">;
@@ -21,6 +24,9 @@ export interface ApiContextValue {
   markLoggedIn(): void;
   /** 标记登出（401 自动触发 / 未来"切换设备"用）。*/
   markLoggedOut(): void;
+  /** 当前打开的 sheet。Header tap target → 切；BottomSheet dismiss → 设 null。*/
+  activeSheet: Accessor<ActiveSheet>;
+  setActiveSheet(s: ActiveSheet): void;
 }
 
 const ApiContext = createContext<ApiContextValue>();
@@ -43,6 +49,7 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
   );
   const [auth, setAuth] = createSignal<AuthState>(props.initialAuth ?? "unknown");
+  const [activeSheet, setActiveSheet] = createSignal<ActiveSheet>(null);
 
   // 探测登入态：试拉一次 fetchTasks（开销小、走 cookie middleware）。
   // 401 → 未登入；其他错误（503 / 网络）→ 视为未登入但保留 LoginView 一次重试机会。
@@ -81,6 +88,8 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         authState: auth,
         markLoggedIn: () => setAuth("in"),
         markLoggedOut: () => setAuth("out"),
+        activeSheet,
+        setActiveSheet,
       }}
     >
       {props.children}

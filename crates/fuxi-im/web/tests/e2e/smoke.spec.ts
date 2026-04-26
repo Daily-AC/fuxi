@@ -7,6 +7,7 @@ declare global {
     __FUXI_FETCH__: Array<{ input: string }>;
     __FUXI_WS__: { last: WebSocketLike | null };
     __FUXI_HISTORY__?: unknown[];
+    __FUXI_TASKS_OVERVIEW__?: unknown;
   }
 }
 
@@ -33,7 +34,13 @@ test.beforeEach(async ({ page }) => {
       fetchCalls.push({ input: url });
       if (url.startsWith("/api/tasks")) {
         if (url.includes("/events")) return json({ events: [], next_cursor: null });
-        return json({ tasks: [] });
+        // fetchTasks(rootOnly=true) 用作 auth probe，走 ?root=1，返 v1 shape
+        if (url.includes("root=1")) return json({ tasks: [] });
+        // fetchTasksOverview 用作阶段 4 任务 sheet · 检查 window.__FUXI_TASKS_OVERVIEW__
+        const overview = (
+          window as unknown as { __FUXI_TASKS_OVERVIEW__?: unknown }
+        ).__FUXI_TASKS_OVERVIEW__;
+        return json(overview ?? { running: [], completed: [] });
       }
       if (url === "/api/intervene") return json({ ok: true });
       if (url === "/api/push/vapid-pub") return json({ public_key: "stub" });
@@ -330,4 +337,120 @@ test("历史预加载 · mock 5 条 stored message → 看到 5 条进入", asyn
   await expect(page.getByTestId("msg-user").first()).toContainText("之前的提问 A");
   await expect(page.locator('[data-testid="msg-user"]')).toHaveCount(3);
   await expect(page.locator('[data-testid="msg-xuannv"]')).toHaveCount(2);
+});
+
+// ===== 阶段 4 · 任务 sheet + 节点 sheet =====
+
+test("Header 任务 tap → TasksSheet 弹出 + 看到 mock 数据 + 关闭按钮", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "task-uuid-12345678",
+          title: "修 ERP 客户列表",
+          status: "running",
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 12_000,
+          members: [
+            {
+              agent_id: "a-luban",
+              role: "luban",
+              role_display: "鲁班",
+              activity: "cargo test --lib",
+              tokens: 1234,
+              status: "busy",
+            },
+            {
+              agent_id: "a-pusong",
+              role: "pusong",
+              role_display: "蒲松",
+              activity: "Read git log",
+              status: "thinking",
+            },
+          ],
+        },
+      ],
+      completed: [
+        {
+          id: "c1",
+          title: "升级 deps",
+          status: "completed",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 200_000,
+          members: [],
+        },
+      ],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+
+  await page.getByTestId("header-tasks").click();
+  await expect(page.getByTestId("tasks-sheet")).toBeVisible();
+  await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("修 ERP 客户列表");
+  await expect(page.getByTestId("member-a-luban")).toContainText("鲁班");
+  await expect(page.getByTestId("member-a-luban")).toContainText("cargo test --lib");
+  await expect(page.getByTestId("member-a-luban")).toContainText("1.2k");
+  await expect(page.getByTestId("task-completed-c1")).toContainText("升级 deps");
+
+  await page.getByTestId("tasks-sheet-close").click();
+  await expect(page.getByTestId("tasks-sheet")).toHaveCount(0);
+});
+
+test("Header 节点 tap → NodesSheet 弹出 + 聚合 home 节点 + 背景关闭", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-luban",
+              role: "luban",
+              role_display: "鲁班",
+              tokens: 1500,
+              status: "busy",
+            },
+            {
+              agent_id: "a-pusong",
+              role: "pusong",
+              role_display: "蒲松",
+              status: "idle",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+
+  await page.getByTestId("header-nodes").click();
+  await expect(page.getByTestId("nodes-sheet")).toBeVisible();
+  await expect(page.getByTestId("node-home")).toContainText("home");
+  await expect(page.getByTestId("node-agent-a-luban")).toContainText("鲁班");
+  await expect(page.getByTestId("node-agent-a-luban")).toContainText("1.5k");
+
+  // 背景点击关闭
+  await page.getByTestId("nodes-sheet-backdrop").click();
+  await expect(page.getByTestId("nodes-sheet")).toHaveCount(0);
+});
+
+test("混合切换 · 任务 sheet 关闭后再开节点 sheet", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("header-tasks").click();
+  await expect(page.getByTestId("tasks-sheet")).toBeVisible();
+  await page.getByTestId("tasks-sheet-close").click();
+  await expect(page.getByTestId("tasks-sheet")).toHaveCount(0);
+  await page.getByTestId("header-nodes").click();
+  await expect(page.getByTestId("nodes-sheet")).toBeVisible();
 });
