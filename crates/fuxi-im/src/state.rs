@@ -8,10 +8,12 @@
 //! 为什么用 `Arc<Fuxi>` 而不是 owned：handler 是 `'static` 任务，必须 cheap clone。
 
 use crate::auth::HmacSecret;
+use crate::conv_store::ConvStore;
 use crate::devices::DeviceStore;
 use crate::lockout::LoginGuard;
 use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
+use crate::uploads::UploadStore;
 use fuxi_orchestrator::Fuxi;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -26,6 +28,12 @@ pub struct AppState {
     pub im_auth: ImAuth,
     /// δ · Web Push 域：VAPID keypair + im.db 句柄。
     pub im_push: ImPush,
+    /// β · #17 IM 层聊天记录（conversations + messages）持久层。
+    /// `Option`：测试 / smoke 默认 None；handler 看到 None 应返 503。
+    pub conv_store: Option<ConvStore>,
+    /// β · #17 文件上传持久层（uploads 表 + 落盘）。
+    /// `Option`：同上，None 时上传/下载 handler 返 503。
+    pub upload_store: Option<UploadStore>,
 }
 
 /// β 鉴权相关的子 state——子结构方便整体 clone 同时 handler 用 `state.im_auth.*`
@@ -59,6 +67,8 @@ impl AppState {
             fuxi,
             im_auth: ImAuth::ephemeral(),
             im_push: ImPush::disabled(),
+            conv_store: None,
+            upload_store: None,
         }
     }
 
@@ -71,6 +81,18 @@ impl AppState {
     /// 注入完整 push wiring——daemon 启动期用（生成或加载 VAPID + 共用 im.db pool）。
     pub fn with_im_push(mut self, im_push: ImPush) -> Self {
         self.im_push = im_push;
+        self
+    }
+
+    /// 注入聊天记录持久层（Task #17）。
+    pub fn with_conv_store(mut self, store: ConvStore) -> Self {
+        self.conv_store = Some(store);
+        self
+    }
+
+    /// 注入文件上传持久层（Task #17）。
+    pub fn with_upload_store(mut self, store: UploadStore) -> Self {
+        self.upload_store = Some(store);
         self
     }
 }
