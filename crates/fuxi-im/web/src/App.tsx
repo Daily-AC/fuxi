@@ -1,57 +1,68 @@
-import { Show, onMount, type JSX, type ParentComponent } from "solid-js";
-import { useNavigate } from "@solidjs/router";
-import { TopBar } from "./components/TopBar";
-import { TalkToXuannvBar } from "./components/TalkToXuannvBar";
-import { BottomNav } from "./components/BottomNav";
+import { createSignal, onMount, type Component, type JSX, Show } from "solid-js";
 import { ApiProvider, useApi } from "./components/ApiProvider";
 import { LoginView } from "./components/LoginView";
+import { Header } from "./components/Header";
+import { Composer } from "./components/Composer";
+import { Conversation } from "./views/Conversation";
 import styles from "./App.module.css";
 
-// App shell：顶栏 + 永久"跟玄女说"输入条 + 视图槽 + 底部导航。
-// 决策 14 §A：所有 view 顶部固定 intervene 输入条。
-// 鉴权 gate（task #10）：未登入显 LoginView；探测中显空底色（防闪烁）。
-export const App: ParentComponent = (props): JSX.Element => {
+// 顶层 shell：未登入 → LoginView；登入 → Header + Conversation + Composer。
+// 阶段 1：空态视觉骨架；阶段 2 起接消息流。
+export const App: Component = (): JSX.Element => {
   onMount(() => {
     if ("serviceWorker" in navigator && import.meta.env.PROD) {
-      // sw 由 vite-plugin-pwa 自动注入。这里只做兜底。
       navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
   });
 
   return (
     <ApiProvider>
-      <AuthGate>{props.children}</AuthGate>
+      <AuthGate />
     </ApiProvider>
   );
 };
 
-const AuthGate: ParentComponent = (props) => {
+const AuthGate: Component = () => {
   const { authState, markLoggedIn } = useApi();
-  const navigate = useNavigate();
-
   return (
     <>
       <Show when={authState() === "in"}>
-        <div class={styles.shell}>
-          <TopBar />
-          <TalkToXuannvBar />
-          <main class={styles.main} data-testid="view-slot">
-            {props.children}
-          </main>
-          <BottomNav />
-        </div>
+        <MainShell />
       </Show>
       <Show when={authState() === "out"}>
-        <LoginView
-          onSuccess={() => {
-            markLoggedIn();
-            navigate("/", { replace: true });
-          }}
-        />
+        <LoginView onSuccess={() => markLoggedIn()} />
       </Show>
       <Show when={authState() === "unknown"}>
         <div class={styles.probing} data-testid="auth-probing" aria-hidden="true" />
       </Show>
     </>
+  );
+};
+
+const MainShell: Component = () => {
+  // 阶段 1 stub。signals 留好接下阶段。
+  const [messages] = createSignal<unknown[]>([]);
+  const [online, _setOnline] = createSignal(false);
+  void _setOnline;
+  const [_tasksOpen, setTasksOpen] = createSignal(false);
+  const [_nodesOpen, setNodesOpen] = createSignal(false);
+  void _tasksOpen;
+  void _nodesOpen;
+
+  // 阶段 2：换成真 intervene。阶段 1 仅 stub 防 form 报错。
+  const handleSubmit = async (_text: string): Promise<void> => {
+    void _text;
+  };
+
+  return (
+    <div class={styles.shell} data-testid="main-shell">
+      <Header
+        online={online()}
+        onOpenTasks={() => setTasksOpen(true)}
+        onOpenNodes={() => setNodesOpen(true)}
+      />
+      <Conversation messages={messages} />
+      <Composer onSubmit={handleSubmit} />
+    </div>
   );
 };

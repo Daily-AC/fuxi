@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "fuxi-im PWA · Solid + Vite，三视图：任务卡片 / 玄女对话 / 单任务 chat",
+  "description": "fuxi-im v2 PWA · Solid + Vite · 大道至简对话主屏 + sheet 召唤副视图",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -16,7 +16,6 @@
     "e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
-    "@solidjs/router": "^0.15.3",
     "idb": "^8.0.0",
     "solid-js": "^1.9.5"
   },
