@@ -84,10 +84,10 @@ export function fuzzyMatch(list: MentionCandidate[], query: string): MentionCand
   });
 }
 
-/** Intervene 请求 · target 取第一个 chip 的 agent_id；空 chip 用 fallback。 */
+/** Intervene 请求 · target 取第一个 chip 的 agent_id；无 chip 时 undefined（让 backend 用玄女默认）。*/
 export interface SerializedIntervene {
-  /** target = mentions[0] ?? fallbackAgentId */
-  target: string;
+  /** target = mentions[0]；无 chip 时 undefined（backend 默认走玄女）。 */
+  target?: string;
   /** 文本部分（chip 占位用零宽间隔符 ​）。*/
   text: string;
   /** 所有 chip 的 agent_id（按出现顺序）。*/
@@ -99,10 +99,12 @@ export interface SerializedIntervene {
 const CHIP_PLACEHOLDER = "​";
 
 /** segments → intervene 请求 body（含 mentions）。
- *  fallbackAgentId = 没 chip 时的默认 target（玄女 tab → 玄女 uuid，任务 thread → 玄女 uuid）。*/
+ *  fallbackAgentId 可选：当前 v3 玄女 tab 不需要传（无 chip 时让 backend 默认走玄女）。
+ *  任务 thread 内可传任务发起人 agent_id 作 fallback target —— spec §D 任务 thread 默认对玄女说，
+ *  跟玄女 tab 默认行为一致，所以 fallback 也可省。*/
 export function serializeComposer(
   segments: ComposerSegment[],
-  fallbackAgentId: string,
+  fallbackAgentId?: string,
 ): SerializedIntervene {
   const mentions: string[] = [];
   let text = "";

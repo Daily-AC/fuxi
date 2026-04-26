@@ -39,8 +39,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("登入后输入发送 → optimistic user bubble + intervene 被调用", async () => {
     const { api, getByTestId, queryAllByTestId, unmount } = setup({ interveneSeq: [200] });
     await new Promise((r) => setTimeout(r, 30));
-    fireEvent.input(getByTestId("composer-input"), { target: { value: "派活：修 ERP" } });
-    fireEvent.click(getByTestId("composer-send"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "派活：修 ERP" } });
+    fireEvent.click(getByTestId("mention-send"));
     await new Promise((r) => setTimeout(r, 30));
     expect(api.state.intervenes).toHaveLength(1);
     expect(api.state.intervenes[0]?.text).toBe("派活：修 ERP");
@@ -56,8 +56,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     vi.useRealTimers();
     await new Promise((r) => setTimeout(r, 30));
     vi.useFakeTimers();
-    fireEvent.input(getByTestId("composer-input"), { target: { value: "hi" } });
-    fireEvent.click(getByTestId("composer-send"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
+    fireEvent.click(getByTestId("mention-send"));
     await vi.advanceTimersByTimeAsync(0);
     expect(api.state.intervenes).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1600);
@@ -73,8 +73,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     vi.useRealTimers();
     await new Promise((r) => setTimeout(r, 30));
     vi.useFakeTimers();
-    fireEvent.input(getByTestId("composer-input"), { target: { value: "hi" } });
-    fireEvent.click(getByTestId("composer-send"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
+    fireEvent.click(getByTestId("mention-send"));
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(1600);
     vi.useRealTimers();
@@ -129,8 +129,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("user_intervention_sent echo · 不重复渲染 user bubble", async () => {
     const { api, queryAllByTestId, unmount } = setup({ interveneSeq: [200] });
     await new Promise((r) => setTimeout(r, 30));
-    fireEvent.input(getByQueryTestId("composer-input"), { target: { value: "hi" } });
-    fireEvent.click(getByQueryTestId("composer-send"));
+    fireEvent.input(getByQueryTestId("mention-editor"), { target: { value: "hi" } });
+    fireEvent.click(getByQueryTestId("mention-send"));
     await new Promise((r) => setTimeout(r, 30));
     api.pushConv(ev({ type: "user_intervention_sent", text: "hi" }));
     await new Promise((r) => setTimeout(r, 30));

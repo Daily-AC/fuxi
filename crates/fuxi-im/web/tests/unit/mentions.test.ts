@@ -117,6 +117,14 @@ describe("mentions · serializeComposer", () => {
     expect(out.multi).toBe(false);
   });
 
+  it("无 chip + 无 fallback · target=undefined（backend 走玄女默认）", () => {
+    const segs: ComposerSegment[] = [{ kind: "text", text: "嗨玄女" }];
+    const out = serializeComposer(segs);
+    expect(out.target).toBeUndefined();
+    expect(out.mentions).toEqual([]);
+    expect(out.text).toBe("嗨玄女");
+  });
+
   it("一个 chip · target = chip.agent_id", () => {
     const segs: ComposerSegment[] = [
       { kind: "text", text: "查 ERP " },

@@ -35,15 +35,19 @@ export interface Upload {
   sha256: string;
 }
 
-/** intervene 阶段 3 扩 attachments 字段（β 配合）。
- *  阶段 #N3 扩 `target`：私聊页发给特定 worker 时带 worker agent uuid；
- *  缺省（玄女主对话）走老路径不带 target。β #N5 落后才真消费这个字段。*/
+/** intervene v3 spec 全字段（β #42/#N7' 已落契约）。
+ *  - target：路由目标 agent_id；省 = 玄女默认；带 = 直走该 agent
+ *  - mentions：所有 @ 的 agent_id（v3 chip composer 序列化），写入事件供历史还原 chip
+ *  - attachments：阶段 3 文件附件
+ *  历史 v2 的 InterveneRequest 不带 target 即等价 target 缺省。 */
 export interface InterveneRequestV2 {
   text: string;
   task_id?: TaskId | null;
   attachments?: string[];
-  /** 私聊页 → worker agent uuid。玄女主对话留空。*/
+  /** 路由 target agent uuid。玄女主对话不带 = 默认走玄女。*/
   target?: string;
+  /** v3 #N7' 加 · 所有 @ 的 agent_ids（含 target）。仅用于历史 chip 还原，不影响路由。*/
+  mentions?: string[];
 }
 
 // ---------- 阶段 4 · 任务 sheet 视图模型（β #21 契约目标） ----------

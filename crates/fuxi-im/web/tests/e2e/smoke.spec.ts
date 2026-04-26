@@ -165,7 +165,7 @@ test("登入后 main shell · BottomTabBar 3 tab + 玄女默认 + Composer 空�
   await expect(page.getByTestId("tab-xuannv")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await expect(page.getByTestId("conversation-empty")).toContainText("玄女在线");
-  await expect(page.getByTestId("composer-input")).toBeVisible();
+  await expect(page.getByTestId("mention-editor")).toBeVisible();
 });
 
 test("BottomTabBar · 点 tab-nodes 切节点页 / 点 tab-tasks 切任务页 (v3)", async ({ page }) => {
@@ -182,9 +182,9 @@ test("BottomTabBar · 点 tab-nodes 切节点页 / 点 tab-tasks 切任务页 (v
 test("composer 输入后发送按钮变 active", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  const send = page.getByTestId("composer-send");
+  const send = page.getByTestId("mention-send");
   await expect(send).toBeDisabled();
-  await page.getByTestId("composer-input").fill("hi");
+  await page.getByTestId("mention-editor").fill("hi");
   await expect(send).toBeEnabled();
 });
 
@@ -195,8 +195,8 @@ test("发送消息 → user bubble + intervene 调用 + WS 流式收到玄女回
   await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
 
   // 输入并发送
-  await page.getByTestId("composer-input").fill("hi 玄女");
-  await page.getByTestId("composer-send").click();
+  await page.getByTestId("mention-editor").fill("hi 玄女");
+  await page.getByTestId("mention-send").click();
 
   // optimistic：user bubble 立刻出现
   await expect(page.getByTestId("msg-user")).toContainText("hi 玄女");
@@ -329,36 +329,9 @@ test("XSS · 玄女回 <script> 不执行（被 sanitize）", async ({ page }) =
   expect(scriptCount).toBe(0);
 });
 
-test("选 1 文件 → 提交 → user bubble + intervene 带 attachments", async ({ page }) => {
-  await page.goto("/");
-  await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
-
-  // 设附件
-  await page.getByTestId("composer-file-input").setInputFiles({
-    name: "screenshot.png",
-    mimeType: "image/png",
-    buffer: Buffer.from("fake-bytes"),
-  });
-  // chip 出现（exclude remove 按钮，用 data-status 精确匹配）
-  await expect(page.locator('[data-testid^="composer-chip-c-"][data-status]')).toHaveCount(1);
-
-  // 输入说明 + 发
-  await page.getByTestId("composer-input").fill("看图");
-  await page.getByTestId("composer-send").click();
-
-  // user bubble 显示文字
-  await expect(page.getByTestId("msg-user")).toContainText("看图");
-  // user bubble 内带 chip
-  await expect(page.getByTestId("msg-user").locator('[data-testid^="attachment-chip-"]')).toHaveCount(1);
-
-  // intervene fetch 调用
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.__FUXI_FETCH__.filter((c) => c.input === "/api/intervene").length),
-    )
-    .toBeGreaterThan(0);
-});
+// v3 玄女 tab 用 MentionComposer，不再支持文件附件 attachments（spec §C 没列）。
+// 老 Composer + AttachmentChip 单测仍保留作 v2.x 备用，但 e2e 流（file-input → upload → intervene
+// 带 attachments）下线。如果用户实测又要附件，重开 task 加进 MentionComposer。
 
 test("历史预加载 · mock 5 条 stored message → 看到 5 条进入", async ({ page }) => {
   await page.addInitScript(() => {
@@ -491,29 +464,31 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
 
-// ===== #N4 玄女顶栏 sticky badge "✓ 抄送 N 门客" =====
+// ===== v2 #N4 sticky badge e2e 已删（v3 #40 删 badge）=====
 
-test("#N4 · running.length=2 → 玄女顶栏 badge 显 \"抄送 2 门客\"", async ({ page }) => {
+// ===== #N5' / #40 玄女 tab @ chip composer =====
+
+test("#N5' · 玄女 tab @ chip · 输 @ 弹 autocomplete + 选 → chip + 发 intervene 带 target+mentions", async ({
+  page,
+}) => {
   await page.addInitScript(() => {
     window.__FUXI_TASKS_OVERVIEW__ = {
       running: [
         {
           id: "t1",
-          title: "x",
+          title: "查 ERP",
           status: "running",
           created_at: "",
-          last_active_at: "",
+          last_active_at: "2026-04-26T11:00:00Z",
           duration_ms: 0,
-          members: [],
-        },
-        {
-          id: "t2",
-          title: "y",
-          status: "running",
-          created_at: "",
-          last_active_at: "",
-          duration_ms: 0,
-          members: [],
+          members: [
+            {
+              agent_id: "a-luban",
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+            },
+          ],
         },
       ],
       completed: [],
@@ -521,44 +496,52 @@ test("#N4 · running.length=2 → 玄女顶栏 badge 显 \"抄送 2 门客\"", a
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  const badge = page.getByTestId("cc-badge");
-  await expect(badge).toBeVisible();
-  await expect(badge).toContainText("抄送");
-  await expect(badge).toContainText("2");
-  await expect(badge).toContainText("门客");
+  // 默认在玄女 tab
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
+
+  // 输 @ 触发 autocomplete
+  await page.getByTestId("mention-editor").fill("@");
+  await expect(page.getByTestId("mention-popup")).toBeVisible();
+  await expect(page.getByTestId("mention-item-a-luban")).toContainText("鲁班");
+
+  // 选鲁班 → chip
+  await page.getByTestId("mention-item-a-luban").click();
+  await expect(page.getByTestId("mention-chip-a-luban")).toBeVisible();
+
+  // 输入正文 + 发
+  await page.getByTestId("mention-editor").fill(" 帮我看 v1.go");
+  await page.getByTestId("mention-send").click();
+
+  // 验 intervene body 带 target=a-luban + mentions=[a-luban]
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const c = window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene");
+        return c?.body ?? "";
+      }),
+    )
+    .toContain('"target":"a-luban"');
+  const body = await page.evaluate(() =>
+    window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene")?.body ?? "",
+  );
+  expect(body).toContain('"mentions":["a-luban"]');
 });
 
-test("#N4 · 空 running → badge 不显（隐藏空态）", async ({ page }) => {
+test("#N5' · 玄女 tab 无 chip · intervene 不带 target（backend 走玄女默认）", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await expect(page.getByTestId("cc-badge")).toHaveCount(0);
-});
-
-test("#N4 · tap badge → swipe 到任务树页 (page 3)", async ({ page }) => {
-  await page.addInitScript(() => {
-    window.__FUXI_TASKS_OVERVIEW__ = {
-      running: [
-        {
-          id: "t1",
-          title: "x",
-          status: "running",
-          created_at: "",
-          last_active_at: "",
-          duration_ms: 0,
-          members: [],
-        },
-      ],
-      completed: [],
-    };
-  });
-  await page.goto("/");
-  await expect(page.getByTestId("main-shell")).toBeVisible();
-  // 起始 page 1 (玄女)
-  await expect(page.getByTestId("tab-xuannv")).toHaveAttribute("aria-selected", "true");
-  await page.getByTestId("cc-badge").click();
-  // → page 2 (任务树)
-  await expect(page.getByTestId("tab-tasks")).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByTestId("page-tasks")).toBeVisible();
+  await page.getByTestId("mention-editor").fill("你好玄女");
+  await page.getByTestId("mention-send").click();
+  await expect.poll(() =>
+    page.evaluate(() => window.__FUXI_FETCH__.filter((c) => c.input === "/api/intervene").length),
+  ).toBeGreaterThan(0);
+  const body = await page.evaluate(() =>
+    window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene")?.body ?? "",
+  );
+  // 无 chip 时 target/mentions 字段都不下发
+  expect(body).not.toContain('"target"');
+  expect(body).not.toContain('"mentions"');
+  expect(body).toContain('"text":"你好玄女"');
 });
 
 // ===== #N3' / #38 任务卡片 tap → push 任务 thread (v3 stub) =====
