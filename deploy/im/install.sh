@@ -185,7 +185,10 @@ else
     step "1. rsync 源码 + 远端 cargo build --release"
     # 同步源码：排除 target/、本地 web/node_modules、git 大对象、IDE 文件——
     # 只送编译需要的。--delete 让删除的文件远端也清掉，但留下 target/ 让缓存复用。
-    run "rsync -az --delete \
+    # `-c` checksum 比对而不是 mtime+size 快查——为防 mtime collision（曾踩：
+    # 本地新版 fuxi.rs 与 home 旧版 mtime 完全相同，size 不同，rsync quick check
+    # 跳过，cargo build 用旧代码爆 E0599）。源码树小，CPU 代价可忽略。
+    run "rsync -azc --delete \
         --exclude '/target' \
         --exclude '/.git' \
         --exclude 'node_modules' \
@@ -221,7 +224,10 @@ fi
 step "4. rsync PWA dist → ${REMOTE_HOST}:${REMOTE_WEB}/"
 run "ssh ${REMOTE_HOST} 'mkdir -p ${REMOTE_WEB}'"
 # rsync --delete 让远端和本地一致：旧 hash 资产清掉避免 sw.js 引用过期文件
-run "rsync -az --delete ${LOCAL_WEB_DIST}/ ${REMOTE_HOST}:${REMOTE_WEB}/"
+# `-c` checksum 同 step 1 理由——dist 一般 hash 命名（content-addressed），但
+# index.html / manifest.webmanifest / sw.js 不是 hash 命名，可能与旧版 mtime 一致 size 一致
+# 而内容微改（version field/timestamp 等），mtime 快查会跳过。
+run "rsync -azc --delete ${LOCAL_WEB_DIST}/ ${REMOTE_HOST}:${REMOTE_WEB}/"
 
 # ── 5. nginx vhost ──────────────────────────────────────────────────
 if [[ "${WEB_ONLY}" == "1" ]]; then
