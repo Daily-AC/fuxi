@@ -19,11 +19,14 @@
 //   - 其它（task_created / tool_call / custom / ...）阶段 2 noop，留阶段 3
 
 import type { ServerEvent } from "~/types/events";
+import type { ConversationRole, StoredMessage, Upload } from "~/types/api";
 
 export interface UserMessage {
   kind: "user";
   id: string;
   text: string;
+  /** 此条 user message 携带的附件（已上传完成）。*/
+  attachments?: Upload[];
   /** 503 重试 / 重试失败时挂 inline 错误。*/
   error?: string | null;
   /** 仍在等服务端回执（虚态）。*/
@@ -36,13 +39,25 @@ export interface XuannvMessage {
   id: string;
   /** agent uuid（debug 用；UI 不暴露）。*/
   agent: string | null;
+  /** role 用于将来门客分支；阶段 3 仍主要走 xuannv。*/
+  role?: ConversationRole;
   text: string;
   /** true 时 bubble 末尾挂 pulse dot。*/
   streaming: boolean;
   ts: number;
 }
 
-export type Message = UserMessage | XuannvMessage;
+/** 文件消息 · 一条 message 包 N 个附件，可有/可无 caption 文字。*/
+export interface FileMessage {
+  kind: "file";
+  id: string;
+  role: ConversationRole;
+  caption?: string;
+  attachments: Upload[];
+  ts: number;
+}
+
+export type Message = UserMessage | XuannvMessage | FileMessage;
 
 function parseTs(iso?: string | null): number {
   if (!iso) return Date.now();
@@ -143,14 +158,79 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
 }
 
 /** optimistic user message factory。*/
-export function makeUserMessage(text: string): UserMessage {
+export function makeUserMessage(text: string, attachments?: Upload[]): UserMessage {
   return {
     kind: "user",
     id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     text,
+    attachments,
     pending: true,
     ts: Date.now(),
   };
+}
+
+/** 把 im.db 历史的 StoredMessage 翻译成内部 Message。
+ *  v1 简化：只识别 text / file；其它 kind（task_card / tool_call / error）阶段 4 处理。
+ */
+export function fromStoredMessage(s: StoredMessage): Message | null {
+  const ts = parseTs(s.ts);
+  if (s.kind === "text") {
+    const text = typeof s.content === "string" ? s.content : "";
+    if (s.role === "user") {
+      return {
+        kind: "user",
+        id: s.id,
+        text,
+        pending: false,
+        ts,
+      };
+    }
+    return {
+      kind: "xuannv",
+      id: s.id,
+      agent: s.agent_id ?? null,
+      role: s.role,
+      text,
+      streaming: false,
+      ts,
+    };
+  }
+  if (s.kind === "file") {
+    const caption =
+      s.content && typeof s.content === "object" && "caption" in s.content
+        ? String((s.content as { caption?: string }).caption ?? "")
+        : "";
+    // attachments 在 history 里要么是 file_id refs 要么是完整 Upload[]；
+    // β 给的是 file_id refs；ε 不知 mime/bytes 时显占位（阶段 4 完善）。
+    const ups: Upload[] = Array.isArray(s.attachments)
+      ? s.attachments.map((id) => ({ id, name: id, mime: "application/octet-stream", bytes: 0, sha256: "" }))
+      : [];
+    return {
+      kind: "file",
+      id: s.id,
+      role: s.role,
+      caption: caption || undefined,
+      attachments: ups,
+      ts,
+    };
+  }
+  return null;
+}
+
+/** 历史预加载 + WS 流入去重：相同 id 的 message 不重复加。
+ *  返回新数组，按 ts 排序（升序，老的在前）。*/
+export function mergeMessages(prev: Message[], incoming: Message[]): Message[] {
+  if (incoming.length === 0) return prev;
+  const seen = new Set(prev.map((m) => m.id));
+  const merged = [...prev];
+  for (const m of incoming) {
+    if (!seen.has(m.id)) {
+      merged.push(m);
+      seen.add(m.id);
+    }
+  }
+  merged.sort((a, b) => a.ts - b.ts);
+  return merged;
 }
 
 /** 标记 user message 完成 / 失败。返回新数组。*/

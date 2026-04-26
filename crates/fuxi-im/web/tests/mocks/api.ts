@@ -10,6 +10,12 @@ import type {
   TaskListResponse,
   VapidPubResponse,
 } from "~/types/events";
+import type {
+  ConversationHistoryResponse,
+  InterveneRequestV2,
+  StoredMessage,
+  Upload,
+} from "~/types/api";
 
 /** mock 鉴权脚本：每次调用消费一个 status，耗尽后回最后一个。
  *  用法：`createMockApi({ auth: { loginSeq: [401, 200] } })` 模拟"先错再对"。*/
@@ -23,13 +29,18 @@ export interface AuthScript {
 export interface MockState {
   tasks: TaskListResponse["tasks"];
   events: Record<string, ServerEvent[]>;
-  intervenes: InterveneRequest[];
+  intervenes: Array<InterveneRequest | InterveneRequestV2>;
   /** 控制 intervene 调用 status：每次消费一个，耗尽走最后一个。空 = 默认 200。*/
   interveneSeq?: number[];
   dispatches: DispatchRequest[];
   pushed: PushSubscribeRequest[];
   vapid: VapidPubResponse;
   auth: AuthScript;
+  /** 历史 conversation messages（按 conv_id 分组）。*/
+  history?: Record<string, StoredMessage[]>;
+  /** 控制 uploadFile 行为：fail=true 时抛 500，否则按 next id 序列返回。*/
+  uploadFail?: boolean;
+  uploads: Upload[];
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -111,6 +122,9 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       pairCalls: [],
     },
     interveneSeq: initial?.interveneSeq,
+    history: initial?.history,
+    uploadFail: initial?.uploadFail,
+    uploads: [],
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -134,7 +148,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       events: state.events[taskId] ?? [],
       next_cursor: null,
     }),
-    intervene: async (req: InterveneRequest) => {
+    intervene: async (req: InterveneRequest | InterveneRequestV2) => {
       state.intervenes.push(req);
       const status = nextStatus(state.interveneSeq, 200);
       if (status !== 200) throw new ApiError(status, statusMessage(status));
@@ -160,6 +174,24 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       const status = nextStatus(state.auth.pairSeq, 200);
       if (status !== 200) throw new ApiError(status, statusMessage(status));
       return { device_id: `dev-pair-${state.auth.pairCalls.length}` };
+    },
+    fetchHistory: async (convId: string): Promise<ConversationHistoryResponse> => {
+      const list = state.history?.[convId] ?? [];
+      return { messages: list, next_before: null };
+    },
+    uploadFile: async (file: File, onProgress?: (r: number) => void): Promise<Upload> => {
+      if (state.uploadFail) throw new ApiError(500, "upload failed");
+      onProgress?.(0.5);
+      onProgress?.(1);
+      const up: Upload = {
+        id: `up-${state.uploads.length + 1}`,
+        name: file.name,
+        mime: file.type || "application/octet-stream",
+        bytes: file.size,
+        sha256: `sha-${state.uploads.length + 1}`,
+      };
+      state.uploads.push(up);
+      return up;
     },
     openConvSocket: () => {
       const s = new FakeSocket();

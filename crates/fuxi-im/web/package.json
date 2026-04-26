@@ -16,7 +16,9 @@
     "e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
+    "dompurify": "^3.2.4",
     "idb": "^8.0.0",
+    "marked": "^15.0.7",
     "solid-js": "^1.9.5"
   },
   "devDependencies": {
