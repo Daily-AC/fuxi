@@ -1,0 +1,77 @@
+/* MentionAutocomplete · v3 #N2' / #37 spec §autocomplete 弹层
+ * 紧贴 composer 上方，从下面浮起。max-height 200px，超出 scroll。
+ * 候选项 ≥ 44px 触控热区。
+ */
+
+.popup {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 4px;
+  z-index: 20;
+}
+
+.empty {
+  padding: 12px var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--size-meta);
+  text-align: center;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.item:hover {
+  background: var(--surface-elevated);
+}
+
+.itemActive {
+  background: var(--accent-subtle);
+}
+
+.itemActive:hover {
+  background: var(--accent-subtle);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.role {
+  font-size: var(--size-aux);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+  flex-shrink: 0;
+}
+
+.hint {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
