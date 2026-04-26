@@ -252,6 +252,7 @@ mod filter_tests {
                 target: AgentId::new(),
                 mode: "append".into(),
                 text: "x".into(),
+                mentions: Vec::new(),
             },
         );
         assert!(task_thread_visible(&intervene, t));
@@ -262,6 +263,7 @@ mod filter_tests {
                 target: AgentId::new(),
                 mode: "append".into(),
                 text: "x".into(),
+                mentions: Vec::new(),
             },
         );
         assert!(!task_thread_visible(&other, t));

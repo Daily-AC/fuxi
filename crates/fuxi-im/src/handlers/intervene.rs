@@ -3,17 +3,27 @@
 //! 流程：
 //! 1. 取 `state.fuxi.xuannv_id().await` —— 没起 → 503（PWA 应在 LoginView 后
 //!    第一次访问就被 ζ 的 `ensure_xuannv` 自启拉起；理论上不该 503，但兜底）
-//! 2. 调 `Fuxi::intervene(xuannv, interrupt, text)`
+//! 2. 解出路由 target：
+//!    - body.target 显式指定 → 用它（PWA 任务 thread 里 @ 门客的场景）
+//!    - 否则 → 玄女（PWA 玄女 tab 默认对话）
+//! 3. 调 `Fuxi::intervene(target, interrupt, text, mentions)`
 //!    - Idle → 自动 degrade 成 dispatch（Decision 04，Fuxi 内部已实装）
 //!    - Busy → enqueue 到 pending（M2.1 已实装）
-//! 3. 返 200 `{ "ok": true }`
+//! 4. 返 200 `{ "ok": true }`
 //!
 //! 决策 04 的 degrade 在 Fuxi 层完成——**IM handler 不要自己再判 idle/busy**。
+//!
+//! v3 #N7'（spec `2026-04-26-im-tab-bar-task-thread-design.md` §intervene 字段扩展）：
+//! body 增加可选 `target` 和 `mentions`：
+//! - `target`: 路由目标 agent_id；前端约定 = `mentions[0]`（无 @ 时省略 = 玄女）
+//! - `mentions`: 所有 @ 的 agent_id（含 target 自身），写入事件供历史还原 chip
+//! - v1 不实装 fan-out 通知——`mentions[1..]` 仅作 mention 标记
 
 use crate::error::{Error, Result};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
+use fuxi_core::AgentId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +33,13 @@ pub struct InterveneBody {
     /// 是否打断当前 turn（决策 04 中 `interrupt_first` 语义）。默认 false 走追加。
     #[serde(default)]
     pub interrupt: bool,
+    /// 路由目标 agent_id；缺省 → 玄女。v3 #N7'：前端任务 thread 里 @ 门客时填。
+    #[serde(default)]
+    pub target: Option<AgentId>,
+    /// 所有被 @ 的 agent_id（含 target 自身）。仅写入事件供前端历史还原 chip 视觉，
+    /// **后端 v1 不据此 fan-out 通知**——只 `target` 有路由效果。
+    #[serde(default)]
+    pub mentions: Vec<AgentId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -39,12 +56,18 @@ pub async fn intervene(
         return Err(Error::BadRequest("text 不能为空".into()));
     }
 
-    let xuannv =
-        state.fuxi.xuannv_id().await.ok_or_else(|| {
+    // target 解析：body 显式 → 用之；否则 fallback 玄女
+    let target = match body.target {
+        Some(t) => t,
+        None => state.fuxi.xuannv_id().await.ok_or_else(|| {
             Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
-        })?;
+        })?,
+    };
 
-    state.fuxi.intervene(xuannv, body.interrupt, text).await?;
+    state
+        .fuxi
+        .intervene(target, body.interrupt, text, body.mentions)
+        .await?;
 
     Ok(Json(InterveneResponse { ok: true }))
 }
@@ -150,10 +173,72 @@ mod tests {
         assert_eq!(parsed["error"], "xuannv_unavailable");
     }
 
+    /// v3 #N7'：body.target 显式指定 → 走该 target，**不**回退玄女。
+    /// 用 shelf 里没有的 target id：handler 应跳过 xuannv lookup 直接调
+    /// `Fuxi::intervene(target, ...)`，结果 AgentNotFound → 503。
+    /// （路由路径正确就够；不真起 agent 验响应）
+    #[tokio::test]
+    async fn body_target_routes_to_explicit_agent_not_xuannv() {
+        let (_dir, app, fuxi) = build_app().await;
+        // 注一个假玄女——若 handler 错误地走了 xuannv 路径会撞 xuannv_unavailable
+        fuxi.set_xuannv(AgentId::new()).await;
+
+        let target = AgentId::new();
+        let body = serde_json::json!({
+            "text": "hi worker",
+            "interrupt": false,
+            "target": target,
+            "mentions": [target],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // shelf 里没这个 agent → 503，但 error 应是 agent_not_found 系而非 xuannv_unavailable
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = parsed["error"].as_str().unwrap_or("");
+        assert_ne!(
+            err, "unavailable",
+            "走了 xuannv 错误路径，应该按 body.target 路由"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_empty_text() {
         let (_dir, app, _) = build_app().await;
         let resp = app.oneshot(req("   ", false)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 老 PWA / TUI 客户端发的 body 不带 `target` `mentions`——两字段 `#[serde(default)]`，
+    /// 应当反序列化成 `target=None` `mentions=vec![]`，行为同现状。
+    #[test]
+    fn body_deserializes_without_target_or_mentions_for_back_compat() {
+        let raw = serde_json::json!({ "text": "hi", "interrupt": false });
+        let body: InterveneBody = serde_json::from_value(raw).expect("legacy body");
+        assert_eq!(body.text, "hi");
+        assert!(!body.interrupt);
+        assert!(body.target.is_none());
+        assert!(body.mentions.is_empty());
+    }
+
+    /// v3 #N7' 完整 body 形态——target + mentions 都解析。
+    #[test]
+    fn body_deserializes_with_target_and_mentions() {
+        let target = AgentId::new();
+        let other = AgentId::new();
+        let raw = serde_json::json!({
+            "text": "查 ERP-1066",
+            "target": target,
+            "mentions": [target, other],
+        });
+        let body: InterveneBody = serde_json::from_value(raw).expect("body");
+        assert_eq!(body.target, Some(target));
+        assert_eq!(body.mentions, vec![target, other]);
     }
 }

@@ -589,6 +589,7 @@ mod tests {
                 target,
                 mode: "append".into(),
                 text: text.into(),
+                mentions: vec![target],
             },
         }
     }

@@ -168,6 +168,16 @@ pub enum EventKind {
         /// `append` / `interrupt`——区分两种介入模式（v0.1 薄片 I）。
         mode: String,
         text: String,
+        /// 用户消息里所有被 @ 的 agent_id（含 target 自身，前端约定）。
+        ///
+        /// v3 #N7'（spec `2026-04-26-im-tab-bar-task-thread-design.md`）加：
+        /// 任务 thread composer 允许多 chip @，第一个为路由 target，其余仅
+        /// mention 标记（v1 不实装 fan-out，留 v2.x）。
+        ///
+        /// `#[serde(default)]` 让老事件（无该字段）回放时反序列化得空 Vec，
+        /// 维持向后兼容——SQLite WAL 已落地的事件不需要回填。
+        #[serde(default)]
+        mentions: Vec<AgentId>,
     },
     /// 门客因介入被打断当前 turn（`control_request/interrupt` 已送达）。
     /// 仅在 `mode=interrupt` 的介入路径上发。
@@ -317,6 +327,60 @@ pub enum EventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v3 #N7' `mentions` 字段加在 `UserInterventionSent` 上——
+    /// 老事件（SQLite WAL 已落地）反序列化必须不挂，回出来 `mentions` 是空 Vec。
+    /// `#[serde(default)]` 是这套 wire 兼容的契约。
+    #[test]
+    fn user_intervention_legacy_payload_without_mentions_deserializes() {
+        // 老 wire 形态：无 mentions 字段（pre-#N7' 已落地的事件）
+        let raw = serde_json::json!({
+            "meta": {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "at": "2026-04-26T10:00:00Z"
+            },
+            "kind": {
+                "type": "user_intervention_sent",
+                "target": "00000000-0000-0000-0000-000000000001",
+                "mode": "append",
+                "text": "old wire"
+            }
+        });
+        let ev: Event = serde_json::from_value(raw).expect("legacy event");
+        match ev.kind {
+            EventKind::UserInterventionSent { mentions, mode, .. } => {
+                assert!(mentions.is_empty(), "老事件 mentions 应回空 Vec");
+                assert_eq!(mode, "append");
+            }
+            other => panic!("expect UserInterventionSent, got {other:?}"),
+        }
+    }
+
+    /// v3 #N7' 完整 round-trip：mentions 数组写入 + 读出保留语义。
+    #[test]
+    fn user_intervention_with_mentions_roundtrip() {
+        let target = AgentId::new();
+        let other = AgentId::new();
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::UserInterventionSent {
+                target,
+                mode: "append".into(),
+                text: "查 ERP-1066".into(),
+                mentions: vec![target, other],
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("user_intervention_sent"));
+        assert!(json.contains("mentions"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        match back.kind {
+            EventKind::UserInterventionSent { mentions, .. } => {
+                assert_eq!(mentions, vec![target, other]);
+            }
+            other => panic!("expect UserInterventionSent, got {other:?}"),
+        }
+    }
 
     #[test]
     fn skill_staged_roundtrip() {

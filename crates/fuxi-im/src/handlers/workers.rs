@@ -239,6 +239,7 @@ mod tests {
                 target: luban,
                 mode: "append".into(),
                 text: "你查下 ERP-1066".into(),
+                mentions: vec![luban],
             },
         );
         assert!(
@@ -254,6 +255,7 @@ mod tests {
                 target: mo,
                 mode: "append".into(),
                 text: "x".into(),
+                mentions: vec![mo],
             },
         );
         assert!(!worker_event_visible(&other, luban));
@@ -433,6 +435,7 @@ mod tests {
                 target: me,
                 mode: "append".into(),
                 text: "干活".into(),
+                mentions: vec![me],
             },
         ))
         .unwrap();
