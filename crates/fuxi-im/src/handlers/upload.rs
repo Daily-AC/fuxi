@@ -17,6 +17,7 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use tracing::{info, warn};
 
 #[derive(Debug, Serialize)]
 pub struct UploadResponse {
@@ -41,34 +42,84 @@ impl From<UploadRecord> for UploadResponse {
 
 pub async fn upload(
     State(state): State<AppState>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>> {
+    // #23 诊断日志：记入站请求三件套（content-type / content-length / x-forwarded-for）
+    // —— 用户实测 iPhone Safari 上传 400 没法定位时，journal 里能直接看到 boundary
+    // 是不是带了 / chunked 编码 / proxy 改了 ct，这些都靠 header 反推。
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let content_length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let xff = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let transfer_encoding = headers
+        .get(header::TRANSFER_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    info!(
+        %content_type,
+        %content_length,
+        %xff,
+        %transfer_encoding,
+        "upload 入口"
+    );
+
     let store = state
         .upload_store
         .as_ref()
         .ok_or_else(|| Error::Unavailable("upload_store 未注入".into()))?;
 
     // 找 field 名 = "file" 的那一份；其它 field 全跳。
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| Error::BadRequest(format!("multipart 读取失败：{e}")))?
-    {
+    loop {
+        let next = multipart.next_field().await.map_err(|e| {
+            // axum::extract::multipart::MultipartError 的 Display 把 multer inner error
+            // 折掉了。Debug 把 source chain 全打出来——journal 上能看到真根因。
+            warn!(
+                %content_type,
+                %content_length,
+                multer_error_display = %e,
+                multer_error_debug = ?e,
+                "multipart next_field 失败"
+            );
+            Error::BadRequest(format!("multipart 读取失败：{e:?}"))
+        })?;
+        let Some(field) = next else { break };
         let field_name = field.name().unwrap_or("").to_string();
         if field_name != "file" {
             continue;
         }
         let mime = field.content_type().map(|s| s.to_string());
         let name = field.file_name().map(|s| s.to_string());
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|e| Error::BadRequest(format!("读 multipart 字节失败：{e}")))?;
+        let bytes = field.bytes().await.map_err(|e| {
+            warn!(
+                ?name,
+                ?mime,
+                multer_error_display = %e,
+                multer_error_debug = ?e,
+                "multipart field.bytes 失败"
+            );
+            Error::BadRequest(format!("读 multipart 字节失败：{e:?}"))
+        })?;
+        info!(
+            ?name,
+            ?mime,
+            size_bytes = bytes.len(),
+            "upload 收到 file field"
+        );
         let rec = store
             .put(&bytes, name.as_deref(), mime.as_deref(), None)
             .await?;
         return Ok(Json(rec.into()));
     }
+    warn!(%content_type, "multipart 没找到 file field");
     Err(Error::BadRequest("multipart 缺 field=file".into()))
 }
 
@@ -283,6 +334,70 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// #23 spec：空文件（0 字节）也应 200 + bytes=0 写库（验证 multipart 解析
+    /// 不被 0-byte field 卡住，且 store::put 不拒空）。
+    #[tokio::test]
+    async fn upload_zero_byte_file_succeeds() {
+        let (_dir, app) = build_app().await;
+        let boundary = "----b-zero";
+        let body = multipart_body(boundary, "empty.txt", "text/plain", b"");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/upload")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["bytes"], 0, "0 字节文件应入库 bytes=0");
+        // 空文件 sha256 是固定值
+        assert_eq!(
+            parsed["sha256"],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    /// #23 spec：真实 PNG magic bytes（1×1 透明 PNG）也应通——证明二进制 byte
+    /// 流跨过 multipart boundary 不会被切错（用户撞的"PNG 也 400"场景）。
+    #[tokio::test]
+    async fn upload_real_png_bytes_succeed() {
+        // 1x1 透明 PNG（67 字节，标准最小 PNG）
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // signature
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, // bit depth, color, etc
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, // IDAT
+            0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, // IEND
+            0xae, 0x42, 0x60, 0x82,
+        ];
+        let (_dir, app) = build_app().await;
+        let boundary = "----WebKitFormBoundaryDXXX";
+        let body = multipart_body(boundary, "avatar.png", "image/png", png);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/upload")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            // Safari iOS 浏览器经常不给 Content-Length（chunked 上传）—— 模拟它不带
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "真 PNG 字节应通");
+        let bytes = to_bytes(resp.into_body(), 4 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["bytes"], png.len() as u64);
+        assert_eq!(parsed["mime"], "image/png");
     }
 
     #[tokio::test]
