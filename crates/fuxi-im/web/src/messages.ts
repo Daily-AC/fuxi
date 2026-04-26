@@ -27,6 +27,9 @@ export interface UserMessage {
   text: string;
   /** 此条 user message 携带的附件（已上传完成）。*/
   attachments?: Upload[];
+  /** v3 任务 thread · 该 turn @ 提及的所有 agent_ids（含 target 自身）。
+   *  历史回放时用于还原 chip 视觉。本地 optimistic 也带（display 一致）。*/
+  mentions?: string[];
   /** 503 重试 / 重试失败时挂 inline 错误。*/
   error?: string | null;
   /** 仍在等服务端回执（虚态）。*/
@@ -57,14 +60,14 @@ export interface FileMessage {
   ts: number;
 }
 
-/** 门客（worker）气泡 · #N3 私聊页用。
- *  视觉上跟 XuannvMessage 同结构（左对齐 + who 标签 + bubble），但 who 走橙色 + role_display 渲染。
- *  agent uuid 必填（私聊页单 agent 上下文）。*/
+/** 门客（worker）气泡 · v3 任务 thread #39 + v2 私聊页 #N3 共用。
+ *  视觉：左对齐 + who 标签 + bubble，who 走 role 颜色 + role_display 渲染。 */
 export interface WorkerMessage {
   kind: "worker";
   id: string;
   agent: string;
-  role?: ConversationRole;
+  /** role key（"luban" / "pusong" / ...）—— 用于 colorForRole 着色 who 标签。*/
+  role?: string;
   /** UI 显示用的角色名（"鲁班" / "蒲松" / "墨子" ...）。*/
   role_display?: string;
   text: string;
@@ -563,4 +566,277 @@ function stringifyOutput(output: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+// ============================================================================
+// 任务 thread (#39 / #N4') 专用 reducer · `applyTaskThreadEvent`
+// ----------------------------------------------------------------------------
+// 跟 applyWorkerEvent 的差异：
+//   - 多 agent 上下文：玄女 + 各 worker 都进同一 thread（按时间）
+//   - 玄女 (role=xuannv) 走 XuannvMessage（紫色 who）
+//   - worker 走 WorkerMessage（角色色 who）
+//   - UserInterventionSent → user bubble 含 mentions（chip 还原），不管 target 是谁
+//   - tool_call/tool_result/thinking 配 agent，不强制单 agent 限制
+// 服务端 /api/tasks/:id/conv 已 filter by meta.task + 白名单 EventKind，前端只需做渲染映射。
+// ============================================================================
+
+export interface TaskThreadCtx {
+  /** 该任务的 agent_id → { role, role_display } 映射，用于 bubble 着色 + who 标签。
+   *  member lookup 来自 TaskGroupCard.members；玄女不在 members 里时降级用 role_display="玄女"。*/
+  members: Record<string, { role: string; role_display: string }>;
+  /** 玄女的 agent_id，用于 user_intervention_sent target 等于它时识别"对玄女说"。
+   *  v1 简化：玄女 role = "xuannv" 也作识别，无需 xuannv_id 必填。 */
+  xuannv_id?: string;
+}
+
+function lookupMember(ctx: TaskThreadCtx, agent: string | null | undefined):
+  | { role: string; role_display: string }
+  | null {
+  if (!agent) return null;
+  return ctx.members[agent] ?? null;
+}
+
+function isXuannvAgent(ctx: TaskThreadCtx, agent: string | null | undefined): boolean {
+  if (!agent) return false;
+  if (agent === ctx.xuannv_id) return true;
+  const m = lookupMember(ctx, agent);
+  return m?.role === "xuannv";
+}
+
+function lastStreamingFrom(prev: Message[], agent: string): WorkerMessage | XuannvMessage | null {
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const m = prev[i];
+    if (!m) continue;
+    if (m.kind === "worker" && m.agent === agent && m.streaming) return m;
+    if (m.kind === "xuannv" && m.agent === agent && m.streaming) return m;
+    // 一旦遇到非 streaming 的同 agent 或不同 agent 终态，就停止往前找
+    if (m.kind === "worker" || m.kind === "xuannv") return null;
+  }
+  return null;
+}
+
+function lastStreamingThinkingFrom(prev: Message[], agent: string): ThinkingMessage | null {
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const m = prev[i];
+    if (!m) continue;
+    if (m.kind === "thinking" && m.agent === agent && m.streaming) return m;
+  }
+  return null;
+}
+
+function startTaskBubble(
+  prev: Message[],
+  ev: ServerEvent,
+  ctx: TaskThreadCtx,
+  initialText: string,
+): Message[] {
+  const ts = parseTs(ev.meta.at);
+  const agent = ev.meta.agent ?? "";
+  const id = ev.meta.id || `m-${ts}-${prev.length}`;
+  if (isXuannvAgent(ctx, agent)) {
+    const next: XuannvMessage = {
+      kind: "xuannv",
+      id,
+      agent,
+      text: initialText,
+      streaming: true,
+      ts,
+    };
+    return [...prev, next];
+  }
+  const member = lookupMember(ctx, agent);
+  const next: WorkerMessage = {
+    kind: "worker",
+    id,
+    agent,
+    role: member?.role,
+    role_display: member?.role_display ?? "门客",
+    text: initialText,
+    streaming: true,
+    ts,
+  };
+  return [...prev, next];
+}
+
+export function applyTaskThreadEvent(
+  prev: Message[],
+  ev: ServerEvent,
+  ctx: TaskThreadCtx,
+): Message[] {
+  if (!ev || !ev.kind || typeof ev.kind.type !== "string") return prev;
+  const k = ev.kind;
+  const ts = parseTs(ev.meta.at);
+  const agent = ev.meta.agent ?? "";
+
+  // —— 用户 intervene · 渲染右侧 user bubble + 还原 chip（mentions）——
+  if (k.type === "user_intervention_sent") {
+    const text = (k as { text?: string }).text ?? "";
+    if (text.trim() === "") return prev;
+    const id = ev.meta.id || `u-${ts}-${prev.length}`;
+    if (prev.some((m) => m.id === id)) return prev;
+    const mentions = (k as { mentions?: string[] }).mentions ?? [];
+    const next: UserMessage = {
+      kind: "user",
+      id,
+      text,
+      mentions: mentions.length > 0 ? mentions : undefined,
+      pending: false,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // —— thinking 折叠条 · 起 / 完结 ——
+  if (k.type === "thinking_started") {
+    if (!agent) return prev;
+    if (lastStreamingThinkingFrom(prev, agent)) return prev;
+    const next: ThinkingMessage = {
+      kind: "thinking",
+      id: ev.meta.id || `th-${ts}-${prev.length}`,
+      agent,
+      streaming: true,
+      ts,
+    };
+    return [...prev, next];
+  }
+  if (k.type === "thinking_finished") {
+    if (!agent) return prev;
+    const last = lastStreamingThinkingFrom(prev, agent);
+    if (!last) return prev;
+    const dur = ts - last.ts;
+    const updated: ThinkingMessage = {
+      ...last,
+      streaming: false,
+      duration_ms: dur >= 0 ? dur : null,
+    };
+    const idx = prev.indexOf(last);
+    const next = prev.slice();
+    next[idx] = updated;
+    return next;
+  }
+
+  // —— 文本 delta / 整段 ——
+  if (k.type === "agent_text_delta") {
+    if (!agent) return prev;
+    const delta = (k as { delta?: string }).delta ?? "";
+    const last = lastStreamingFrom(prev, agent);
+    if (last) {
+      const updated = { ...last, text: last.text + delta };
+      const idx = prev.indexOf(last);
+      const next = prev.slice();
+      next[idx] = updated;
+      return next;
+    }
+    return startTaskBubble(prev, ev, ctx, delta);
+  }
+  if (k.type === "agent_text" || k.type === "agent_responded") {
+    if (!agent) return prev;
+    const text = (k as { text?: string }).text ?? "";
+    const isEmpty = text.trim() === "";
+    const last = lastStreamingFrom(prev, agent);
+    if (last) {
+      if (isEmpty) {
+        // 空 turn：丢空 bubble（Bug #24 同款防御）
+        return prev.filter((m) => m !== last);
+      }
+      const updated = { ...last, text, streaming: false };
+      const idx = prev.indexOf(last);
+      const next = prev.slice();
+      next[idx] = updated;
+      return next;
+    }
+    if (isEmpty) return prev;
+    if (isXuannvAgent(ctx, agent)) {
+      const next: XuannvMessage = {
+        kind: "xuannv",
+        id: ev.meta.id || `xn-${ts}-${prev.length}`,
+        agent,
+        text,
+        streaming: false,
+        ts,
+      };
+      return [...prev, next];
+    }
+    const member = lookupMember(ctx, agent);
+    const next: WorkerMessage = {
+      kind: "worker",
+      id: ev.meta.id || `w-${ts}-${prev.length}`,
+      agent,
+      role: member?.role,
+      role_display: member?.role_display ?? "门客",
+      text,
+      streaming: false,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // —— 工具调用配对 ——
+  if (k.type === "tool_call") {
+    if (!agent) return prev;
+    const tool = (k as { tool?: string }).tool ?? "tool";
+    const args = stringifyArgs((k as { input?: unknown }).input);
+    const next: ToolCallMessage = {
+      kind: "tool_call",
+      id: ev.meta.id || `tc-${ts}-${prev.length}`,
+      agent,
+      tool,
+      args_summary: args,
+      status: "running",
+      ts,
+    };
+    return [...prev, next];
+  }
+  if (k.type === "tool_result") {
+    if (!agent) return prev;
+    const tool = (k as { tool?: string }).tool ?? "tool";
+    const ok = Boolean((k as { ok?: boolean }).ok);
+    const output = stringifyOutput((k as { output?: unknown }).output);
+    const idx = findRunningToolIdx(prev, agent, tool);
+    if (idx >= 0) {
+      const running = prev[idx] as ToolCallMessage;
+      const updated: ToolCallMessage = {
+        ...running,
+        status: ok ? "ok" : "err",
+        duration_ms: ts - running.ts,
+        output,
+      };
+      const next = prev.slice();
+      next[idx] = updated;
+      return next;
+    }
+    // 未配上 started · 直接插完结态卡
+    const next: ToolCallMessage = {
+      kind: "tool_call",
+      id: ev.meta.id || `tc-${ts}-${prev.length}`,
+      agent,
+      tool,
+      status: ok ? "ok" : "err",
+      duration_ms: 0,
+      output,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // —— 状态变更 marker ——
+  if (k.type === "agent_idle") {
+    const member = lookupMember(ctx, agent);
+    const text = `${member?.role_display ?? "门客"} idle`;
+    return appendMarker(prev, ev, text, ts);
+  }
+  if (k.type === "task_completed") {
+    const summary = (k as { summary?: string }).summary;
+    const text = summary ? `任务完成 · ${summary}` : "任务完成";
+    return appendMarker(prev, ev, text, ts);
+  }
+  if (k.type === "task_state_changed") {
+    const to = (k as { to?: string }).to ?? "";
+    if (to === "Done" || to === "done") return appendMarker(prev, ev, "任务完成", ts);
+    if (to === "Cancelled" || to === "cancelled") return appendMarker(prev, ev, "已取消", ts);
+    if (to === "Failed" || to === "failed") return appendMarker(prev, ev, "任务失败", ts);
+    return prev;
+  }
+
+  return prev;
 }

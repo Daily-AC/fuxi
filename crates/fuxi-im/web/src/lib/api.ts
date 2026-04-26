@@ -120,7 +120,9 @@ export function createHttpClient(): ApiClient {
     },
     uploadFile: (file, onProgress) => uploadViaXhr(file, onProgress),
     openConvSocket: () => new WebSocket(wsUrl("/api/conv")),
-    openTaskSocket: (taskId) => new WebSocket(wsUrl(`/api/tasks/${encodeURIComponent(taskId)}/stream`)),
+    // v3 #N4'：任务 thread 走 /conv（白名单 filter）；老 /stream 留给 firehose 观察器
+    openTaskSocket: (taskId) =>
+      new WebSocket(wsUrl(`/api/tasks/${encodeURIComponent(taskId)}/conv`)),
     openWorkerSocket: (agentId) =>
       new WebSocket(wsUrl(`/api/workers/${encodeURIComponent(agentId)}/conv`)),
   };
