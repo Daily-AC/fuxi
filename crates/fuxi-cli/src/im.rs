@@ -220,8 +220,8 @@ pub async fn run(args: StartArgs) -> Result<()> {
     match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
         Ok(id) => {
             // set_xuannv 已经在 ensure_xuannv 里调用——上面 step 5 的 push_hooks_task
-            // 内部 wait_for_xuannv 会在下一次 2s 轮询拿到这个 id（旧设计的轮询路径
-            // 不动，避免 step 5 / 6.5 顺序耦合）。
+            // 通过 watch::Receiver 立刻收到通知（#7 修：从 2s 轮询切换为 watch
+            // changed() 实时唤醒）。
             tracing::info!(xuannv = %id, role = %xuannv_role, "玄女自启完成");
             // β · #17 conv_store sync hook —— 玄女上线后立刻订 EventBus 翻消息进 messages 表。
             // `spawn_xuannv_sync` 是 async 函数，**返回前**完成 ensure_scope + subscribe，
@@ -350,20 +350,38 @@ pub async fn run(args: StartArgs) -> Result<()> {
 /// AgentId。home 长跑期间玄女早晚由 REPL 起来。在此之前，hooks task 会被 await
 /// 阻塞但 IM API 已可用。
 ///
+/// `#7` 公理 #3 真实时不轮询——`Fuxi::xuannv_id_watch()` 拿 watch::Receiver，
+/// 直接 `.changed().await` 等 set_xuannv 触发。旧 2s 轮询路径已弃用（违反公理）。
+///
 /// 兜底：如果 5 分钟内还没玄女（没有人开 REPL），fallback 到内存 UUID——push
 /// hooks 仍能跑 task done 路径（基于 task_id），玄女 idle 路径会因不匹配 agent
 /// 而静默——可接受降级。
 async fn wait_for_xuannv(fuxi: &Fuxi) -> fuxi_core::id::AgentId {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
-    loop {
-        if let Some(id) = fuxi.xuannv_id().await {
-            return id;
+    let mut rx = fuxi.xuannv_id_watch();
+    // 已就绪 → 立即返回；否则 await changed()。
+    if let Some(id) = *rx.borrow_and_update() {
+        return id;
+    }
+
+    let timeout = std::time::Duration::from_secs(300);
+    match tokio::time::timeout(timeout, async {
+        loop {
+            if rx.changed().await.is_err() {
+                // sender 已 drop（Fuxi 销毁）——返 None 走 placeholder 兜底
+                return None;
+            }
+            if let Some(id) = *rx.borrow_and_update() {
+                return Some(id);
+            }
         }
-        if tokio::time::Instant::now() >= deadline {
+    })
+    .await
+    {
+        Ok(Some(id)) => id,
+        Ok(None) | Err(_) => {
             tracing::warn!("玄女 5 分钟未上线，push hooks 用 placeholder agent id 兜底");
-            return fuxi_core::id::AgentId::new();
+            fuxi_core::id::AgentId::new()
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
 

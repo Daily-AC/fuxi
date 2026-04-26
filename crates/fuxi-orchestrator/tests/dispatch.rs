@@ -567,6 +567,39 @@ async fn blocked_event_does_not_terminate_pump() {
     );
 }
 
+/// #19 回归 · `EventKind::TaskBlocked` 是 cc/codex 的"本 turn 出错"信号
+/// （cc `ResultError` / codex `TurnFailed` 都翻译到这里），与状态机的
+/// `TaskStateChanged{to: Blocked}` 不同——前者 turn 已结束 cc 内部 Idle，
+/// 后者只是状态转移仍可能继续派事件。pump 必须把 `TaskBlocked` 视为终态，
+/// 否则 cc 报错后 shelf 锁死 Busy（用户实测撞过：门客 Idle 但任务无收尾）。
+#[tokio::test]
+async fn task_blocked_terminates_dispatch_pump_so_shelf_returns_idle() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    // 脚本只有一条 `TaskBlocked`——模拟 cc `ResultError`。pump 应当看到此事件后
+    // 退出并把 shelf 摊回 Idle，不再等永远不会来的 Done。
+    let stub = StubAgent::new(
+        "dev",
+        vec![EventKind::TaskBlocked {
+            reason: "cc cli error".into(),
+        }],
+    );
+    let id = fuxi.insert_agent(stub, None).await;
+
+    fuxi.dispatch(id, Task::new("t", "")).await.unwrap();
+    // 给 pump 跑完（含 50ms grace 窗口）。
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let status = fuxi.status_of(id).await;
+    assert_eq!(
+        status,
+        Some(fuxi_orchestrator::ShelfStatus::Idle),
+        "TaskBlocked 后 shelf 必须回 Idle，否则门客锁死 Busy"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_dispatch_to_any_spawns_distinct_task_bound_workers() {
     let bus = EventBus::with_memory_store().await.unwrap();
@@ -1401,4 +1434,49 @@ async fn dispatch_pump_records_even_when_session_id_none() {
         recorded[0].cli_session_id.is_none(),
         "cli_session_id 应继承 agent.session_id() = None"
     );
+}
+
+/// #7 公理 #3：`xuannv_id_watch` 真实时入口——set_xuannv 触发 changed()，
+/// 替代旧 5min/2s 轮询。
+#[tokio::test]
+async fn xuannv_id_watch_signals_change_when_set() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Arc::new(Fuxi::new(bus, ws));
+
+    let mut rx = fuxi.xuannv_id_watch();
+    // 初值 None——未设置
+    assert!(rx.borrow_and_update().is_none());
+
+    let fuxi_clone = fuxi.clone();
+    let new_id = AgentId::new();
+    let setter = tokio::spawn(async move {
+        // 给订阅方一点时间挂上去（虽然 watch 即使 set 在前也能记到 mark_changed）
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        fuxi_clone.set_xuannv(new_id).await;
+    });
+
+    // 真实时唤醒——不轮询，直接 await changed()
+    let changed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.changed())
+        .await
+        .expect("watch changed() 应在 2s 内被 set_xuannv 唤醒");
+    assert!(changed.is_ok());
+    assert_eq!(*rx.borrow_and_update(), Some(new_id));
+
+    setter.await.unwrap();
+}
+
+/// #7：`xuannv_id_watch` 已就绪场景——subscribe 之前就已 set 的话，第一次
+/// `borrow` 立即拿到值，不必 .changed() 也能直接走。
+#[tokio::test]
+async fn xuannv_id_watch_borrow_returns_already_set_value() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Arc::new(Fuxi::new(bus, ws));
+
+    let preset = AgentId::new();
+    fuxi.set_xuannv(preset).await;
+    let mut rx = fuxi.xuannv_id_watch();
+
+    assert_eq!(*rx.borrow_and_update(), Some(preset));
 }

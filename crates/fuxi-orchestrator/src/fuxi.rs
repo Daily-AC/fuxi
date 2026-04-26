@@ -29,7 +29,7 @@ use fuxi_events::EventBus;
 use fuxi_workspace::GitWorktreeWorkspace;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tracing::{debug, info, warn};
 
 // turn 终态后给 pending-drain 新事件的宽限窗口。过大体感会慢，过小会丢尾包。
@@ -94,7 +94,11 @@ pub struct Fuxi {
     /// 顶层玄女 agent id——repl 启动 spawn 后通过 `set_xuannv` 告知。
     /// Why `Option`：`Fuxi::new` 零门客启动，早于任何 spawn；抄送路径
     /// 遇到 `None` 时 graceful skip，不强求设置。
-    xuannv_id: Arc<RwLock<Option<AgentId>>>,
+    ///
+    /// `watch::Sender` 替代 `RwLock`（#7 修，公理 #3 真实时不轮询）：
+    /// 调用方拿 [`Self::xuannv_id_watch`] 订阅 → 直接 `.changed().await`，
+    /// 不需 5min 轮询。读路径仍走 `borrow()`，与原 `RwLock::read` 等价。
+    xuannv_id: watch::Sender<Option<AgentId>>,
     /// P2 召回入库钩子。Why `Option`：默认 None 向后兼容——未设 sink 时
     /// dispatch pump silent skip，不阻塞 Done 流程。具体 impl 由 fuxi-cli 注入
     /// （参见 fuxi-cli/src/extractor_hook.rs 的反向依赖 pattern）。
@@ -114,12 +118,15 @@ impl Fuxi {
         cfg: FuxiConfig,
     ) -> Self {
         let shelf = Arc::new(Shelf::new());
+        // watch::channel 初值 None——和原 `RwLock::new(None)` 等价的"未设置"态。
+        // 接收端通过 `borrow()` 读当前值、`changed().await` 等下次 set。
+        let (xuannv_tx, _) = watch::channel(None);
         let me = Self {
             bus: bus.clone(),
             workspace,
             shelf: shelf.clone(),
             cfg,
-            xuannv_id: Arc::new(RwLock::new(None)),
+            xuannv_id: xuannv_tx,
             recall_sink: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
@@ -141,14 +148,31 @@ impl Fuxi {
     }
 
     /// 告知 Fuxi 哪个 agent 是玄女——抄送路径用这个判定 target≠xuannv。
-    /// 幂等：再次调用以最新值为准。
+    /// 幂等：再次调用以最新值为准。订阅方 ([`Self::xuannv_id_watch`]) 会收到
+    /// `changed()` 通知。
     pub async fn set_xuannv(&self, id: AgentId) {
-        *self.xuannv_id.write().await = Some(id);
+        // send_replace：无 receiver 也不 panic（Fuxi 启动早于 IM 订阅时也安全）
+        let _ = self.xuannv_id.send_replace(Some(id));
     }
 
     /// 读玄女 id——未设置返回 None。
     pub async fn xuannv_id(&self) -> Option<AgentId> {
-        *self.xuannv_id.read().await
+        *self.xuannv_id.borrow()
+    }
+
+    /// 订阅玄女 id 变化——`#7` 公理 #3 真实时入口，替代旧 5min 轮询。
+    ///
+    /// 用法：
+    /// ```ignore
+    /// let mut rx = fuxi.xuannv_id_watch();
+    /// // 已就绪 → 立即 borrow 拿值；否则 .changed().await 等下次 set
+    /// if let Some(id) = *rx.borrow_and_update() { return id; }
+    /// while rx.changed().await.is_ok() {
+    ///     if let Some(id) = *rx.borrow_and_update() { return id; }
+    /// }
+    /// ```
+    pub fn xuannv_id_watch(&self) -> watch::Receiver<Option<AgentId>> {
+        self.xuannv_id.subscribe()
     }
 
     /// 注入 P2 召回入库钩子。fuxi-cli 启动时调一次；未调时 dispatch pump silent skip。
@@ -471,8 +495,18 @@ impl Fuxi {
                     .await;
                 }
 
-                // WHY：终态只看 TaskStateChanged{Done|Cancelled} + AgentDead；
+                // WHY：dispatch turn 终态视角看以下三类——
+                //   1. `TaskStateChanged{Done|Cancelled}`：cc/codex 干完
+                //   2. `AgentDead`：cc/codex 进程崩溃
+                //   3. `TaskBlocked`：cc/codex 自身把当前 turn 打到 Blocked
+                //      （cc `ResultError` / codex `TurnFailed` 都映射到此），
+                //      cc 内部已进 Idle 等用户干预——dispatch 这单不会再出新事件
+                //
                 // M3.6 删掉 TaskDelivered/TaskCancelled 孤儿后不再兜底。
+                // #19 修：之前 `TaskBlocked` 不在终态——cc/codex 报错时 ws_pump 进
+                // 内部 Idle，但 Fuxi pump 永远等不到 Done，shelf 锁死 Busy。
+                // 治本：Blocked 也算 turn 结束（task 本身仍是 Blocked 可恢复态，
+                // 等 `resume_task` 触发新 dispatch 即可——pump 寿命 ≤ 单 turn）。
                 let is_terminal = matches!(
                     &ev.kind,
                     EventKind::TaskStateChanged {
@@ -480,6 +514,7 @@ impl Fuxi {
                             | fuxi_core::task::TaskState::Cancelled,
                         ..
                     } | EventKind::AgentDead { .. }
+                        | EventKind::TaskBlocked { .. }
                 );
                 if bus.publish(ev).is_err() {
                     warn!(agent = %agent_id, "event bus 已关闭，pump 退出");
@@ -494,10 +529,19 @@ impl Fuxi {
             }
             // pump 退出默认摊回 Idle，但若已被 death_watcher 标 Dead（AgentDead），
             // 不能回写成 Idle——否则会出现"门客死亡后又可用"的状态回退。
-            if shelf.status_of(agent_id).await != Some(ShelfStatus::Dead) {
+            // #19 增 info 级日志：用户复现"门客 Idle 但 task 无收尾"时，journal 可以
+            // 一眼看到 pump 在哪个分支退出（terminal 见到 vs 没见到 vs bus 关）。
+            let prev_status = shelf.status_of(agent_id).await;
+            if prev_status != Some(ShelfStatus::Dead) {
                 shelf.set_status(agent_id, ShelfStatus::Idle).await;
             }
-            debug!(agent = %agent_id, saw_terminal, "dispatch pump 退出");
+            info!(
+                agent = %agent_id,
+                task = %task_id,
+                saw_terminal,
+                prev_status = ?prev_status,
+                "dispatch pump 退出"
+            );
         });
 
         Ok(())
