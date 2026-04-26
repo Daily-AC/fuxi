@@ -31,7 +31,11 @@ pub fn build(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(handlers::health::healthz))
         .route("/api/tasks", get(handlers::tasks::list_tasks))
+        // β · #N6' 任务 thread 镜像端点：events 走白名单 filter，conv WS 同 filter
+        // 接续。`/stream` 是 γ 早期的"任务 raw 事件流"路径，filter 仅 meta.task；
+        // 保留兼容观察器，不删
         .route("/api/tasks/{id}/events", get(handlers::tasks::task_events))
+        .route("/api/tasks/{id}/conv", get(handlers::tasks::task_conv_ws))
         .route(
             "/api/tasks/{id}/stream",
             get(handlers::conv::task_stream_ws),

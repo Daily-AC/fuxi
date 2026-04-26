@@ -9,16 +9,56 @@
 //! 默认 limit=100，硬上限 1000，防止前端误打分页接口当 dump 工具。
 
 use crate::error::{Error, Result};
-use crate::handlers::ws_common::parse_cursor;
+use crate::handlers::ws_common::{build_event_stream, parse_cursor, run_ws_loop};
 use crate::state::AppState;
 use crate::tasks_view::{ListTasksResponse, aggregate};
 use axum::Json;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
+use axum::response::Response;
 use futures_util::StreamExt;
-use fuxi_core::{Event, TaskId};
+use fuxi_core::task::TaskState;
+use fuxi_core::{Event, EventKind, TaskId};
 use fuxi_events::ReplayCursor;
 use serde::Deserialize;
+use tracing::{info, warn};
 use uuid::Uuid;
+
+/// 单任务 thread 流的事件白名单 filter（#N6'）。
+///
+/// 镜像 `handlers::workers::worker_event_visible` 的设计：
+/// - 抽出独立 fn 让 HTTP `task_events` + WS `task_conv_ws` + 旧 `task_stream_ws`
+///   共用一份语义，避免 filter 漂移
+/// - WS 闭包 `'static` 必须 capture by value，把 `task_id` clone 进去
+/// - 单测能直接断言 filter 行为，不必起 axum
+///
+/// 命中 `meta.task == Some(:task_id)` 时再过 EventKind 白名单：
+/// - `UserInterventionSent`（用户对该 task 上的 worker 说话）
+/// - `AgentResponded`（worker 输出文本；玄女在 task 中也算 member）
+/// - `ToolCallStarted` / `ToolCallFinished`
+/// - `ThinkingStarted` / `ThinkingFinished`
+/// - `TaskStateChanged{Done|Cancelled|Delivering}`（终态 marker）
+///
+/// 故意**不**收：`AgentSpawning`/`AgentReady`/`AgentDead`/`TaskCreated`/`TaskDispatched`
+/// 这些是平台事件不是对话内容；前端不该在任务 thread 渲染。
+pub(crate) fn task_thread_visible(ev: &Event, task_id: TaskId) -> bool {
+    if ev.meta.task != Some(task_id) {
+        return false;
+    }
+    matches!(
+        ev.kind,
+        EventKind::UserInterventionSent { .. }
+            | EventKind::AgentResponded { .. }
+            | EventKind::ToolCallStarted { .. }
+            | EventKind::ToolCallFinished { .. }
+            | EventKind::ThinkingStarted
+            | EventKind::ThinkingFinished
+            | EventKind::TaskStateChanged {
+                to: TaskState::Done | TaskState::Cancelled | TaskState::Delivering,
+                ..
+            }
+    )
+}
 
 /// 同 `handlers/conv.rs::parse_task_id`：URL path 段允许裸 UUID 或 `task-<uuid>`。
 fn parse_task_id(s: &str) -> std::result::Result<TaskId, String> {
@@ -60,7 +100,11 @@ pub struct EventsQuery {
 
 /// `GET /api/tasks/:id/events?from=<cursor>&limit=N` —— 单任务事件历史。
 ///
-/// 使用 `EventStore::replay` 拉全表流然后按 `meta.task == :id` 过滤+分页——
+/// **#N6'** 起加 EventKind 白名单：只下发任务 thread 渲染需要的事件
+/// （AgentResponded / ToolCall* / Thinking* / UserInterventionSent /
+/// TaskStateChanged 终态）—— 详见 [`task_thread_visible`]。
+///
+/// 使用 `EventStore::replay` 拉全表流然后按 filter 过滤+分页——
 /// 不直接走 `history_for_task` 是因为后者无 cursor 语义。`replay(FromId)` 走
 /// rowid 锚点，跨任务统一时间序保持单调。
 #[tracing::instrument(skip(state), fields(task_id = %id))]
@@ -79,7 +123,7 @@ pub async fn task_events(
 
     while let Some(item) = stream.next().await {
         let ev = item?;
-        if ev.meta.task != Some(task_id) {
+        if !task_thread_visible(&ev, task_id) {
             continue;
         }
         out.push(ev);
@@ -88,6 +132,231 @@ pub async fn task_events(
         }
     }
     Ok(Json(out))
+}
+
+/// `?from=<cursor>` WS 流式接续 query。
+#[derive(Debug, Default, Deserialize)]
+pub struct TaskStreamQuery {
+    pub from: Option<String>,
+}
+
+/// `WS /api/tasks/:id/conv` —— 任务 thread 流式接续（#N6'）。
+///
+/// 镜像 `WS /api/conv` + `WS /api/workers/:id/conv` 的 pattern，但 filter 走
+/// [`task_thread_visible`]（meta.task 命中 + 白名单 EventKind）。
+///
+/// 与旧 `WS /api/tasks/:id/stream` 区别：
+/// - `/conv` 走白名单（前端任务 thread 直接渲染）
+/// - `/stream` 早期未上白名单（任务级原始事件流，给观察器用）
+/// router.rs 把两条路径都映射到本 handler；行为一致。
+#[tracing::instrument(skip(ws, state), fields(task_id = %id))]
+pub async fn task_conv_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<TaskStreamQuery>,
+) -> Result<Response> {
+    let task_id = parse_task_id(&id).map_err(|e| {
+        warn!(raw = %id, error = %e, "task_id 解析失败");
+        Error::BadRequest(e)
+    })?;
+    let cursor = parse_cursor(q.from.as_deref())?;
+    info!(?cursor, %task_id, "ws /api/tasks/{id}/conv accept");
+
+    let bus = state.fuxi.bus().clone();
+    let stream = build_event_stream(&bus, cursor);
+
+    let resp = ws.on_upgrade(move |socket| async move {
+        run_ws_loop(socket, stream, move |ev| task_thread_visible(ev, task_id)).await;
+    });
+    Ok(resp)
+}
+
+#[cfg(test)]
+mod filter_tests {
+    //! `task_thread_visible` filter 契约——镜像 `handlers::workers::worker_event_visible`
+    //! 的单测格式。让 #N6' 白名单漂移在三 gate 立刻报警，不必等真 server e2e。
+
+    use super::task_thread_visible;
+    use chrono::Utc;
+    use fuxi_core::{AgentId, Event, EventKind, EventMeta, TaskId, task::TaskState};
+
+    fn ev(task: Option<TaskId>, agent: Option<AgentId>, kind: EventKind) -> Event {
+        let mut meta = EventMeta::now();
+        meta.task = task;
+        meta.agent = agent;
+        meta.at = Utc::now();
+        Event { meta, kind }
+    }
+
+    #[test]
+    fn passes_assistant_text_for_target_task() {
+        let t = TaskId::new();
+        let mine = ev(
+            Some(t),
+            None,
+            EventKind::AgentResponded { text: "hi".into() },
+        );
+        let other_task = ev(
+            Some(TaskId::new()),
+            None,
+            EventKind::AgentResponded { text: "hi".into() },
+        );
+        assert!(task_thread_visible(&mine, t));
+        assert!(!task_thread_visible(&other_task, t));
+    }
+
+    #[test]
+    fn passes_tool_call_pair() {
+        let t = TaskId::new();
+        let started = ev(
+            Some(t),
+            None,
+            EventKind::ToolCallStarted {
+                tool: "Bash".into(),
+                args: serde_json::json!({"command":"ls"}),
+            },
+        );
+        let finished = ev(
+            Some(t),
+            None,
+            EventKind::ToolCallFinished {
+                tool: "Bash".into(),
+                ok: true,
+                output_preview: "ok".into(),
+            },
+        );
+        assert!(task_thread_visible(&started, t));
+        assert!(task_thread_visible(&finished, t));
+    }
+
+    #[test]
+    fn passes_thinking_pair() {
+        let t = TaskId::new();
+        let s = ev(Some(t), None, EventKind::ThinkingStarted);
+        let f = ev(Some(t), None, EventKind::ThinkingFinished);
+        assert!(task_thread_visible(&s, t));
+        assert!(task_thread_visible(&f, t));
+    }
+
+    #[test]
+    fn passes_user_intervention_when_meta_task_matches() {
+        // 任务 thread 的 UserInterventionSent 按 meta.task 命中即可——和 worker
+        // 私聊页按 target 命中是不同维度。任务 thread 内"用户对该任务说了话"
+        // 这件事按 meta.task 区分。
+        let t = TaskId::new();
+        let intervene = ev(
+            Some(t),
+            None,
+            EventKind::UserInterventionSent {
+                target: AgentId::new(),
+                mode: "append".into(),
+                text: "x".into(),
+            },
+        );
+        assert!(task_thread_visible(&intervene, t));
+        let other = ev(
+            Some(TaskId::new()),
+            None,
+            EventKind::UserInterventionSent {
+                target: AgentId::new(),
+                mode: "append".into(),
+                text: "x".into(),
+            },
+        );
+        assert!(!task_thread_visible(&other, t));
+    }
+
+    #[test]
+    fn passes_task_terminal_state() {
+        let t = TaskId::new();
+        let done = ev(
+            Some(t),
+            None,
+            EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Done,
+            },
+        );
+        let cancelled = ev(
+            Some(t),
+            None,
+            EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Cancelled,
+            },
+        );
+        let delivering = ev(
+            Some(t),
+            None,
+            EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Delivering,
+            },
+        );
+        let mid_state = ev(
+            Some(t),
+            None,
+            EventKind::TaskStateChanged {
+                from: TaskState::Ready,
+                to: TaskState::InProgress,
+            },
+        );
+        assert!(task_thread_visible(&done, t));
+        assert!(task_thread_visible(&cancelled, t));
+        assert!(task_thread_visible(&delivering, t));
+        assert!(
+            !task_thread_visible(&mid_state, t),
+            "中间态不算 task_completed 不入 thread"
+        );
+    }
+
+    #[test]
+    fn drops_non_whitelisted_kinds() {
+        let t = TaskId::new();
+        // AgentSpawning / TaskCreated / TaskDispatched / Custom 都是平台事件
+        // 而非对话内容，不进 thread
+        let spawning = ev(
+            Some(t),
+            None,
+            EventKind::AgentSpawning {
+                role: "luban".into(),
+                cli: "claude-code".into(),
+            },
+        );
+        assert!(!task_thread_visible(&spawning, t));
+        let created = ev(
+            Some(t),
+            None,
+            EventKind::TaskCreated {
+                title: "x".into(),
+                description: "x".into(),
+            },
+        );
+        assert!(!task_thread_visible(&created, t));
+        let dispatched = ev(
+            Some(t),
+            None,
+            EventKind::TaskDispatched { to: AgentId::new() },
+        );
+        assert!(!task_thread_visible(&dispatched, t));
+        let custom = ev(
+            Some(t),
+            None,
+            EventKind::Custom {
+                label: "x".into(),
+                payload: serde_json::json!({}),
+            },
+        );
+        assert!(!task_thread_visible(&custom, t));
+    }
+
+    #[test]
+    fn drops_when_meta_task_missing() {
+        let t = TaskId::new();
+        let no_task = ev(None, None, EventKind::AgentResponded { text: "x".into() });
+        assert!(!task_thread_visible(&no_task, t));
+    }
 }
 
 #[cfg(test)]
