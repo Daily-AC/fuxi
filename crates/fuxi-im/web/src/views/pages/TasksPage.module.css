@@ -11,8 +11,7 @@
 
 .header {
   flex-shrink: 0;
-  padding: calc(40px + max(var(--space-2), env(safe-area-inset-top))) var(--space-4)
-    var(--space-3);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
 }
 
 .title {

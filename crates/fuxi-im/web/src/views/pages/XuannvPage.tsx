@@ -28,18 +28,20 @@ import styles from "./XuannvPage.module.css";
 // 设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §"页 2·玄女主对话"
 //
 // composer 走 intervene(xuannv, ...)（默认 active=Xuannv）。
-// 顶栏 sticky badge "✓ 抄送 N 门客"（#N4）：
+// 顶栏 sticky badge "✓ 抄送 N 门客"（v2 #N4）：
 //   - 数据：N = tasksOverview.running.length（已 filter user-turn by β #25）
 //   - 仅当 N > 0 时显示
-//   - tap badge → setCurrentPage(2) swipe 到任务树
+//   - tap badge → setActiveTab(1) 切到任务 tab
 //   - UI 兑现公理 2「玄女永远有知情权」
+// v3 注：本 badge 在 #40/#N5' 会被删（任务 tab 自身已是这个角色 redundant）。
+// 本 task #36 仅改导航 wire（setCurrentPage → setActiveTab）保持闭环，删工作让给 #40。
 
 const RETRY_DELAY_MS = 1500;
 const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv";
 
 export const XuannvPage: Component = () => {
-  const { client, setCurrentPage } = useApi();
+  const { client, setActiveTab } = useApi();
 
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [online, setOnline] = createSignal(false);
@@ -155,7 +157,7 @@ export const XuannvPage: Component = () => {
           <button
             type="button"
             class={styles.ccBadge}
-            onClick={() => setCurrentPage(2)}
+            onClick={() => setActiveTab(1)}
             data-testid="cc-badge"
             aria-label={`查看 ${ccCount()} 个进行中任务`}
           >

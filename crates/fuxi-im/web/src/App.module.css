@@ -5,7 +5,71 @@
   background: var(--bg);
 }
 
+.main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .probing {
   min-height: 100dvh;
   background: var(--bg);
+}
+
+/* 任务 tab Layer 2 placeholder · #39/#N4' 实装真 TaskThread 后删 */
+.taskTopStub {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.stubHead {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-3) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.stubBack {
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  font-size: var(--size-aux);
+  color: var(--accent);
+}
+
+.stubTitle {
+  text-align: center;
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.stubRight {
+  width: var(--touch);
+}
+
+.stubBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+}
+
+.stubMsg {
+  margin: 0;
+  font-size: var(--size-aux);
+}
+
+.stubMeta {
+  margin: 0;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
 }

@@ -12,7 +12,7 @@ function setup(overview?: TasksOverview) {
   const api = createMockApi({ tasksOverview: overview });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialPage={2}>
+    <ApiProvider initialAuth="in" initialTab={1}>
       <TasksPage />
     </ApiProvider>
   ));
@@ -110,7 +110,7 @@ describe("TasksPage · C 方案", () => {
       return null;
     };
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialPage={2}>
+      <ApiProvider initialAuth="in" initialTab={1}>
         <TasksPage />
         <Probe />
       </ApiProvider>
@@ -134,7 +134,7 @@ describe("TasksPage · C 方案", () => {
       return null;
     };
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialPage={2}>
+      <ApiProvider initialAuth="in" initialTab={1}>
         <TasksPage />
         <ActivateLuban />
       </ApiProvider>

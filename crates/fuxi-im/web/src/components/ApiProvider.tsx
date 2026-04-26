@@ -12,13 +12,24 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
-/** Pager 当前页索引：0=节点 / 1=玄女主对话 / 2=任务树。
- *  设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §B */
-export type PageIndex = 0 | 1 | 2;
+/** Bottom tab bar 当前 tab：0=玄女 / 1=任务 / 2=节点。
+ *  设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §A
+ *  v2 的 PageIndex 已淘汰（horizontal pager 路线被 supersede）。*/
+export type TabIndex = 0 | 1 | 2;
 
-/** NavigationStack 顶部的 push 路由（v1 只有"私聊门客"一种）。
- *  null = 没 push，pager 直接见底。*/
-export type NavRoute = { kind: "worker"; agent_id: string; role_display?: string } | null;
+/** NavigationStack 顶部的 push 路由。
+ *  v3 仅在"任务 tab"下生效（Layer 1 任务列表 → Layer 2 任务 thread）。
+ *  null = 没 push，base 直接见底。
+ *
+ *  类型说明：
+ *    - kind: "task" · v3 主路：任务卡片 → 任务 thread (#38/#N3' 落)
+ *    - kind: "worker" · v2 残留 · per-worker 私聊（#40/#N5' 推 v3 时移除）
+ *      保留只是为了让 TasksPage v2 member-row tap 不立即编译错；
+ *      App.tsx renderTaskTop 仅渲染 kind==="task"，其他 kind 视作 noop。*/
+export type NavRoute =
+  | { kind: "task"; task_id: string; title?: string }
+  | { kind: "worker"; agent_id: string; role_display?: string }
+  | null;
 
 export interface ApiContextValue {
   client: ApiClient;
@@ -30,15 +41,14 @@ export interface ApiContextValue {
   /** 标记登出（401 自动触发 / 未来"切换设备"用）。*/
   markLoggedOut(): void;
 
-  /** 当前 pager 页（0=节点, 1=玄女, 2=任务树）。*/
-  currentPage: Accessor<PageIndex>;
-  setCurrentPage(p: PageIndex): void;
+  /** 当前 tab（0=玄女, 1=任务, 2=节点）。*/
+  activeTab: Accessor<TabIndex>;
+  setActiveTab(i: TabIndex): void;
 
-  /** NavigationStack 当前路由（v1 只支持 0 或 1 层）。null = 没 push。*/
+  /** 任务 tab 的 NavigationStack 路由。其他 tab 下读到 null。
+   *  navPush/navPop 仅在任务 tab 下生效；玄女/节点 tab 下调用是 noop。*/
   navRoute: Accessor<NavRoute>;
-  /** 推一个新路由（覆盖式 v1，下个 task #N3 才会实际渲染私聊页）。*/
   navPush(route: NonNullable<NavRoute>): void;
-  /** 弹回 pager。*/
   navPop(): void;
 }
 
@@ -54,8 +64,8 @@ export function setApiOverride(client: ApiClient | null): void {
 export interface ApiProviderProps {
   /** 测试入口：跳过 onMount 探测，直接钉死 authState。*/
   initialAuth?: AuthState;
-  /** 测试入口：钉死起始 page（默认 1=玄女）。*/
-  initialPage?: PageIndex;
+  /** 测试入口：钉死起始 tab（默认 0=玄女）。*/
+  initialTab?: TabIndex;
 }
 
 export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
@@ -64,8 +74,14 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
   );
   const [auth, setAuth] = createSignal<AuthState>(props.initialAuth ?? "unknown");
-  const [currentPage, setCurrentPage] = createSignal<PageIndex>(props.initialPage ?? 1);
+  const [activeTab, _setActiveTab] = createSignal<TabIndex>(props.initialTab ?? 0);
   const [navRoute, setNavRoute] = createSignal<NavRoute>(null);
+
+  // tab 切换时清空 navRoute · 跨 tab 不保留二层 push（spec §A "navPush 仅任务 tab 下生效"）
+  const setActiveTab = (i: TabIndex): void => {
+    if (i !== 1) setNavRoute(null);
+    _setActiveTab(i);
+  };
 
   // 探测登入态：试拉一次 fetchTasks（开销小、走 cookie middleware）。
   const probe = async (): Promise<void> => {
@@ -102,10 +118,14 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         authState: auth,
         markLoggedIn: () => setAuth("in"),
         markLoggedOut: () => setAuth("out"),
-        currentPage,
-        setCurrentPage,
+        activeTab,
+        setActiveTab,
         navRoute,
-        navPush: (route) => setNavRoute(route),
+        // navPush 只允许在任务 tab 下；其他 tab 调用静默 noop（防御 misuse）
+        navPush: (route) => {
+          if (activeTab() !== 1) return;
+          setNavRoute(route);
+        },
         navPop: () => setNavRoute(null),
       }}
     >
