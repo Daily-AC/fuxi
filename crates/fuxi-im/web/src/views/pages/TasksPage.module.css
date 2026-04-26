@@ -174,40 +174,19 @@
   border-top: 1px solid var(--border);
 }
 
+/* v3：member 行 inspection-only（div，不可 tap）。
+ *  active 高亮 + chev 已删（per-worker 私聊概念去除）。 */
 .memberRow {
-  border-bottom: 1px solid var(--border);
-}
-
-.memberRow:last-child {
-  border-bottom: 0;
-}
-
-/* active 高亮 · 左 2px 橙边 + 浅橙背景（spec §"active 门客行高亮"） */
-.memberRowActive .memberBtn {
-  border-left-color: var(--accent);
-  background: var(--accent-subtle);
-}
-
-.memberBtn {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   padding: 10px var(--space-4);
-  width: 100%;
-  min-height: 56px; /* spec ≥ 32px · 我们用 ≥44px 保证触控 + 副文本两行 */
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-left: 2px solid transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+  border-bottom: 1px solid var(--border);
+  min-height: 44px;
 }
 
-.memberBtn:hover,
-.memberBtn:focus-visible {
-  background: rgba(255, 255, 255, 0.03);
+.memberRow:last-child {
+  border-bottom: 0;
 }
 
 .memberMain {
@@ -232,14 +211,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.chev {
-  font-size: var(--size-title);
-  color: var(--text-muted);
-  flex-shrink: 0;
-  font-weight: var(--weight-normal);
-  line-height: 1;
 }
 
 /* ===== 已完成 sticky tail ===== */
