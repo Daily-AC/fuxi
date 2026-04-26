@@ -1,7 +1,7 @@
 # IM v2 · 任务 sheet → 任务树 + active target 私聊页 重设计
 
 **日期**：2026-04-26
-**状态**：已通过 brainstorm（用户拍板 ABCC，跳过 spec 复审），进入实装
+**状态**：⛔ **superseded by [`2026-04-26-im-tab-bar-task-thread-design.md`](2026-04-26-im-tab-bar-task-thread-design.md)** —— horizontal pager + per-worker 私聊页路线在用户实测后被否决。本 spec 的实装代码（commit ee34f8d / c52c908 / 983a6bf / fda219b）在 v3 spec 实装阶段被改造或替换。spec 保留作为否决路径的历史记录。
 **关联**：决策 14（IM 移动端骨架）的延续，决策 04（intervene degrade）的 UI 落地
 
 ---
