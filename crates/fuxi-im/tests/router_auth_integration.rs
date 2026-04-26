@@ -343,3 +343,30 @@ async fn api_workers_conv_ws_without_cookie_returns_401() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+// β · #41 任务 thread 镜像端点：events + conv 都强制鉴权
+#[tokio::test]
+async fn api_tasks_events_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let resp = app
+        .oneshot(req(
+            "/api/tasks/00000000-0000-0000-0000-000000000000/events",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_tasks_conv_ws_without_cookie_returns_401() {
+    let (_dir, app, _secret) = build_app().await;
+    let resp = app
+        .oneshot(req(
+            "/api/tasks/00000000-0000-0000-0000-000000000000/conv",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

@@ -143,15 +143,18 @@ fn agent_event(agent: AgentId, text: &str) -> Event {
     }
 }
 
+/// 单任务白名单事件——用 `AgentResponded` 携带 label 文本，既满足 #N6'
+/// `task_thread_visible` 白名单（`/api/tasks/:id/{events,conv}` 走该 filter），也
+/// 让旧 `/api/tasks/:id/stream`（裸 task_id 过滤，无白名单）继续兼容。
+///
+/// 历史上这里用 `EventKind::Custom`，但 #N6' 上线后该 kind 不在 task thread 白
+/// 名单内——会被 `/events` HTTP 端 filter 滤掉，导致 e2e 假阴性。
 fn task_event(task: TaskId, label: &str) -> Event {
     let mut meta = EventMeta::now();
     meta.task = Some(task);
     Event {
         meta,
-        kind: EventKind::Custom {
-            label: label.into(),
-            payload: serde_json::json!({}),
-        },
+        kind: EventKind::AgentResponded { text: label.into() },
     }
 }
 
@@ -296,8 +299,10 @@ async fn ws_task_stream_filters_by_task_id() {
 
     let got = next_event(&mut r, "task-filter").await;
     match got.kind {
-        EventKind::Custom { label, .. } => assert_eq!(label, "A-signal", "应只收 task_a 事件"),
-        o => panic!("expect Custom, got {o:?}"),
+        EventKind::AgentResponded { text } => {
+            assert_eq!(text, "A-signal", "应只收 task_a 事件")
+        }
+        o => panic!("expect AgentResponded, got {o:?}"),
     }
     // meta.task 必须是 task_a。
     assert_eq!(got.meta.task, Some(task_a));
@@ -439,7 +444,7 @@ async fn http_task_events_returns_history_with_pagination() {
     let labels: Vec<String> = evs
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::Custom { label, .. } => Some(label.clone()),
+            EventKind::AgentResponded { text } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -474,11 +479,96 @@ async fn http_task_events_with_cursor_returns_strictly_after() {
     let labels: Vec<String> = evs
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::Custom { label, .. } => Some(label.clone()),
+            EventKind::AgentResponded { text } => Some(text.clone()),
             _ => None,
         })
         .collect();
     assert_eq!(labels, vec!["b", "c"]);
+}
+
+/// #N6' 新端点：`WS /api/tasks/:id/conv`——任务 thread 流式接续。
+/// 镜像 `/api/tasks/:id/stream` 的 task_id 过滤逻辑，但走白名单 EventKind
+/// （`task_thread_visible`）。本测验"task_b 噪声不进 task_a thread"。
+#[tokio::test]
+async fn ws_task_conv_filters_by_task_id() {
+    let (base, bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
+
+    let task_a = TaskId::new();
+    let task_b = TaskId::new();
+
+    let url_s = format!(
+        "{}/api/tasks/{}/conv",
+        base.replace("http://", "ws://"),
+        task_a
+    );
+    let url = Url::parse(&url_s).expect("parse");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
+    let (_w, mut r) = ws.split();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    bus.publish(task_event(task_b, "B-noise"))
+        .expect("publish B");
+    bus.publish(task_event(task_a, "A-signal"))
+        .expect("publish A");
+
+    let got = next_event(&mut r, "task-conv-filter").await;
+    match got.kind {
+        EventKind::AgentResponded { text } => {
+            assert_eq!(text, "A-signal", "应只收 task_a 事件")
+        }
+        o => panic!("expect AgentResponded, got {o:?}"),
+    }
+    assert_eq!(got.meta.task, Some(task_a));
+}
+
+/// #N6' 白名单：`Custom`/`AgentSpawning`/`TaskCreated` 等"非对话内容"事件
+/// 不进 `/events` HTTP 响应——前端任务 thread 只渲染 `task_thread_visible`。
+#[tokio::test]
+async fn http_task_events_drops_non_whitelisted_kinds() {
+    let (base, bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
+    let task = TaskId::new();
+
+    // 白名单内：AgentResponded
+    bus.publish(task_event(task, "say")).expect("publish text");
+    // 白名单外：Custom（早期任务级原始事件流用过）
+    let mut meta = EventMeta::now();
+    meta.task = Some(task);
+    bus.publish(Event {
+        meta,
+        kind: EventKind::Custom {
+            label: "platform-noise".into(),
+            payload: serde_json::json!({}),
+        },
+    })
+    .expect("publish custom");
+    // 白名单外：TaskCreated
+    let mut meta2 = EventMeta::now();
+    meta2.task = Some(task);
+    bus.publish(Event {
+        meta: meta2,
+        kind: EventKind::TaskCreated {
+            title: "T".into(),
+            description: "".into(),
+        },
+    })
+    .expect("publish created");
+    tokio::time::sleep(Duration::from_millis(220)).await;
+
+    let http = reqwest::Client::new();
+    let url = format!("{base}/api/tasks/{task}/events");
+    let resp = http
+        .get(&url)
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let evs: Vec<Event> = resp.json().await.expect("json");
+    assert_eq!(evs.len(), 1, "白名单外 2 条应被过滤，只剩 AgentResponded");
+    match &evs[0].kind {
+        EventKind::AgentResponded { text } => assert_eq!(text, "say"),
+        o => panic!("expect AgentResponded, got {o:?}"),
+    }
 }
 
 #[tokio::test]
