@@ -375,6 +375,7 @@ mod tests {
             assert!(card.get(k).is_some(), "TaskCard 缺字段 {k}");
         }
         let m = &card["members"][0];
+        // 重设计 #25 字段加齐：last_tool_call + description
         for k in [
             "agent_id",
             "role",
@@ -382,8 +383,190 @@ mod tests {
             "activity",
             "tokens",
             "status",
+            "last_tool_call",
+            "description",
         ] {
             assert!(m.get(k).is_some(), "MemberCard 缺字段 {k}");
         }
+    }
+
+    /// 重设计 #25：title=="user-turn" 的 task **不**进 list_tasks 响应。
+    /// 用户实测撞过 9 条 user-turn 充满 sheet。
+    #[tokio::test]
+    async fn user_turn_tasks_filtered_out() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let t0 = Utc::now();
+        let agent_a = AgentId::new();
+        let user_turn_id = TaskId::new();
+        let real_id = TaskId::new();
+
+        // user-turn task：派给真 agent 也不该进列表（title 字面 == "user-turn"）
+        bus.publish(make_event(
+            user_turn_id,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "user-turn".into(),
+                description: "用户对玄女说话".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            user_turn_id,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: agent_a },
+        ))
+        .unwrap();
+
+        // 真 task：title 不是 user-turn，正常进列表
+        bus.publish(make_event(
+            real_id,
+            None,
+            t0 + ChronoDuration::seconds(2),
+            EventKind::TaskCreated {
+                title: "修 ERP-1066".into(),
+                description: "复现 + 修".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            real_id,
+            None,
+            t0 + ChronoDuration::seconds(3),
+            EventKind::TaskDispatched { to: agent_a },
+        ))
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        let v = fetch(app).await;
+        let running = v["running"].as_array().unwrap();
+        assert_eq!(running.len(), 1, "只有真 task 入列；user-turn 应过滤");
+        assert_eq!(running[0]["title"], "修 ERP-1066");
+    }
+
+    /// 重设计 #25：member.last_tool_call 用 spec 严格 "·" 分隔。
+    #[tokio::test]
+    async fn member_last_tool_call_uses_dot_separator() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        let t0 = Utc::now();
+        bus.publish(make_event(
+            task,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "复现 + 修".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: agent },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0 + ChronoDuration::seconds(2),
+            EventKind::ToolCallStarted {
+                tool: "Bash".into(),
+                args: serde_json::json!({"command": "grep server/api/v1.go"}),
+            },
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        let v = fetch(app).await;
+        let m = &v["running"][0]["members"][0];
+        let ltc = m["last_tool_call"].as_str().unwrap_or("");
+        assert!(
+            ltc == "Bash · grep server/api/v1.go",
+            "spec 要求严格 `Bash · ...` 格式，得到 {ltc:?}"
+        );
+        // description 也应进 member（task 派活时附的）
+        assert_eq!(m["description"].as_str(), Some("复现 + 修"));
+    }
+
+    /// 重设计 #25：没发过工具调用的 member，last_tool_call=null（而非 "" 或 fallback text）。
+    #[tokio::test]
+    async fn member_last_tool_call_null_when_no_tool_yet() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        let t0 = Utc::now();
+        bus.publish(make_event(
+            task,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: agent },
+        ))
+        .unwrap();
+        // agent 只发了 text，没工具调用
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0 + ChronoDuration::seconds(2),
+            EventKind::AgentResponded {
+                text: "好的".into(),
+            },
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        let v = fetch(app).await;
+        let m = &v["running"][0]["members"][0];
+        assert!(m["last_tool_call"].is_null(), "无工具调用应返 null：{m}");
+        // description 空字符串 → null
+        assert!(m["description"].is_null(), "空 description 应转 null");
+    }
+
+    /// 重设计 #25：member.status 严格三态。Dead agent 应返 "dead"（之前是 "idle"）。
+    #[tokio::test]
+    async fn member_status_dead_when_agent_dead() {
+        // 测试通过 fuxi.status_of 返 None 路径走 dead——shelf 没注册的 agent
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let unregistered = AgentId::new();
+        let t0 = Utc::now();
+        bus.publish(make_event(
+            task,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: unregistered },
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        let v = fetch(app).await;
+        let status = v["running"][0]["members"][0]["status"]
+            .as_str()
+            .unwrap_or("");
+        // shelf 不在该 agent + 没 thinking → "dead"（spec 要求三态明确，不再降级 "idle"）
+        assert_eq!(
+            status, "dead",
+            "shelf 不在的 agent 应返 dead，得到 {status}"
+        );
     }
 }
