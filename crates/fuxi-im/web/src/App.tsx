@@ -14,6 +14,7 @@ import { Toast } from "./components/Toast";
 import { NodesPage } from "./views/pages/NodesPage";
 import { XuannvPage } from "./views/pages/XuannvPage";
 import { TasksPage } from "./views/pages/TasksPage";
+import { TaskThreadPage } from "./views/pages/TaskThreadPage";
 import styles from "./App.module.css";
 
 // 顶层 shell · v3 设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §A
@@ -69,40 +70,14 @@ const TABS: TabSpec[] = [
 const MainShell: Component = () => {
   const { activeTab, setActiveTab, navRoute, navPop } = useApi();
 
-  // 任务 tab Layer 2 placeholder · #39/#N4' TaskThread 实装时换成真组件
-  // v3 主路：kind === "task"
-  // v2 残留：kind === "worker" 走旧 placeholder（#38/#N3' 切到 task-card-tap 后该路径自然消亡）
+  // 任务 tab Layer 2 · v3 真 TaskThreadPage（#39 已落）
+  // kind === "worker"（v2 残留）保留兜底 stub，正常 v3 流不应触发
   const renderTaskTop = (): JSX.Element | undefined => {
     const r = navRoute();
     if (!r) return undefined;
     if (r.kind === "task") {
-      return (
-        <div class={styles.taskTopStub} data-testid="task-thread-stub">
-          <header class={styles.stubHead}>
-            <button
-              type="button"
-              class={styles.stubBack}
-              onClick={() => navPop()}
-              data-testid="task-thread-back"
-              aria-label="返回任务列表"
-            >
-              ‹ 列表
-            </button>
-            <span class={styles.stubTitle}>{r.title ?? "任务"}</span>
-            <span class={styles.stubRight} aria-hidden="true" />
-          </header>
-          <div class={styles.stubBody}>
-            <p class={styles.stubMsg}>
-              任务 thread placeholder（#39/#N4' 实装 mix 全成员 thread + tool 卡 + thinking + chip @）
-            </p>
-            <p class={styles.stubMeta}>
-              task_id：<span class="agent-id">{r.task_id}</span>
-            </p>
-          </div>
-        </div>
-      );
+      return <TaskThreadPage task_id={r.task_id} fallback_title={r.title} />;
     }
-    // v2 残留 kind === "worker"：兜底 stub 提示，#38 后该路径不再触发
     return (
       <div class={styles.taskTopStub} data-testid="worker-route-legacy">
         <header class={styles.stubHead}>
@@ -120,7 +95,7 @@ const MainShell: Component = () => {
         </header>
         <div class={styles.stubBody}>
           <p class={styles.stubMsg}>
-            v2 私聊页路由已废，#38/#N3' TaskList 切 kind="task" push 后失效。
+            v2 私聊页路由已废，请从任务卡 push 进任务 thread。
           </p>
         </div>
       </div>

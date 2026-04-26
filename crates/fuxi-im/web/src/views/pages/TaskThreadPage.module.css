@@ -1,0 +1,150 @@
+/* TaskThreadPage · v3 #N4' / #39
+ * 任务 thread = 群聊心智 · 微信群风格 · 时间序 mix 全成员
+ * spec docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §"任务 tab · Layer 2"
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.topbar {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-3) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.back {
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  font-size: var(--size-aux);
+  color: var(--accent);
+  border-radius: 8px;
+}
+
+.back:active {
+  background: var(--accent-subtle);
+}
+
+.title {
+  text-align: center;
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  font-size: 18px;
+  color: var(--text-muted);
+}
+
+/* 任务 banner · 顶栏下方紧贴 */
+.banner {
+  flex-shrink: 0;
+  padding: 10px var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bannerLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.statusDotRunning {
+  background: var(--accent);
+}
+
+.statusDotDone {
+  background: var(--success);
+}
+
+.statusName {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+
+.bannerSep {
+  color: var(--text-muted);
+}
+
+.bannerMembers {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* thread */
+.thread {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding: var(--space-4);
+  padding-bottom: 24px;
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: var(--size-body);
+  color: var(--text-secondary);
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.rowRight {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rowLeft {
+  display: flex;
+  justify-content: flex-start;
+}

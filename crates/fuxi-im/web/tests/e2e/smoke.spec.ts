@@ -544,9 +544,13 @@ test("#N5' · 玄女 tab 无 chip · intervene 不带 target（backend 走玄女
   expect(body).toContain('"text":"你好玄女"');
 });
 
-// ===== #N3' / #38 任务卡片 tap → push 任务 thread (v3 stub) =====
+// 老 #N3' placeholder e2e 已被下面 #N4' 替代（真 TaskThreadPage 渲染替代 stub）
 
-test("#N3' · 任务卡片 tap → push Layer 2 thread placeholder", async ({ page }) => {
+// ===== #N4' / #39 任务 thread = 群聊 mix 全成员 =====
+
+test("#N4' · 任务卡 push 后渲染真 TaskThreadPage（顶栏+banner+thread+composer）", async ({
+  page,
+}) => {
   await page.addInitScript(() => {
     window.__FUXI_TASKS_OVERVIEW__ = {
       running: [
@@ -558,11 +562,13 @@ test("#N3' · 任务卡片 tap → push Layer 2 thread placeholder", async ({ pa
           last_active_at: "2026-04-26T11:12:00Z",
           duration_ms: 12_000,
           members: [
+            { agent_id: "a-xn", role: "xuannv", role_display: "玄女", status: "busy" },
             {
               agent_id: "a-luban",
               role: "luban",
               role_display: "鲁班",
               status: "busy",
+              last_tool_call: { tool: "Bash", args_summary: "grep" },
             },
           ],
         },
@@ -573,22 +579,78 @@ test("#N3' · 任务卡片 tap → push Layer 2 thread placeholder", async ({ pa
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
   await page.getByTestId("tab-tasks").click();
-  await expect(page.getByTestId("page-tasks")).toBeVisible();
-
-  // 点任务卡 header → push thread placeholder
   await page.getByTestId("task-card-head-task-erp").click();
-  await expect(page.getByTestId("task-thread-stub")).toBeVisible();
-  await expect(page.getByTestId("task-thread-stub")).toContainText("查 ERP API");
 
-  // ‹ 列表 pop 回任务列表
+  // 真 TaskThreadPage（不是 placeholder）
+  await expect(page.getByTestId("task-thread-page")).toBeVisible();
+  await expect(page.getByTestId("task-thread-page")).toHaveAttribute("data-task-id", "task-erp");
+  await expect(page.getByTestId("task-thread-page")).toContainText("查 ERP API");
+
+  // 任务 banner
+  await expect(page.getByTestId("task-banner")).toContainText("进行中");
+  await expect(page.getByTestId("task-banner")).toContainText("0:12");
+  await expect(page.getByTestId("task-banner")).toContainText("2 门客");
+  await expect(page.getByTestId("task-banner-members")).toContainText("玄女");
+  await expect(page.getByTestId("task-banner-members")).toContainText("鲁班");
+
+  // composer 默认 placeholder "对玄女说..."
+  await expect(
+    page.getByTestId("task-thread-page").getByTestId("mention-editor"),
+  ).toHaveAttribute("placeholder", /玄女/);
+
+  // ‹ 列表 pop
   await page.getByTestId("task-thread-back").click();
-  await expect(page.getByTestId("task-thread-stub")).toHaveCount(0);
+  await expect(page.getByTestId("task-thread-page")).toHaveCount(0);
   await expect(page.getByTestId("page-tasks")).toBeVisible();
+});
+
+test("#N4' · @ 选鲁班 → intervene 带 task_id+target+mentions", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_TASKS_OVERVIEW__ = {
+      running: [
+        {
+          id: "t1",
+          title: "x",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [
+            { agent_id: "a-xn", role: "xuannv", role_display: "玄女", status: "busy" },
+            { agent_id: "a-luban-2", role: "luban", role_display: "鲁班", status: "busy" },
+          ],
+        },
+      ],
+      completed: [],
+    };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-tasks").click();
+  await page.getByTestId("task-card-head-t1").click();
+  await expect(page.getByTestId("task-thread-page")).toBeVisible();
+
+  const editor = page.getByTestId("task-thread-page").getByTestId("mention-editor");
+  await editor.fill("@lu");
+  await page.getByTestId("mention-item-a-luban-2").click();
+  await editor.fill(" 帮我看");
+  await page.getByTestId("task-thread-page").getByTestId("mention-send").click();
+
+  await expect.poll(() =>
+    page.evaluate(() => {
+      const c = window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene");
+      return c?.body ?? "";
+    }),
+  ).toContain('"target":"a-luban-2"');
+  const body = await page.evaluate(() =>
+    window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene")?.body ?? "",
+  );
+  expect(body).toContain('"task_id":"t1"');
+  expect(body).toContain('"mentions":["a-luban-2"]');
 });
 
 // ===== #N3 v2 私聊页 e2e 已删 (v3 supersede 后 per-worker push 概念去除) =====
 // 私聊页源码 src/views/pages/WorkerPage.tsx 暂留作 v2.x 备用（per spec），但 e2e 流不再走。
-// 任务 thread (#39/#N4') 实装后会有新的 task-thread-* 一族 e2e 替代这里。
 // 单测 tests/unit/WorkerPage.test.tsx 也保留作 reducer/render 单元覆盖。
 
 test("#N2 · completed 卡折叠 sticky tail · 展开后显 members + tool 副文本", async ({ page }) => {
