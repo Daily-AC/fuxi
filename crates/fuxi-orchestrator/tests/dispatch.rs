@@ -750,7 +750,7 @@ async fn intervene_append_emits_user_intervention_and_applied() {
     fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, false, "hello mid-task")
+    fuxi.intervene(id, false, "hello mid-task", Vec::new())
         .await
         .expect("intervene");
 
@@ -809,7 +809,7 @@ async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
     fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, true, "stop and rework")
+    fuxi.intervene(id, true, "stop and rework", Vec::new())
         .await
         .expect("intervene");
 
@@ -866,7 +866,7 @@ async fn intervene_on_idle_auto_degrades_to_dispatch() {
     );
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, false, "你好，鲁班")
+    fuxi.intervene(id, false, "你好，鲁班", Vec::new())
         .await
         .expect("intervene");
 
@@ -976,7 +976,7 @@ async fn intervene_on_missing_agent_returns_not_found() {
 
     let bogus = AgentId::new();
     let err = fuxi
-        .intervene(bogus, false, "ghost")
+        .intervene(bogus, false, "ghost", Vec::new())
         .await
         .expect_err("should fail on missing agent");
     let msg = format!("{err}");
@@ -1036,7 +1036,7 @@ async fn intervene_on_worker_publishes_cc_received_to_xuannv() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "加个注释")
+    fuxi.intervene(worker_id, false, "加个注释", Vec::new())
         .await
         .expect("intervene worker");
 
@@ -1080,7 +1080,7 @@ async fn intervene_on_xuannv_herself_does_not_publish_cc_received() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(xuannv_id, false, "hi")
+    fuxi.intervene(xuannv_id, false, "hi", Vec::new())
         .await
         .expect("intervene xuannv");
 
@@ -1111,7 +1111,7 @@ async fn intervene_without_xuannv_id_set_skips_cc_received() {
     let worker_id = fuxi.insert_agent(worker, None).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "hi")
+    fuxi.intervene(worker_id, false, "hi", Vec::new())
         .await
         .expect("intervene");
 
@@ -1180,7 +1180,9 @@ async fn orchestrator_cc_received_carries_original_intervention_id() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "ping").await.unwrap();
+    fuxi.intervene(worker_id, false, "ping", Vec::new())
+        .await
+        .unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     let mut sent_id: Option<uuid::Uuid> = None;

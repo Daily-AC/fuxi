@@ -405,7 +405,11 @@ fn summarize(k: &EventKind) -> String {
             let status = if *ok { "ok" } else { "err" };
             format!("tool={tool} {status}: {}", one_line(output_preview, 40))
         }
-        UserInterventionSent { target, mode, text } => {
+        UserInterventionSent {
+            target, mode, text, ..
+        } => {
+            // mentions 字段（v3 #N7'）TUI 不渲染——TUI 没 chip 视觉，
+            // target 已显在前缀里；多 @ 信息留给 PWA。
             format!(
                 "→{} [{}]: {}",
                 short_id(&target.to_string()),

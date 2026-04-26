@@ -525,9 +525,13 @@ impl Fuxi {
     /// - `interrupt`：打断当前 turn 再追加（依赖 WS 模式的 control_request/interrupt）
     ///
     /// v0.1 薄片 I 承诺的三个事件：
-    /// - `UserInterventionSent { target, mode, text }`  （入口）
+    /// - `UserInterventionSent { target, mode, text, mentions }`  （入口）
     /// - `AgentInterrupted { reason }`   仅在 interrupt 模式下发
     /// - `TaskInterventionApplied { mode }`  wire 层确认
+    ///
+    /// `mentions`（v3 #N7'）：用户消息里所有被 @ 的 agent_id，前端约定含
+    /// `target` 自身。后端不强制语义检查（前端保证），仅写入事件用作历史回放
+    /// 时还原 chip 视觉。空 Vec = 无 @（对应 v0.1 旧入口、TUI、内部 degrade）。
     ///
     /// cc 适配器忽略 task_id，这里传随机 id 兼容 trait 签名；事件上不挂
     /// task 维度（没有从 dispatch 回流最近 task 的路径）——v0.2 补上"最近
@@ -537,6 +541,7 @@ impl Fuxi {
         agent_id: AgentId,
         interrupt_first: bool,
         text: &str,
+        mentions: Vec<AgentId>,
     ) -> Result<()> {
         let agent = self
             .shelf
@@ -563,6 +568,7 @@ impl Fuxi {
                         target: agent_id,
                         mode: "append_via_dispatch".to_string(),
                         text: text.to_string(),
+                        mentions: mentions.clone(),
                     },
                 });
                 id
@@ -609,6 +615,7 @@ impl Fuxi {
                     target: agent_id,
                     mode: mode_str.to_string(),
                     text: text.to_string(),
+                    mentions,
                 },
             });
             id

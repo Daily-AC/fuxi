@@ -136,7 +136,9 @@ pub trait Intervener: Send + Sync {
 #[async_trait]
 impl Intervener for Fuxi {
     async fn intervene(&self, agent_id: AgentId, interrupt_first: bool, text: &str) -> Result<()> {
-        Fuxi::intervene(self, agent_id, interrupt_first, text).await
+        // 内部 bridge / 系统触发器走该 trait——不需要 @ mention 语义，传空 Vec。
+        // 只有 IM HTTP `POST /api/intervene` 走 Fuxi::intervene 直拨，才会带 mentions。
+        Fuxi::intervene(self, agent_id, interrupt_first, text, Vec::new()).await
     }
 
     async fn role_of(&self, agent_id: AgentId) -> Option<String> {
