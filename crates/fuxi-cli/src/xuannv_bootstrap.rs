@@ -14,9 +14,11 @@
 //! ## 决策 04 / 06 / 14 兼容
 //!
 //! - 玄女 role 默认 "xuannv"——和 repl Args::xuannv_role 默认一致，用户可改
-//! - resume 走 [`crate::session::resolve_xuannv_session`]：home 上首启会写一条
-//!   策府事实，重启后命中 → cc --resume；这跟 REPL 启的玄女**共享** session
-//!   连续性（两边都从同一 oracle_facts 读）
+//! - resume 走 [`crate::session::resolve_xuannv_session`]：仅读策府不落盘；
+//!   spawn 成功后调 [`crate::session::record_xuannv_session`] 落 session_id
+//!   （#12 修：spawn 失败时不留脏 fact，避免下次启动 cc --resume 一个不存在的
+//!   session 直接死循环）。重启后命中 → cc --resume；与 REPL 启的玄女**共享**
+//!   session 连续性（两边都从同一 oracle_facts 读）
 //! - **不**起 SystemEventBridge：bridge 是 repl-only 的"用户输入桥"，IM daemon
 //!   场景下用户消息走 `/api/intervene` 直接 `Fuxi::intervene`，不经 bridge
 
@@ -49,6 +51,9 @@ pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Res
     let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(oracle)
         .await
         .context("解析玄女 session_id")?;
+    // #12：留住 fresh uuid（spawn 成功后才落盘）。已有 resume → session_id 是 None
+    // 不需要 record；新 session → spawn ok 后写。
+    let fresh_session_to_record = session_id.clone();
 
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
@@ -67,6 +72,20 @@ pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Res
         .await
         .context("玄女 spawn 失败")?;
     fuxi.set_xuannv(xuannv_id).await;
+
+    // #12：仅在新 session 路径（首次启动）才 record——spawn 成功 ⇒ 落盘安全
+    if let Some(sid) = fresh_session_to_record
+        && let Err(e) = crate::session::record_xuannv_session(oracle, &sid, "im-bootstrap").await
+    {
+        // record 失败不应让玄女进程跟着死——下次启动会重新生成 uuid（等于 fresh
+        // start），代价是丢历史 session。warn 级提示运维。
+        tracing::warn!(
+            error = %e,
+            session_id = %sid,
+            "玄女 session 落策府失败——下次启动会作为新 session 重启（丢历史）"
+        );
+    }
+
     tracing::info!(xuannv = %xuannv_id, role, "玄女已自启");
     Ok(xuannv_id)
 }
@@ -170,5 +189,32 @@ mod tests {
         );
         // 未起成 → xuannv_id 仍为 None，不会留半途状态
         assert!(fuxi.xuannv_id().await.is_none());
+    }
+
+    /// #12 边界：role load / spawn 失败时不能留下 session 脏 fact。
+    /// 本测能直接覆盖 role-load 路径（`skill_loader::load` 在 resolve 之前
+    /// fail-fast），间接证明早期失败不污染策府。spawn 路径的失败覆盖在
+    /// `session.rs::tests::no_record_after_failed_spawn_keeps_oracle_clean`：
+    /// 那里直接断言 resolve 拿 uuid 后不调 record，oracle 仍空。
+    #[tokio::test]
+    async fn role_load_failure_leaves_oracle_session_unrecorded() {
+        let (_dir, fuxi) = make_fuxi().await;
+        let oracle = OracleStore::connect_memory().await.expect("oracle");
+
+        let _err = ensure_xuannv(&fuxi, &oracle, "another-nonexistent-role")
+            .await
+            .expect_err("未知 role 应返错");
+
+        let fact = oracle
+            .query_one(
+                crate::session::XUANNV_SUBJECT,
+                crate::session::SESSION_PREDICATE,
+            )
+            .await
+            .unwrap();
+        assert!(
+            fact.is_none(),
+            "role load 失败应保持策府空——避免 redeploy 时 sqlite delete"
+        );
     }
 }

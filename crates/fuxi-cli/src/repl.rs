@@ -344,7 +344,8 @@ pub async fn run(args: Args) -> Result<()> {
             ))
         }
         (_, Some(id)) => {
-            tracing::info!(session = %id, "玄女 cc 首次启动，新 session_id 已落盘");
+            // #12：spawn 前不落盘——message 改成"将首次启动"，落盘移到 spawn 成功之后
+            tracing::info!(session = %id, "玄女 cc 即将首次启动（spawn 成功后落盘）");
             None
         }
         // 上游契约：resolve_xuannv_session 总返回至少一个 Some。若两者皆 None，
@@ -353,6 +354,9 @@ pub async fn run(args: Args) -> Result<()> {
             "策府返回 (None, None)：玄女 session_id 既未命中也未生成，请检查 oracle_facts 表"
         ),
     };
+
+    // #12：留 fresh uuid 句柄——spawn 成功后落策府
+    let fresh_session_to_record = session_id.clone();
 
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
@@ -370,6 +374,19 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("玄女 spawn 失败")?;
     fuxi.set_xuannv(xuannv_id).await;
+
+    // #12：spawn 成功后才把首次生成的 session_id 落策府——失败时上面的 ? 已 bail
+    // 留住 oracle 干净状态，重启 redeploy 不必 sqlite delete。
+    if let Some(sid) = fresh_session_to_record
+        && let Err(e) = crate::session::record_xuannv_session(&oracle, &sid, "repl-bootstrap").await
+    {
+        tracing::warn!(
+            error = %e,
+            session_id = %sid,
+            "玄女 session 落策府失败——下次启动会作为新 session 重启（丢历史）"
+        );
+    }
+
     tracing::info!(xuannv = %xuannv_id, "玄女已就绪");
 
     let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
