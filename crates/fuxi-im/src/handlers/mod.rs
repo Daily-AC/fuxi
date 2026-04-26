@@ -12,6 +12,8 @@ pub mod intervene;
 pub mod push;
 pub mod tasks;
 pub mod upload;
+// β · #27 镜像 /api/conv 但按 agent_id 过滤——私聊页（重设计 #N5）数据源
+pub mod workers;
 
 // γ · WS 通用循环 + cursor 解析 + 事件流构造——`conv` / `tasks` 共用。
 pub(crate) mod ws_common;
