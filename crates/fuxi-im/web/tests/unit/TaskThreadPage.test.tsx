@@ -160,6 +160,35 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     unmount();
   });
 
+  it("v3 #52 · 任务 status=completed 时不下发 task_id（避免误中 4xx）", async () => {
+    const overview = {
+      running: [],
+      completed: [
+        {
+          id: TASK_ID,
+          title: "查 ERP API",
+          status: "completed" as const,
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 12_000,
+          members: [
+            { agent_id: XUANNV, role: "xuannv", role_display: "玄女", status: "idle" as const },
+          ],
+        },
+      ],
+    };
+    const { api, getByTestId, unmount } = setup({ overview, interveneSeq: [200] });
+    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "你好" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(api.state.intervenes).toHaveLength(1);
+    const req = api.state.intervenes[0] as { task_id?: string | null };
+    // 关键：task_id 不应是 TASK_ID（task 已完成，避免 backend 把 intervene 路由到 closed task）
+    expect(req.task_id).toBeNull();
+    unmount();
+  });
+
   it("4xx → toast 门客正忙", async () => {
     const { getByTestId, queryByTestId, unmount } = setup({ interveneSeq: [409] });
     await new Promise((r) => setTimeout(r, 50));

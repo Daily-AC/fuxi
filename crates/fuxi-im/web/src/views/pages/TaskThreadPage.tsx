@@ -162,10 +162,14 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
   });
 
   const sendIntervene = async (req: SerializedIntervene, msgId: string): Promise<void> => {
+    // v3 #52 fix · 任务 done 后用户在 thread composer 发"你好"被拒：
+    // 旧逻辑无脑挂 task_id，backend 见到 task_id 关联的是 done 任务 → 4xx → toast "门客正忙"误导。
+    // 修：task 状态非 running 时不挂 task_id（视为对玄女的普通主对话 intervene）。
+    const isRunning = task()?.status === "running";
     const send = (): Promise<unknown> =>
       client.intervene({
         text: req.text,
-        task_id: props.task_id,
+        task_id: isRunning ? props.task_id : null,
         target: req.target,
         mentions: req.mentions.length > 0 ? req.mentions : undefined,
         attachments: req.attachments,
