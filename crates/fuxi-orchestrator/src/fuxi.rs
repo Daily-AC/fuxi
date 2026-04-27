@@ -679,9 +679,16 @@ impl Fuxi {
             // #79 always-nudge fallback：task done 但 cc 没主动发 sentinel
             // → pump 兜底 publish AgentRequestReview，玄女能开口告交付。
             // 走 bus 而非 trait method 因为后者要 active_tx，已 Idle 的 cc 接不了。
+            //
+            // **跳过 xuannv role**：玄女不是门客，user-turn task 完成时不该
+            // 给自己发 nudge——否则 bridge 转 AgentRequestReview→intervene 玄女
+            // →新 turn 又触发 always-nudge→死循环（用户实测 21:31「这个 xuannv
+            // 门客在循环把我的话回放给我」根因）。同 sentinel_addendum 黑名单
+            // 语义对齐——玄女是 sentinel 接收方，不是发送方。
+            let role_is_xuannv = recall_agent.card().profile.role == "xuannv";
             let nudge_disabled =
                 std::env::var("FUXI_DISABLE_NUDGE_FALLBACK").ok().as_deref() == Some("1");
-            if task_done_ok && !saw_review_request && !nudge_disabled {
+            if task_done_ok && !saw_review_request && !nudge_disabled && !role_is_xuannv {
                 let summary = match &last_assistant_text {
                     Some(t) if !t.trim().is_empty() => {
                         let trimmed = t.trim();
