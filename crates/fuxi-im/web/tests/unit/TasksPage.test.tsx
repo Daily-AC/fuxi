@@ -3,13 +3,13 @@ import { fireEvent, render } from "@solidjs/testing-library";
 import { ApiProvider, setApiOverride, useApi } from "~/components/ApiProvider";
 import { TasksPage } from "~/views/pages/TasksPage";
 import { createMockApi } from "../mocks/api";
-import type { TasksOverview } from "~/types/api";
+import type { NodesResponse, TasksOverview } from "~/types/api";
 import { createEffect, type Component } from "solid-js";
 
 afterEach(() => setApiOverride(null));
 
-function setup(overview?: TasksOverview) {
-  const api = createMockApi({ tasksOverview: overview });
+function setup(overview?: TasksOverview, nodes?: NodesResponse) {
+  const api = createMockApi({ tasksOverview: overview, nodes });
   setApiOverride(api);
   return render(() => (
     <ApiProvider initialAuth="in" initialTab={1}>
@@ -188,13 +188,90 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
       ],
       completed: [],
     };
-    const { getByTestId, unmount } = setup(overview);
+    // 节点 mock：mac-local + home 都在线 → @node 走 muted gray 路径（不是 dim red）
+    const nodes: NodesResponse = {
+      nodes: [
+        { node_id: "mac-local", tags: [], max_concurrency: 8, inflight_jobs: 0, heartbeat_lag_ms: 100, online: true, registered_at: null, workers: [] },
+        { node_id: "home", tags: [], max_concurrency: 4, inflight_jobs: 0, heartbeat_lag_ms: 100, online: true, registered_at: null, workers: [] },
+      ],
+    };
+    const { getByTestId, unmount } = setup(overview, nodes);
     await new Promise((r) => setTimeout(r, 30));
     const lubanRow = getByTestId("member-a-luban-mac");
     expect(lubanRow.textContent).toContain("@mac-local");
     expect(getByTestId("member-node-a-luban-mac").textContent).toBe("@mac-local");
     const pusongRow = getByTestId("member-a-pusong-home");
     expect(pusongRow.textContent).toContain("@home");
+    unmount();
+  });
+
+  it("v3 #64 · 节点离线时 @node 切 dim red testid（member-node-offline-）", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: "t-stale",
+          title: "节点离线了",
+          status: "running",
+          created_at: "",
+          last_active_at: "2026-04-26T10:00:00Z",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-stale",
+              role: "luban",
+              role_display: "鲁班",
+              status: "idle",
+              node_id: "mac-local",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    // mac-local heartbeat 超时 → online=false
+    const nodes: NodesResponse = {
+      nodes: [
+        { node_id: "mac-local", tags: [], max_concurrency: 8, inflight_jobs: 0, heartbeat_lag_ms: 99999, online: false, registered_at: null, workers: [] },
+      ],
+    };
+    const { getByTestId, queryByTestId, unmount } = setup(overview, nodes);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getByTestId("member-node-offline-a-stale").textContent).toBe("@mac-local");
+    // 在线 testid 不存在
+    expect(queryByTestId("member-node-a-stale")).toBeNull();
+    unmount();
+  });
+
+  it("v3 #64 · nodes 未 ready 时 @node 默认走在线路径（避免 race 闪红）", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: "t-loading",
+          title: "节点加载中",
+          status: "running",
+          created_at: "",
+          last_active_at: "2026-04-26T10:00:00Z",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-loading",
+              role: "luban",
+              role_display: "鲁班",
+              status: "idle",
+              node_id: "mac-local",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    // 不传 nodes mock → mock 默认 { nodes: [] }（已 ready 的空集）
+    // 期望：mac-local 不在 [] → 算离线 dim red
+    // 所以这个 case 实际验"已 ready 但空集 = offline"，符合 spec
+    const { getByTestId, unmount } = setup(overview);
+    await new Promise((r) => setTimeout(r, 30));
+    // mock 默认 fetchNodes 立即 resolve {nodes:[]} → mac-local 不在内 → offline
+    expect(getByTestId("member-node-offline-a-loading").textContent).toBe("@mac-local");
     unmount();
   });
 

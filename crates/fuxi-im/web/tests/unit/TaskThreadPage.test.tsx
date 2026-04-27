@@ -6,7 +6,7 @@ import { Toast } from "~/components/Toast";
 import { dismissToast } from "~/lib/toast";
 import { createMockApi } from "../mocks/api";
 import type { ServerEvent } from "~/types/events";
-import type { TasksOverview } from "~/types/api";
+import type { NodesResponse, TasksOverview } from "~/types/api";
 
 const TASK_ID = "task-erp";
 const XUANNV = "agent-xuannv";
@@ -63,11 +63,13 @@ function setup(opts?: {
   overview?: TasksOverview;
   taskEvents?: ServerEvent[];
   interveneSeq?: number[];
+  nodes?: NodesResponse;
 }) {
   const api = createMockApi({
     tasksOverview: opts?.overview ?? TASK_OVERVIEW,
     events: opts?.taskEvents ? { [TASK_ID]: opts.taskEvents } : {},
     interveneSeq: opts?.interveneSeq,
+    nodes: opts?.nodes,
   });
   setApiOverride(api);
   const tools = render(() => (
@@ -135,12 +137,55 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
       ],
       completed: [],
     };
-    const { findByTestId, unmount } = setup({ overview });
+    // 节点 mock：mac-local + home 都在线 → @node 走 muted gray 路径（#64 引入）
+    const nodes: NodesResponse = {
+      nodes: [
+        { node_id: "mac-local", tags: [], max_concurrency: 8, inflight_jobs: 0, heartbeat_lag_ms: 100, online: true, registered_at: null, workers: [] },
+        { node_id: "home", tags: [], max_concurrency: 4, inflight_jobs: 0, heartbeat_lag_ms: 100, online: true, registered_at: null, workers: [] },
+      ],
+    };
+    const { findByTestId, unmount } = setup({ overview, nodes });
     const members = await findByTestId("task-banner-members");
     expect(members.textContent).toContain("鲁班");
     expect(members.textContent).toContain("@mac-local");
     expect(members.textContent).toContain("蒲松");
     expect(members.textContent).toContain("@home");
+    unmount();
+  });
+
+  it("v3 #64 · banner @node 节点离线 · testid banner-node-offline-<id>", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: TASK_ID,
+          title: "stale 节点任务",
+          status: "running",
+          created_at: "",
+          last_active_at: "2026-04-26T11:00:00Z",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: LUBAN,
+              role: "luban",
+              role_display: "鲁班",
+              status: "idle",
+              node_id: "mac-local",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    // mac-local heartbeat 超时 → online=false
+    const nodes: NodesResponse = {
+      nodes: [
+        { node_id: "mac-local", tags: [], max_concurrency: 8, inflight_jobs: 0, heartbeat_lag_ms: 99999, online: false, registered_at: null, workers: [] },
+      ],
+    };
+    const { findByTestId, queryByTestId, unmount } = setup({ overview, nodes });
+    await findByTestId("task-banner-members");
+    expect(queryByTestId(`banner-node-offline-${LUBAN}`)?.textContent).toBe("@mac-local");
+    expect(queryByTestId(`banner-node-${LUBAN}`)).toBeNull();
     unmount();
   });
 

@@ -98,6 +98,13 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
     const nodes = nodesData() ? candidatesFromNodes(nodesData()!.nodes) : [];
     return [...workers, ...nodes];
   });
+  // v3 #64 · online 节点 id 集合 · banner 用来给 @node 切 dim red（离线）vs muted gray（在线）
+  // null = nodesData 未 ready · 下游按"未知态默认在线"处理（避免首帧 race 闪红）
+  const onlineNodeIds = createMemo<Set<string> | null>(() => {
+    const data = nodesData();
+    if (!data) return null;
+    return new Set(data.nodes.filter((n) => n.online).map((n) => n.node_id));
+  });
 
   let controller: ReconnectController | null = null;
 
@@ -244,7 +251,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
       </header>
 
       <Show when={task()}>
-        {(t) => <Banner task={t()} />}
+        {(t) => <Banner task={t()} onlineNodeIds={onlineNodeIds()} />}
       </Show>
 
       <Thread messages={messages} online={online} />
@@ -258,7 +265,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
   );
 };
 
-const Banner: Component<{ task: TaskGroupCard }> = (props) => {
+const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null }> = (props) => {
   const statusLabel = (): string => {
     if (props.task.status === "running") return "进行中";
     if (props.task.status === "completed") return "已完成";
@@ -272,17 +279,8 @@ const Banner: Component<{ task: TaskGroupCard }> = (props) => {
     return "";
   };
 
-  // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）· @node 标识（v3 #59）
-  const memberLine = (): string => {
-    return props.task.members
-      .map((m) => {
-        const tail = truncate(m.last_tool_call?.tool ?? memberStatusFallback(m), 12);
-        const node = m.node_id ? ` · @${m.node_id}` : "";
-        return `${m.role_display} · ${tail}${node}`;
-      })
-      .join(" ▎ ");
-  };
-
+  // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）· @node 标识
+  // v3 #64 · @node 在线 muted gray / 离线 dim red（区分 stale 节点）
   return (
     <div class={styles.banner} data-testid="task-banner">
       <div class={styles.bannerLine}>
@@ -295,7 +293,43 @@ const Banner: Component<{ task: TaskGroupCard }> = (props) => {
       </div>
       <Show when={props.task.members.length > 0}>
         <div class={styles.bannerMembers} data-testid="task-banner-members">
-          {memberLine()}
+          <For each={props.task.members}>
+            {(m, i) => {
+              const tail = truncate(m.last_tool_call?.tool ?? memberStatusFallback(m), 12);
+              // 仅在 onlineNodeIds 已 ready 且 node_id 不在内时算 offline；未知态默认在线
+              const offline = (): boolean =>
+                !!m.node_id
+                && props.onlineNodeIds !== null
+                && !props.onlineNodeIds.has(m.node_id);
+              return (
+                <>
+                  <Show when={i() > 0}>
+                    <span aria-hidden="true"> ▎ </span>
+                  </Show>
+                  <span>
+                    {m.role_display} · {tail}
+                    <Show when={m.node_id}>
+                      {(nid) => (
+                        <>
+                          {" · "}
+                          <span
+                            class={offline() ? styles.bannerNodeOffline : ""}
+                            data-testid={
+                              offline()
+                                ? `banner-node-offline-${m.agent_id}`
+                                : `banner-node-${m.agent_id}`
+                            }
+                          >
+                            @{nid()}
+                          </span>
+                        </>
+                      )}
+                    </Show>
+                  </span>
+                </>
+              );
+            }}
+          </For>
         </div>
       </Show>
     </div>
