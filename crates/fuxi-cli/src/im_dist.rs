@@ -269,7 +269,11 @@ impl DistControllerEnqueuer {
 
 #[async_trait]
 impl DistEnqueuer for DistControllerEnqueuer {
-    async fn enqueue(&self, task: &Task, system_prompt: Option<String>) -> OrchResult<String> {
+    async fn enqueue(
+        &self,
+        task: &Task,
+        opts: fuxi_orchestrator::DistEnqueueOptions,
+    ) -> OrchResult<String> {
         // node_id_hint：pinned_node 优先，否则空串（让 dist matcher 按 tags 派）
         let node_hint = task.pinned_node.clone().unwrap_or_default();
         // body：把 description 作为 prompt body 给 worker——worker 端跑 cc/codex
@@ -279,25 +283,24 @@ impl DistEnqueuer for DistControllerEnqueuer {
         } else {
             task.description.clone()
         };
-        // cli wire 名必须与 dist::select_adapter 接受的字符串对齐——`"claude-code"`
-        // 是 CcAdapter::name() 的 SoT。曾经填 `"cc"`（项目内简称），worker
-        // factory 直接 Err → fast-fail ok=0；report.output 字段没持久化让 bug
-        // 隐了一个月（#71）。allowed_tools 仍走 worker role-skill 自补。
-        // system_prompt：caller 合成（含 role 心智 + sentinel addendum），
-        // worker `run_cc_job` 转 `--append-system-prompt` 注 cc。`None` 时
-        // 远端 cc 跑裸 prompt（决策 13 nudge 不会触发，`fuxi-im` 生产路径
-        // 应总是 Some——`Fuxi::dispatch` dist 分支负责合成）。
+        // cli wire 名 SoT = `"claude-code"`（CcAdapter::name()）；曾踩 `"cc"`
+        // 简称 wire mismatch 隐 bug（#71）。allowed_tools 仍走 worker role-skill
+        // 自补。task_id/role 是 #76/#77 修：worker 用 home 真相 task_id 让
+        // events.meta.task 跨节点一致；publish AgentSpawning 让 home aggregate
+        // 拿到 role 不 fallback "unknown"。
         let job_id = self
             .ctrl
             .enqueue(
                 node_hint,
                 task.title.clone(),
                 body,
-                system_prompt,
+                opts.system_prompt,
                 task.required_tags.clone(),
                 task.pinned_node.clone(),
                 "claude-code".to_string(),
                 Vec::new(),
+                opts.task_id,
+                opts.role,
             )
             .await;
         tracing::info!(
@@ -417,7 +420,10 @@ mod tests {
 
         let enqueuer = DistControllerEnqueuer::new(layer.ctrl.clone());
         let task = fuxi_core::task::Task::new("ls", "ls ~/erp").with_pinned_node("mac");
-        enqueuer.enqueue(&task, None).await.expect("enqueue");
+        enqueuer
+            .enqueue(&task, fuxi_orchestrator::DistEnqueueOptions::default())
+            .await
+            .expect("enqueue");
 
         let job = layer.ctrl.pull("mac").await.expect("应能 pull 到 job");
 

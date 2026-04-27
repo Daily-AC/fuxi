@@ -1518,7 +1518,7 @@ struct RecordingEnqueuer {
     calls: EnqueueCalls,
 }
 
-type EnqueueCalls = Arc<tokio::sync::Mutex<Vec<(Task, Option<String>)>>>;
+type EnqueueCalls = Arc<tokio::sync::Mutex<Vec<(Task, fuxi_orchestrator::DistEnqueueOptions)>>>;
 
 impl RecordingEnqueuer {
     fn new() -> (Arc<Self>, EnqueueCalls) {
@@ -1535,9 +1535,9 @@ impl fuxi_orchestrator::DistEnqueuer for RecordingEnqueuer {
     async fn enqueue(
         &self,
         task: &Task,
-        system_prompt: Option<String>,
+        opts: fuxi_orchestrator::DistEnqueueOptions,
     ) -> fuxi_orchestrator::Result<String> {
-        self.calls.lock().await.push((task.clone(), system_prompt));
+        self.calls.lock().await.push((task.clone(), opts));
         Ok(format!("stub-job-{}", task.id))
     }
 }
@@ -1592,8 +1592,9 @@ async fn dispatch_dist_path_injects_sentinel_addendum_into_system_prompt() {
 
     let recorded = calls.lock().await;
     assert_eq!(recorded.len(), 1);
-    let sp = recorded[0]
-        .1
+    let opts = &recorded[0].1;
+    let sp = opts
+        .system_prompt
         .as_deref()
         .expect("dist 路径必须传 system_prompt（含 sentinel 教学）");
     assert!(sp.contains("# 你是鲁班"), "应保留 role-specific 段：{sp}");
@@ -1602,6 +1603,14 @@ async fn dispatch_dist_path_injects_sentinel_addendum_into_system_prompt() {
         sp.contains("request_review"),
         "sentinel kind 字段应在文案：{sp}"
     );
+    // #76: task_id 必须透传——home 真相 task.id 让 worker 端 events.meta.task 一致
+    assert_eq!(
+        opts.task_id.as_deref(),
+        Some(recorded[0].0.id.to_string().as_str()),
+        "task_id 必须透传 home 真相 id"
+    );
+    // #77: role 必须透传——worker 端 publish AgentSpawning 用此 role 让 home aggregate 拿到
+    assert_eq!(opts.role.as_deref(), Some("luban"), "role 必须透传");
 }
 
 /// β · #4 配套：玄女作为接收方不该被注 sentinel（`should_inject_for_role`
@@ -1621,7 +1630,7 @@ async fn dispatch_dist_path_skips_sentinel_for_xuannv() {
     fuxi.dispatch(id, task).await.unwrap();
 
     let recorded = calls.lock().await;
-    if let Some(sp) = recorded[0].1.as_deref() {
+    if let Some(sp) = recorded[0].1.system_prompt.as_deref() {
         assert!(
             !sp.contains("_fuxi"),
             "玄女 system_prompt 不应含 sentinel 教学：{sp}"

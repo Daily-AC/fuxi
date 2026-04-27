@@ -68,6 +68,8 @@ async fn enq_simple(ctrl: &DistController, title: &str) -> String {
         None,
         String::new(),
         vec![],
+        None,
+        None,
     )
     .await
 }

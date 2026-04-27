@@ -149,6 +149,8 @@ impl BenchHarness {
                     None,
                     String::new(),
                     vec![],
+                    None,
+                    None,
                 )
                 .await;
             ids.push(id);

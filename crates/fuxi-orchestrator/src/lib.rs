@@ -28,7 +28,7 @@ pub mod registry;
 pub mod sentinel_addendum;
 
 pub use bridge::{Intervener, SystemEventBridge};
-pub use dist_enqueuer::DistEnqueuer;
+pub use dist_enqueuer::{DistEnqueueOptions, DistEnqueuer};
 pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use idle_gc::{

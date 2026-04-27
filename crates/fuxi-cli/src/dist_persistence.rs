@@ -368,6 +368,8 @@ mod tests {
             pinned_node: None,
             cli: String::new(),
             allowed_tools: vec![],
+            task_id: None,
+            role: None,
         }
     }
 

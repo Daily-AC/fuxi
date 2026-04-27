@@ -90,6 +90,9 @@ struct TaskAccumulator {
     agent_last_tool_call: HashMap<AgentId, String>,
     /// thinking 状态：True 表示正在 thinking；False/None 表示 idle 或 busy 工具中
     agent_thinking: HashMap<AgentId, bool>,
+    /// #78：dist 路径下事件源节点 id（取自 `meta.source_node_id`）。home 端
+    /// 本地 spawn 的事件无此字段，保持 None → MemberCard.node_id 回落 "home"。
+    source_node_id: Option<String>,
 }
 
 impl TaskAccumulator {
@@ -108,6 +111,14 @@ impl TaskAccumulator {
             && !self.member_ids.contains(&agent)
         {
             self.member_ids.push(agent);
+        }
+
+        // #78：远端 dist worker republish 的事件带 source_node_id；任一条命中
+        // 就给整 task 标节点（不区分 agent，因 dist 路径 1 task = 1 节点的 cc）。
+        if let Some(node) = ev.meta.source_node_id.as_deref()
+            && self.source_node_id.is_none()
+        {
+            self.source_node_id = Some(node.to_string());
         }
 
         match &ev.kind {
@@ -382,10 +393,10 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 status,
                 last_tool_call,
                 description: acc.description.clone(),
-                // β · #55 v1：本地 spawn 全部归 home。dispatch routing #57 加
-                // pinned_node 后这里改读 EventKind.pinned_node 拿真 node_id；
-                // 现在所有 worker 都跑在 home 进程，"home" 是诚实默认。
-                node_id: "home".into(),
+                // #78：dist 路径用 acc.source_node_id（远端事件 republish 带的
+                // node_id）；本地 spawn 路径默认 "home"。修了用户实测「mac 远端
+                // 任务卡显 @home」错显。
+                node_id: acc.source_node_id.clone().unwrap_or_else(|| "home".into()),
             });
         }
 

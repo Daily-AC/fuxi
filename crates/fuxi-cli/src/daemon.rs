@@ -802,6 +802,11 @@ impl Agent for DistGatewayAgent {
                 pinned_node: cfg.pinned_node.clone(),
                 cli: cfg.cli.clone(),
                 allowed_tools: cfg.allowed_tools.clone(),
+                // daemon gateway 路径透传 task 真相（#76）；role 暂走 None
+                // （cfg 没 role_hint 字段——daemon 路径用户场景较少，#77 主路径
+                // 在 fuxi-im DistControllerEnqueuer 上）
+                task_id: Some(task.id.to_string()),
+                role: None,
             };
             let enq =
                 crate::dist_auth_client::signed_post(&client, &secret, &enqueue_url, &enqueue_req)

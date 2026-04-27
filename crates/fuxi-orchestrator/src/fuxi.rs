@@ -456,6 +456,9 @@ impl Fuxi {
                 // 经 `--append-system-prompt` 注，必须从这里把整段串好下发。
                 // 否则远端跑裸 cc，玄女永远等不到 deliverable nudge（#4 真因）。
                 let agent_for_role = self.shelf.get_agent(agent_id).await;
+                let role_for_worker = agent_for_role
+                    .as_ref()
+                    .map(|a| a.card().profile.role.clone());
                 let system_prompt = agent_for_role.as_ref().and_then(|a| {
                     let profile = &a.card().profile;
                     let want_sentinel = !crate::sentinel_addendum::is_globally_disabled()
@@ -478,6 +481,7 @@ impl Fuxi {
                     pinned_node = ?task.pinned_node,
                     required_tags = ?task.required_tags,
                     has_system_prompt = system_prompt.is_some(),
+                    role = ?role_for_worker,
                     "dispatch routing: 走 dist enqueue（spec gap e）"
                 );
                 // dist 路径补发 TaskCreated（#1 真因：远端 cc 不发 task lifecycle，
@@ -495,7 +499,14 @@ impl Fuxi {
                         },
                     });
                 }
-                let _job_id = enqueuer.enqueue(&task, system_prompt).await?;
+                // #76：透传 home 真相 task_id 让 worker 端 cc events meta.task 一致；
+                // #77：透传 role 让 worker 端发 AgentSpawning 给 home aggregate 拿 role
+                let opts = crate::DistEnqueueOptions {
+                    system_prompt,
+                    task_id: Some(task.id.to_string()),
+                    role: role_for_worker,
+                };
+                let _job_id = enqueuer.enqueue(&task, opts).await?;
                 return Ok(());
             }
             // enqueuer 未注入但 task 要 dist——降级到本地 spawn + warn
