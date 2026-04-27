@@ -172,11 +172,30 @@ pub async fn run(args: StartArgs) -> Result<()> {
         .with_context(|| format!("无法创建上传根目录: {}", upload_root.display()))?;
     let upload_store = fuxi_im::uploads::UploadStore::new(im_pool.clone(), upload_root);
 
+    // β · #54 dist controller 内嵌——必须在 AppState 构造前完成，让 #55
+    // NodesProvider 注入闭环（spec gap a + gap c 共要求）。
+    // dist_home_dir 复用 events.db 父目录，跟 #54 一致。
+    let dist_home_dir = events_db_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dist_layer = crate::im_dist::build_dist_layer(&dist_home_dir, bus.clone())
+        .await
+        .context("装配 dist controller layer")?;
+    tracing::info!("dist controller 已内嵌——/dist/* 走 HMAC，home 节点已自注册");
+    let dist_ctrl = dist_layer.ctrl.clone();
+    let dist_router = dist_layer.router;
+    // β · #55 NodesProvider 包 Arc<DistController>，注入 AppState 让
+    // /api/nodes handler 能查 dist topology
+    let nodes_provider: Arc<dyn fuxi_im::nodes_provider::NodesProvider> =
+        Arc::new(crate::im_dist::DistControllerNodesProvider::new(dist_ctrl));
+
     let app_state = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
         .with_im_push(im_push)
         .with_conv_store(conv_store.clone())
-        .with_upload_store(upload_store);
+        .with_upload_store(upload_store)
+        .with_nodes_provider(nodes_provider);
 
     // 5. push hooks —— 订阅 EventBus 触发 web push（玄女 idle / task done）。
     //    必须在 fuxi 已 ready 之后挂；玄女 id 若此刻为 None 就 fallback 到内存
@@ -262,19 +281,9 @@ pub async fn run(args: StartArgs) -> Result<()> {
 
     // 7. webhook router（scheduler）+ IM router + dist controller router + ServeDir(/) 合并
     //
-    // #54 新增 dist 内嵌：home 也是个真节点，dist controller 同进程跑（共享 EventBus +
-    // SQLite WAL）。`/dist/*` 走 HMAC layer，`/api/*` 走 cookie layer，两层互不干扰
+    // dist_router 已在 step 4.5 提前装配（让 NodesProvider 闭环走通 #55）。
+    // /dist/* 走 HMAC layer，/api/* 走 cookie layer，两层互不干扰
     // （cookie layer 的 is_exempt 分支放行 `!path.starts_with("/api/")`）。
-    let dist_home_dir = events_db_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dist_layer = crate::im_dist::build_dist_layer(&dist_home_dir, bus.clone())
-        .await
-        .context("装配 dist controller layer")?;
-    tracing::info!("dist controller 已内嵌——/dist/* 走 HMAC，home 节点已自注册");
-    let _dist_ctrl = dist_layer.ctrl.clone(); // #55 之后会接给 /api/nodes 用
-
     let webhook_router = fuxi_scheduler::webhook::router(WebhookState {
         store: sched_store.clone(),
         keeper: keeper.clone(),
@@ -286,7 +295,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
             tracing::info!(web_root = %root.display(), "PWA dist 已挂载到 /");
             im_router
                 .merge(webhook_router)
-                .merge(dist_layer.router)
+                .merge(dist_router)
                 .fallback_service(ServeDir::new(root))
         }
         Some(root) => {
@@ -294,11 +303,11 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 web_root = %root.display(),
                 "PWA dist 不存在——/ 将返 404；install.sh 没把 dist 推到位？"
             );
-            im_router.merge(webhook_router).merge(dist_layer.router)
+            im_router.merge(webhook_router).merge(dist_router)
         }
         None => {
             tracing::warn!("未指定 PWA dist 路径（--web-root + 默认都失败）；/ 将无静态资源");
-            im_router.merge(webhook_router).merge(dist_layer.router)
+            im_router.merge(webhook_router).merge(dist_router)
         }
     };
 

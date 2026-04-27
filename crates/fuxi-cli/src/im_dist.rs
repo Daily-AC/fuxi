@@ -41,8 +41,13 @@
 //! [`build_dist_layer`] 拿到 `(Arc<DistController>, Router)`，然后 `app.merge(dist_router)`。
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use axum::Router;
 use fuxi_events::EventBus;
+use fuxi_im::nodes_provider::{
+    NodeView, NodesProvider, ONLINE_HEARTBEAT_THRESHOLD_MS, home_workers_from_shelf,
+};
+use fuxi_orchestrator::Fuxi;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -170,6 +175,57 @@ fn resolve_dist_token(home_dir: &std::path::Path) -> Result<String> {
         "dist token 自动生成——首启场景"
     );
     Ok(generated)
+}
+
+/// `Arc<DistController>` 包装为 fuxi-im 的 `NodesProvider` trait（β · #55）。
+///
+/// 这是 trait 反向依赖 pattern：fuxi-im 不能引 fuxi-cli（循环依赖），但需要查
+/// dist controller 的 nodes_snapshot。trait 定义在 fuxi-im，impl 放在顶层
+/// fuxi-cli 包 `Arc<DistController>`。
+///
+/// home 节点的 workers 列表从 `Fuxi.shelf` 拿（local 实例）；其他远端节点 v1
+/// 始终空 `workers: []`——dist 协议当前只跟 job_id 不跟 agent_id，#57 dispatch
+/// routing 加 worker→node 真映射后才能填。
+pub struct DistControllerNodesProvider {
+    pub ctrl: Arc<DistController>,
+}
+
+impl DistControllerNodesProvider {
+    pub fn new(ctrl: Arc<DistController>) -> Self {
+        Self { ctrl }
+    }
+}
+
+#[async_trait]
+impl NodesProvider for DistControllerNodesProvider {
+    async fn list_nodes(&self, fuxi: &Fuxi) -> Vec<NodeView> {
+        let snap = self.ctrl.nodes_snapshot().await;
+        let mut out: Vec<NodeView> = Vec::with_capacity(snap.len());
+        for s in snap {
+            // online：heartbeat lag < 30s（spec gap c 严格阈值，比 dist STALE 60s 略严）
+            let online = s
+                .last_seen_ms_ago
+                .map(|ms| ms < ONLINE_HEARTBEAT_THRESHOLD_MS)
+                .unwrap_or(false);
+            // workers：home 节点从 shelf 拿，远端节点 v1 始终空
+            let workers = if s.node_id == HOME_NODE_ID {
+                home_workers_from_shelf(fuxi).await
+            } else {
+                Vec::new()
+            };
+            out.push(NodeView {
+                node_id: s.node_id,
+                tags: s.tags,
+                max_concurrency: s.max_concurrency,
+                inflight_jobs: s.inflight_count,
+                heartbeat_lag_ms: s.last_seen_ms_ago,
+                online,
+                registered_at_ms_ago: s.registered_at_ms_ago,
+                workers,
+            });
+        }
+        out
+    }
 }
 
 /// 简单随机串（hex）——用 OS RNG 而非 uuid 避免 dependency；secret/token 都用。
