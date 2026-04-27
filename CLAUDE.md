@@ -108,6 +108,7 @@ fuxi/
 - **shutdown_agent 必须豁免玄女**（2026-04-20 `1e6db4e`）：`IdleGcTask` 10 分钟 idle 会误杀 xuannv（她对 GC 是普通 agent）。治本：`Fuxi::shutdown_agent` 开头比对 `xuannv_id()`，命中 warn + 返 Ok 静默 noop。**任何新 shutdown 路径（`fuxi kill --id` / 将来的 worker pool rebalance）都从这个方法走，不绕旁路**。只有 `Fuxi::shutdown()`（整体下线）能关玄女。
 - **spawn 语义是"新建"，去重不塞在 spawn_worker**（2026-04-20 `fbba2ec`）：用户"起三个鲁班"就真起三个。复用职责在 `dispatch_to_any(role)`（`claim_idle_by_role` 原子），GC 负责回收。
 - **fuxi-memory 不能依赖 fuxi-orchestrator**（循环依赖风险）。需要调 orchestrator 的 pattern：trait 定义在 memory，impl adapter 放 **fuxi-cli**（顶层依赖全部 crate）。参考 `fuxi-cli/src/extractor_hook.rs::FuxiExtractorSpawner`。
+- **mock fixture 必须跟 backend 实际 wire 形式对齐**（2026-04-26 ε `d87af4d` 修，bug 埋了一个月才被用户实测撞穿）：`fromStoredMessage` 把 backend `conv_store::handle_event` 写库的 `serde_json::json!({"text":"..."})` JSON 对象 当作裸 string 读 → 永远空 → message.trim()=="" 进 #24 防御 → 历史全过滤 → 用户感知"刷新一次玄女对话历史就全没了"。前端 mock fixture 用的是 string 形式（早期 PoC 留下的简化），单测/e2e 都走 string 分支不报错——latent type mismatch 不被发现。**新加 IM/PWA 客户端反序列化 helper 时，先 `sqlite3 *.db` 看一眼真数据形状**，别只信 fixture。
 
 ## 决策 + 过程文档
 
