@@ -11,6 +11,7 @@ import type {
 import type {
   ConversationHistoryResponse,
   InterveneRequestV2,
+  NodesResponse,
   TasksOverview,
   Upload,
 } from "~/types/api";
@@ -46,6 +47,8 @@ export interface ApiClient {
   fetchHistory(convId: string, limit: number, before?: string): Promise<ConversationHistoryResponse>;
   /** 阶段 4 任务 sheet · 拉 running + completed 视图模型（β #21 目标契约）。*/
   fetchTasksOverview(): Promise<TasksOverview>;
+  /** v3 #58 dist topology · GET /api/nodes（β #55 实装中，本接口契约由 spec 钉）。 */
+  fetchNodes(): Promise<NodesResponse>;
   /** #N3 私聊页 · 拉门客历史（β #N5 / #27 目标契约）。
    *  filter by meta.agent==agent_id；事件 kind 白名单见 spec §私聊页"事件 filter"。*/
   fetchWorkerEvents(agentId: string, fromCursor?: string): Promise<EventHistoryResponse>;
@@ -117,6 +120,7 @@ export function createHttpClient(): ApiClient {
       return jsonFetch<ConversationHistoryResponse>(`/api/conv/messages?${params.toString()}`);
     },
     fetchTasksOverview: () => jsonFetch<TasksOverview>(`/api/tasks`),
+    fetchNodes: () => jsonFetch<NodesResponse>(`/api/nodes`),
     fetchWorkerEvents: (agentId, from) => {
       const q = from ? `?from=${encodeURIComponent(from)}` : "";
       return jsonFetch<EventHistoryResponse>(

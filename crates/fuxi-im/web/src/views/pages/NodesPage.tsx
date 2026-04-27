@@ -3,83 +3,32 @@ import {
   Show,
   createMemo,
   createResource,
+  createSignal,
   type Component,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
-import { colorForTaskRole, formatTokens } from "~/lib/format-task";
-import type { TaskMember, TasksOverview } from "~/types/api";
+import { colorForTaskRole } from "~/lib/format-task";
+import type { NodeView, NodeWorker } from "~/types/api";
 import styles from "./NodesPage.module.css";
 
-// Page 1 · 节点 · 设计 spec §"页 1·节点（沿用决策 14）"。
-// 内容沿用旧 NodesSheet（aggregateHomeNode 聚合逻辑），去 BottomSheet 容器，promote 成整页。
+// 节点 tab · v3 #58 · spec 2026-04-27-im-dist-接通-design.md (gap d)
+//
+// v2 ε 早期版本走 aggregateHomeNode 假 topology（拿 tasksOverview 包一层），用户实测撞穿
+// "home 离线"问题（其实只是当前没 running task）。本版切真 /api/nodes 端点（β #55 落地中），
+// dist controller 维护真 node 注册 + heartbeat + workers 实例 map。
+//
+// 视觉：每节点一卡（#16110E 圆角 12px）；header = 节点名 + online dot + tags chip + inflight/max；
+// body = workers 列表（按 status busy>idle）每行 role+task title。离线整卡 muted。
+// "添加节点" 按钮弹 modal 显 install script 复制命令。
 
-interface NodeAgentRow {
-  agent_id: string;
-  role: string;
-  role_display: string;
-  status: TaskMember["status"];
-  tokens: number;
-}
-
-interface NodeView {
-  id: string;
-  name: string;
-  online: boolean;
-  agents: NodeAgentRow[];
-}
-
-/** 把 overview 聚合成单 home 节点。同 agent_id 出现多次 → tokens 累加；
- *  status 取最忙（busy > thinking > idle）。空 overview → 空节点。*/
-export function aggregateHomeNode(overview: TasksOverview | undefined): NodeView {
-  const buckets = new Map<string, NodeAgentRow>();
-  if (overview) {
-    for (const t of overview.running) {
-      for (const m of t.members) {
-        const exist = buckets.get(m.agent_id);
-        if (exist) {
-          exist.tokens += m.tokens ?? 0;
-          if (rank(m.status) > rank(exist.status)) exist.status = m.status;
-        } else {
-          buckets.set(m.agent_id, {
-            agent_id: m.agent_id,
-            role: m.role,
-            role_display: m.role_display,
-            status: m.status,
-            tokens: m.tokens ?? 0,
-          });
-        }
-      }
-    }
-  }
-  const agents = Array.from(buckets.values()).sort((a, b) => {
-    if (rank(a.status) !== rank(b.status)) return rank(b.status) - rank(a.status);
-    return a.role_display.localeCompare(b.role_display, "zh");
-  });
-  return {
-    id: "home",
-    name: "home",
-    online: agents.length > 0,
-    agents,
-  };
-}
-
-function rank(s: TaskMember["status"]): number {
-  if (s === "busy") return 3;
-  if (s === "thinking") return 2;
-  return 1; // idle
-}
-
-function statusLabel(s: TaskMember["status"]): string {
-  if (s === "busy") return "运行中";
-  if (s === "thinking") return "思考中";
-  return "空闲";
-}
+const INSTALL_CMD = "bash <(curl -s https://im.qmledmq.cn:8443/setup-local-worker.sh)";
 
 export const NodesPage: Component = () => {
   return (
     <div class={styles.page} data-testid="page-nodes">
       <header class={styles.header}>
         <h1 class={styles.title}>节点</h1>
+        <AddNodeButton />
       </header>
       <div class={styles.body}>
         <RenderNodes />
@@ -88,62 +37,208 @@ export const NodesPage: Component = () => {
   );
 };
 
+const AddNodeButton: Component = () => {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <>
+      <button
+        type="button"
+        class={styles.addBtn}
+        onClick={() => setOpen(true)}
+        data-testid="nodes-add-btn"
+        aria-label="添加节点"
+      >
+        + 添加节点
+      </button>
+      <Show when={open()}>
+        <AddNodeModal onClose={() => setOpen(false)} />
+      </Show>
+    </>
+  );
+};
+
+const AddNodeModal: Component<{ onClose: () => void }> = (props) => {
+  const onCopy = (): void => {
+    void navigator.clipboard?.writeText(INSTALL_CMD);
+  };
+  return (
+    <div
+      class={styles.modalScrim}
+      data-testid="nodes-add-modal"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div class={styles.modalCard} role="dialog" aria-label="添加节点">
+        <header class={styles.modalHead}>
+          <h2 class={styles.modalTitle}>添加节点</h2>
+          <button
+            type="button"
+            class={styles.modalClose}
+            onClick={() => props.onClose()}
+            aria-label="关闭"
+            data-testid="nodes-add-close"
+          >
+            ×
+          </button>
+        </header>
+        <p class={styles.modalHint}>
+          在新设备上跑这条命令，输入主密码即可加入：
+        </p>
+        <pre class={styles.modalCode} data-testid="nodes-install-cmd">
+          {INSTALL_CMD}
+        </pre>
+        <button
+          type="button"
+          class={styles.modalCopy}
+          onClick={onCopy}
+          data-testid="nodes-add-copy"
+        >
+          复制命令
+        </button>
+        <p class={styles.modalNote}>
+          支持 macOS（launchd）+ Linux（systemd user）。安装后该节点自动出现在列表，离线
+          ≥ 30s 显灰。
+        </p>
+      </div>
+    </div>
+  );
+};
+
 const RenderNodes: Component = () => {
   const { client } = useApi();
-  const [data] = createResource(() => client.fetchTasksOverview());
-  const node = createMemo(() => aggregateHomeNode(data()));
+  const [data] = createResource(() => client.fetchNodes());
+  const nodes = createMemo<NodeView[]>(() => {
+    const list = data()?.nodes ?? [];
+    // online 在前，online 内部按 inflight 降序（最忙优先）
+    return list.slice().sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      return b.inflight_jobs - a.inflight_jobs;
+    });
+  });
 
   return (
     <Show
       when={data() || data.error}
       fallback={<p class={styles.muted} data-testid="nodes-loading">加载中…</p>}
     >
-      <div class={styles.root}>
-        <Show when={data.error}>
-          <p class={styles.errMsg} role="alert">
-            加载失败：{String(data.error)}
-          </p>
-        </Show>
-        <section class={styles.section} data-testid={node().online ? "nodes-online" : "nodes-offline"}>
-          <h3 class={styles.sectionLabel}>{node().online ? "在线" : "离线"}</h3>
-          <article class={styles.nodeCard} data-testid={`node-${node().id}`}>
-            <header class={styles.nodeHead}>
-              <span class={styles.nodeName}>{node().name}</span>
-              <span class={styles.nodeStatus}>
-                <span
-                  class={styles.statusDot}
-                  classList={{ [styles.statusDotOn ?? ""]: node().online }}
-                  aria-hidden="true"
-                />
-                <span class={styles.statusText}>{node().online ? "在线" : "离线"}</span>
-              </span>
-            </header>
-            <Show
-              when={node().agents.length > 0}
-              fallback={<p class={styles.muted}>当前没有活跃 agent</p>}
-            >
-              <ul class={styles.agents}>
-                <For each={node().agents}>
-                  {(a) => (
-                    <li class={styles.agentRow} data-testid={`node-agent-${a.agent_id}`}>
-                      <span
-                        class={styles.agentDot}
-                        style={{ background: colorForTaskRole(a.role) }}
-                        aria-hidden="true"
-                      />
-                      <span class={styles.agentName}>{a.role_display}</span>
-                      <span class={styles.agentStatusText}>{statusLabel(a.status)}</span>
-                      <Show when={a.tokens > 0}>
-                        <span class={`${styles.agentTokens} mono`}>{formatTokens(a.tokens)}</span>
-                      </Show>
-                    </li>
-                  )}
-                </For>
-              </ul>
-            </Show>
-          </article>
-        </section>
-      </div>
+      <Show when={data.error}>
+        <p class={styles.errMsg} role="alert">
+          加载失败：{String(data.error)}
+        </p>
+      </Show>
+      <Show
+        when={nodes().length > 0}
+        fallback={
+          <div class={styles.empty} data-testid="nodes-empty">
+            <p class={styles.emptyTitle}>暂无节点</p>
+            <p class={styles.emptyHint}>点上方"+ 添加节点"接入第一个 worker</p>
+          </div>
+        }
+      >
+        <div class={styles.root}>
+          <For each={nodes()}>{(n) => <NodeCard node={n} />}</For>
+        </div>
+      </Show>
     </Show>
   );
 };
+
+const NodeCard: Component<{ node: NodeView }> = (props) => {
+  const sortedWorkers = createMemo<NodeWorker[]>(() => {
+    return props.node.workers.slice().sort((a, b) => rank(b.status) - rank(a.status));
+  });
+  return (
+    <article
+      class={styles.nodeCard}
+      classList={{ [styles.nodeCardOffline ?? ""]: !props.node.online }}
+      data-testid={`node-${props.node.node_id}`}
+      data-online={props.node.online ? "true" : "false"}
+    >
+      <header class={styles.nodeHead}>
+        <span
+          class={styles.nodeDot}
+          classList={{ [styles.nodeDotOn ?? ""]: props.node.online }}
+          aria-hidden="true"
+        />
+        <span class={styles.nodeName}>{props.node.node_id}</span>
+        <span class={styles.nodeMeta}>
+          {props.node.inflight_jobs}/{props.node.max_concurrency}
+        </span>
+      </header>
+      <Show when={props.node.tags.length > 0}>
+        <div class={styles.tagRow}>
+          <For each={props.node.tags}>
+            {(t) => <span class={styles.tag}>{t}</span>}
+          </For>
+        </div>
+      </Show>
+      <Show when={props.node.online && sortedWorkers().length > 0}>
+        <ul class={styles.workers}>
+          <For each={sortedWorkers()}>{(w) => <WorkerRow worker={w} />}</For>
+        </ul>
+      </Show>
+      <Show when={props.node.online && sortedWorkers().length === 0}>
+        <p class={styles.workerEmpty}>当前无 worker 实例</p>
+      </Show>
+    </article>
+  );
+};
+
+const WorkerRow: Component<{ worker: NodeWorker }> = (props) => {
+  const { setActiveTab, navPush } = useApi();
+  const onTap = (): void => {
+    if (!props.worker.current_task_id) return;
+    setActiveTab(1);
+    navPush({
+      kind: "task",
+      task_id: props.worker.current_task_id,
+      title: props.worker.current_task_title ?? undefined,
+    });
+  };
+  const tappable = (): boolean => Boolean(props.worker.current_task_id);
+  return (
+    <li
+      class={styles.workerRow}
+      data-testid={`node-worker-${props.worker.agent_id}`}
+      data-status={props.worker.status}
+    >
+      <button
+        type="button"
+        class={styles.workerBtn}
+        onClick={onTap}
+        disabled={!tappable()}
+        aria-label={
+          tappable()
+            ? `跳转任务 ${props.worker.current_task_title ?? ""}`
+            : `${props.worker.role_display} ${statusLabel(props.worker.status)}`
+        }
+      >
+        <span
+          class={styles.workerDot}
+          style={{ background: colorForTaskRole(props.worker.role) }}
+          aria-hidden="true"
+        />
+        <span class={styles.workerRole}>{props.worker.role_display}</span>
+        <Show
+          when={props.worker.current_task_title}
+          fallback={<span class={styles.workerStatusText}>{statusLabel(props.worker.status)}</span>}
+        >
+          <span class={styles.workerTaskTitle}>{props.worker.current_task_title}</span>
+        </Show>
+      </button>
+    </li>
+  );
+};
+
+function rank(s: NodeWorker["status"]): number {
+  if (s === "busy") return 3;
+  if (s === "thinking") return 2;
+  return 1; // idle
+}
+
+function statusLabel(s: NodeWorker["status"]): string {
+  if (s === "busy") return "运行中";
+  if (s === "thinking") return "思考中";
+  return "待命";
+}
