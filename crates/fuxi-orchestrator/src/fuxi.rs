@@ -450,13 +450,53 @@ impl Fuxi {
         if needs_dist {
             let enqueuer_opt = self.dist_enqueuer.read().await.clone();
             if let Some(enqueuer) = enqueuer_opt {
+                // dist 路径合成 worker system prompt——含 role 心智 + sentinel
+                // addendum（决策 13）。本地 spawn 路径走 inject_cc 在 spawn_worker
+                // 处注 cc launch config；dist 路径远端 cc 由 worker `run_cc_job`
+                // 经 `--append-system-prompt` 注，必须从这里把整段串好下发。
+                // 否则远端跑裸 cc，玄女永远等不到 deliverable nudge（#4 真因）。
+                let agent_for_role = self.shelf.get_agent(agent_id).await;
+                let system_prompt = agent_for_role.as_ref().and_then(|a| {
+                    let profile = &a.card().profile;
+                    let want_sentinel = !crate::sentinel_addendum::is_globally_disabled()
+                        && crate::sentinel_addendum::should_inject_for_role(&profile.role);
+                    if !want_sentinel && profile.system_prompt.trim().is_empty() {
+                        return None;
+                    }
+                    let role_part = profile.system_prompt.trim();
+                    let sentinel_part =
+                        crate::sentinel_addendum::SENTINEL_ADDENDUM_TEXT.trim();
+                    let assembled = match (role_part.is_empty(), want_sentinel) {
+                        (true, true) => sentinel_part.to_string(),
+                        (false, true) => format!("{role_part}\n\n{sentinel_part}"),
+                        (false, false) => role_part.to_string(),
+                        (true, false) => return None,
+                    };
+                    Some(assembled)
+                });
                 info!(
                     task_id = %task.id,
                     pinned_node = ?task.pinned_node,
                     required_tags = ?task.required_tags,
+                    has_system_prompt = system_prompt.is_some(),
                     "dispatch routing: 走 dist enqueue（spec gap e）"
                 );
-                let _job_id = enqueuer.enqueue(&task).await?;
+                // dist 路径补发 TaskCreated（#1 真因：远端 cc 不发 task lifecycle，
+                // 没人填 acc.title / member_ids，aggregate 把整 task 当空壳过滤）。
+                // 跟本地路径对称发 TaskCreated；TaskDispatched 留 None target——
+                // 让 ingest 用 meta.agent+meta.task fallback 累积 member_ids。
+                {
+                    let mut meta = EventMeta::now();
+                    meta.task = Some(task.id);
+                    let _ = self.bus.publish(Event {
+                        meta,
+                        kind: EventKind::TaskCreated {
+                            title: task.title.clone(),
+                            description: task.description.clone(),
+                        },
+                    });
+                }
+                let _job_id = enqueuer.enqueue(&task, system_prompt).await?;
                 return Ok(());
             }
             // enqueuer 未注入但 task 要 dist——降级到本地 spawn + warn

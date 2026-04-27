@@ -69,6 +69,34 @@ impl StubAgent {
     fn dispatches(&self) -> usize {
         self.dispatch_count.load(Ordering::Relaxed)
     }
+
+    /// 同 `with_session_id` 但额外塞 role-specific `system_prompt`——
+    /// dist 路径 sentinel addendum 注入测试用（#72）。
+    fn with_role_and_system_prompt(
+        role: &str,
+        system_prompt: &str,
+        script: Vec<EventKind>,
+    ) -> Arc<Self> {
+        let card = AgentCard {
+            id: AgentId::new(),
+            profile: AgentProfile {
+                name: format!("stub-{role}"),
+                role: role.to_string(),
+                cli: "stub".to_string(),
+                system_prompt: system_prompt.to_string(),
+                tags: vec!["test".to_string()],
+                extra: Default::default(),
+            },
+            endpoint: "stub://local".into(),
+            status: AgentStatus::Idle,
+        };
+        Arc::new(Self {
+            card,
+            dispatch_count: AtomicUsize::new(0),
+            script,
+            session_id_override: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -1487,12 +1515,14 @@ async fn xuannv_id_watch_borrow_returns_already_set_value() {
 
 /// 测试用 stub DistEnqueuer：记录每次 enqueue 调用，返回固定 job_id。
 struct RecordingEnqueuer {
-    calls: Arc<tokio::sync::Mutex<Vec<Task>>>,
+    calls: EnqueueCalls,
 }
 
+type EnqueueCalls = Arc<tokio::sync::Mutex<Vec<(Task, Option<String>)>>>;
+
 impl RecordingEnqueuer {
-    fn new() -> (Arc<Self>, Arc<tokio::sync::Mutex<Vec<Task>>>) {
-        let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    fn new() -> (Arc<Self>, EnqueueCalls) {
+        let calls: EnqueueCalls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let me = Arc::new(Self {
             calls: calls.clone(),
         });
@@ -1502,8 +1532,12 @@ impl RecordingEnqueuer {
 
 #[async_trait]
 impl fuxi_orchestrator::DistEnqueuer for RecordingEnqueuer {
-    async fn enqueue(&self, task: &Task) -> fuxi_orchestrator::Result<String> {
-        self.calls.lock().await.push(task.clone());
+    async fn enqueue(
+        &self,
+        task: &Task,
+        system_prompt: Option<String>,
+    ) -> fuxi_orchestrator::Result<String> {
+        self.calls.lock().await.push((task.clone(), system_prompt));
         Ok(format!("stub-job-{}", task.id))
     }
 }
@@ -1529,12 +1563,95 @@ async fn dispatch_routes_to_dist_when_pinned_node_set() {
     // dist enqueuer 应被调用一次
     let recorded = calls.lock().await;
     assert_eq!(recorded.len(), 1, "dist enqueuer 应被调用一次");
-    assert_eq!(recorded[0].id, task.id);
-    assert_eq!(recorded[0].pinned_node.as_deref(), Some("mac-local"));
+    assert_eq!(recorded[0].0.id, task.id);
+    assert_eq!(recorded[0].0.pinned_node.as_deref(), Some("mac-local"));
     drop(recorded);
 
     // 本地 stub agent 不应被 dispatch
     assert_eq!(stub.dispatches(), 0, "dist 路径不该调本地 agent.dispatch");
+}
+
+/// β · #4 真因回归：dist 路径必须把 sentinel addendum 注进 system_prompt
+/// 让远端 cc 学到决策 13 nudge 协议。否则远端跑裸 cc，玄女永远收不到
+/// deliverable 信号——这正是 #5 用户实测「门客交付了么」「没有」的根因，
+/// 隐了一个月没暴露因为本地 spawn 路径走的 inject_cc 是另一条 wire。
+#[tokio::test]
+async fn dispatch_dist_path_injects_sentinel_addendum_into_system_prompt() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let (enq, calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    let stub = StubAgent::with_role_and_system_prompt("luban", "# 你是鲁班", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("ls", "ls ~/erp").with_pinned_node("mac-local");
+    fuxi.dispatch(id, task).await.unwrap();
+
+    let recorded = calls.lock().await;
+    assert_eq!(recorded.len(), 1);
+    let sp = recorded[0]
+        .1
+        .as_deref()
+        .expect("dist 路径必须传 system_prompt（含 sentinel 教学）");
+    assert!(sp.contains("# 你是鲁班"), "应保留 role-specific 段：{sp}");
+    assert!(sp.contains("_fuxi"), "应含 sentinel 教学：{sp}");
+    assert!(sp.contains("request_review"), "sentinel kind 字段应在文案：{sp}");
+}
+
+/// β · #4 配套：玄女作为接收方不该被注 sentinel（`should_inject_for_role`
+/// 黑名单），dispatch 走 dist 路径时也遵守同规则。
+#[tokio::test]
+async fn dispatch_dist_path_skips_sentinel_for_xuannv() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+    let (enq, calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    let stub = StubAgent::with_role_and_system_prompt("xuannv", "# 玄女", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("delegate", "x").with_pinned_node("mac-local");
+    fuxi.dispatch(id, task).await.unwrap();
+
+    let recorded = calls.lock().await;
+    if let Some(sp) = recorded[0].1.as_deref() {
+        assert!(
+            !sp.contains("_fuxi"),
+            "玄女 system_prompt 不应含 sentinel 教学：{sp}"
+        );
+    }
+}
+
+/// β · #1 真因回归：dist 路径必须发 TaskCreated 让 home 端 EventBus 有
+/// task lifecycle，否则 aggregate 把远端 task 当空壳（acc.title=None +
+/// member_ids=[]）过滤掉——/api/tasks 永远看不到（用户实测「任务树没新任务」）。
+#[tokio::test]
+async fn dispatch_dist_path_emits_task_created_to_bus() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+    let (enq, _calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    let stub = StubAgent::with_role_and_system_prompt("luban", "", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("dist task title", "dist task desc").with_pinned_node("mac");
+    let task_id = task.id;
+    fuxi.dispatch(id, task).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let recent = bus.store().recent(50).await.expect("recent");
+    let found = recent.iter().any(|ev| {
+        matches!(&ev.kind, EventKind::TaskCreated { title, description }
+            if title == "dist task title" && description == "dist task desc")
+            && ev.meta.task == Some(task_id)
+    });
+    assert!(found, "dist 路径必须发 TaskCreated 让 /api/tasks 能聚合到");
 }
 
 /// 决策树分支 2：task.required_tags 非空 → 走 dist enqueue。
@@ -1556,7 +1673,7 @@ async fn dispatch_routes_to_dist_when_required_tags_nonempty() {
 
     let recorded = calls.lock().await;
     assert_eq!(recorded.len(), 1, "tags 非空也应走 dist");
-    assert_eq!(recorded[0].required_tags, vec!["erp", "local"]);
+    assert_eq!(recorded[0].0.required_tags, vec!["erp", "local"]);
     drop(recorded);
     assert_eq!(stub.dispatches(), 0);
 }
