@@ -13,6 +13,7 @@ import type {
 import type {
   ConversationHistoryResponse,
   InterveneRequestV2,
+  NodesResponse,
   StoredMessage,
   TasksOverview,
   Upload,
@@ -44,6 +45,8 @@ export interface MockState {
   uploads: Upload[];
   /** 阶段 4 任务 sheet · /api/tasks 返回值。空时跑空状态。*/
   tasksOverview?: TasksOverview;
+  /** v3 #58 dist topology · /api/nodes 返回值。空 = { nodes: [] }。*/
+  nodes?: NodesResponse;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -131,6 +134,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     uploadFail: initial?.uploadFail,
     uploads: [],
     tasksOverview: initial?.tasksOverview,
+    nodes: initial?.nodes,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -191,6 +195,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     },
     fetchTasksOverview: async (): Promise<TasksOverview> =>
       state.tasksOverview ?? { running: [], completed: [] },
+    fetchNodes: async (): Promise<NodesResponse> => state.nodes ?? { nodes: [] },
     fetchWorkerEvents: async (agentId: string): Promise<EventHistoryResponse> => ({
       events: state.events[`worker:${agentId}`] ?? [],
       next_cursor: null,

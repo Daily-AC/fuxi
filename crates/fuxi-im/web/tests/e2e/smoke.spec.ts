@@ -10,6 +10,7 @@ declare global {
     __FUXI_HISTORY__?: unknown[];
     __FUXI_TASKS_OVERVIEW__?: unknown;
     __FUXI_INTERVENE_NEXT_STATUS__?: number;
+    __FUXI_NODES__?: unknown;
   }
 }
 
@@ -59,6 +60,10 @@ test.beforeEach(async ({ page }) => {
       if (url.startsWith("/api/workers/")) {
         // /api/workers/:agent_id/events  · 私聊页历史
         return json({ events: [], next_cursor: null });
+      }
+      if (url === "/api/nodes") {
+        const inj = (window as unknown as { __FUXI_NODES__?: unknown }).__FUXI_NODES__;
+        return json(inj ?? { nodes: [] });
       }
       if (url === "/api/push/vapid-pub") return json({ public_key: "stub" });
       if (url === "/api/push/subscribe") return json({ ok: true });
@@ -411,45 +416,81 @@ test("Pager · 切任务页 · 看到 mock 数据 + 切回玄女", async ({ page
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
 
-test("Pager · 切节点页 · 聚合 home 节点 + agents 列表（dot 0）", async ({ page }) => {
+test("#58 · 节点 tab 切真 /api/nodes · 显 home + mac-local + workers", async ({ page }) => {
   await page.addInitScript(() => {
-    window.__FUXI_TASKS_OVERVIEW__ = {
-      running: [
+    window.__FUXI_NODES__ = {
+      nodes: [
         {
-          id: "t1",
-          title: "x",
-          status: "running",
-          created_at: "",
-          last_active_at: "",
-          duration_ms: 0,
-          members: [
+          node_id: "home",
+          tags: ["home", "linux"],
+          max_concurrency: 4,
+          inflight_jobs: 1,
+          heartbeat_lag_ms: 8230,
+          online: true,
+          registered_at: "2026-04-27T05:00:00Z",
+          workers: [
             {
               agent_id: "a-luban",
               role: "luban",
               role_display: "鲁班",
-              tokens: 1500,
               status: "busy",
-            },
-            {
-              agent_id: "a-pusong",
-              role: "pusong",
-              role_display: "蒲松",
-              status: "idle",
+              current_task_id: "t-erp",
+              current_task_title: "查 ERP API",
             },
           ],
         },
+        {
+          node_id: "mac-local",
+          tags: ["local", "mac", "erp"],
+          max_concurrency: 2,
+          inflight_jobs: 0,
+          heartbeat_lag_ms: 4120,
+          online: true,
+          registered_at: "2026-04-27T04:50:00Z",
+          workers: [],
+        },
       ],
-      completed: [],
     };
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-
   await page.getByTestId("tab-nodes").click();
   await expect(page.getByTestId("page-nodes")).toBeVisible();
-  await expect(page.getByTestId("node-home")).toContainText("home");
-  await expect(page.getByTestId("node-agent-a-luban")).toContainText("鲁班");
-  await expect(page.getByTestId("node-agent-a-luban")).toContainText("1.5k");
+  // home 节点：显 worker
+  const home = page.getByTestId("node-home");
+  await expect(home).toContainText("home");
+  await expect(home).toContainText("1/4");
+  await expect(home).toContainText("linux");
+  await expect(page.getByTestId("node-worker-a-luban")).toContainText("鲁班");
+  await expect(page.getByTestId("node-worker-a-luban")).toContainText("查 ERP API");
+  // mac-local：在线但无 worker
+  const mac = page.getByTestId("node-mac-local");
+  await expect(mac).toContainText("mac-local");
+  await expect(mac).toContainText("0/2");
+  await expect(mac).toContainText("当前无 worker 实例");
+});
+
+test("#58 · 节点空 · 显空态提示加节点", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__FUXI_NODES__ = { nodes: [] };
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-nodes").click();
+  await expect(page.getByTestId("nodes-empty")).toContainText("暂无节点");
+});
+
+test("#58 · 添加节点按钮 · 弹 modal 显 install command", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-nodes").click();
+  await page.getByTestId("nodes-add-btn").click();
+  const modal = page.getByTestId("nodes-add-modal");
+  await expect(modal).toBeVisible();
+  await expect(page.getByTestId("nodes-install-cmd")).toContainText("setup-local-worker.sh");
+  // 关 modal
+  await page.getByTestId("nodes-add-close").click();
+  await expect(modal).toHaveCount(0);
 });
 
 test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ page }) => {

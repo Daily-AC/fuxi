@@ -95,3 +95,37 @@ export interface TasksOverview {
   running: TaskGroupCard[];
   completed: TaskGroupCard[];
 }
+
+// ---------- v3 #58 dist topology · GET /api/nodes 契约（β #55 实装中） ----------
+
+export type NodeWorkerStatus = "busy" | "idle" | "thinking";
+
+/** dist controller 维护的 node 上 worker 实例（dispatch 时记下，complete 时清）。*/
+export interface NodeWorker {
+  agent_id: string;
+  role: string;
+  role_display: string;
+  status: NodeWorkerStatus;
+  /** 当前在跑的 task uuid（idle 时 null）。*/
+  current_task_id?: string | null;
+  /** 当前在跑的 task title（idle 时 null）。*/
+  current_task_title?: string | null;
+}
+
+/** dist topology 单节点视图。home 也走 dist register（特殊 node_id="home"）。*/
+export interface NodeView {
+  node_id: string;
+  /** dist tags 数组（home 节点典型 ["home","linux"]，本地 ["local","mac",...]）。*/
+  tags: string[];
+  max_concurrency: number;
+  inflight_jobs: number;
+  /** dist heartbeat 距今 ms；> 30000 视为离线（backend 已计算 online）。*/
+  heartbeat_lag_ms: number;
+  online: boolean;
+  registered_at?: string | null;
+  workers: NodeWorker[];
+}
+
+export interface NodesResponse {
+  nodes: NodeView[];
+}
