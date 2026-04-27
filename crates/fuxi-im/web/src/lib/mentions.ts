@@ -1,32 +1,42 @@
-// @ 提及逻辑 · v3 #N2' / #37
+// @ 提及逻辑 · v3 #N2' / #37 + dist #60
 //
-// 设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §C / §"composer @ 机制详细规范"
+// 设计 spec:
+//   - docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §C / §"composer @ 机制详细规范"
+//   - docs/superpowers/specs/2026-04-27-im-dist-接通-design.md §"PWA composer @ pinned-node 解析"
 //
-// 三块：
-//   1. MentionCandidate 类型 + 排序（last_active_at 降序）
-//   2. fuzzyMatch · 拼音/汉字/role 名 match 候选
-//   3. 序列化：composer 文本 + chip 数组 → { target, text, mentions } intervene 请求
+// 候选两种 kind：worker（默认 · 现有）和 node（dist topology 节点 · #60）。
+// 序列化时 worker chips → mentions[]；node chips → pinned_node（取第一个）。
 
-import type { TaskMember } from "~/types/api";
+import type { NodeView, TaskMember } from "~/types/api";
+
+/** 候选的 kind：worker = 现有 agent；node = dist topology 节点（#60）。
+ *  缺省视为 worker（旧调用兼容）。*/
+export type MentionKind = "worker" | "node";
 
 export interface MentionCandidate {
+  /** worker 用 agent_id；node 用 node_id。chip 上一律走 id。*/
   agent_id: string;
-  /** role key，"luban" / "pusong" / "xuannv" / ...。用于 colorForRole + role_color 选择。*/
+  /** worker：role key（"luban" / "xuannv" / ...）；node：固定 "node"（着色查蓝色专属色）。*/
   role: string;
-  /** 显示名："鲁班" / "蒲松" / "玄女"。*/
+  /** 显示名："鲁班" / "蒲松" / "玄女" / node_id ("home" / "mac-local")。*/
   role_display: string;
-  /** autocomplete 副文本：last_tool_call.tool 或 status fallback ("待命" / "思考中" / ...)。*/
+  /** autocomplete 副文本：last_tool_call.tool / 节点 inflight/online 状态。*/
   hint?: string | null;
   /** 排序用（last_active_at ISO）。null/missing → 排底。*/
   last_active_at?: string | null;
+  /** #60 加 · 候选种类。缺省 worker 兼容老调用。 */
+  kind?: MentionKind;
 }
 
 /** Composer 内的 chip token · 序列化时按 spec §"发送时序列化" 用零宽 + agent_id 占位。
- *  chip 在 composer 是不可分割单元（光标只能在前后），结构上保持成 [text, chip, text, chip, ...] 段。*/
+ *  chip 在 composer 是不可分割单元（光标只能在前后），结构上保持成 [text, chip, text, chip, ...] 段。
+ *  #60：chip 加 kind 区分 worker/node；node chip 走 pinned_node 路径不走 mentions。 */
 export interface MentionChipToken {
   agent_id: string;
   role: string;
   role_display: string;
+  /** #60 加 · 缺省 worker。node chip 序列化为 pinned_node。*/
+  kind?: MentionKind;
 }
 
 /** Composer state 段落组：text 段和 chip 段交错。
@@ -47,7 +57,25 @@ export function candidatesFromMembers(
     role_display: m.role_display,
     hint: hintForMember(m),
     last_active_at: null,
+    kind: "worker" as MentionKind,
   }));
+}
+
+/** #60：dist NodeView 数组转 MentionCandidate · 注入 composer @ 候选尾部。
+ *  - 仅 online 节点入候选（用户 @ 离线节点没意义）
+ *  - hint：inflight/max_concurrency 直观显容量（"2/4 个任务"）
+ *  - role 固定 "node"，给 colorForRole + chip 走蓝色专属色 #7AA0E5（spec §gap e）*/
+export function candidatesFromNodes(nodes: NodeView[]): MentionCandidate[] {
+  return nodes
+    .filter((n) => n.online)
+    .map((n) => ({
+      agent_id: n.node_id,
+      role: "node",
+      role_display: n.node_id,
+      hint: `${n.inflight_jobs}/${n.max_concurrency} 个任务`,
+      last_active_at: null,
+      kind: "node" as MentionKind,
+    }));
 }
 
 function hintForMember(m: TaskMember): string | null {
@@ -84,46 +112,62 @@ export function fuzzyMatch(list: MentionCandidate[], query: string): MentionCand
   });
 }
 
-/** Intervene 请求 · target 取第一个 chip 的 agent_id；无 chip 时 undefined（让 backend 用玄女默认）。*/
+/** Intervene 请求 · target 取第一个 worker chip；无 worker chip 时 undefined（backend 用玄女默认）。
+ *  #60：node chip 走 pinned_node 字段，跟 worker mentions 互不干扰。 */
 export interface SerializedIntervene {
-  /** target = mentions[0]；无 chip 时 undefined（backend 默认走玄女）。 */
+  /** target = 第一个 worker chip 的 agent_id；无 worker chip 时 undefined（backend 默认走玄女）。 */
   target?: string;
   /** 文本部分（chip 占位用零宽间隔符 ​）。*/
   text: string;
-  /** 所有 chip 的 agent_id（按出现顺序）。*/
+  /** 所有 worker chip 的 agent_id（按出现顺序）。 */
   mentions: string[];
-  /** chip 数 > 1 时设 true，UI 用来 toast 警示「只发给第一个」。*/
+  /** worker chip 数 > 1 时 true，UI 用来 toast 警示「只发给第一个」。 */
   multi: boolean;
   /** v3 #46 加 · 已上传附件的 upload id 列表（β #17 attachments 字段）。 */
   attachments?: string[];
+  /** #60 加 · 第一个 node chip 的 node_id（无 node chip 时 undefined）。
+   *  契约：β #57 后端 InterveneRequest 加 pinned_node 解析 → Fuxi::dispatch 走 dist enqueue。*/
+  pinned_node?: string;
+  /** #60 加 · node chip 数 > 1 时 true，UI 用来 toast 警示「多于一个节点 chip 取第一个」。 */
+  multi_node: boolean;
 }
 
 const CHIP_PLACEHOLDER = "​";
 
-/** segments → intervene 请求 body（含 mentions）。
- *  fallbackAgentId 可选：当前 v3 玄女 tab 不需要传（无 chip 时让 backend 默认走玄女）。
- *  任务 thread 内可传任务发起人 agent_id 作 fallback target —— spec §D 任务 thread 默认对玄女说，
- *  跟玄女 tab 默认行为一致，所以 fallback 也可省。*/
+/** segments → intervene 请求 body。
+ *  - worker chip → mentions[]（target = mentions[0]）
+ *  - node chip → pinned_node（取第一个；多于一个 multi_node=true → UI toast 警示）
+ *  - chip 占位用零宽间隔符 ​（U+200B）保留位置但不显字符
+ *
+ *  fallbackAgentId 可选：当前 v3 玄女 tab 不需要传（无 chip 时让 backend 默认走玄女）。 */
 export function serializeComposer(
   segments: ComposerSegment[],
   fallbackAgentId?: string,
 ): SerializedIntervene {
   const mentions: string[] = [];
+  const nodeIds: string[] = [];
   let text = "";
   for (const seg of segments) {
     if (seg.kind === "text") {
       text += seg.text;
+      continue;
+    }
+    if (seg.chip.kind === "node") {
+      nodeIds.push(seg.chip.agent_id);
     } else {
       mentions.push(seg.chip.agent_id);
-      text += CHIP_PLACEHOLDER;
     }
+    text += CHIP_PLACEHOLDER;
   }
   const target = mentions[0] ?? fallbackAgentId;
+  const pinned_node = nodeIds[0];
   return {
     target,
     text: text.trim(),
     mentions,
     multi: mentions.length > 1,
+    pinned_node,
+    multi_node: nodeIds.length > 1,
   };
 }
 
@@ -147,3 +191,11 @@ export function previewText(segments: ComposerSegment[]): string {
 /** v1 多 chip toast 文案（spec §多 @ 处理）。*/
 export const MULTI_MENTION_WARNING =
   "fuxi 当前只发给第一个 @ 的角色，其余仅作引用";
+
+/** #60：多于一个 node chip 时 toast 文案（spec §gap e）。*/
+export const MULTI_NODE_WARNING =
+  "fuxi 当前只 pin 第一个 @ 的节点，其余仅作引用";
+
+/** #60：node chip 专属蓝色（spec §gap e 钉的 #7AA0E5）。
+ *  独立 export 让 MentionChip / NodeChip 共用同一颜色源。*/
+export const NODE_CHIP_COLOR = "#7AA0E5";

@@ -272,4 +272,105 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     expect(items.map((e) => e.textContent).join(" ")).toContain("鲁班");
     unmount();
   });
+
+  it("v3 #60 · composer 候选含 dist online 节点（worker 在前 节点在后）", async () => {
+    const api = createMockApi({
+      tasksOverview: TASK_OVERVIEW,
+      nodes: {
+        nodes: [
+          {
+            node_id: "home",
+            tags: ["home"],
+            max_concurrency: 4,
+            inflight_jobs: 1,
+            heartbeat_lag_ms: 100,
+            online: true,
+            registered_at: null,
+            workers: [],
+          },
+          {
+            node_id: "mac-local",
+            tags: ["local"],
+            max_concurrency: 8,
+            inflight_jobs: 0,
+            heartbeat_lag_ms: 800,
+            online: true,
+            registered_at: null,
+            workers: [],
+          },
+          {
+            node_id: "off",
+            tags: [],
+            max_concurrency: 1,
+            inflight_jobs: 0,
+            heartbeat_lag_ms: 99999,
+            online: false,
+            registered_at: null,
+            workers: [],
+          },
+        ],
+      },
+    });
+    setApiOverride(api);
+    const { getByTestId, queryByTestId, queryAllByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in" initialTab={1}>
+        <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
+      </ApiProvider>
+    ));
+    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "@" } });
+    // 3 worker + 2 online node = 5；节点段 separator 应在
+    const items = queryAllByTestId(/^mention-item-/);
+    expect(items.length).toBe(5);
+    expect(getByTestId("mention-popup-node-sep")).toBeTruthy();
+    expect(getByTestId("mention-item-node-home")).toBeTruthy();
+    expect(getByTestId("mention-item-node-mac-local")).toBeTruthy();
+    // offline 节点不入候选
+    expect(queryByTestId("mention-item-node-off")).toBeNull();
+    unmount();
+  });
+
+  it("v3 #60 · @ node 发送 · intervene body 含 pinned_node + task_id", async () => {
+    const api = createMockApi({
+      tasksOverview: TASK_OVERVIEW,
+      nodes: {
+        nodes: [
+          {
+            node_id: "mac-local",
+            tags: ["local"],
+            max_concurrency: 8,
+            inflight_jobs: 0,
+            heartbeat_lag_ms: 800,
+            online: true,
+            registered_at: null,
+            workers: [],
+          },
+        ],
+      },
+      interveneSeq: [200],
+    });
+    setApiOverride(api);
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in" initialTab={1}>
+        <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
+      </ApiProvider>
+    ));
+    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "用 @ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " 跑测试" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(api.state.intervenes).toHaveLength(1);
+    const req = api.state.intervenes[0] as {
+      task_id?: string | null;
+      pinned_node?: string;
+      target?: string;
+    };
+    expect(req.pinned_node).toBe("mac-local");
+    expect(req.task_id).toBe(TASK_ID);
+    // 仅 node chip · target 应缺省（让 backend 走玄女默认）
+    expect(req.target).toBeUndefined();
+    unmount();
+  });
 });

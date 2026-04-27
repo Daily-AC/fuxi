@@ -22,6 +22,7 @@ import { MentionComposer } from "~/components/MentionComposer";
 import { Conversation } from "~/views/Conversation";
 import {
   candidatesFromMembers,
+  candidatesFromNodes,
   sortCandidates,
   type MentionCandidate,
   type SerializedIntervene,
@@ -53,20 +54,24 @@ export const XuannvPage: Component = () => {
 
   // alive workers · 从 running tasks members 去重，不含玄女（role="xuannv"）。
   const [tasksOverview] = createResource(() => client.fetchTasksOverview());
+  // v3 #60 dist · 拉 /api/nodes online 节点作 @ 候选追加段
+  const [nodesData] = createResource(() => client.fetchNodes());
   const candidates = createMemo<MentionCandidate[]>(() => {
     const ov = tasksOverview();
-    if (!ov) return [];
-    const all = ov.running.flatMap((t) => candidatesFromMembers(t.members));
-    // 去重 by agent_id + 过滤掉玄女
-    const seen = new Set<string>();
-    const out: MentionCandidate[] = [];
-    for (const c of all) {
-      if (c.role === "xuannv") continue;
-      if (seen.has(c.agent_id)) continue;
-      seen.add(c.agent_id);
-      out.push(c);
+    const workers: MentionCandidate[] = [];
+    if (ov) {
+      const all = ov.running.flatMap((t) => candidatesFromMembers(t.members));
+      const seen = new Set<string>();
+      for (const c of all) {
+        if (c.role === "xuannv") continue;
+        if (seen.has(c.agent_id)) continue;
+        seen.add(c.agent_id);
+        workers.push(c);
+      }
     }
-    return sortCandidates(out);
+    const sorted = sortCandidates(workers);
+    const nodes = nodesData() ? candidatesFromNodes(nodesData()!.nodes) : [];
+    return [...sorted, ...nodes];
   });
 
   let controller: ReconnectController | null = null;
@@ -120,6 +125,7 @@ export const XuannvPage: Component = () => {
         target: req.target,
         mentions: req.mentions.length > 0 ? req.mentions : undefined,
         attachments: req.attachments,
+        pinned_node: req.pinned_node,
       });
     try {
       await send();
@@ -174,7 +180,7 @@ export const XuannvPage: Component = () => {
       <Conversation messages={messages} />
       <MentionComposer
         candidates={candidates()}
-        placeholder="对玄女说..."
+        placeholder="对玄女说... (@ 角色或节点)"
         onSubmit={handleSubmit}
       />
     </div>
