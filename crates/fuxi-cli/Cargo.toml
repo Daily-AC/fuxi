@@ -86,3 +86,6 @@ rpassword = "7"
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = "3"
 fuxi-skills.workspace = true
+# β · #54 集成测：tests/im_dist_layer.rs 用 tower::ServiceExt::oneshot 跑 axum
+# Router 真请求验 cookie/HMAC 两 layer 互不干扰
+tower = "0.5"

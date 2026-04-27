@@ -31,6 +31,7 @@ pub mod dist_persistence;
 pub mod draft_stash;
 pub mod extractor_hook;
 pub mod im;
+pub mod im_dist;
 pub mod ipc;
 pub mod markdown;
 pub mod memory_cmd;
