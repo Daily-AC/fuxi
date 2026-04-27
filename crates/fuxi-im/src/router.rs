@@ -18,10 +18,21 @@
 use crate::handlers;
 use crate::middleware::{AuthGate, cookie_auth_layer};
 use crate::state::AppState;
+use crate::uploads::MAX_UPLOAD_BYTES;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
+
+/// `/api/upload` 单请求 body 上限——
+/// 等于 [`MAX_UPLOAD_BYTES`] + 256 KB slack（multipart boundary / headers / form
+/// fields 开销）。axum 默认 `DefaultBodyLimit::max(2MB)` 太小，iOS Safari 上传
+/// 中等图片即超 → multer `failed to read stream` 报错（#49 用户实测踩到）。
+///
+/// 该常量必须 ≥ nginx `client_max_body_size`，否则 nginx 放行的字节 axum 拒。
+/// 当前 nginx 给 32m，本侧给 16m + slack ≈ 16.25m；nginx 仍是上游硬上限。
+const UPLOAD_BODY_LIMIT_BYTES: usize = MAX_UPLOAD_BYTES + 256 * 1024;
 
 /// 装配 IM 服务的全部路由。
 ///
@@ -55,7 +66,14 @@ pub fn build(state: AppState) -> Router {
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
         // β · #17 文件上传 / 下载
-        .route("/api/upload", post(handlers::upload::upload))
+        // #49 修：DefaultBodyLimit 必须显式拉到 UPLOAD_BODY_LIMIT_BYTES——axum
+        // 默认只 2MB，iOS Safari 中等图片就超，multer 报 failed to read stream。
+        // 注意 layer 仅作用于此 route（用 RouterExt route_layer 模式：跟在 .route 后
+        // 调 .layer 会污染所有 route，所以单独 nest）。
+        .route(
+            "/api/upload",
+            post(handlers::upload::upload).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT_BYTES)),
+        )
         .route("/api/uploads/{id}", get(handlers::upload::get_upload))
         .route("/api/auth/login", post(handlers::auth::login))
         .route("/api/auth/pair", post(handlers::auth::pair))

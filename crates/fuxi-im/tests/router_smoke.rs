@@ -144,3 +144,47 @@ async fn unknown_route_is_404() {
     // 404 而非 401——middleware `!path.starts_with("/api/")` 分支放行非 /api 路径
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// #49 修：`/api/upload` 路由的 DefaultBodyLimit 必须显式拉到 ~16MB。
+/// axum 默认 2MB——iOS Safari 上传中等图片就超 → multer 报 failed to read stream。
+///
+/// 本测试发一个 5MB body（远大于 axum 默认 2MB，但远小于本路由 16MB 上限）：
+/// - 修之前：会被 axum body limit layer 在 handler 前拒，返 413 Payload Too Large
+/// - 修之后：layer 放行进 handler，handler 因 upload_store 未注入返 503
+///
+/// 我们断言 status **不**是 413——证明 layer 放行了。具体 status 是 503 还是 400
+/// 取决于 multipart parse 是否在 handler 内成功（5MB 未带 boundary 的裸数据无法解析
+/// 成 multipart，handler 走错 path 但都不该是 413）。
+#[tokio::test]
+async fn api_upload_body_limit_lifted_above_axum_default_2mb() {
+    let (_dir, app, cookie) = build_router().await;
+
+    // 5MB 任意字节（不构造合法 multipart——我们只验 layer 不拒）
+    let big_body = vec![b'x'; 5 * 1024 * 1024];
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/upload")
+                .header(header::COOKIE, &cookie)
+                // 故意给 multipart content-type 但 body 是裸字节——
+                // 进 handler 后 multipart parse 会失败；layer 不应在那之前拒
+                .header(
+                    header::CONTENT_TYPE,
+                    "multipart/form-data; boundary=----test-boundary",
+                )
+                .body(Body::from(big_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "5MB body 不应被 layer 拒——证明 DefaultBodyLimit 已拉到 16MB+；\
+         实际 status: {}",
+        resp.status()
+    );
+}
