@@ -119,6 +119,7 @@ export const XuannvPage: Component = () => {
         task_id: null,
         target: req.target,
         mentions: req.mentions.length > 0 ? req.mentions : undefined,
+        attachments: req.attachments,
       });
     try {
       await send();
