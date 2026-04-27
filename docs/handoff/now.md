@@ -1,132 +1,130 @@
-# NOW · 单页真相（2026-04-26 · IM v3 + β follow-up 三件套全 ship）
+# NOW · 单页真相（2026-04-27 · IM v4 dist 接通卡在 mac cc spawn）
 
-> 上一份 NOW 在同日早些时候，记 v2 重设计四件套（用户实测后否决）。本份覆盖 v3 重设计 + β follow-up backlog 清空。
+> 上一份 NOW 是同日 v3 重设计四件套全 ship。本份覆盖 v4 dist 真接通批次（#54-#70）+ 用户实测撞 mac cc spawn 失败的当下卡点。
 
 ## 一句话
 
-fuxi-im **v3 重设计**（bottom tab bar + 任务=群聊 thread + chip @ 提及）全套已部署 home，HEAD `a2c5976`。v2 (horizontal pager + per-worker 私聊页) 在用户实测后被否决，本批是替代实装。同时 β 把三件 follow-up backlog 全清（#7/#12/#19）+ ζ 永久修了 rsync stale 部署坑。
+fuxi-im v4 dist 真接通**代码层全 ship + home 部署完成 + mac worker 注册成功**，但 e2e 第 3 条（玄女派活到 mac-local 真跑 cc 出结果）**卡在 mac worker spawn cc 失败 → ok=0**。已找到首层 root cause（plist PATH 缺 `~/.local/bin`），刚 hot-fix 但**未在新会话验证**。
 
-## 关键节点
+## 5 gap 接通进度
 
-- **v3 spec**：`docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md`
-- **v2 spec（已 superseded）**：`docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md`
-- **决策 16**（v3 心智 / 否决 v2 路径）：`docs/decisions/16-im-tab-bar-task-thread.md`
-- **决策 17**（IM 部署解耦中期排期）：`docs/decisions/17-im-deploy-decoupling.md`
-- agent team `fuxi-im-v1`：α/β/γ/δ/ε/ζ + team-lead，全员 alive，可 SendMessage 续派
-- 部署：`./deploy/im/install.sh --apply`（rust+web ~1min）/ `--apply --web-only`（dist ~30s）
-
-## 本会话提交（按时间，21 条）
-
-```
-a2c5976 ζ install.sh rsync 加 -c checksum · 防 mtime collision stale
-5a7d714 β follow-up 三件 (#19 dispatch pump 收尾 + #12 fact 两阶段 + #7 xuannv watch)
-1a4d6d5 ε v3 #39 任务 thread mix 全成员
-ce9a12c ε v3 #40 玄女 tab 删 sticky badge + 加 @ chip composer
-d984d7d ε v3 #38 任务列表点卡 push thread
-dc0a404 ε v3 #37 MentionChip + MentionAutocomplete 组件
-ad220d6 ε v3 #36 App shell · BottomTabBar + 删 Pager
-e58f188 β v3 #42 POST /api/intervene 加 mentions 字段
-e8cf9bf β v3 #41 镜像端点 /api/tasks/:id/{events,conv}
-71a788d v3 spec + 决策 16/17 + v2 spec superseded mark
-cd73691 NOW handoff v2 全 ship 状态
-fda219b ε v2 #31 玄女 sticky badge "✓ 抄送 N 门客"  ← v2 (现已 superseded)
-9bd8ed6 β #23 upload multipart 详细诊断日志 + 0 字节支持 + PNG e2e
-983a6bf ε v2 #30 私聊页 modal C 方案橙色识别 + 任务 banner ← v2
-41eb8d8 β #25 GET /api/tasks 字段补齐 + filter user-turn
-0fbfc7b β #27 镜像端点 /api/workers/:agent_id/{events,conv}
-c52c908 ε v2 #29 任务树页 C 方案两级行卡片  ← v2
-df189eb ζ install.sh 加 --web-only flag
-ee34f8d ε v2 #28 重构 App shell · BottomSheet → horizontal pager + NavigationStack  ← v2
-0a707b8 docs · 决策 15 + CLAUDE.md codex follow-up 注释修措辞
-d35f653 v2 spec
-```
-
-## v3 重设计 ship 矩阵
-
-| # | task | commit | 测试 |
+| gap | 代码 | 部署 | e2e 验通 |
 |---|---|---|---|
-| #36 | App shell · BottomTabBar + 删 Pager | `ad220d6` | unit + e2e |
-| #37 | MentionChip + MentionAutocomplete 组件 | `dc0a404` | unit + e2e |
-| #38 | 任务列表点卡 push thread | `d984d7d` | unit + e2e |
-| #39 | 任务 thread mix 全成员 | `1a4d6d5` | 12 reducer + 9 page unit + 2 e2e |
-| #40 | 玄女 tab 删 badge + 加 @ chip composer | `ce9a12c` | 13 unit + 2 e2e |
-| #41 | β `/api/tasks/:id/{events,conv}` 镜像端点 | `e8cf9bf` | 8 filter + 4 e2e |
-| #42 | β `POST /api/intervene` 加 mentions | `e58f188` | 4 单测 |
+| (a) fuxi-im 内嵌 dist controller (#54) | ✅ `f114978` | ✅ home | ✅（home 节点 self-register OK）|
+| (b) install-local-worker.sh + macOS launchd (#61) | ✅ `55a91bc` | ✅ home 静态端点 | ⚠ mac worker register 通了但 cc spawn 失败 |
+| (c) /api/nodes 真 topology (#55) | ✅ `31b5649` | ✅ home | ✅（PWA 节点 tab 显 home + mac-local online）|
+| (d) PWA 节点 tab 切真 + 任务树 @node (#58/#59/#64) | ✅ ε ship | ✅ home | ✅（PWA 显示对）|
+| (e) 玄女 dispatch routing 决策树 (#57) + intervene 闭环 (#70) | ✅ `f77b159` + `5b5fe70` | ✅ home | ⚠ 玄女路由对了，dist enqueue 进 queue，worker pull 拿到 job，**cc spawn 失败 ok=0** |
 
-PWA 总：224 unit + 20 e2e；后端总：187 backend unit。
+## 当前真卡点：mac worker spawn cc
 
-## β follow-up backlog 清空（`5a7d714`）
+**evidence chain**：
+- home `dist_jobs.db` 显示 3 个 job：state=`done`、assignee=`zyldemacbook-pro-local`、**ok=0**（fast-fail，job dispatch 后 1 秒就 done）
+- home journal `dist enqueue 成功 pinned_node=Some("zyldemacbook-pro-local")` ✓
+- nginx access log 3040 次 `/dist/pull 200`（worker 真 pull）+ 3 次 `/dist/report 200`（真上报）
+- mac `which -a claude` → `/Users/e0_7/.local/bin/claude`
+- mac plist `EnvironmentVariables.PATH` 原本 = `~/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`（**缺 `~/.local/bin`**）
 
-| # | 修复 |
-|---|---|
-| #19 | `EventKind::TaskBlocked` 加进 dispatch pump `is_terminal` 白名单（cc ResultError / codex TurnFailed 翻译到 TaskBlocked 后 cc 进 Idle 但不发新事件，旧 pump 卡死） |
-| #12 | `session.rs` 拆 `resolve_xuannv_session` (只读) + `record_xuannv_session` (spawn 成功后才落盘)。**实测**：ζ stop/start fuxi-im 后 journalctl 干净，永久消除手动 `sqlite DELETE oracle_facts xuannv` 运维负担 |
-| #7 | `Fuxi::xuannv_id` 从 `Arc<RwLock>` 改 `tokio::sync::watch::Sender`；`wait_for_xuannv` 用 `.changed().await` 真实时唤醒（公理 3 兑现） |
+**首层 root cause**：worker spawn cc 时 `--cc-bin` 默认 `claude`，走 PATH 查找，但 `~/.local/bin` 不在 plist PATH 里 → cc 找不到 → spawn 失败 → report `ok=0`。
 
-## 进行中（in_progress 等用户）
+**修法（双保险）**：
+- 我 mac hot-fix：plist PATH 前置 `~/.local/bin`，重启 worker（pid 26292 跑着）
+- ζ 升级版 (`88329c8`) 部署到 home：脚本探 cc 真绝对路径 → plist 加 `--cc-bin /Users/e0_7/.local/bin/claude` 不依赖 PATH + plist PATH 也加 `~/.local/bin`（cc 内部 spawn 子进程仍能命中）
 
-- **#23 β · upload multipart 400** — `9bd8ed6` 加诊断日志已部署。**等用户重传一次 iPhone 上传**，β 拿 `journalctl -u fuxi-im | grep -E "upload 入口|multer_error_debug"` 排真因。
+**未验证**：用户在我 hot-fix 后重发同一句但**没观察到 cc 真跑**，PWA 节点 tab 工作中门客仍 0。可能原因：
+1. PATH 修不够，仍有其他 cc spawn 问题（NO_PROXY 没生效 / CLAUDECODE env 嵌套触发 cc 静默卡死 / cc 自己鉴权问题）
+2. PWA 任务树 / 节点 tab 没刷新（缓存）
+3. 玄女这次没真触发 dispatch（用户测试时 PWA → /api/intervene 路径出错）
+4. 或者 hot-fix 的 worker 跑起来但其他原因 cc spawn 又失败
 
-## pending follow-up（3 条非阻塞）
+## 新会话接班步骤（5 分钟）
 
-- **#35** ToolCallCard stdout 前 20 行截断 + 全文按钮（任务 thread 仍渲染 ToolCallCard，仍适用）
-- **#43** UserMessage.mentions 历史回放还原 chip 视觉（数据已带，仅渲染层简化）
-- **#23** 同上，等用户重传
+1. 读本文件 + spec `docs/superpowers/specs/2026-04-27-im-dist-接通-design.md`
+2. 实时 tail mac worker log + ssh home journalctl 看链路状态
+   ```bash
+   tail -f /tmp/fuxi-worker.log /tmp/fuxi-worker.err.log
+   ssh home 'journalctl -u fuxi-im -f -p info' &
+   ```
+3. 让用户重发：`@zyldemacbook-pro-local 帮我 ls ~/erp`
+4. 看链路哪一步停：
+   - home journal 没 `intervene on idle → auto-degrade` → PWA 没到 home（cookie/WS 问题）
+   - 没 `dispatch routing: 走 dist enqueue` → 玄女没认 [路由提示]（#70 实装可能未生效到 home）
+   - dist_jobs 表 ok=1 + worker stdout 有 cc 输出 → e2e 通，PWA 显示问题（前端事件订阅）
+   - dist_jobs 表 ok=0 → cc spawn 仍失败，看 worker err log 真错误信息
+5. 如 hot-fix PATH 仍不够 → 让用户跑 `bash <(curl -s https://im.qmledmq.cn:8443/setup-local-worker.sh)` 拿 ζ 升级版（双保险 `--cc-bin` 绝对路径）
 
-## v3 心智模型（实装兑现）
+## v4 ship 矩阵（71 commit 已 home）
 
+最新 HEAD：`88329c8`（ζ install-local-worker.sh PATH + --cc-bin 双保险，未用户验）
+
+主要 commit 链（按时间逆）：
 ```
-┌─ MainShell ───────────────────────────────────────────────┐
-│                                                           │
-│  ┌─ activeTab content ─────────────────────────────────┐  │
-│  │  玄女 tab：用户↔玄女 thread + composer with @       │  │
-│  │            (autocomplete = all alive workers)       │  │
-│  │  任务 tab Layer 1：任务列表（点卡 push）             │  │
-│  │  任务 tab Layer 2：任务 thread（mix 全成员）         │  │
-│  │  节点 tab：节点列表                                  │  │
-│  └─────────────────────────────────────────────────────┘  │
-│                                                           │
-│  ┌─ BottomTabBar (56px) ───────────────────────────────┐  │
-│  │  ● 玄女     ⚒ 任务     ⛁ 节点                       │  │
-│  └─────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────┘
+88329c8 ζ install-local-worker.sh cc PATH + --cc-bin 双保险 (#71 RCA)
+5b5fe70 β #70 intervene pinned_node 真路由闭环 (#57 v1 缺口)
+2343995 β #67 setup-worker controller_url X-Forwarded-* 推算
+8efbf4b β #69 worker controller URL normalize 6 处 + chaos timing
+2ddc43d ε #68 user bubble 竖排修 + toast 误报修 + ζ #66 controller URL 部分修搭车
+55a91bc ζ install-local-worker.sh 加固（preflight 5 项 + 回滚 + NO_PROXY）
+6ea7c96 ζ install.sh fuxi-im.service 加 dist controller URL env (有问题，被 2ddc43d 修对)
+f361706 β #56 setup-worker + 静态脚本端点
+31b5649 β #55 /api/nodes 真 topology + members.node_id
+f114978 β #54 fuxi-im 内嵌 dist controller + /dist/* HMAC layer
+f77b159 β #57 dispatch routing 决策树 + EventKind.pinned_node + 玄女 ROLE.md
+e58f188 β #42 intervene mentions
+e8cf9bf β #41 /api/tasks/:id/{events,conv} 镜像端点
+fda219b ε #31 玄女 sticky badge "✓ 抄送 N 门客"（v3 已 superseded by 任务 tab）
+1a4d6d5 ε #39 任务 thread mix 全成员
+ce9a12c ε #40 玄女 tab 删 badge + 加 @ chip composer
+d984d7d ε #38 任务列表点卡 push thread
+dc0a404 ε #37 MentionChip + MentionAutocomplete
+ad220d6 ε #36 BottomTabBar + 删 Pager
+38f2ef4 docs · v4 spec + 决策 16/17
+（之前还有 v3 重设计 / v2 路线 / B1 deliverable handoff #48 等，详见 git log -50）
 ```
 
-**composer @ 路由**：text 里第一个 @mention 为 `target`，无 @ 则默认（玄女 tab → 玄女；任务 thread → 玄女即任务发起人）。多 @ v1 简化为第一个为准 + toast 警示。
+## v4 spec + 决策
 
-## v3 视觉一致性（沿用决策 14）
+- **spec**：`docs/superpowers/specs/2026-04-27-im-dist-接通-design.md`
+- **v3 spec**（已 ship 但 v4 是延续）：`2026-04-26-im-tab-bar-task-thread-design.md`
+- **决策 16**：`docs/decisions/16-im-tab-bar-task-thread.md`（任务=群聊心智）
+- **决策 17**：`docs/decisions/17-im-deploy-decoupling.md`（IM 部署解耦中期排期）
+- **决策 13**：`docs/decisions/13-deliverable-boundary-handoff.md`（deliverable nudge）
+- **决策 12**：`docs/decisions/12-dist-worker-true-concurrency.md`（dist 真并发，本批是用户能用层落地）
 
-- 暖暗底 `#1F1E1B`，Anthropic 橙 accent `#D97757`
-- 角色色：玄女紫 `#C4A8E8` / 鲁班琥珀 `#E5A547` / 蒲松绿 `#A0C277`
-- chip 用**角色色**而非橙 accent（一眼区分 @ 谁）
-- autocomplete 弹层 inline 紧贴 composer max-height 200px
-- 不用 emoji / Unicode block / shadow / gradient
-- 触控热区 ≥ 44px（tab bar 项 ≥ 48px）
+## agent team `fuxi-im-v1` 状态
 
-## 协作模式两条收获
+- **β** 队列空（#54-#57 + #41/#42 + #67/#69/#70 + #65 follow-up 全 done）
+- **ε** 队列空（#36-#40 + #58-#60 + #64 + #68 全 done，#43/#35 follow-up pending）
+- **ζ** #62 e2e 验收 in_progress（卡 mac worker cc spawn）+ #71 in_progress（RCA 已修部署，未用户验通）
+- 全员 alive，新会话 SendMessage 续派即可
 
-新 memory：
+## 已知缺口（非阻塞）
 
-- `feedback_team_lead_batch_dispatch.md`（ε 自己写）—— 自驱型 teammate 派活：整批 spec + dep 一次给完，按 dep 自驱，不每件 ack 后再派下一条。worker 速度 >> coordinator 时省 round-trip。
-- 实测验证：v3 batch 派活 ε 五件套连环 ship，β 两件并行 ship + 三件 follow-up，全程 zero stale。
+- #43 follow-up · UserMessage.mentions 历史回放还原 chip 视觉
+- #35 follow-up · ToolCallCard stdout 前 20 行截断 + 全文按钮
+- v1 simplification: intervene busy 路径不 prepend pinned_node（PendingTurn struct 没字段）
+- v1 simplification: `dispatch --task <parent>` 父任务 fan-out 时 routing hint 不传
 
-## 给新会话的"5 分钟接班"清单
+## 接班"5 分钟"checklist
 
 1. 读 `CLAUDE.md`（公理 + 工程规范）
 2. 读本文件
-3. 读 v3 spec `docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md` + 决策 16/17
-4. `git log --oneline -25` 看 commit 链
-5. `TaskList` 看现状（重点 #23 等用户 / #35 #43 follow-up）
-6. `git status` 确认 working tree 干净
-7. SendMessage 各 teammate 探活；β/ε 都已下班待命
+3. 读 v4 spec + 决策 16/17
+4. `git log --oneline -20` 看 commit 链
+5. `TaskList` 看 #62 / #71 进度 + #35/#43 pending
+6. `git status` 工作树状态
+7. SendMessage 各 teammate 探活（β/ε/ζ idle 待命）
 
 ## 不该忘记
 
 - ssh home 端口 2222 / 用户 e0-7 / DDNS / sudo 可用
-- nginx 8443 + 通配符证书 + WS upgrade headers 在 sites-enabled/sia-gateway 模板
+- nginx 8443 + 通配符证书 + WS upgrade headers
 - fuxi-im 绑 127.0.0.1:9100 + nginx im.qmledmq.cn:8443 反代
-- `~/.fuxi/im_password.bcrypt` 主密码（用户私持）
-- 玄女 self-spawn 在 `fuxi im start` 启动时由 `xuannv_bootstrap::ensure_xuannv` 触发（**#12 已修，spawn 失败不留 stale fact**）
-- 镜像端点：worker per `/api/workers/:id/{events,conv}` 保留备用（v2 路线，决策 17 部署解耦后可能用上）；task per `/api/tasks/:id/{events,conv}` 是 v3 主线
-- intervene 的 `mentions: [agent_ids]` 是 v3 新增字段，写入 `UserInterventionSent.mentions`，老事件读出空 Vec backward compat
-- install.sh rsync 已加 `-c` checksum（`a2c5976`），mtime collision stale 永久修
+- `~/.fuxi/im_password.bcrypt` 主密码
+- 玄女自启在 `xuannv_bootstrap::ensure_xuannv`
+- mac worker plist `~/Library/LaunchAgents/com.fuxi.worker.plist` + env `~/.fuxi/dist-worker.env`
+- mac worker 日志 `/tmp/fuxi-worker.log` + `/tmp/fuxi-worker.err.log`
+- home dist_jobs 表 `~/.fuxi/dist_jobs.db`（ssh home 上 sqlite3 看）
+- claude binary 真路径 `/Users/e0_7/.local/bin/claude`（mac）
+- install.sh ssh ControlMaster 加固 (`2202f87`)
+- install.sh rsync `-c` checksum (`a2c5976`) 防 mtime collision stale
