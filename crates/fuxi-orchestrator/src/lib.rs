@@ -24,6 +24,7 @@ pub mod fuxi;
 pub mod idle_gc;
 pub mod recall;
 pub mod registry;
+pub mod sentinel_addendum;
 
 pub use bridge::{Intervener, SystemEventBridge};
 pub use error::{OrchestratorError, Result};
