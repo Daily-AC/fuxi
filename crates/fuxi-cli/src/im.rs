@@ -185,17 +185,32 @@ pub async fn run(args: StartArgs) -> Result<()> {
     tracing::info!("dist controller 已内嵌——/dist/* 走 HMAC，home 节点已自注册");
     let dist_ctrl = dist_layer.ctrl.clone();
     let dist_router = dist_layer.router;
+    let hmac_secret_plain = dist_layer.hmac_secret_plain.clone();
+    let dist_token_plain = dist_layer.dist_token_plain.clone();
     // β · #55 NodesProvider 包 Arc<DistController>，注入 AppState 让
     // /api/nodes handler 能查 dist topology
     let nodes_provider: Arc<dyn fuxi_im::nodes_provider::NodesProvider> =
         Arc::new(crate::im_dist::DistControllerNodesProvider::new(dist_ctrl));
+
+    // β · #56 dist_secrets 给 /api/dist/setup-worker 派发用。
+    // controller_url：用 FUXI_DIST_CONTROLLER_URL env（部署侧 nginx 反代时
+    // 指向 https://im.qmledmq.cn:8443/dist），缺则推算 http://<bind>/dist
+    // 仅适合 dev——生产部署 ζ 必须设 env。
+    let controller_url = std::env::var("FUXI_DIST_CONTROLLER_URL")
+        .unwrap_or_else(|_| format!("http://{}/dist", args.bind));
+    let dist_secrets = fuxi_im::state::DistSecrets {
+        hmac_secret: hmac_secret_plain,
+        dist_token: dist_token_plain,
+        controller_url,
+    };
 
     let app_state = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
         .with_im_push(im_push)
         .with_conv_store(conv_store.clone())
         .with_upload_store(upload_store)
-        .with_nodes_provider(nodes_provider);
+        .with_nodes_provider(nodes_provider)
+        .with_dist_secrets(dist_secrets);
 
     // 5. push hooks —— 订阅 EventBus 触发 web push（玄女 idle / task done）。
     //    必须在 fuxi 已 ready 之后挂；玄女 id 若此刻为 None 就 fallback 到内存
