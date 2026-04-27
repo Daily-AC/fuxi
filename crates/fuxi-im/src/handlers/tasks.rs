@@ -647,6 +647,7 @@ mod tests {
         }
         let m = &card["members"][0];
         // 重设计 #25 字段加齐：last_tool_call + description
+        // β · #55 加齐：node_id（v1 = "home"）
         for k in [
             "agent_id",
             "role",
@@ -656,9 +657,12 @@ mod tests {
             "status",
             "last_tool_call",
             "description",
+            "node_id",
         ] {
             assert!(m.get(k).is_some(), "MemberCard 缺字段 {k}");
         }
+        // β · #55 v1 默认值断言
+        assert_eq!(m["node_id"], "home", "v1 本地 spawn 默认归 home");
     }
 
     /// 重设计 #25：title=="user-turn" 的 task **不**进 list_tasks 响应。

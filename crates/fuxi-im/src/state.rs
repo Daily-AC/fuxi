@@ -11,6 +11,7 @@ use crate::auth::HmacSecret;
 use crate::conv_store::ConvStore;
 use crate::devices::DeviceStore;
 use crate::lockout::LoginGuard;
+use crate::nodes_provider::NodesProvider;
 use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
 use crate::uploads::UploadStore;
@@ -34,6 +35,10 @@ pub struct AppState {
     /// β · #17 文件上传持久层（uploads 表 + 落盘）。
     /// `Option`：同上，None 时上传/下载 handler 返 503。
     pub upload_store: Option<UploadStore>,
+    /// β · #55 节点拓扑提供方——production 由 fuxi-cli 注入 `Arc<DistController>`
+    /// 包装。`Option`：smoke / 单测默认 None；handler 返 503。
+    /// 见 `crate::nodes_provider::NodesProvider` trait + `handlers::nodes`。
+    pub nodes_provider: Option<Arc<dyn NodesProvider>>,
 }
 
 /// β 鉴权相关的子 state——子结构方便整体 clone 同时 handler 用 `state.im_auth.*`
@@ -69,6 +74,7 @@ impl AppState {
             im_push: ImPush::disabled(),
             conv_store: None,
             upload_store: None,
+            nodes_provider: None,
         }
     }
 
@@ -93,6 +99,13 @@ impl AppState {
     /// 注入文件上传持久层（Task #17）。
     pub fn with_upload_store(mut self, store: UploadStore) -> Self {
         self.upload_store = Some(store);
+        self
+    }
+
+    /// β · #55 注入节点拓扑数据源——`fuxi-cli/src/im_dist.rs::build_dist_layer`
+    /// 后由 caller 包 `Arc<DistController>` 调本方法。
+    pub fn with_nodes_provider(mut self, provider: Arc<dyn NodesProvider>) -> Self {
+        self.nodes_provider = Some(provider);
         self
     }
 }

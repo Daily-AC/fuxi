@@ -22,6 +22,7 @@ pub mod devices;
 pub mod error;
 pub mod lockout;
 pub mod middleware;
+pub mod nodes_provider;
 pub mod pair;
 pub mod password;
 pub mod push;

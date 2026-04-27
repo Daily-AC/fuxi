@@ -44,6 +44,11 @@ pub struct MemberCard {
     /// 重设计 #25：task 派给 worker 时附的 description。从 `TaskCreated.description` 拿。
     /// 任务级 description 同 task 内所有 member 共用。
     pub description: Option<String>,
+    /// β · #55：worker 当前所在节点的 `node_id`。v1 默认 `"home"`（本地 spawn）；
+    /// #57 dispatch routing 加 pinned_node 后，dispatch 到远端节点的 worker
+    /// 这里会变 "mac-local" / 自定义 node 名。前端 ε #59 用此字段在 member 行
+    /// 渲染 `· @home` / `· @mac-local` 后缀。
+    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +370,10 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 status,
                 last_tool_call,
                 description: acc.description.clone(),
+                // β · #55 v1：本地 spawn 全部归 home。dispatch routing #57 加
+                // pinned_node 后这里改读 EventKind.pinned_node 拿真 node_id；
+                // 现在所有 worker 都跑在 home 进程，"home" 是诚实默认。
+                node_id: "home".into(),
             });
         }
 

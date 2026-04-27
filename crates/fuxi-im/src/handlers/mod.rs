@@ -9,6 +9,8 @@ pub mod conv;
 pub mod dispatch;
 pub mod health;
 pub mod intervene;
+// β · #55 dist topology 节点 tab 数据源
+pub mod nodes;
 pub mod push;
 pub mod tasks;
 pub mod upload;
