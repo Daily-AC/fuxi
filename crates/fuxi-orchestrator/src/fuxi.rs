@@ -314,10 +314,19 @@ impl Fuxi {
     async fn launch_and_register(
         &self,
         agent_id: AgentId,
-        profile: AgentProfile,
+        mut profile: AgentProfile,
         kind: WorkerKind,
         worktree: Option<fuxi_core::workspace::WorkspaceHandle>,
     ) -> Result<AgentId> {
+        // #48 决策 13 sentinel 教学注入——非黑名单 role + 未全局 disable 时，
+        // 把 sentinel 用法写进 worker 的 system prompt addendum。
+        // 详见 `crate::sentinel_addendum` 的 module doc。
+        // cc 走 cc_cfg.append_system_prompt（cc 不读 profile.system_prompt）；
+        // codex 走 profile.system_prompt（compose_prompt 在 dispatch 时 prepend）。
+        // 故注入点跟分支一对一耦合，下面在 match 内各做一次。
+        let inject_addendum = !crate::sentinel_addendum::is_globally_disabled()
+            && crate::sentinel_addendum::should_inject_for_role(&profile.role);
+
         // 适配器 launch。每个分支都返回一个统一的
         //    `Result<(Arc<dyn Agent>, String /* endpoint_hint */), CoreError>`，
         //    后面共享同一段 register / 失败回滚逻辑。
@@ -327,6 +336,10 @@ impl Fuxi {
             WorkerKind::Cc(mut cc_cfg) => {
                 if let (None, Some(h)) = (cc_cfg.cwd.as_ref(), worktree.as_ref()) {
                     cc_cfg.cwd = Some(h.worktree_path.clone());
+                }
+                if inject_addendum {
+                    // cc 专用：把 sentinel 教学拼到 --append-system-prompt
+                    crate::sentinel_addendum::inject_cc(&mut cc_cfg);
                 }
                 match CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg).await {
                     Ok(a) => {
@@ -355,6 +368,10 @@ impl Fuxi {
             WorkerKind::Codex(mut codex_cfg) => {
                 if let (None, Some(h)) = (codex_cfg.cwd.as_ref(), worktree.as_ref()) {
                     codex_cfg.cwd = Some(h.worktree_path.clone());
+                }
+                if inject_addendum {
+                    // codex 专用：把 sentinel 教学拼到 profile.system_prompt 末尾
+                    crate::sentinel_addendum::inject_codex_profile(&mut profile);
                 }
                 match CodexAgent::launch_with_id(agent_id, profile.clone(), codex_cfg).await {
                     Ok(a) => {
