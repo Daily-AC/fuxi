@@ -8,11 +8,14 @@
 
 use std::path::PathBuf;
 
-/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置默认 `haiku`。
+/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置默认 `sonnet`。
 ///
-/// WHY：当前阶段以成本优先，先用 haiku 跑门客回路；后续可按场景切回更强模型。
+/// WHY：早期为省钱用 haiku，但实测 haiku 不可靠遵守 system prompt addendum
+/// 教学（决策 13 sentinel JSON 输出 ≪ cc team 实测 ≥95%），导致玄女永远等不到
+/// deliverable nudge——交付链直接断（用户实测 19:49 本地任务复现）。换 sonnet
+/// 提高 instruction-following 可靠性；成本敏感场景仍可用 `FUXI_CC_MODEL=haiku` 覆盖。
 pub const DEFAULT_MODEL_ENV: &str = "FUXI_CC_MODEL";
-pub const DEFAULT_MODEL_FALLBACK: &str = "haiku";
+pub const DEFAULT_MODEL_FALLBACK: &str = "sonnet";
 
 /// `claude` headless 启动参数。任何字段都可以不填——`Default` 给出最
 /// 稳定的一套（见 `reference_cc_stream_json.md`）。
@@ -150,7 +153,7 @@ impl CcLaunchConfig {
     }
 }
 
-/// 读 `FUXI_CC_MODEL`；未设回退到 `haiku`。
+/// 读 `FUXI_CC_MODEL`；未设回退到 [`DEFAULT_MODEL_FALLBACK`]（`sonnet`）。
 pub fn resolve_default_model() -> Option<String> {
     std::env::var(DEFAULT_MODEL_ENV)
         .ok()

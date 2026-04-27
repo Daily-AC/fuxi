@@ -572,6 +572,15 @@ impl Fuxi {
             // 新逻辑：terminal 后不立即 break，用短暂 grace timeout 等新事件；
             // 超时仍无 → 真 idle 退。这给 agent pump drain 一个窗口触发新 turn。
             let mut saw_terminal = false;
+            // #79 / 本地路径同款 always-nudge 兜底：cc haiku 实测不可靠遵守
+            // sentinel addendum——本地 spawn 的鲁班跑完 task 不主动发 sentinel
+            // 时玄女永远等不到通知（用户 19:49 测「测试交付」实证）。pump 退出
+            // 时若没观察到 AgentRequestReview，且 task ok done，兜底发一条让
+            // 玄女能开口告交付。Decision 13 "门客自决" 留给 model 升级到能可
+            // 靠遵守 addendum 时再恢复（FUXI_DISABLE_NUDGE_FALLBACK=1 可关）。
+            let mut saw_review_request = false;
+            let mut last_assistant_text: Option<String> = None;
+            let mut task_done_ok = false;
             let drain_grace_ms = terminal_drain_grace_ms();
             loop {
                 let ev_opt = if saw_terminal {
@@ -640,6 +649,22 @@ impl Fuxi {
                     } | EventKind::AgentDead { .. }
                         | EventKind::TaskBlocked { .. }
                 );
+                // #79 兜底：track sentinel + final text + done state
+                if matches!(&ev.kind, EventKind::AgentRequestReview { .. }) {
+                    saw_review_request = true;
+                }
+                if let EventKind::AgentResponded { text } = &ev.kind {
+                    last_assistant_text = Some(text.clone());
+                }
+                if matches!(
+                    &ev.kind,
+                    EventKind::TaskStateChanged {
+                        to: fuxi_core::task::TaskState::Done,
+                        ..
+                    }
+                ) {
+                    task_done_ok = true;
+                }
                 if bus.publish(ev).is_err() {
                     warn!(agent = %agent_id, "event bus 已关闭，pump 退出");
                     break;
@@ -650,6 +675,44 @@ impl Fuxi {
                     // terminal 后收到新事件 = drain 的新 turn 启动了；重置等再次 terminal
                     saw_terminal = false;
                 }
+            }
+            // #79 always-nudge fallback：task done 但 cc 没主动发 sentinel
+            // → pump 兜底 publish AgentRequestReview，玄女能开口告交付。
+            // 走 bus 而非 trait method 因为后者要 active_tx，已 Idle 的 cc 接不了。
+            let nudge_disabled =
+                std::env::var("FUXI_DISABLE_NUDGE_FALLBACK").ok().as_deref() == Some("1");
+            if task_done_ok && !saw_review_request && !nudge_disabled {
+                let summary = match &last_assistant_text {
+                    Some(t) if !t.trim().is_empty() => {
+                        let trimmed = t.trim();
+                        let count = trimmed.chars().count();
+                        if count <= 200 {
+                            trimmed.to_string()
+                        } else {
+                            let truncated: String = trimmed.chars().take(199).collect();
+                            format!("{truncated}…")
+                        }
+                    }
+                    _ => "任务已完成".to_string(),
+                };
+                let mut meta = EventMeta::now();
+                meta.agent = Some(agent_id);
+                meta.task = Some(task_id);
+                let _ = bus.publish(Event {
+                    meta,
+                    kind: EventKind::AgentRequestReview {
+                        agent: agent_id,
+                        task: task_id,
+                        deliverable_kind: fuxi_core::event::DeliverableKind::ResearchSummary,
+                        summary,
+                        artifact_ref: None,
+                    },
+                });
+                info!(
+                    %agent_id,
+                    %task_id,
+                    "always-nudge fallback：cc 未输出 sentinel，pump 兜底发 AgentRequestReview"
+                );
             }
             // pump 退出默认摊回 Idle，但若已被 death_watcher 标 Dead（AgentDead），
             // 不能回写成 Idle——否则会出现"门客死亡后又可用"的状态回退。
