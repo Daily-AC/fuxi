@@ -104,6 +104,46 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     unmount();
   });
 
+  it("v3 #59 · 任务 banner 第二行成员含 @node 标识", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: TASK_ID,
+          title: "混合节点任务",
+          status: "running",
+          created_at: "",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 5000,
+          members: [
+            {
+              agent_id: LUBAN,
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+              last_tool_call: { tool: "grep" },
+              node_id: "mac-local",
+            },
+            {
+              agent_id: PUSONG,
+              role: "pusong",
+              role_display: "蒲松",
+              status: "idle",
+              node_id: "home",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    const { findByTestId, unmount } = setup({ overview });
+    const members = await findByTestId("task-banner-members");
+    expect(members.textContent).toContain("鲁班");
+    expect(members.textContent).toContain("@mac-local");
+    expect(members.textContent).toContain("蒲松");
+    expect(members.textContent).toContain("@home");
+    unmount();
+  });
+
   it("WS 玄女 agent_responded · 渲染 xuannv bubble", async () => {
     const { api, queryAllByTestId, unmount } = setup();
     await new Promise((r) => setTimeout(r, 50));

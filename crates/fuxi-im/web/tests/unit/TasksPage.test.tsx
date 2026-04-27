@@ -157,6 +157,75 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
     unmount();
   });
 
+  it("v3 #59 · member 行有 node_id 时显 @node 标识", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: "t-mix",
+          title: "混合",
+          status: "running",
+          created_at: "",
+          last_active_at: "2026-04-26T11:00:00Z",
+          duration_ms: 5_000,
+          members: [
+            {
+              agent_id: "a-luban-mac",
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+              last_tool_call: { tool: "grep", args_summary: "src/main.go" },
+              node_id: "mac-local",
+            },
+            {
+              agent_id: "a-pusong-home",
+              role: "pusong",
+              role_display: "蒲松",
+              status: "idle",
+              node_id: "home",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    const { getByTestId, unmount } = setup(overview);
+    await new Promise((r) => setTimeout(r, 30));
+    const lubanRow = getByTestId("member-a-luban-mac");
+    expect(lubanRow.textContent).toContain("@mac-local");
+    expect(getByTestId("member-node-a-luban-mac").textContent).toBe("@mac-local");
+    const pusongRow = getByTestId("member-a-pusong-home");
+    expect(pusongRow.textContent).toContain("@home");
+    unmount();
+  });
+
+  it("v3 #59 · member 无 node_id 时不显 @node", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: "t-no-node",
+          title: "无节点信息",
+          status: "running",
+          created_at: "",
+          last_active_at: "",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-no-node",
+              role: "luban",
+              role_display: "鲁班",
+              status: "idle",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    const { queryByTestId, unmount } = setup(overview);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(queryByTestId("member-node-a-no-node")).toBeNull();
+    unmount();
+  });
+
   it("进行中段按 last_active_at 降序 · 最近活动在上", async () => {
     const overview: TasksOverview = {
       running: [
