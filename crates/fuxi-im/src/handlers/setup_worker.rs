@@ -119,13 +119,64 @@ pub async fn setup_worker(
     state.im_auth.login_guard.record_success(ip);
     tracing::info!(%ip, %node, "setup-worker 派发 secret + token 成功");
 
+    // β · #67 controller_url 优雅推算：优先 nginx 反代设的 X-Forwarded-* 头
+    // （`X-Forwarded-Proto` + `X-Forwarded-Host`），fallback 到 fuxi-im 启动期
+    // 注入的 `secrets.controller_url`（systemd env / cli 默认）。
+    //
+    // 为啥要 X-Forwarded-* 优先：用户从 PWA 访问时 host = im.qmledmq.cn:8443，
+    // 但 fuxi-im 进程绑 127.0.0.1:9100；老路径返 secrets.controller_url 时如果
+    // systemd 没设 env，回退到内部 bind 地址，公网 worker 拼出来不可达。
+    // X-Forwarded-* 是 nginx 主动告知的"用户视角"地址，最可靠。
+    //
+    // 同时保证响应**不含 /dist 后缀**（worker 端 #69 normalize 已防御，但这里
+    // 给的是契约型干净字符串，未来 ops 设 systemd env 也跟这统一）。
+    let controller_url = derive_controller_url(&headers, &secrets.controller_url);
     let body_json = Json(SetupWorkerResponse {
         hmac_secret: secrets.hmac_secret.clone(),
         dist_token: secrets.dist_token.clone(),
-        controller_url: secrets.controller_url.clone(),
+        controller_url,
     });
     let resp = (StatusCode::OK, body_json).into_response();
     Ok(resp)
+}
+
+/// β · #67 从 `X-Forwarded-Proto` + `X-Forwarded-Host` 推算 controller URL。
+///
+/// 返保证：
+/// - 不含末尾 `/`
+/// - 不含 `/dist` 后缀（worker 端 format `{controller}/dist/register`，自带）
+///
+/// 决策：
+/// 1. 同时拿到 `X-Forwarded-Proto` + `X-Forwarded-Host` → 拼 `{proto}://{host}`
+/// 2. 缺任一 → fallback `secrets.controller_url`（仍走 normalize 剥末尾 `/dist`）
+///
+/// host 头里 axum 默认全小写名字（http2 强制小写，http1 大小写不敏感）；
+/// 我们走 `headers.get("x-forwarded-proto")` lower-case 形式覆盖二者。
+fn derive_controller_url(headers: &HeaderMap, fallback: &str) -> String {
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let (Some(proto), Some(host)) = (proto, host) {
+        let url = format!("{proto}://{host}");
+        return normalize_url(&url);
+    }
+    normalize_url(fallback)
+}
+
+/// 剥末尾 `/` 与 `/dist`，跟 `dist::normalize_controller_base` 同语义但本地实
+/// 装避免跨 crate 依赖（fuxi-im 不依赖 fuxi-cli）。改 dist 一侧时记得对齐。
+fn normalize_url(s: &str) -> String {
+    s.trim_end_matches('/')
+        .trim_end_matches("/dist")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// install-local-worker.sh 脚本内容编译时内嵌——避免 production 打包后找不到
@@ -259,7 +310,8 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["hmac_secret"], "test-hmac-secret-abc");
         assert_eq!(v["dist_token"], "test-token-xyz");
-        assert_eq!(v["controller_url"], "https://im.test/dist");
+        // β · #67 normalize 剥 /dist 后缀（即使 secrets 里写的是 .../dist）
+        assert_eq!(v["controller_url"], "https://im.test");
     }
 
     #[tokio::test]
@@ -347,6 +399,71 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let resp = app.oneshot(req("test-pwd-1234", "  ")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// β · #67 nginx 反代场景：X-Forwarded-* 头存在 → controller_url 用真实
+    /// 公网域名拼，不走 fallback。
+    #[tokio::test]
+    async fn controller_url_uses_x_forwarded_when_present() {
+        let (_p, _w, app) = build_app_with_password("test-pwd-1234").await;
+        let body = serde_json::json!({"password": "test-pwd-1234", "node_id": "mac-local"});
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/dist/setup-worker")
+            .header("content-type", "application/json")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-host", "im.qmledmq.cn:8443")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["controller_url"], "https://im.qmledmq.cn:8443",
+            "X-Forwarded-* 应推算公网 host 不含 /dist"
+        );
+    }
+
+    /// β · #67 本机直连无反代头 → fallback secrets.controller_url，但末尾 /dist
+    /// 仍被剥（保证 worker 拼 `{controller}/dist/register` 不双 /dist）。
+    #[tokio::test]
+    async fn controller_url_falls_back_to_secrets_and_strips_dist() {
+        let (_p, _w, app) = build_app_with_password("test-pwd-1234").await;
+        // build_app_with_password 里 controller_url 设的是 "https://im.test/dist"
+        let resp = app
+            .oneshot(req("test-pwd-1234", "mac-local"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["controller_url"], "https://im.test",
+            "fallback 走 secrets 字段但 /dist 后缀必须剥"
+        );
+    }
+
+    /// β · #67 部分头缺失（只有 proto，没有 host）→ 仍走 fallback。
+    #[tokio::test]
+    async fn controller_url_requires_both_proto_and_host() {
+        let (_p, _w, app) = build_app_with_password("test-pwd-1234").await;
+        let body = serde_json::json!({"password": "test-pwd-1234", "node_id": "mac-local"});
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/dist/setup-worker")
+            .header("content-type", "application/json")
+            .header("x-forwarded-proto", "https") // 故意缺 host
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["controller_url"], "https://im.test",
+            "缺 X-Forwarded-Host 应回退 secrets"
+        );
     }
 
     #[tokio::test]
