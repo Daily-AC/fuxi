@@ -32,7 +32,8 @@ use fuxi_im::devices::DeviceStore;
 use fuxi_im::push::notify::HyperPushSender;
 use fuxi_im::state::{AppState, ImAuth, ImPush};
 use fuxi_memory::OracleStore;
-use fuxi_orchestrator::{Fuxi, FuxiConfig};
+use fuxi_core::trigger_lookup::TriggerLookup;
+use fuxi_orchestrator::{Fuxi, FuxiConfig, SystemEventBridge};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::watcher::{FsWatcherConfig, FsWatcherRig};
 use fuxi_scheduler::webhook::WebhookState;
@@ -277,6 +278,18 @@ pub async fn run(args: StartArgs) -> Result<()> {
             )
             .await;
             conv_sync_handle = Some(h);
+
+            // **CRITICAL** SystemEventBridge 装配——TUI REPL 在 repl.rs:394 装的，
+            // IM 重做时漏抄了！没装 bridge 玄女永远收不到 AgentRequestReview /
+            // AgentDead 这些系统事件 → 用户实测「门客明明完成了，玄女说没事件」
+            // 真因（事件入了 SQLite 但 bridge 没订阅 → 没把 nudge 注入玄女）。
+            //
+            // trigger_lookup 用 sched_store —— 跟 TUI 同一份 impl（fuxi_scheduler
+            // ::TriggerLookup for SchedulerStore）。bridge 任务的 JoinHandle 不存
+            // （bridge 是只读订阅，进程结束 tokio runtime drop 自动清）。
+            let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
+            SystemEventBridge::spawn(fuxi.clone(), bus.clone(), id, trigger_lookup);
+            tracing::info!(xuannv = %id, "SystemEventBridge 已装配");
         }
         Err(e) => {
             // 即便自启失败也别让整个 daemon 死——降级到"等 REPL 起玄女"路径，
