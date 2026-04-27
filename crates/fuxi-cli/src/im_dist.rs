@@ -69,10 +69,15 @@ pub const HOME_NODE_MAX_CONCURRENCY: u32 = 4;
 /// caller 已 mkdir -p。
 pub async fn build_dist_layer(home_dir: &std::path::Path, bus: EventBus) -> Result<DistLayer> {
     // 1. resolve secret——env 优先，缺失自生成 + 落盘
-    let hmac_secret = resolve_hmac_secret(home_dir).context("解析 dist HMAC secret")?;
+    //    返 (HmacSecret 给 HMAC layer, 明文 String 给 #56 setup-worker 派发)
+    let (hmac_secret, hmac_secret_plain) =
+        resolve_hmac_secret(home_dir).context("解析 dist HMAC secret")?;
     // 2. resolve dist token（暂只 register/heartbeat 用，HMAC 已是主鉴权；token
     //    保留作 controller URL 内嵌的 noise，跟 cli `--token` 兼容）
     let dist_token = resolve_dist_token(home_dir).context("解析 dist token")?;
+    // β · #56 onboarding 端点把这两个明文派给本地 worker 写
+    // ~/.fuxi/dist-worker.env，存进 DistLayer.secrets 由 caller 注入 AppState。
+    let dist_token_plain = dist_token.clone();
 
     // 3. JobPersistence——独立 SQLite 文件
     let dist_db_path = home_dir.join("dist_jobs.db");
@@ -114,30 +119,45 @@ pub async fn build_dist_layer(home_dir: &std::path::Path, bus: EventBus) -> Resu
     let gate = HmacGate::new(hmac_secret);
     let router = router_with_hmac(ctrl.clone(), gate);
 
-    Ok(DistLayer { ctrl, router })
+    Ok(DistLayer {
+        ctrl,
+        router,
+        hmac_secret_plain,
+        dist_token_plain,
+    })
 }
 
-/// `build_dist_layer` 的产物——分两块返便于 caller 各取所需：
-/// - `ctrl` 给 daemon `with_dist` 用 + 后续 #55 `/api/nodes` 共享
+/// `build_dist_layer` 的产物——分块返便于 caller 各取所需：
+/// - `ctrl` 给 daemon `with_dist` 用 + #55 `/api/nodes` 共享
 /// - `router` 给 axum app `.merge()`
+/// - `hmac_secret_plain` / `dist_token_plain` 给 #56 `/api/dist/setup-worker`
+///   主密码鉴权后派给本地 worker 写 `~/.fuxi/dist-worker.env`
 pub struct DistLayer {
     pub ctrl: Arc<DistController>,
     pub router: Router,
+    pub hmac_secret_plain: String,
+    pub dist_token_plain: String,
 }
 
 /// 解析 HMAC secret——env 优先；缺失则读 `~/.fuxi/dist_hmac.key`；都无则首启
 /// 自生成 + 落盘（0600）。同 fuxi-im 主 auth 的 load-or-create 模式。
-fn resolve_hmac_secret(home_dir: &std::path::Path) -> Result<HmacSecret> {
-    if let Ok(secret) = HmacSecret::from_env() {
+///
+/// 返 `(HmacSecret 给 HMAC layer, 明文 String 给 #56 setup-worker 派发)`。
+/// HmacSecret 包 SecretString 不允许 clone 出明文，所以这里在 secret 装包前
+/// 多保留一份字符串副本——仅在 fuxi-im 启动期 in-memory 流转，不落第二份盘。
+fn resolve_hmac_secret(home_dir: &std::path::Path) -> Result<(HmacSecret, String)> {
+    if let Ok(plain) = std::env::var(FUXI_DIST_HMAC_SECRET_ENV)
+        && !plain.is_empty()
+    {
         tracing::info!("dist HMAC secret 来源：${FUXI_DIST_HMAC_SECRET_ENV}");
-        return Ok(secret);
+        return Ok((HmacSecret::new(plain.clone()), plain));
     }
     let key_path = home_dir.join("dist_hmac.key");
     if let Ok(content) = std::fs::read_to_string(&key_path) {
-        let trimmed = content.trim();
+        let trimmed = content.trim().to_string();
         if !trimmed.is_empty() {
             tracing::info!(path = %key_path.display(), "dist HMAC secret 来源：本地文件");
-            return Ok(HmacSecret::new(trimmed.to_string()));
+            return Ok((HmacSecret::new(trimmed.clone()), trimmed));
         }
     }
     // 自生成 + 落盘
@@ -148,7 +168,7 @@ fn resolve_hmac_secret(home_dir: &std::path::Path) -> Result<HmacSecret> {
         path = %key_path.display(),
         "dist HMAC secret 自动生成——首启场景；后续可改 ${FUXI_DIST_HMAC_SECRET_ENV} 或本地文件"
     );
-    Ok(HmacSecret::new(generated))
+    Ok((HmacSecret::new(generated.clone()), generated))
 }
 
 /// 解析 dist token——env 优先；缺失则读 `~/.fuxi/dist_token`；都无自生成。

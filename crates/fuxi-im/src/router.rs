@@ -44,6 +44,17 @@ pub fn build(state: AppState) -> Router {
         .route("/api/tasks", get(handlers::tasks::list_tasks))
         // β · #55 dist topology——节点 tab + 任务卡 @node 标识共用数据源
         .route("/api/nodes", get(handlers::nodes::list_nodes))
+        // β · #56 worker onboarding——主密码鉴权派 secret/token + 静态脚本端点
+        // setup-worker 路径在 cookie middleware is_exempt 已豁免（同 /api/auth/login）；
+        // setup-local-worker.sh 不在 /api/* 自然过 layer，脚本本身无 secret
+        .route(
+            "/api/dist/setup-worker",
+            post(handlers::setup_worker::setup_worker),
+        )
+        .route(
+            "/setup-local-worker.sh",
+            get(handlers::setup_worker::get_setup_script),
+        )
         // β · #N6' 任务 thread 镜像端点：events 走白名单 filter，conv WS 同 filter
         // 接续。`/stream` 是 γ 早期的"任务 raw 事件流"路径，filter 仅 meta.task；
         // 保留兼容观察器，不删

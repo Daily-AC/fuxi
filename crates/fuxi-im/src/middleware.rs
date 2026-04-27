@@ -34,8 +34,13 @@ impl AuthGate {
 }
 
 /// 不需要鉴权的路径前缀——登入入口、配对入口本身、liveness probe。
+/// `/api/dist/setup-worker` 是 worker onboarding 入口（本身用主密码鉴权而非
+/// cookie，攻击面跟 `/api/auth/login` 同等）。
 fn is_exempt(path: &str) -> bool {
-    matches!(path, "/api/auth/login" | "/api/auth/pair" | "/healthz")
+    matches!(
+        path,
+        "/api/auth/login" | "/api/auth/pair" | "/api/dist/setup-worker" | "/healthz"
+    )
 }
 
 /// axum middleware 入口。

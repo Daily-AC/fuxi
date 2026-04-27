@@ -12,6 +12,8 @@ pub mod intervene;
 // β · #55 dist topology 节点 tab 数据源
 pub mod nodes;
 pub mod push;
+// β · #56 本地 worker onboarding：主密码 → secret/token + 静态脚本端点
+pub mod setup_worker;
 pub mod tasks;
 pub mod upload;
 // β · #27 镜像 /api/conv 但按 agent_id 过滤——私聊页（重设计 #N5）数据源

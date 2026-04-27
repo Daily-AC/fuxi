@@ -39,6 +39,27 @@ pub struct AppState {
     /// 包装。`Option`：smoke / 单测默认 None；handler 返 503。
     /// 见 `crate::nodes_provider::NodesProvider` trait + `handlers::nodes`。
     pub nodes_provider: Option<Arc<dyn NodesProvider>>,
+    /// β · #56 dist worker onboarding 派发的 secret/token 三件套。
+    /// production 由 fuxi-cli 在 `im_dist::build_dist_layer` 后注入；
+    /// `Option`：smoke / 单测默认 None；setup-worker handler 返 503。
+    pub dist_secrets: Option<DistSecrets>,
+}
+
+/// β · #56 dist worker onboarding 派给本地 macOS 节点的三件套。
+/// 通过 `POST /api/dist/setup-worker` 主密码鉴权后下发——
+/// install-local-worker.sh 写到 `~/.fuxi/dist-worker.env`。
+///
+/// **不暴露 setter**——这些值由 `fuxi im start` 启动时一次性加载/生成
+/// （见 `fuxi-cli/src/im_dist.rs`），运行期不变更。
+#[derive(Clone, Debug)]
+pub struct DistSecrets {
+    /// HMAC secret 明文——同 fuxi-im 启动时 `FUXI_DIST_HMAC_SECRET` env / 落盘文件
+    /// 加载/生成的那个值。脚本写到 worker 端 `FUXI_DIST_HMAC_SECRET`。
+    pub hmac_secret: String,
+    /// dist token 明文——脚本写到 worker 端 `FUXI_DIST_TOKEN`。
+    pub dist_token: String,
+    /// dist controller URL——一般 `<home_url>/dist`，部署侧 nginx 反代到 fuxi-im :9100。
+    pub controller_url: String,
 }
 
 /// β 鉴权相关的子 state——子结构方便整体 clone 同时 handler 用 `state.im_auth.*`
@@ -75,6 +96,7 @@ impl AppState {
             conv_store: None,
             upload_store: None,
             nodes_provider: None,
+            dist_secrets: None,
         }
     }
 
@@ -106,6 +128,13 @@ impl AppState {
     /// 后由 caller 包 `Arc<DistController>` 调本方法。
     pub fn with_nodes_provider(mut self, provider: Arc<dyn NodesProvider>) -> Self {
         self.nodes_provider = Some(provider);
+        self
+    }
+
+    /// β · #56 注入 dist secret/token onboarding 包——`fuxi im start` 启动时
+    /// 用同一组 secret 配 [`with_nodes_provider`] 一并注入。
+    pub fn with_dist_secrets(mut self, secrets: DistSecrets) -> Self {
+        self.dist_secrets = Some(secrets);
         self
     }
 }
