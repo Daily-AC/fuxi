@@ -132,23 +132,28 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
     unmount();
   });
 
-  it("已完成段默认折叠 · sticky tail 显数量 + tap 展开", async () => {
+  it("v3 #44 · 已完成段直接平铺（无 sticky tail）+ 按 last_active_at 降序", async () => {
     const overview: TasksOverview = {
       running: [],
       completed: [
-        { id: "c1", title: "升级 deps", status: "completed", created_at: "", last_active_at: "", duration_ms: 100_000, members: [] },
-        { id: "c2", title: "整理日报", status: "completed", created_at: "", last_active_at: "", duration_ms: 200_000, members: [] },
+        // 故意把更早的放前面，验证 sort 后老的在底
+        { id: "c-old", title: "整理日报", status: "completed", created_at: "", last_active_at: "2026-04-26T10:00:00Z", duration_ms: 200_000, members: [] },
+        { id: "c-new", title: "升级 deps", status: "completed", created_at: "", last_active_at: "2026-04-26T11:00:00Z", duration_ms: 100_000, members: [] },
       ],
     };
-    const { getByTestId, queryByTestId, unmount } = setup(overview);
+    const { container, getByTestId, queryByTestId, unmount } = setup(overview);
     await new Promise((r) => setTimeout(r, 30));
-    const tail = getByTestId("tasks-completed-tail");
-    expect(tail.textContent).toContain("已完成 · 2 条");
-    expect(queryByTestId("task-card-c1")).toBeNull();
-    fireEvent.click(tail);
-    await new Promise((r) => setTimeout(r, 10));
-    expect(getByTestId("task-card-c1")).toBeTruthy();
-    expect(getByTestId("task-card-c2")).toBeTruthy();
+    // sticky tail 已删
+    expect(queryByTestId("tasks-completed-tail")).toBeNull();
+    // 已完成段直接展示卡片
+    expect(getByTestId("task-card-c-old")).toBeTruthy();
+    expect(getByTestId("task-card-c-new")).toBeTruthy();
+    // 验排序：c-new 在前
+    const cards = Array.from(
+      container.querySelectorAll('[data-testid^="task-card-c-"]'),
+    ).filter((el) => !el.getAttribute("data-testid")?.startsWith("task-card-head-"));
+    expect(cards[0]?.getAttribute("data-testid")).toBe("task-card-c-new");
+    expect(cards[1]?.getAttribute("data-testid")).toBe("task-card-c-old");
     unmount();
   });
 

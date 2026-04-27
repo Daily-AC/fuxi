@@ -213,32 +213,5 @@
   text-overflow: ellipsis;
 }
 
-/* ===== 已完成 sticky tail ===== */
-
-.completedTail {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  min-height: var(--touch);
-  width: 100%;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-  text-align: left;
-  transition: color var(--transition-fast), border-color var(--transition-fast);
-}
-
-.completedTail:hover,
-.completedTail:focus-visible {
-  color: var(--text-secondary);
-  border-color: var(--border-strong);
-}
-
-.tailMark {
-  font-size: var(--size-body);
-  color: inherit;
-}
+/* v3 #44：已完成段 sticky tail 折叠已删（用户实测嫌没必要），直接平铺。
+ * dim 卡片视觉用 .cardDim opacity 0.65。 */
