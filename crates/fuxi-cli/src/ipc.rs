@@ -52,6 +52,16 @@ pub enum Command {
         task_id: Option<String>,
         title: String,
         body: Option<String>,
+        /// β · #70 dist 路由 hint：钉到指定 node_id（如 `mac-local`）。
+        /// `None` = 不钉。Fuxi::dispatch 决策树看到 `pinned_node.is_some()` 即走
+        /// dist enqueue，不走本地 spawn。serde default 兼容老 daemon。
+        #[serde(default)]
+        pinned_node: Option<String>,
+        /// β · #70 dist 路由 hint：能力 tag 集合（如 `["local","erp"]`）。
+        /// 非空时走 dist enqueue，controller 按 tag 匹配 worker。serde default
+        /// 兼容老 daemon。
+        #[serde(default)]
+        required_tags: Vec<String>,
     },
     /// 介入——向指定门客发话。
     Intervene {

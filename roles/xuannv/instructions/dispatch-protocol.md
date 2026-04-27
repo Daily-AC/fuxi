@@ -34,6 +34,34 @@ fuxi dispatch --to "$ID2" --task "$TID" --title '升级 rust 1.75' '负责 integ
 2. 第二个及后续门客都要带 `--task "$TID"`。
 3. TUI 任务树按 `task_id` 聚合，用户会看到一个任务节点下挂多个门客。
 
+### 2.2 节点路由派活（dist 接通后必读）
+
+当用户消息含 `[路由提示：...]` 段（PWA composer 用 `@<node-id>` 钉到节点时，IM
+handler 自动 prepend），或者你按 `dispatch-routing.md` 推断该活需要某节点能力，
+派活时**必须**用 `--pinned-node` 或 `--required-tags`：
+
+```bash
+ID=$(fuxi spawn --role luban | tail -n1)
+
+# 用户说"用 mac-local 帮我看 ~/erp" → composer chip @mac-local 后端 prepend
+# [路由提示：用户希望本次派活路由到节点 mac-local]
+# 我看到提示后用 --pinned-node 派给该节点：
+fuxi dispatch --to "$ID" --pinned-node mac-local --title 'ls erp' '请 ls -la ~/erp 然后报告目录树前两层'
+
+# 或按能力 tag 派（用户没钉具体节点，但活要本地 fs 访问）：
+fuxi dispatch --to "$ID" --required-tags local,erp --title '...' '...'
+```
+
+`Fuxi::dispatch` 决策树看到 `task.pinned_node.is_some() || !required_tags.is_empty()`
+→ 走 dist enqueue → 远端 worker pull job → 在该节点起 cc/codex 跑。事件流回
+共享 EventBus，我和 PWA 都看得到 worker 进度。
+
+**反模式**：
+- 用户没说节点 / 不带 `[路由提示]` → 不要乱加 `--pinned-node`，让默认路径 fallback 本地 spawn
+- `--pinned-node` 和 `--required-tags` 二选一，pinned_node 优先级更高
+- 不要给"纯调研 / 写代码思考"加 `--pinned-node`——默认 home 本地 spawn 更快
+- `--task <parent>` 父任务 fan-out 时**暂不支持** routing hint（同 task fan-out 多 worker 的路由语义 v2 再定）
+
 ## 3. 中途观察 · 等待哲学
 
 **事件流自己渲染，我不轮询。**

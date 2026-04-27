@@ -71,6 +71,15 @@ pub struct DispatchArgs {
     /// 只打印 task_id（便于 shell capture 做同 task fan-out）。
     #[arg(long, default_value_t = false)]
     pub print_task_id: bool,
+    /// β · #70 dist 路由 hint：钉到指定 dist node_id（如 `mac-local`）。
+    /// `Fuxi::dispatch` 决策树命中 → 走 dist enqueue 而非本地 spawn。
+    /// 玄女按 dispatch-routing.md 推断后传，PWA 不直接走 CLI。
+    #[arg(long = "pinned-node")]
+    pub pinned_node: Option<String>,
+    /// β · #70 dist 路由 hint：能力 tag 集合（逗号分隔，如 `local,erp`）。
+    /// 非空时走 dist enqueue。pinned_node 优先级高于 tags（玄女只需选其一）。
+    #[arg(long = "required-tags", value_delimiter = ',')]
+    pub required_tags: Vec<String>,
 }
 
 pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
@@ -80,6 +89,8 @@ pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
         task_id: args.task_id,
         title: args.title,
         body: if body.is_empty() { None } else { Some(body) },
+        pinned_node: args.pinned_node,
+        required_tags: args.required_tags,
     })
     .await?;
     if !args.print_task_id {
@@ -811,6 +822,66 @@ mod tests {
         assert_eq!(w.a.agent_id, "agent-123");
         assert!(w.a.print_task_id);
         assert_eq!(w.a.body, vec!["请先跑测试"]);
+    }
+
+    /// β · #70 `--pinned-node` flag 解析。
+    #[test]
+    fn dispatch_args_parse_pinned_node() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: DispatchArgs,
+        }
+        let w = W::try_parse_from([
+            "w",
+            "--to",
+            "agent-123",
+            "--pinned-node",
+            "mac-local",
+            "ls",
+            "erp",
+        ])
+        .unwrap();
+        assert_eq!(w.a.pinned_node.as_deref(), Some("mac-local"));
+        assert!(w.a.required_tags.is_empty());
+        assert_eq!(w.a.body, vec!["ls", "erp"]);
+    }
+
+    /// β · #70 `--required-tags local,erp` 逗号分隔解析为 Vec。
+    #[test]
+    fn dispatch_args_parse_required_tags_comma_separated() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: DispatchArgs,
+        }
+        let w = W::try_parse_from([
+            "w",
+            "--to",
+            "agent-123",
+            "--required-tags",
+            "local,erp",
+            "看代码",
+        ])
+        .unwrap();
+        assert_eq!(w.a.required_tags, vec!["local", "erp"]);
+        assert!(w.a.pinned_node.is_none());
+    }
+
+    /// β · #70 既无 pinned-node 也无 required-tags → 默认空（本地 spawn 路径）
+    #[test]
+    fn dispatch_args_default_no_routing_hint() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: DispatchArgs,
+        }
+        let w = W::try_parse_from(["w", "--to", "agent-123", "干活"]).unwrap();
+        assert!(w.a.pinned_node.is_none());
+        assert!(w.a.required_tags.is_empty());
     }
 
     #[test]

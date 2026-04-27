@@ -341,11 +341,21 @@ async fn dispatch_command(
             task_id,
             title,
             body,
+            pinned_node,
+            required_tags,
         } => match parse_agent_id(&agent_id) {
             Err(e) => Response::err(e),
             Ok(id) => {
                 let desc = body.as_deref().unwrap_or("");
                 if let Some(parent_raw) = task_id {
+                    // β · #70 v1 限制：dispatch_in_task 走 dispatch_to_any 路径，
+                    // 暂不传 pinned_node/required_tags（fan-out 到多 worker 时
+                    // routing 语义另说）。同 task fan-out 撞 dist 需求时再扩。
+                    if pinned_node.is_some() || !required_tags.is_empty() {
+                        tracing::warn!(
+                            "dispatch --task <parent> 同时带 pinned_node/required_tags v1 暂忽略 routing hint"
+                        );
+                    }
                     match parse_task_id(&parent_raw) {
                         Err(e) => Response::err(e),
                         Ok(parent) => match fuxi.dispatch_in_task(id, parent, &title, desc).await {
@@ -356,7 +366,15 @@ async fn dispatch_command(
                         },
                     }
                 } else {
-                    let task = Task::new(&title, desc);
+                    // β · #70 把 CLI 的 routing hint 注入 Task → Fuxi::dispatch 决策
+                    // 树命中 dist enqueue（pinned_node.is_some() || !tags.is_empty()）。
+                    let mut task = Task::new(&title, desc);
+                    if let Some(node) = pinned_node {
+                        task = task.with_pinned_node(node);
+                    }
+                    if !required_tags.is_empty() {
+                        task = task.with_required_tags(required_tags);
+                    }
                     let task_id = task.id;
                     match fuxi.dispatch(id, task).await {
                         Ok(()) => Response::ok(serde_json::json!({"task_id": task_id.to_string()})),
