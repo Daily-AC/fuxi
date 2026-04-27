@@ -109,6 +109,67 @@ describe("fromStoredMessage", () => {
     };
     expect(fromStoredMessage(s)).toBeNull();
   });
+
+  // Bug #45 回归：backend conv_store handle_event 写库时 content 是 JSON object
+  // `{"text":"..."}`（serde_json::json! 宏），不是裸字符串。v3 之前 fromStoredMessage 把
+  // 非 string 的 content 全当空 → 历史消息全丢，用户感知"刷新就没了"。
+  it("Bug #45 · text content 是 JSON 对象 {text: ...}（backend 实际 wire）→ 取出 text", () => {
+    const s: StoredMessage = {
+      id: "m45-u",
+      conv_id: "xuannv",
+      role: "user",
+      kind: "text",
+      content: { text: "查 ERP API 的入口" },
+      ts: "2026-04-26T12:00:00Z",
+    };
+    expect(fromStoredMessage(s)).toMatchObject({
+      kind: "user",
+      text: "查 ERP API 的入口",
+    });
+  });
+
+  it("Bug #45 · 玄女回复 content 也是 {text: ...} JSON 对象", () => {
+    const s: StoredMessage = {
+      id: "m45-x",
+      conv_id: "xuannv",
+      role: "xuannv",
+      agent_id: "x-uuid",
+      kind: "text",
+      content: { text: "查到 12 条接口" },
+      ts: "2026-04-26T12:00:01Z",
+    };
+    expect(fromStoredMessage(s)).toMatchObject({
+      kind: "xuannv",
+      text: "查到 12 条接口",
+      streaming: false,
+    });
+  });
+
+  it("Bug #45 · {text: \"\"} 空 text 仍然过滤 null（Bug #24 防御不破）", () => {
+    const s: StoredMessage = {
+      id: "m45-empty",
+      conv_id: "xuannv",
+      role: "xuannv",
+      agent_id: "x",
+      kind: "text",
+      content: { text: "" },
+      ts: "2026-04-26T12:00:02Z",
+    };
+    expect(fromStoredMessage(s)).toBeNull();
+  });
+
+  it("Bug #45 · content 既不是 string 也不是 {text:...} → 兜底空，过滤 null", () => {
+    const s: StoredMessage = {
+      id: "m45-junk",
+      conv_id: "xuannv",
+      role: "xuannv",
+      agent_id: "x",
+      kind: "text",
+      content: { foo: "bar" }, // wire 格式不对
+      ts: "2026-04-26T12:00:03Z",
+    };
+    expect(fromStoredMessage(s)).toBeNull();
+  });
 });
 
 describe("mergeMessages 去重 + 排序", () => {

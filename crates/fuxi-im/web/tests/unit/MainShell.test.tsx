@@ -193,6 +193,41 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     unmount();
   });
 
+  it("Bug #45 · 历史预加载 backend 实际 wire（content 是 {text}）→ 渲染上屏", async () => {
+    // backend conv_store::handle_event 写库时 content 是 serde_json::json!({"text":"..."})
+    // v3 之前 fromStoredMessage 把非 string 当空 → 历史全丢；本测试守住"刷新历史不丢"。
+    const history = {
+      xuannv: [
+        {
+          id: "real-u",
+          conv_id: "xuannv",
+          role: "user" as const,
+          kind: "text" as const,
+          content: { text: "查 ERP API" },
+          ts: "2026-04-26T10:00:00Z",
+        },
+        {
+          id: "real-x",
+          conv_id: "xuannv",
+          role: "xuannv" as const,
+          agent_id: "x-uuid",
+          kind: "text" as const,
+          content: { text: "好，派给鲁班" },
+          ts: "2026-04-26T10:00:30Z",
+        },
+      ],
+    };
+    const { queryAllByTestId, unmount } = setup({ history });
+    await new Promise((r) => setTimeout(r, 50));
+    const users = queryAllByTestId("msg-user");
+    const xn = queryAllByTestId("msg-xuannv");
+    expect(users).toHaveLength(1);
+    expect(xn).toHaveLength(1);
+    expect(users[0]?.textContent).toContain("查 ERP API");
+    expect(xn[0]?.textContent).toContain("好，派给鲁班");
+    unmount();
+  });
+
   it("历史 + WS 推同 id 不重复（去重）", async () => {
     const history = {
       xuannv: [

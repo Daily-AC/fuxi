@@ -120,6 +120,19 @@ export type Message =
   | ThinkingMessage
   | StatusMarker;
 
+/** StoredMessage.content 的 text 抽取 · 兼容两路 wire：
+ *  - backend serde_json::json!({"text":"..."}) 主路（β #17 实装至今）→ 取 .text
+ *  - 裸字符串（早期或 mock）→ 直接返
+ *  其它情况返空串（外层 .trim() === "" 会丢掉空 bubble）。 */
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (content && typeof content === "object") {
+    const t = (content as { text?: unknown }).text;
+    if (typeof t === "string") return t;
+  }
+  return "";
+}
+
 function parseTs(iso?: string | null): number {
   if (!iso) return Date.now();
   const t = new Date(iso).getTime();
@@ -244,11 +257,16 @@ export function makeUserMessage(text: string, attachments?: Upload[]): UserMessa
  *  "玄女 16:55" 空灰圆 bubble。β #17 旧版 conv_store 把没回复的 thinking turn 也
  *  sync 进了 im.db；β #25 在做服务端侧过滤，前端这里是双保险。
  *  user 空 text 同样不应该出现，兜底丢。
+ *
+ *  Bug #45 修：backend conv_store::handle_event 写库时把 text kind 的 content 包成
+ *  `{"text": "..."}` JSON 对象（serde_json::json! 宏），而不是裸字符串。
+ *  这里 v3 之前一直用 `typeof s.content === "string"` 取值 → 永远拿到空串 → 历史消息
+ *  全被丢掉，用户感知"刷新历史就没了"。修：兼容两种 wire（裸 string 兜底 + JSON 对象主路）。
  */
 export function fromStoredMessage(s: StoredMessage): Message | null {
   const ts = parseTs(s.ts);
   if (s.kind === "text") {
-    const text = typeof s.content === "string" ? s.content : "";
+    const text = textFromContent(s.content);
     if (text.trim() === "") return null;
     if (s.role === "user") {
       return {
