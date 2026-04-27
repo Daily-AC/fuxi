@@ -463,6 +463,39 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
 
+// ===== #46 composer + 附件入口（玄女 tab 测，任务 thread 共用同 MentionComposer 路径）=====
+
+test("#46 · 玄女 tab + 选 PNG → attach chip → 发 → intervene 带 attachments", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
+  await expect(page.getByTestId("composer-attach-btn")).toBeVisible();
+
+  // 选文件
+  await page.getByTestId("composer-file-input").setInputFiles({
+    name: "screenshot.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("fake-bytes"),
+  });
+  // attach chip 出现
+  await expect(page.locator('[data-testid^="composer-attach-c-"][data-status]')).toHaveCount(1);
+
+  // 输文字 + 发
+  await page.getByTestId("mention-editor").fill("看看这张");
+  await page.getByTestId("mention-send").click();
+
+  // intervene body 含 attachments + text
+  await expect.poll(() =>
+    page.evaluate(() => {
+      const c = window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene");
+      return c?.body ?? "";
+    }),
+  ).toContain('"attachments"');
+  const body = await page.evaluate(() =>
+    window.__FUXI_FETCH__.find((x) => x.input === "/api/intervene")?.body ?? "",
+  );
+  expect(body).toContain('"text":"看看这张"');
+});
+
 // ===== v2 #N4 sticky badge e2e 已删（v3 #40 删 badge）=====
 
 // ===== #N5' / #40 玄女 tab @ chip composer =====

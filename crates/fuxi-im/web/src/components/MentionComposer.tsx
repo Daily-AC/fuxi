@@ -1,9 +1,12 @@
 import {
+  For,
   Show,
   createMemo,
   createSignal,
   type Component,
 } from "solid-js";
+import { ApiError } from "~/lib/api";
+import { useApi } from "./ApiProvider";
 import { MentionAutocomplete } from "./MentionAutocomplete";
 import { MentionChip } from "./MentionChip";
 import {
@@ -16,6 +19,7 @@ import {
   type SerializedIntervene,
 } from "~/lib/mentions";
 import { pushToast } from "~/lib/toast";
+import type { Upload } from "~/types/api";
 import styles from "./MentionComposer.module.css";
 
 // MentionComposer · v3 #N5' / #40 (玄女 tab) + #N4' / #39 (任务 thread) 共用
@@ -47,14 +51,30 @@ export interface MentionComposerProps {
   onSubmit(req: SerializedIntervene): Promise<void>;
 }
 
+/** 附件 chip 状态机（v3 #46 加，沿用旧 Composer 状态机）。 */
+type AttachStatus = "idle" | "uploading" | "done" | "error";
+
+interface AttachChip {
+  /** 本地 client id（区别于服务端 upload.id）。*/
+  cid: string;
+  file: File;
+  status: AttachStatus;
+  progress: number; // 0..1
+  upload?: Upload; // done 后填
+  error?: string;
+}
+
 export const MentionComposer: Component<MentionComposerProps> = (props) => {
+  const { client } = useApi();
   const [segments, setSegments] = createSignal<ComposerSegment[]>([
     { kind: "text", text: "" },
   ]);
   const [busy, setBusy] = createSignal(false);
   const [query, setQuery] = createSignal<string | null>(null); // null = 不在 @ 模式
   const [hi, setHi] = createSignal(0);
+  const [attachChips, setAttachChips] = createSignal<AttachChip[]>([]);
   let composing = false; // IME 中文输入态
+  let fileInput: HTMLInputElement | undefined;
 
   /** 把最末 text 段的内容写入 segments。
    *  保证：segments 末尾必为 text 段（即使空）。*/
@@ -136,6 +156,61 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     });
   };
 
+  // ===== 附件管道（v3 #46）=====
+
+  const updateAttach = (cid: string, patch: Partial<AttachChip>): void => {
+    setAttachChips((cs) => cs.map((c) => (c.cid === cid ? { ...c, ...patch } : c)));
+  };
+
+  const onFilesPicked = (e: Event): void => {
+    const target = e.target as HTMLInputElement;
+    const files = target.files;
+    if (!files) return;
+    const fresh: AttachChip[] = [];
+    for (let i = 0; i < files.length; i += 1) {
+      const f = files[i];
+      if (!f) continue;
+      fresh.push({
+        cid: `c-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${i}`,
+        file: f,
+        status: "idle",
+        progress: 0,
+      });
+    }
+    setAttachChips([...attachChips(), ...fresh]);
+    target.value = ""; // 允许相同文件再次选
+  };
+
+  const removeAttach = (cid: string): void => {
+    setAttachChips((cs) => cs.filter((c) => c.cid !== cid));
+  };
+
+  /** 串行上传所有 idle chip。已 done 的跳过；error 的不重试。
+   *  返回 true 表示全部 done；false 表示有 error。*/
+  const uploadAllAttach = async (): Promise<boolean> => {
+    for (const c of attachChips()) {
+      if (c.status === "done") continue;
+      if (c.status === "error") return false;
+      updateAttach(c.cid, { status: "uploading", progress: 0, error: undefined });
+      try {
+        const up = await client.uploadFile(c.file, (ratio) => {
+          updateAttach(c.cid, { progress: ratio });
+        });
+        updateAttach(c.cid, { status: "done", progress: 1, upload: up });
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? `上传失败 (${err.status})`
+            : err instanceof Error
+              ? err.message
+              : "上传失败";
+        updateAttach(c.cid, { status: "error", error: msg });
+        return false;
+      }
+    }
+    return true;
+  };
+
   /** 处理输入键 · 输入框 onInput · 我们用受控的"末段 text"模型，输入直接走 setTailText。*/
   const onInput = (e: InputEvent & { currentTarget: HTMLInputElement }): void => {
     if (composing) return; // IME 中不更新模型
@@ -186,14 +261,19 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
 
   const canSend = (): boolean => {
     if (busy() || props.disabled) return false;
-    // 必须有非空 text 或至少一个 chip
+    // 必须有非空 text 或至少一个 chip 或至少一个附件
     const hasText = segments().some((s) => s.kind === "text" && s.text.trim() !== "");
     const hasChip = segments().some((s) => s.kind === "chip");
-    return hasText || hasChip;
+    const hasAttach = attachChips().length > 0;
+    if (!hasText && !hasChip && !hasAttach) return false;
+    // error 状态附件必须先清掉
+    if (attachChips().some((c) => c.status === "error")) return false;
+    return true;
   };
 
   const reset = (): void => {
     setSegments([{ kind: "text", text: "" }]);
+    setAttachChips([]);
     closeAutocomplete();
   };
 
@@ -201,7 +281,19 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     if (!canSend()) return;
     setBusy(true);
     try {
+      // 先把 attach chips 全部上传完，失败则 toast 不发送
+      if (attachChips().length > 0) {
+        const allDone = await uploadAllAttach();
+        if (!allDone) {
+          pushToast("有附件上传失败，请清理后再发送", "error");
+          return;
+        }
+      }
       const req = serializeComposer(segments(), props.defaultTargetAgentId);
+      const ups: Upload[] = attachChips()
+        .map((c) => c.upload)
+        .filter((u): u is Upload => Boolean(u));
+      if (ups.length > 0) req.attachments = ups.map((u) => u.id);
       if (req.multi) {
         pushToast(MULTI_MENTION_WARNING, "warn");
       }
@@ -256,7 +348,71 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
             ))}
         </div>
       </Show>
+      {/* 附件 chip 行 · v3 #46 · 上传中显进度 / done 显大小 / error 显消息 + ✕ 删 */}
+      <Show when={attachChips().length > 0}>
+        <div class={styles.attachRow} data-testid="composer-attach-chips">
+          <For each={attachChips()}>
+            {(c) => (
+              <div
+                class={styles.attachChip}
+                classList={{
+                  [styles.attachChipUploading ?? ""]: c.status === "uploading",
+                  [styles.attachChipDone ?? ""]: c.status === "done",
+                  [styles.attachChipError ?? ""]: c.status === "error",
+                }}
+                data-testid={`composer-attach-${c.cid}`}
+                data-status={c.status}
+                title={c.error ?? c.file.name}
+              >
+                <span class={styles.attachName}>{c.file.name}</span>
+                <Show
+                  when={c.status === "uploading"}
+                  fallback={
+                    <Show
+                      when={c.status === "error"}
+                      fallback={<span class={styles.attachMeta}>{formatBytes(c.file.size)}</span>}
+                    >
+                      <span class={styles.attachMeta}>{c.error ?? "失败"}</span>
+                    </Show>
+                  }
+                >
+                  <span class={styles.attachMeta}>{Math.round(c.progress * 100)}%</span>
+                </Show>
+                <button
+                  type="button"
+                  class={styles.attachRemove}
+                  aria-label={`移除附件 ${c.file.name}`}
+                  data-testid={`composer-attach-remove-${c.cid}`}
+                  disabled={c.status === "uploading"}
+                  onClick={() => removeAttach(c.cid)}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
       <div class={styles.bar}>
+        <button
+          type="button"
+          class={styles.attachBtn}
+          onClick={() => fileInput?.click()}
+          aria-label="添加附件"
+          data-testid="composer-attach-btn"
+          disabled={busy() || props.disabled}
+        >
+          +
+        </button>
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          accept="image/*,application/pdf,text/*,application/json,application/zip,video/*"
+          class={styles.fileInput}
+          data-testid="composer-file-input"
+          onChange={onFilesPicked}
+        />
         <input
           class={styles.editor}
           type="text"
@@ -284,3 +440,10 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     </form>
   );
 };
+
+function formatBytes(b: number): string {
+  if (!b) return "";
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+}

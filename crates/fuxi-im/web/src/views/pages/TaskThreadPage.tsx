@@ -168,6 +168,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
         task_id: props.task_id,
         target: req.target,
         mentions: req.mentions.length > 0 ? req.mentions : undefined,
+        attachments: req.attachments,
       });
     try {
       await send();

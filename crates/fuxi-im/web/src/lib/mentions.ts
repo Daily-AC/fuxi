@@ -94,6 +94,8 @@ export interface SerializedIntervene {
   mentions: string[];
   /** chip 数 > 1 时设 true，UI 用来 toast 警示「只发给第一个」。*/
   multi: boolean;
+  /** v3 #46 加 · 已上传附件的 upload id 列表（β #17 attachments 字段）。 */
+  attachments?: string[];
 }
 
 const CHIP_PLACEHOLDER = "​";
