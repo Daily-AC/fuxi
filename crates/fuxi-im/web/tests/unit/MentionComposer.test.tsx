@@ -188,9 +188,9 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     expect(getByTestId("mention-popup-empty").textContent).toContain("没找到");
   });
 
-  // ===== 附件 +/upload v3 #46 =====
+  // ===== 附件 +/upload v3 #46 + #50 改"选完立即并发上传" =====
 
-  it("+ 按钮存在 · 选文件 → attach chip 出现 · 文件名 + 大小", () => {
+  it("+ 按钮存在 · 选文件 → attach chip 立即出现 · 上传完成后 status=done", async () => {
     const { getByTestId, queryAllByTestId } = renderWithApi(() => (
       <MentionComposer candidates={[]} onSubmit={noopSubmit} />
     ));
@@ -202,9 +202,11 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     const chips = queryAllByTestId(/^composer-attach-c-/);
     expect(chips).toHaveLength(1);
     expect(chips[0]?.textContent).toContain("screenshot.png");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(queryAllByTestId(/^composer-attach-c-/)[0]?.getAttribute("data-status")).toBe("done");
   });
 
-  it("有附件 + 空 text · send enable（纯附件消息）", () => {
+  it("有附件 · 选完后 send 始终 enable（uploading 也可点 → toast；done 后真发）", async () => {
     const { getByTestId } = renderWithApi(() => (
       <MentionComposer candidates={[]} onSubmit={noopSubmit} />
     ));
@@ -213,10 +215,14 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     const file = new File(["x"], "a.txt", { type: "text/plain" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     fireEvent.change(fileInput);
+    // 即使 uploading 也 enable（spec §"否则禁 send + toast" 走 toast 而非 disable）
+    expect((getByTestId("mention-send") as HTMLButtonElement).disabled).toBe(false);
+    await new Promise((r) => setTimeout(r, 30));
+    // done 后仍 enable
     expect((getByTestId("mention-send") as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("发送 → uploadFile 调用 + onSubmit req.attachments=[upload.id]", async () => {
+  it("发送 → uploadFile 调用 + onSubmit req.attachments=[upload.id]（选完立即上传）", async () => {
     let captured = null as SerializedIntervene | null;
     const onSubmit = async (req: SerializedIntervene): Promise<void> => {
       captured = req;
@@ -228,17 +234,16 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     const file = new File(["data"], "doc.pdf", { type: "application/pdf" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     fireEvent.change(fileInput);
+    await new Promise((r) => setTimeout(r, 30));
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "看看这个" } });
     fireEvent.click(getByTestId("mention-send"));
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 30));
     expect(captured?.text).toBe("看看这个");
-    expect(captured?.attachments).toBeTruthy();
     expect(captured?.attachments?.length).toBe(1);
-    // mock api uploadFile 返 up-1
     expect(captured?.attachments?.[0]).toMatch(/^up-/);
   });
 
-  it("✕ 删除 attach chip · chip 下线", () => {
+  it("✕ 删除 attach chip (done) · chip 下线", async () => {
     const { getByTestId, queryAllByTestId } = renderWithApi(() => (
       <MentionComposer candidates={[]} onSubmit={noopSubmit} />
     ));
@@ -246,6 +251,7 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     const file = new File(["x"], "a.txt", { type: "text/plain" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     fireEvent.change(fileInput);
+    await new Promise((r) => setTimeout(r, 30));
     const chips = queryAllByTestId(/^composer-attach-c-/);
     expect(chips).toHaveLength(1);
     const cid = chips[0]?.getAttribute("data-testid")?.replace("composer-attach-", "") ?? "";
@@ -262,10 +268,78 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     const file = new File(["x"], "a.txt", { type: "text/plain" });
     Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
     fireEvent.change(fileInput);
+    await new Promise((r) => setTimeout(r, 30));
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
     fireEvent.click(getByTestId("mention-send"));
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 30));
     expect(queryAllByTestId(/^composer-attach-c-/)).toHaveLength(0);
+  });
+
+  it("v3 #50 · 附件 uploading 时 send · toast \"等附件传完再发\" + 不发", async () => {
+    // 用 hanging uploadFile mock 让 chip 一直 uploading
+    const api = createMockApi();
+    api.uploadFile = (file): Promise<import("~/types/api").Upload> =>
+      new Promise<import("~/types/api").Upload>(() => {
+        // 不调 resolve, chip 永远 uploading 直到测试 end / abort
+        void file;
+      });
+    setApiOverride(api);
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { getByTestId, queryByTestId } = render(() => (
+      <ApiProvider initialAuth="in">
+        <MentionComposer candidates={[]} onSubmit={onSubmit} />
+        <Toast />
+      </ApiProvider>
+    ));
+    const fileInput = getByTestId("composer-file-input") as HTMLInputElement;
+    const file = new File(["x"], "a.txt", { type: "text/plain" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
+    // chip 仍 uploading（hanging mock 没 resolve）
+    fireEvent.click(getByTestId("mention-send"));
+    expect(onSubmit).not.toHaveBeenCalled();
+    // toast 同步渲染（pushToast 立即 setSignal）
+    // toast 渲染 next microtask
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(queryByTestId("toast")?.textContent ?? "").toContain("等附件传完");
+  });
+
+  it("v3 #50 · uploading 中 ✕ 删 chip · 立即从 UI 下线（sync removeAttach）", () => {
+    const { getByTestId, queryAllByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[]} onSubmit={noopSubmit} />
+    ));
+    const fileInput = getByTestId("composer-file-input") as HTMLInputElement;
+    const file = new File(["x"], "a.txt", { type: "text/plain" });
+    Object.defineProperty(fileInput, "files", { value: [file], configurable: true });
+    fireEvent.change(fileInput);
+    const chips = queryAllByTestId(/^composer-attach-c-/);
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.getAttribute("data-status")).toBe("uploading");
+    const cid = chips[0]?.getAttribute("data-testid")?.replace("composer-attach-", "") ?? "";
+    // uploading 中 ✕ 删 → 同步从 UI 下线（abort 是异步副作用，本测试不验）
+    fireEvent.click(getByTestId(`composer-attach-remove-${cid}`));
+    expect(queryAllByTestId(/^composer-attach-c-/)).toHaveLength(0);
+  });
+
+  it("v3 #50 · 多文件并发上传（不串行）", async () => {
+    const { getByTestId, queryAllByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[]} onSubmit={noopSubmit} />
+    ));
+    const fileInput = getByTestId("composer-file-input") as HTMLInputElement;
+    const a = new File(["a"], "a.txt", { type: "text/plain" });
+    const b = new File(["b"], "b.txt", { type: "text/plain" });
+    const c = new File(["c"], "c.txt", { type: "text/plain" });
+    Object.defineProperty(fileInput, "files", { value: [a, b, c], configurable: true });
+    fireEvent.change(fileInput);
+    expect(queryAllByTestId(/^composer-attach-c-/)).toHaveLength(3);
+    // 都立刻 uploading（说明并发了，没串行 await）
+    const chips = queryAllByTestId(/^composer-attach-c-/);
+    for (const ch of chips) expect(ch.getAttribute("data-status")).toBe("uploading");
+    await new Promise((r) => setTimeout(r, 30));
+    const after = queryAllByTestId(/^composer-attach-c-/);
+    for (const ch of after) expect(ch.getAttribute("data-status")).toBe("done");
   });
 
   it("Enter 在 query 模式不触发 send（autocomplete 接管 Enter）", async () => {

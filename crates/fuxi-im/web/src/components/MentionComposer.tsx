@@ -51,8 +51,12 @@ export interface MentionComposerProps {
   onSubmit(req: SerializedIntervene): Promise<void>;
 }
 
-/** 附件 chip 状态机（v3 #46 加，沿用旧 Composer 状态机）。 */
-type AttachStatus = "idle" | "uploading" | "done" | "error";
+/** 附件 chip 状态机（v3 #46 加 / #50 改"选完立即上传"）。
+ *  - uploading: 选完立即并发触发上传，chip 立刻显进度（不再等 send）
+ *  - done: 上传完成，chip 显文件大小，可被 send
+ *  - error: 上传失败，chip 显错误 + ✕ 让用户清；canSend=false 直到清掉
+ *  v3 #50 删了 idle 状态：chip 一出现就直接 uploading。 */
+type AttachStatus = "uploading" | "done" | "error";
 
 interface AttachChip {
   /** 本地 client id（区别于服务端 upload.id）。*/
@@ -62,6 +66,8 @@ interface AttachChip {
   progress: number; // 0..1
   upload?: Upload; // done 后填
   error?: string;
+  /** v3 #50：选完立即上传，chip 持有自己的 AbortController；removeAttach 时 abort。*/
+  controller: AbortController;
 }
 
 export const MentionComposer: Component<MentionComposerProps> = (props) => {
@@ -156,10 +162,38 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     });
   };
 
-  // ===== 附件管道（v3 #46）=====
+  // ===== 附件管道（v3 #46 + #50 改"选完立即并发上传"）=====
 
   const updateAttach = (cid: string, patch: Partial<AttachChip>): void => {
     setAttachChips((cs) => cs.map((c) => (c.cid === cid ? { ...c, ...patch } : c)));
+  };
+
+  /** v3 #50：选完立即异步上传单个 chip · 不阻塞 onFilesPicked 返回 · progress 流式 update。 */
+  const startUploadFor = async (chip: AttachChip): Promise<void> => {
+    try {
+      const up = await client.uploadFile(
+        chip.file,
+        (ratio) => updateAttach(chip.cid, { progress: ratio }),
+        chip.controller.signal,
+      );
+      updateAttach(chip.cid, { status: "done", progress: 1, upload: up });
+    } catch (err) {
+      // abort 走过这里 (ApiError status=0 message="aborted")。chip 已被 removeAttach 提前 splice 掉，
+      // updateAttach 的 cs.map 找不到 cid → noop，所以 abort 既不留 error chip 也不残留 done。
+      const msg =
+        err instanceof ApiError
+          ? err.status === 0
+            ? err.message
+            : `上传失败 (${err.status})`
+          : err instanceof Error
+            ? err.message
+            : "上传失败";
+      // 已被 abort 取消的 chip 不留 error 状态（chip 早被 splice）
+      const stillExists = attachChips().some((c) => c.cid === chip.cid);
+      if (stillExists && msg !== "aborted") {
+        updateAttach(chip.cid, { status: "error", error: msg });
+      }
+    }
   };
 
   const onFilesPicked = (e: Event): void => {
@@ -173,42 +207,22 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
       fresh.push({
         cid: `c-${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${i}`,
         file: f,
-        status: "idle",
+        status: "uploading",
         progress: 0,
+        controller: new AbortController(),
       });
     }
     setAttachChips([...attachChips(), ...fresh]);
     target.value = ""; // 允许相同文件再次选
+    // 并发上传所有新 chip · 不 await（不阻塞 UI）
+    for (const c of fresh) void startUploadFor(c);
   };
 
   const removeAttach = (cid: string): void => {
-    setAttachChips((cs) => cs.filter((c) => c.cid !== cid));
-  };
-
-  /** 串行上传所有 idle chip。已 done 的跳过；error 的不重试。
-   *  返回 true 表示全部 done；false 表示有 error。*/
-  const uploadAllAttach = async (): Promise<boolean> => {
-    for (const c of attachChips()) {
-      if (c.status === "done") continue;
-      if (c.status === "error") return false;
-      updateAttach(c.cid, { status: "uploading", progress: 0, error: undefined });
-      try {
-        const up = await client.uploadFile(c.file, (ratio) => {
-          updateAttach(c.cid, { progress: ratio });
-        });
-        updateAttach(c.cid, { status: "done", progress: 1, upload: up });
-      } catch (err) {
-        const msg =
-          err instanceof ApiError
-            ? `上传失败 (${err.status})`
-            : err instanceof Error
-              ? err.message
-              : "上传失败";
-        updateAttach(c.cid, { status: "error", error: msg });
-        return false;
-      }
-    }
-    return true;
+    // v3 #50：上传中删 chip = abort xhr · 让 backend 不收完整文件
+    const c = attachChips().find((x) => x.cid === cid);
+    if (c && c.status === "uploading") c.controller.abort();
+    setAttachChips((cs) => cs.filter((x) => x.cid !== cid));
   };
 
   /** 处理输入键 · 输入框 onInput · 我们用受控的"末段 text"模型，输入直接走 setTailText。*/
@@ -259,15 +273,20 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     }
   };
 
-  const canSend = (): boolean => {
+  /** UI 层"send 看上去能不能按"——uploading/error 时按钮 *仍然能按*（不 disabled），
+   *  让 send() 走 toast 路径告诉用户为啥发不出去（spec §"否则禁 send + toast"）。 */
+  const canSendUI = (): boolean => {
     if (busy() || props.disabled) return false;
-    // 必须有非空 text 或至少一个 chip 或至少一个附件
     const hasText = segments().some((s) => s.kind === "text" && s.text.trim() !== "");
     const hasChip = segments().some((s) => s.kind === "chip");
     const hasAttach = attachChips().length > 0;
-    if (!hasText && !hasChip && !hasAttach) return false;
-    // error 状态附件必须先清掉
-    if (attachChips().some((c) => c.status === "error")) return false;
+    return hasText || hasChip || hasAttach;
+  };
+
+  /** send() 内真正决定能不能发的版本（chip status 也得全 done）。 */
+  const canSend = (): boolean => {
+    if (!canSendUI()) return false;
+    if (attachChips().some((c) => c.status !== "done")) return false;
     return true;
   };
 
@@ -278,17 +297,21 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
   };
 
   const send = async (): Promise<void> => {
+    // v3 #50：附件状态拦截放在 canSend 之外做差异化 toast 文案
+    if (busy() || props.disabled) return;
+    const hasError = attachChips().some((c) => c.status === "error");
+    const hasUploading = attachChips().some((c) => c.status === "uploading");
+    if (hasError) {
+      pushToast("有附件上传失败，请清掉再发", "error");
+      return;
+    }
+    if (hasUploading) {
+      pushToast("等附件传完再发", "warn");
+      return;
+    }
     if (!canSend()) return;
     setBusy(true);
     try {
-      // 先把 attach chips 全部上传完，失败则 toast 不发送
-      if (attachChips().length > 0) {
-        const allDone = await uploadAllAttach();
-        if (!allDone) {
-          pushToast("有附件上传失败，请清理后再发送", "error");
-          return;
-        }
-      }
       const req = serializeComposer(segments(), props.defaultTargetAgentId);
       const ups: Upload[] = attachChips()
         .map((c) => c.upload)
@@ -383,7 +406,6 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
                   class={styles.attachRemove}
                   aria-label={`移除附件 ${c.file.name}`}
                   data-testid={`composer-attach-remove-${c.cid}`}
-                  disabled={c.status === "uploading"}
                   onClick={() => removeAttach(c.cid)}
                 >
                   ×
@@ -430,7 +452,7 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
           type="submit"
           class={styles.send}
           classList={{ [styles.sendActive ?? ""]: canSend() }}
-          disabled={!canSend()}
+          disabled={!canSendUI()}
           data-testid="mention-send"
           aria-label="发送"
         >

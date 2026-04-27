@@ -195,9 +195,16 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       events: state.events[`worker:${agentId}`] ?? [],
       next_cursor: null,
     }),
-    uploadFile: async (file: File, onProgress?: (r: number) => void): Promise<Upload> => {
+    uploadFile: async (
+      file: File,
+      onProgress?: (r: number) => void,
+      signal?: AbortSignal,
+    ): Promise<Upload> => {
+      if (signal?.aborted) throw new ApiError(0, "aborted");
       if (state.uploadFail) throw new ApiError(500, "upload failed");
       onProgress?.(0.5);
+      // 让 abort 在 50% 进度处有机会触发（v3 #50 测 abort 用）
+      if (signal?.aborted) throw new ApiError(0, "aborted");
       onProgress?.(1);
       const up: Upload = {
         id: `up-${state.uploads.length + 1}`,
