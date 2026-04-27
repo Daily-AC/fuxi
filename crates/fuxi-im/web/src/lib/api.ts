@@ -50,7 +50,12 @@ export interface ApiClient {
    *  filter by meta.agent==agent_id；事件 kind 白名单见 spec §私聊页"事件 filter"。*/
   fetchWorkerEvents(agentId: string, fromCursor?: string): Promise<EventHistoryResponse>;
   /** 上传单文件，可选进度回调（0..1）。*/
-  uploadFile(file: File, onProgress?: (ratio: number) => void): Promise<Upload>;
+  /** v3 #50: 支持 AbortSignal 取消上传中的 chip · removeAttach 时调 controller.abort() */
+  uploadFile(
+    file: File,
+    onProgress?: (ratio: number) => void,
+    signal?: AbortSignal,
+  ): Promise<Upload>;
   openConvSocket(): WebSocket;
   openTaskSocket(taskId: string): WebSocket;
   /** #N3 私聊页 · 接门客流式事件（β #N5 / #27 目标契约）。*/
@@ -118,7 +123,7 @@ export function createHttpClient(): ApiClient {
         `/api/workers/${encodeURIComponent(agentId)}/events${q}`,
       );
     },
-    uploadFile: (file, onProgress) => uploadViaXhr(file, onProgress),
+    uploadFile: (file, onProgress, signal) => uploadViaXhr(file, onProgress, signal),
     openConvSocket: () => new WebSocket(wsUrl("/api/conv")),
     // v3 #N4'：任务 thread 走 /conv（白名单 filter）；老 /stream 留给 firehose 观察器
     openTaskSocket: (taskId) =>
@@ -128,8 +133,13 @@ export function createHttpClient(): ApiClient {
   };
 }
 
-/** XHR upload —— 用 XHR 而非 fetch 是为了 progress 事件（fetch 不支持上传进度）。*/
-function uploadViaXhr(file: File, onProgress?: (ratio: number) => void): Promise<Upload> {
+/** XHR upload —— 用 XHR 而非 fetch 是为了 progress 事件（fetch 不支持上传进度）。
+ *  v3 #50: signal 触发 abort → xhr.abort() → reject ApiError(0, "aborted")。*/
+function uploadViaXhr(
+  file: File,
+  onProgress?: (ratio: number) => void,
+  signal?: AbortSignal,
+): Promise<Upload> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     const fd = new FormData();
@@ -141,6 +151,13 @@ function uploadViaXhr(file: File, onProgress?: (ratio: number) => void): Promise
       xhr.upload.addEventListener("progress", (e) => {
         if (e.lengthComputable && e.total > 0) onProgress(e.loaded / e.total);
       });
+    }
+    if (signal) {
+      if (signal.aborted) {
+        reject(new ApiError(0, "aborted"));
+        return;
+      }
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
     }
     xhr.addEventListener("load", () => {
       if (xhr.status >= 200 && xhr.status < 300) {
