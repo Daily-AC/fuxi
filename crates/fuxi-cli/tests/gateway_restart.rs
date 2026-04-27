@@ -152,9 +152,11 @@ async fn chaos_gateway_restart_recovers_inflight_jobs() {
         200,    // heartbeat_ms
     );
 
-    // 5 × 50ms 串行 = 250ms 上限，并发更快；5s 容忍 axum bring-up + register +
-    // 5 次 pull 的 reqwest round-trip + workspace 并行下的调度抖动。
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 5 × 50ms 串行 = 250ms 上限，并发更快；放宽到 15s 容忍 cargo test --workspace
+    // 下 ~30 个测试 binary 同时跑（多 axum + reqwest + tokio current_thread runtime
+    // 抢 OS 线程）。实测原 5s 阈值在高并发整套测试时 worker register→pull 链路
+    // 跑不及，all 5 stuck done=false。15s 仍远小于真 deadlock 上限。
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let mut all_done = true;
         for id in &job_ids {

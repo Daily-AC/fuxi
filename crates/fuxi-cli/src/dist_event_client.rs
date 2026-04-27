@@ -134,6 +134,10 @@ impl NetworkBusClient {
     ) -> Self {
         debug_assert!(queue_cap > 0, "queue_cap must be > 0");
         debug_assert!(batch_size > 0, "batch_size must be > 0");
+        // β · #69 双保险——run_worker_with 已 normalize，但其他 caller（测试/未来
+        // 直接构造）不一定走 worker 入口。在这里再 trim 一道，spec 契约：
+        // controller 字段保证已剥末尾 `/` 与 `/dist`，下面 format 用 `{}/dist/event`。
+        let controller = crate::dist::normalize_controller_base(&controller);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 queue: VecDeque::with_capacity(queue_cap.min(1024)),

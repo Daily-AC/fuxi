@@ -1415,6 +1415,29 @@ fn cli_label_of(cli: &str) -> String {
     }
 }
 
+/// β · #69 防御性 controller URL 归一化（spec gap controller-url-bug）。
+///
+/// 干掉历史踩过的两类拼接错误：
+/// - 末尾 `/`：`https://x/` → 拼成 `https://x//dist/register`（双斜杠）
+/// - 末尾 `/dist`：`https://x/dist` → 拼成 `https://x/dist/dist/register`（双 /dist）
+///
+/// worker 端 5 个 endpoint 拼 URL（register/heartbeat/pull/report/progress）共用
+/// 此 helper：调一次 `normalize_controller_base()` 拿干净 base，后续 `format!`
+/// 直接 `{base}/dist/<endpoint>` 即可。
+///
+/// 选择 trim 顺序：先 `/` → 再 `/dist` → 再 `/`。第二个 `/` 处理 `https://x/dist/`
+/// 这种斜杠+后缀+斜杠的组合（先去末 `/` 得 `https://x/dist`，再去 `/dist` 得
+/// `https://x`）。
+///
+/// 不动 `https://x` 的 host 段——只剥**末尾**冗余，不解析 path/query。
+pub(crate) fn normalize_controller_base(controller: &str) -> String {
+    controller
+        .trim_end_matches('/')
+        .trim_end_matches("/dist")
+        .trim_end_matches('/')
+        .to_string()
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DistCmd {
     /// 往分布式队列派发一个 codex 任务（由远端 worker 拉取执行）
@@ -1482,7 +1505,11 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
         .map_err(|e| anyhow!("dist enqueue HMAC secret: {e}"))?;
     let body = args.body.join(" ");
     let client = Client::new();
-    let url = format!("{}/dist/enqueue", args.controller.trim_end_matches('/'));
+    // β · #69 normalize（同 run_worker_with）
+    let url = format!(
+        "{}/dist/enqueue",
+        normalize_controller_base(&args.controller)
+    );
     let req = DistEnqueueReq {
         node_id: args.node,
         title: args.title,
@@ -1550,7 +1577,9 @@ pub(crate) async fn run_worker_with(
     adapter_factory: AdapterFactory,
     heartbeat_interval: Duration,
 ) -> Result<()> {
-    let controller = args.controller.trim_end_matches('/').to_string();
+    // β · #69 normalize：剥末尾 `/` 与 `/dist` 双重，避免 systemd env 误写
+    // 含 `/dist` 后缀时 worker 拼成 `host/dist/dist/register`。
+    let controller = normalize_controller_base(&args.controller);
     let client = Client::new();
     let register_url = format!("{controller}/dist/register");
     let register_req = DistRegisterReq {
@@ -2384,6 +2413,59 @@ fn truncate_text(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// β · #69 normalize 4 路 spec 契约。
+    #[test]
+    fn normalize_controller_base_strips_trailing_slash_and_dist() {
+        // 干净（不动）
+        assert_eq!(
+            normalize_controller_base("https://x"),
+            "https://x".to_string()
+        );
+        // 末尾 /
+        assert_eq!(
+            normalize_controller_base("https://x/"),
+            "https://x".to_string()
+        );
+        // 末尾 /dist
+        assert_eq!(
+            normalize_controller_base("https://x/dist"),
+            "https://x".to_string()
+        );
+        // 末尾 /dist/
+        assert_eq!(
+            normalize_controller_base("https://x/dist/"),
+            "https://x".to_string()
+        );
+        // host:port + /dist 后缀（实战 systemd 常见误写）
+        assert_eq!(
+            normalize_controller_base("https://im.qmledmq.cn:8443/dist"),
+            "https://im.qmledmq.cn:8443".to_string()
+        );
+        // path 中段含 dist 不动（只剥末尾）
+        assert_eq!(
+            normalize_controller_base("https://x/dist/proxy"),
+            "https://x/dist/proxy".to_string()
+        );
+    }
+
+    #[test]
+    fn normalize_controller_base_concat_yields_clean_register_url() {
+        // 关键不变量：normalize 后拼 `{base}/dist/<endpoint>` 不会双 `/dist`
+        for input in [
+            "https://x",
+            "https://x/",
+            "https://x/dist",
+            "https://x/dist/",
+        ] {
+            let base = normalize_controller_base(input);
+            let url = format!("{base}/dist/register");
+            assert_eq!(
+                url, "https://x/dist/register",
+                "input {input:?} 拼 register 应一致"
+            );
+        }
+    }
 
     fn job_for(title: &str, body: &str, system: Option<&str>) -> DistJob {
         DistJob {
