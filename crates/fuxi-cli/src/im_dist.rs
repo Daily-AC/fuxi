@@ -277,9 +277,10 @@ impl DistEnqueuer for DistControllerEnqueuer {
         } else {
             task.description.clone()
         };
-        // v1 cli/allowed_tools 走默认 cc + 空——worker 端 launch CcLaunchConfig
-        // 时按 role-skill 自补真 allowed_tools。后续若需精细控制可 wire 进
-        // task 维度。
+        // cli wire 名必须与 dist::select_adapter 接受的字符串对齐——`"claude-code"`
+        // 是 CcAdapter::name() 的 SoT。曾经填 `"cc"`（项目内简称），worker
+        // factory 直接 Err → fast-fail ok=0；report.output 字段没持久化让 bug
+        // 隐了一个月（#71）。allowed_tools 仍走 worker role-skill 自补。
         let job_id = self
             .ctrl
             .enqueue(
@@ -289,7 +290,7 @@ impl DistEnqueuer for DistControllerEnqueuer {
                 None, // system_prompt：暂走 worker 自带 role skill
                 task.required_tags.clone(),
                 task.pinned_node.clone(),
-                "cc".to_string(),
+                "claude-code".to_string(),
                 Vec::new(),
             )
             .await;
@@ -387,6 +388,40 @@ mod tests {
         let token_v2 = std::fs::read_to_string(dir.path().join("dist_token")).unwrap();
         assert_eq!(secret_v1, secret_v2, "HMAC secret 不应被重生成");
         assert_eq!(token_v1, token_v2, "dist token 不应被重生成");
+    }
+
+    /// 真因回归 · #71：im_dist enqueue 写入的 cli 字段必须与 dist worker
+    /// `select_adapter` 接受的 wire 名一致；否则 worker 收 job 后 factory_c
+    /// 直接 Err，每个 job 走 `(false, "worker run error: ...")` fast-fail，
+    /// dist_jobs.ok=0。错误只在 final report.output 里，schema 没存→看不见。
+    /// 之前调试 v4 dist 接通时一直怀疑是 PATH/cc spawn，挖了一个月。
+    #[tokio::test]
+    async fn enqueuer_cli_field_must_match_worker_select_adapter_wire_name() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let dir = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::remove_var(FUXI_DIST_HMAC_SECRET_ENV);
+            std::env::remove_var(DIST_TOKEN_ENV);
+        }
+        let layer = build_dist_layer(dir.path(), bus).await.expect("build");
+        layer
+            .ctrl
+            .register("mac".into(), vec!["local".into()], 1)
+            .await;
+
+        let enqueuer = DistControllerEnqueuer::new(layer.ctrl.clone());
+        let task = fuxi_core::task::Task::new("ls", "ls ~/erp").with_pinned_node("mac");
+        enqueuer.enqueue(&task).await.expect("enqueue");
+
+        let job = layer.ctrl.pull("mac").await.expect("应能 pull 到 job");
+
+        // SoT：dist::select_adapter 只认 "codex"/""/"claude-code"。
+        // 若改成别的字符串需同步更新 dist::select_adapter。
+        assert_eq!(
+            job.cli, "claude-code",
+            "enqueuer cli={:?} 与 dist select_adapter 不匹配——worker 会 fast-fail ok=0",
+            job.cli
+        );
     }
 
     #[tokio::test]
