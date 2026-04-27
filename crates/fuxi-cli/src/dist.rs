@@ -3735,12 +3735,14 @@ mod tests {
         });
 
         // 等 active==1（worker pull 到并 spawn task）
-        let pickup_deadline = Instant::now() + Duration::from_secs(2);
+        // pickup deadline 5s——并行 cargo test 高 load 下 worker register→pull
+        // 链路慢于 2s 的实测概率非 0；放宽到 5s（仍小于 stub 5s sleep + 2s 取消窗）
+        let pickup_deadline = Instant::now() + Duration::from_secs(5);
         while active.load(Ordering::SeqCst) == 0 {
             if Instant::now() > pickup_deadline {
                 worker_handle.abort();
                 srv.abort();
-                panic!("worker 1s 内未 pickup silent job");
+                panic!("worker 5s 内未 pickup silent job");
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -4239,12 +4241,11 @@ mod tests {
     async fn dist_event_publish_to_bus_when_authorized() {
         let (ctrl, base, srv) = spawn_controller().await;
         ctrl.register("remoteA".into(), vec![], 1).await;
-        let bus = ctrl.bus().clone();
 
-        // probe 必须在 POST 之前 subscribe，broadcast 不留历史
+        // 同步 subscribe **在 POST 前完成**（race fix；同 cross_node_bus_e2e_*）
+        use futures_util::StreamExt;
+        let mut s = ctrl.bus().subscribe();
         let probe = tokio::spawn(async move {
-            use futures_util::StreamExt;
-            let mut s = bus.subscribe();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             loop {
                 let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -4258,7 +4259,6 @@ mod tests {
                 }
             }
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
 
         let req = DistEventReq {
             node_id: "remoteA".into(),
@@ -4339,11 +4339,11 @@ mod tests {
     async fn dist_event_handles_batch() {
         let (ctrl, base, srv) = spawn_controller().await;
         ctrl.register("remoteA".into(), vec![], 1).await;
-        let bus = ctrl.bus().clone();
 
+        // 同步 subscribe **在 POST 前完成**（race fix；同 cross_node_bus_e2e_*）
+        use futures_util::StreamExt;
+        let mut s = ctrl.bus().subscribe();
         let probe = tokio::spawn(async move {
-            use futures_util::StreamExt;
-            let mut s = bus.subscribe();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             let mut got = Vec::new();
             loop {
@@ -4358,7 +4358,6 @@ mod tests {
                 }
             }
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
 
         let req = DistEventReq {
             node_id: "remoteA".into(),
@@ -4548,12 +4547,14 @@ mod tests {
     async fn cross_node_bus_e2e_marks_source_node_id() {
         let (ctrl, base, srv) = spawn_controller().await;
         ctrl.register("far".into(), vec![], 1).await;
-        let bus = ctrl.bus().clone();
 
-        // probe 必须在 POST 之前 subscribe——broadcast 不留历史。
+        // 同步 subscribe **在 POST 前完成**——broadcast 不留历史，spawn 内 subscribe
+        // 有 race（spawn 首次 poll 可能晚于 publish）。早期版本靠 `sleep(20ms)` 让
+        // spawn 起来，高 load 下不可靠（用户实测 10/10 fail）。改 outer subscribe，
+        // BroadcastStream 跨 await/move 安全。
+        use futures_util::StreamExt;
+        let mut s = ctrl.bus().subscribe();
         let probe = tokio::spawn(async move {
-            use futures_util::StreamExt;
-            let mut s = bus.subscribe();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             loop {
                 let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -4567,7 +4568,6 @@ mod tests {
                 }
             }
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
 
         // worker 发的事件 meta.source_node_id 故意 None——controller 应**覆盖**它，
         // 不能依赖 worker 端自填（信任域 = controller 边界）。
@@ -4605,11 +4605,10 @@ mod tests {
     async fn cross_node_bus_e2e_overrides_worker_supplied_source_node_id() {
         let (ctrl, base, srv) = spawn_controller().await;
         ctrl.register("realnode".into(), vec![], 1).await;
-        let bus = ctrl.bus().clone();
 
+        use futures_util::StreamExt;
+        let mut s = ctrl.bus().subscribe();
         let probe = tokio::spawn(async move {
-            use futures_util::StreamExt;
-            let mut s = bus.subscribe();
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
             loop {
                 let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -4623,7 +4622,6 @@ mod tests {
                 }
             }
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
 
         let mut spoofed = ev_agent_responded("trying to spoof");
         spoofed.meta.source_node_id = Some("imposter".into());
