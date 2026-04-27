@@ -1,6 +1,6 @@
-import { For, Show, createEffect, onCleanup, onMount, type Component } from "solid-js";
+import { For, Show, createEffect, createMemo, onCleanup, onMount, type Component } from "solid-js";
 import { colorForRole } from "~/tokens";
-import type { MentionCandidate } from "~/lib/mentions";
+import { NODE_CHIP_COLOR, type MentionCandidate } from "~/lib/mentions";
 import styles from "./MentionAutocomplete.module.css";
 
 // MentionAutocomplete · v3 #N2' / #37
@@ -69,6 +69,18 @@ export const MentionAutocomplete: Component<MentionAutocompleteProps> = (props) 
     }
   });
 
+  // #60：worker 候选在前，node 候选在后；保留原 props.candidates 顺序但分两段排
+  const ordered = createMemo<MentionCandidate[]>(() => {
+    const workers = props.candidates.filter((c) => c.kind !== "node");
+    const nodes = props.candidates.filter((c) => c.kind === "node");
+    return [...workers, ...nodes];
+  });
+  // node 段的起始 index，用于渲染 separator
+  const firstNodeIdx = createMemo<number>(() => {
+    const list = ordered();
+    return list.findIndex((c) => c.kind === "node");
+  });
+
   return (
     <Show when={props.visible}>
       <div
@@ -76,42 +88,58 @@ export const MentionAutocomplete: Component<MentionAutocompleteProps> = (props) 
         class={styles.popup}
         data-testid="mention-popup"
         role="listbox"
-        aria-label="选择门客"
+        aria-label="选择门客或节点"
       >
         <Show
-          when={props.candidates.length > 0}
+          when={ordered().length > 0}
           fallback={
             <div class={styles.empty} data-testid="mention-popup-empty">
               没找到匹配的门客
             </div>
           }
         >
-          <For each={props.candidates}>
+          <For each={ordered()}>
             {(c, i) => {
               const isActive = (): boolean => i() === props.highlightedIndex;
+              const isNode = (): boolean => c.kind === "node";
               const dotStyle = (): { background: string } => ({
-                background: colorForRole(c.role),
+                background: isNode() ? NODE_CHIP_COLOR : colorForRole(c.role),
               });
+              const itemTestId = (): string =>
+                isNode() ? `mention-item-node-${c.agent_id}` : `mention-item-${c.agent_id}`;
+              const showSep = (): boolean => isNode() && i() === firstNodeIdx() && i() > 0;
               return (
-                <button
-                  type="button"
-                  class={styles.item}
-                  classList={{ [styles.itemActive ?? ""]: isActive() }}
-                  role="option"
-                  aria-selected={isActive()}
-                  data-testid={`mention-item-${c.agent_id}`}
-                  data-mention-idx={i()}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    props.onSelect(c);
-                  }}
-                >
-                  <span class={styles.dot} style={dotStyle()} aria-hidden="true" />
-                  <span class={styles.role}>{c.role_display}</span>
-                  <Show when={c.hint}>
-                    <span class={styles.hint}>· {c.hint}</span>
+                <>
+                  <Show when={showSep()}>
+                    <div
+                      class={styles.separator}
+                      data-testid="mention-popup-node-sep"
+                      aria-hidden="true"
+                    >
+                      节点
+                    </div>
                   </Show>
-                </button>
+                  <button
+                    type="button"
+                    class={styles.item}
+                    classList={{ [styles.itemActive ?? ""]: isActive() }}
+                    role="option"
+                    aria-selected={isActive()}
+                    data-testid={itemTestId()}
+                    data-mention-idx={i()}
+                    data-kind={c.kind ?? "worker"}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      props.onSelect(c);
+                    }}
+                  >
+                    <span class={styles.dot} style={dotStyle()} aria-hidden="true" />
+                    <span class={styles.role}>{c.role_display}</span>
+                    <Show when={c.hint}>
+                      <span class={styles.hint}>· {c.hint}</span>
+                    </Show>
+                  </button>
+                </>
               );
             }}
           </For>

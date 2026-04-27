@@ -12,10 +12,12 @@ afterEach(() => {
 function setup(opts?: {
   interveneSeq?: number[];
   history?: Record<string, import("~/types/api").StoredMessage[]>;
+  nodes?: import("~/types/api").NodesResponse;
 }) {
   const api = createMockApi({
     interveneSeq: opts?.interveneSeq,
     history: opts?.history,
+    nodes: opts?.nodes,
   });
   setApiOverride(api);
   const tools = render(() => <App />);
@@ -225,6 +227,40 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     expect(xn).toHaveLength(1);
     expect(users[0]?.textContent).toContain("查 ERP API");
     expect(xn[0]?.textContent).toContain("好，派给鲁班");
+    unmount();
+  });
+
+  it("v3 #60 · 玄女 tab @node mac-local · intervene body 含 pinned_node + task_id null", async () => {
+    const { api, getByTestId, unmount } = setup({
+      interveneSeq: [200],
+      nodes: {
+        nodes: [
+          {
+            node_id: "mac-local",
+            tags: ["local"],
+            max_concurrency: 8,
+            inflight_jobs: 0,
+            heartbeat_lag_ms: 600,
+            online: true,
+            registered_at: null,
+            workers: [],
+          },
+        ],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "用 @ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " 跑 cargo test" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(api.state.intervenes).toHaveLength(1);
+    const req = api.state.intervenes[0] as {
+      task_id?: string | null;
+      pinned_node?: string;
+    };
+    expect(req.pinned_node).toBe("mac-local");
+    expect(req.task_id).toBeNull();
     unmount();
   });
 

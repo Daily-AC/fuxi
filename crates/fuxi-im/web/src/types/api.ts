@@ -48,6 +48,8 @@ export interface InterveneRequestV2 {
   target?: string;
   /** v3 #N7' 加 · 所有 @ 的 agent_ids（含 target）。仅用于历史 chip 还原，不影响路由。*/
   mentions?: string[];
+  /** v3 #60 加 · 用户 @ 节点显式指定派活到该 node（β #57 后端 Fuxi::dispatch routing 决策树解析）。 */
+  pinned_node?: string;
 }
 
 // ---------- 阶段 4 · 任务 sheet 视图模型（β #21 契约目标） ----------

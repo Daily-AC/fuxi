@@ -166,6 +166,89 @@ describe("MentionAutocomplete (v3 #N2' / #37)", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("v3 #60 · workers 在前 nodes 在后 + node 段头 separator + node testid", () => {
+    const NODE_HOME: MentionCandidate = {
+      agent_id: "home",
+      role: "node",
+      role_display: "home",
+      hint: "1/4 个任务",
+      kind: "node",
+    };
+    const { getByTestId, queryByTestId } = render(() => (
+      <MentionAutocomplete
+        visible
+        candidates={[LUBAN, NODE_HOME, PUSONG]}
+        highlightedIndex={0}
+        onSelect={() => undefined}
+        onCancel={() => undefined}
+        onMoveSelection={() => undefined}
+      />
+    ));
+    // 渲染顺序：worker LUBAN → worker PUSONG → 节点 separator → node home
+    expect(getByTestId("mention-item-a-luban")).toBeTruthy();
+    expect(getByTestId("mention-item-a-pusong")).toBeTruthy();
+    expect(getByTestId("mention-item-node-home")).toBeTruthy();
+    expect(getByTestId("mention-popup-node-sep")).toBeTruthy();
+    // 没 node 候选时不渲染 separator
+    const { queryByTestId: q2 } = render(() => (
+      <MentionAutocomplete
+        visible
+        candidates={[LUBAN]}
+        highlightedIndex={0}
+        onSelect={() => undefined}
+        onCancel={() => undefined}
+        onMoveSelection={() => undefined}
+      />
+    ));
+    expect(q2("mention-popup-node-sep")).toBeNull();
+    void queryByTestId;
+  });
+
+  it("v3 #60 · 仅 node 候选 · 不渲染 separator（separator 只在 worker→node 转换处显）", () => {
+    const NODE_HOME: MentionCandidate = {
+      agent_id: "home",
+      role: "node",
+      role_display: "home",
+      hint: "0/4",
+      kind: "node",
+    };
+    const { getByTestId, queryByTestId } = render(() => (
+      <MentionAutocomplete
+        visible
+        candidates={[NODE_HOME]}
+        highlightedIndex={0}
+        onSelect={() => undefined}
+        onCancel={() => undefined}
+        onMoveSelection={() => undefined}
+      />
+    ));
+    expect(getByTestId("mention-item-node-home")).toBeTruthy();
+    expect(queryByTestId("mention-popup-node-sep")).toBeNull();
+  });
+
+  it("v3 #60 · onSelect 收到 node candidate（kind='node'）", () => {
+    const NODE_MAC: MentionCandidate = {
+      agent_id: "mac-local",
+      role: "node",
+      role_display: "mac-local",
+      hint: "0/8",
+      kind: "node",
+    };
+    const onSelect = vi.fn();
+    const { getByTestId } = render(() => (
+      <MentionAutocomplete
+        visible
+        candidates={[LUBAN, NODE_MAC]}
+        highlightedIndex={0}
+        onSelect={onSelect}
+        onCancel={() => undefined}
+        onMoveSelection={() => undefined}
+      />
+    ));
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    expect(onSelect).toHaveBeenCalledWith(NODE_MAC);
+  });
+
   it("highlightedIndex reactive 切换 · aria-selected 更新", () => {
     const [hi, setHi] = createSignal(0);
     const { getByTestId } = render(() => (

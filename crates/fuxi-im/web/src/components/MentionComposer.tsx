@@ -11,6 +11,7 @@ import { MentionAutocomplete } from "./MentionAutocomplete";
 import { MentionChip } from "./MentionChip";
 import {
   MULTI_MENTION_WARNING,
+  MULTI_NODE_WARNING,
   fuzzyMatch,
   serializeComposer,
   type ComposerSegment,
@@ -114,7 +115,8 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     setHi(0);
   };
 
-  /** 选中候选 → 替换最末 text 段内 "@<query>" 为 chip token + 起新空 text 段。*/
+  /** 选中候选 → 替换最末 text 段内 "@<query>" 为 chip token + 起新空 text 段。
+   *  #60：candidate.kind 透传到 chip token（worker → mentions 路径；node → pinned_node 路径）。*/
   const onPickCandidate = (c: MentionCandidate): void => {
     setSegments((prev) => {
       const out = prev.slice();
@@ -130,6 +132,7 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
         agent_id: c.agent_id,
         role: c.role,
         role_display: c.role_display,
+        kind: c.kind ?? "worker",
       };
       out.push({ kind: "chip", chip });
       out.push({ kind: "text", text: " " }); // chip 后留个空格方便继续输入
@@ -138,13 +141,19 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     closeAutocomplete();
   };
 
-  const onRemoveChip = (agent_id: string): void => {
+  /** #60：唯一 key 是 (kind, id) — agent_id 和 node_id 理论上可冲（极端 demo），按 kind 区分匹配。*/
+  const onRemoveChip = (agent_id: string, kind: "worker" | "node" = "worker"): void => {
     setSegments((prev) => {
-      // 删第一个匹配的 chip · 同时合并相邻 text 段
       const out: ComposerSegment[] = [];
       let removed = false;
       for (const seg of prev) {
-        if (!removed && seg.kind === "chip" && seg.chip.agent_id === agent_id) {
+        const segKind = seg.kind === "chip" ? (seg.chip.kind ?? "worker") : null;
+        if (
+          !removed
+          && seg.kind === "chip"
+          && seg.chip.agent_id === agent_id
+          && segKind === kind
+        ) {
           removed = true;
           continue;
         }
@@ -155,7 +164,6 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
           out.push(seg);
         }
       }
-      // 末尾必为 text 段
       const last = out[out.length - 1];
       if (!last || last.kind !== "text") out.push({ kind: "text", text: "" });
       return out;
@@ -262,7 +270,7 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
       const beforeTail = segs[segs.length - 2];
       if (beforeTail && beforeTail.kind === "chip") {
         e.preventDefault();
-        onRemoveChip(beforeTail.chip.agent_id);
+        onRemoveChip(beforeTail.chip.agent_id, beforeTail.chip.kind ?? "worker");
         return;
       }
     }
@@ -320,6 +328,9 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
       if (req.multi) {
         pushToast(MULTI_MENTION_WARNING, "warn");
       }
+      if (req.multi_node) {
+        pushToast(MULTI_NODE_WARNING, "warn");
+      }
       await props.onSubmit(req);
       reset();
     } finally {
@@ -365,8 +376,9 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
                 agent_id={s.chip.agent_id}
                 role={s.chip.role}
                 role_display={s.chip.role_display}
+                kind={s.chip.kind ?? "worker"}
                 removable
-                onRemove={() => onRemoveChip(s.chip.agent_id)}
+                onRemove={() => onRemoveChip(s.chip.agent_id, s.chip.kind ?? "worker")}
               />
             ))}
         </div>
@@ -439,7 +451,7 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
           class={styles.editor}
           type="text"
           value={tailText()}
-          placeholder={props.placeholder ?? "对玄女说..."}
+          placeholder={props.placeholder ?? "对玄女说... (@ 角色或节点)"}
           data-testid="mention-editor"
           disabled={busy() || props.disabled}
           onInput={onInput}

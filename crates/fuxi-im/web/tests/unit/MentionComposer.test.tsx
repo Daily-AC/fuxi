@@ -342,6 +342,119 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     for (const ch of after) expect(ch.getAttribute("data-status")).toBe("done");
   });
 
+  // ===== v3 #60 · dist node chip 路径 =====
+
+  const NODE_HOME: MentionCandidate = {
+    agent_id: "home",
+    role: "node",
+    role_display: "home",
+    hint: "1/4 个任务",
+    kind: "node",
+  };
+  const NODE_MAC: MentionCandidate = {
+    agent_id: "mac-local",
+    role: "node",
+    role_display: "mac-local",
+    hint: "0/8",
+    kind: "node",
+  };
+
+  it("v3 #60 · 选 node 候选 → 节点 chip（蓝色 + testid 走 mention-chip-node-）", () => {
+    const { getByTestId, queryByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[LUBAN, NODE_MAC]} onSubmit={noopSubmit} />
+    ));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "用 @ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    expect(getByTestId("mention-chip-node-mac-local")).toBeTruthy();
+    expect(queryByTestId("mention-chip-mac-local")).toBeNull();
+    expect(getByTestId("mention-chip-node-mac-local").getAttribute("style")?.toLowerCase()).toContain("7aa0e5");
+  });
+
+  it("v3 #60 · 仅 node chip · 发送 · pinned_node=node_id · mentions 空 · target undefined", async () => {
+    let captured = null as SerializedIntervene | null;
+    const onSubmit = async (req: SerializedIntervene): Promise<void> => {
+      captured = req;
+    };
+    const { getByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[NODE_MAC]} onSubmit={onSubmit} />
+    ));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "@ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " 跑测试" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(captured?.pinned_node).toBe("mac-local");
+    expect(captured?.mentions).toEqual([]);
+    expect(captured?.target).toBeUndefined();
+    expect(captured?.text).toContain("跑测试");
+  });
+
+  it("v3 #60 · worker chip + node chip mix · 发送 target=worker · pinned_node=node", async () => {
+    let captured = null as SerializedIntervene | null;
+    const onSubmit = async (req: SerializedIntervene): Promise<void> => {
+      captured = req;
+    };
+    const { getByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[LUBAN, NODE_MAC]} onSubmit={onSubmit} />
+    ));
+    // 先 @鲁班
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "@lu" } });
+    fireEvent.click(getByTestId("mention-item-a-luban"));
+    // 再 @mac-local
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " @ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " 跑" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(captured?.target).toBe("a-luban");
+    expect(captured?.mentions).toEqual(["a-luban"]);
+    expect(captured?.pinned_node).toBe("mac-local");
+    expect(captured?.multi).toBe(false);
+    expect(captured?.multi_node).toBe(false);
+  });
+
+  it("v3 #60 · 两个 node chip · 发送时 toast \"多于一个节点\" 警示 · 取第一个", async () => {
+    let captured = null as SerializedIntervene | null;
+    const onSubmit = async (req: SerializedIntervene): Promise<void> => {
+      captured = req;
+    };
+    const { getByTestId, queryByTestId } = renderWithApi(() => (
+      <>
+        <MentionComposer candidates={[NODE_HOME, NODE_MAC]} onSubmit={onSubmit} />
+        <Toast />
+      </>
+    ));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "@ho" } });
+    fireEvent.click(getByTestId("mention-item-node-home"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " @ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " 跑" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(captured?.pinned_node).toBe("home");
+    expect(captured?.multi_node).toBe(true);
+    expect(queryByTestId("toast")?.textContent ?? "").toContain("第一个");
+  });
+
+  it("v3 #60 · node chip ✕ 删 · chip 下线", () => {
+    const { getByTestId, queryByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[NODE_MAC]} onSubmit={noopSubmit} />
+    ));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "@ma" } });
+    fireEvent.click(getByTestId("mention-item-node-mac-local"));
+    expect(getByTestId("mention-chip-node-mac-local")).toBeTruthy();
+    fireEvent.click(getByTestId("mention-chip-remove-node-mac-local"));
+    expect(queryByTestId("mention-chip-node-mac-local")).toBeNull();
+  });
+
+  it("v3 #60 · placeholder 默认含 \"角色或节点\" 提示", () => {
+    const { getByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[]} onSubmit={noopSubmit} />
+    ));
+    const editor = getByTestId("mention-editor") as HTMLInputElement;
+    expect(editor.placeholder).toContain("角色或节点");
+  });
+
   it("Enter 在 query 模式不触发 send（autocomplete 接管 Enter）", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const { getByTestId } = renderWithApi(() => (

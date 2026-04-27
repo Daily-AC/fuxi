@@ -34,6 +34,7 @@ import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
 import {
   candidatesFromMembers,
+  candidatesFromNodes,
   sortCandidates,
   type MentionCandidate,
   type SerializedIntervene,
@@ -89,11 +90,13 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
     return { members, xuannv_id };
   });
 
-  // composer 候选 = 全任务成员（spec §D 任务 thread autocomplete = 该任务成员）
+  // composer 候选 = 全任务成员 + dist online 节点（v3 #60 加节点段）
+  const [nodesData] = createResource(() => client.fetchNodes());
   const candidates = createMemo<MentionCandidate[]>(() => {
     const t = task();
-    if (!t) return [];
-    return sortCandidates(candidatesFromMembers(t.members));
+    const workers = t ? sortCandidates(candidatesFromMembers(t.members)) : [];
+    const nodes = nodesData() ? candidatesFromNodes(nodesData()!.nodes) : [];
+    return [...workers, ...nodes];
   });
 
   let controller: ReconnectController | null = null;
@@ -173,6 +176,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
         target: req.target,
         mentions: req.mentions.length > 0 ? req.mentions : undefined,
         attachments: req.attachments,
+        pinned_node: req.pinned_node,
       });
     try {
       await send();
@@ -247,7 +251,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
 
       <MentionComposer
         candidates={candidates()}
-        placeholder="对玄女说..."
+        placeholder="对玄女说... (@ 角色或节点)"
         onSubmit={handleSubmit}
       />
     </div>

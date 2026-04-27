@@ -75,3 +75,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* #60：worker / node 段分隔小标 · 节点段头 "节点" muted 文字 + 上下细线 */
+.separator {
+  padding: 6px 10px 4px;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}

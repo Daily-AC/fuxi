@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   candidatesFromMembers,
+  candidatesFromNodes,
   chipsOf,
   fuzzyMatch,
   previewText,
   serializeComposer,
   sortCandidates,
   MULTI_MENTION_WARNING,
+  MULTI_NODE_WARNING,
+  NODE_CHIP_COLOR,
   type ComposerSegment,
   type MentionCandidate,
 } from "~/lib/mentions";
-import type { TaskMember } from "~/types/api";
+import type { NodeView, TaskMember } from "~/types/api";
 
 const LUBAN: MentionCandidate = {
   agent_id: "a-luban",
@@ -165,6 +168,132 @@ describe("mentions · serializeComposer", () => {
   it("MULTI_MENTION_WARNING 文案匹配 spec", () => {
     expect(MULTI_MENTION_WARNING).toContain("第一个");
     expect(MULTI_MENTION_WARNING).toContain("引用");
+  });
+});
+
+describe("mentions · #60 dist node 候选 + pinned_node", () => {
+  const NODES: NodeView[] = [
+    {
+      node_id: "home",
+      tags: ["home"],
+      max_concurrency: 4,
+      inflight_jobs: 1,
+      heartbeat_lag_ms: 100,
+      online: true,
+      registered_at: null,
+      workers: [],
+    },
+    {
+      node_id: "mac-local",
+      tags: ["local", "mac"],
+      max_concurrency: 8,
+      inflight_jobs: 0,
+      heartbeat_lag_ms: 800,
+      online: true,
+      registered_at: null,
+      workers: [],
+    },
+    {
+      node_id: "offline-node",
+      tags: [],
+      max_concurrency: 4,
+      inflight_jobs: 0,
+      heartbeat_lag_ms: 99999,
+      online: false,
+      registered_at: null,
+      workers: [],
+    },
+  ];
+
+  it("candidatesFromNodes · 仅 online 节点 + role='node' + kind='node' + hint inflight/cap", () => {
+    const out = candidatesFromNodes(NODES);
+    expect(out.length).toBe(2);
+    expect(out.map((c) => c.agent_id)).toEqual(["home", "mac-local"]);
+    expect(out.every((c) => c.kind === "node")).toBe(true);
+    expect(out.every((c) => c.role === "node")).toBe(true);
+    expect(out[0]?.hint).toBe("1/4 个任务");
+    expect(out[1]?.hint).toBe("0/8 个任务");
+  });
+
+  it("serializeComposer · 单 node chip · pinned_node = node_id · multi_node=false", () => {
+    const segs: ComposerSegment[] = [
+      { kind: "text", text: "用 " },
+      {
+        kind: "chip",
+        chip: { agent_id: "mac-local", role: "node", role_display: "mac-local", kind: "node" },
+      },
+      { kind: "text", text: " 跑" },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.pinned_node).toBe("mac-local");
+    expect(out.mentions).toEqual([]);
+    expect(out.target).toBeUndefined();
+    expect(out.multi_node).toBe(false);
+  });
+
+  it("serializeComposer · worker chip + node chip mix · 各走各路", () => {
+    const segs: ComposerSegment[] = [
+      {
+        kind: "chip",
+        chip: { agent_id: "a-luban", role: "luban", role_display: "鲁班", kind: "worker" },
+      },
+      { kind: "text", text: " 跑 " },
+      {
+        kind: "chip",
+        chip: { agent_id: "mac-local", role: "node", role_display: "mac-local", kind: "node" },
+      },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.target).toBe("a-luban");
+    expect(out.mentions).toEqual(["a-luban"]);
+    expect(out.pinned_node).toBe("mac-local");
+    expect(out.multi).toBe(false);
+    expect(out.multi_node).toBe(false);
+  });
+
+  it("serializeComposer · 两个 node chip · multi_node=true · 取第一个", () => {
+    const segs: ComposerSegment[] = [
+      {
+        kind: "chip",
+        chip: { agent_id: "home", role: "node", role_display: "home", kind: "node" },
+      },
+      { kind: "text", text: " " },
+      {
+        kind: "chip",
+        chip: { agent_id: "mac-local", role: "node", role_display: "mac-local", kind: "node" },
+      },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.pinned_node).toBe("home");
+    expect(out.multi_node).toBe(true);
+  });
+
+  it("无 node chip · pinned_node 为 undefined（不发字段）", () => {
+    const segs: ComposerSegment[] = [{ kind: "text", text: "你好" }];
+    const out = serializeComposer(segs);
+    expect(out.pinned_node).toBeUndefined();
+    expect(out.multi_node).toBe(false);
+  });
+
+  it("MULTI_NODE_WARNING 文案匹配 spec（多于一个节点 chip 取第一个）", () => {
+    expect(MULTI_NODE_WARNING).toContain("第一个");
+    expect(MULTI_NODE_WARNING).toContain("节点");
+  });
+
+  it("NODE_CHIP_COLOR · spec 钉的 #7AA0E5 蓝色", () => {
+    expect(NODE_CHIP_COLOR.toLowerCase()).toBe("#7aa0e5");
+  });
+
+  it("缺省 chip.kind · 视为 worker（兼容老 chip token）", () => {
+    const segs: ComposerSegment[] = [
+      {
+        kind: "chip",
+        chip: { agent_id: "a-luban", role: "luban", role_display: "鲁班" },
+      },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.mentions).toEqual(["a-luban"]);
+    expect(out.pinned_node).toBeUndefined();
   });
 });
 
