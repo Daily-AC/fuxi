@@ -191,9 +191,16 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
       return;
     } catch (err) {
       if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-        pushToast("门客正忙，等这轮跑完再发", "error");
+        // #68 fix · task 已完成（或无 worker target）时 4xx 是玄女 busy，不是门客 busy。
+        // 文案要区分：targetIsWorker = 任务 running 且 req.target 是 worker；否则是玄女路径。
+        const targetIsWorker = isRunning && Boolean(req.target);
+        const toastMsg = targetIsWorker
+          ? "门客正忙，等这轮跑完再发"
+          : "玄女正忙，稍后再试";
+        const inlineErr = targetIsWorker ? "门客正忙" : "玄女正忙";
+        pushToast(toastMsg, "error");
         setMessages((prev) =>
-          markUserMessage(prev, msgId, { pending: false, error: "门客正忙" }),
+          markUserMessage(prev, msgId, { pending: false, error: inlineErr }),
         );
         return;
       }
@@ -281,6 +288,13 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
 
   // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）· @node 标识
   // v3 #64 · @node 在线 muted gray / 离线 dim red（区分 stale 节点）
+  // #68 (c) · 任务 completed 时 member 副文 fallback 用 "已歇" 替代 "待命"（避免误导用户以为 worker 还在线等接活）
+  const memberTail = (m: TaskGroupCard["members"][number]): string => {
+    const tool = m.last_tool_call?.tool;
+    if (tool) return tool;
+    if (props.task.status !== "running") return "已歇";
+    return memberStatusFallback(m);
+  };
   return (
     <div class={styles.banner} data-testid="task-banner">
       <div class={styles.bannerLine}>
@@ -295,7 +309,7 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
         <div class={styles.bannerMembers} data-testid="task-banner-members">
           <For each={props.task.members}>
             {(m, i) => {
-              const tail = truncate(m.last_tool_call?.tool ?? memberStatusFallback(m), 12);
+              const tail = truncate(memberTail(m), 12);
               // 仅在 onlineNodeIds 已 ready 且 node_id 不在内时算 offline；未知态默认在线
               const offline = (): boolean =>
                 !!m.node_id

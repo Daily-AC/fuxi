@@ -15,11 +15,12 @@ Environment=PATH=/home/e0-7/.cargo/bin:/home/e0-7/.local/bin:/usr/local/sbin:/us
 # 公约 + sia/src/core/cc-process.ts 同坑）。
 Environment=NO_PROXY=127.0.0.1,localhost
 # 公网 dist controller URL（β #56 setup-worker 端点返给 worker 用）：
-# 必须是公网可达地址，不是 fuxi-im bind 的 127.0.0.1:9100。否则 worker 节点
-# 拿到 controller_url 后连 controller 永远连不上。2026-04-27 用户实测踩过。
-# **长期**：β #66 follow-up 让 setup-worker 端点用 nginx 转发的
+# 必须是公网可达地址，不是 fuxi-im bind 的 127.0.0.1:9100。**不带 /dist 后缀**——
+# worker 内部 (crates/fuxi-cli/src/dist.rs:1555) 自己拼 `{controller}/dist/register`，
+# 这里再带 /dist 会得到 //dist/dist/register 双重路径。2026-04-27 用户实测踩过。
+# **长期**：β #67 follow-up 让 setup-worker 端点用 nginx 转发的
 # X-Forwarded-Host/Proto 自动推算，不依赖此 hardcode。
-Environment=FUXI_DIST_CONTROLLER_URL=https://im.qmledmq.cn:8443/dist
+Environment=FUXI_DIST_CONTROLLER_URL=https://im.qmledmq.cn:8443
 # WorkingDirectory：让玄女自启时 fuxi-skills 的 `cwd/roles/` 查找路径命中
 # `/home/e0-7/fuxi/roles/`（rsync 落地处）。否则 systemd 默认 cwd=/ 找不到
 # roles/xuannv/ROLE.md → 玄女自启失败 → /api/conv 返 503。

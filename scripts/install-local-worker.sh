@@ -126,10 +126,15 @@ if [[ -z "${HMAC_SECRET}" || -z "${DIST_TOKEN}" ]]; then
     exit 2
 fi
 
-# controller_url 后端可能不返（v1 简化），fallback 到 ${HOME_URL}/dist
+# controller_url 后端可能不返（v1 简化），fallback 到 ${HOME_URL}（不含 /dist）
+# worker 内部 dist.rs:1555 自己拼 `{controller}/dist/register`——这里再加 /dist
+# 会得到 //dist/dist/register 双重路径。setup-worker 端点也走相同约定（β #67）。
 if [[ -z "${CONTROLLER_URL}" ]]; then
-    CONTROLLER_URL="${HOME_URL}/dist"
+    CONTROLLER_URL="${HOME_URL}"
 fi
+# 防御性：去掉用户/后端意外塞的尾部 / 或 /dist 后缀
+CONTROLLER_URL="${CONTROLLER_URL%/}"
+CONTROLLER_URL="${CONTROLLER_URL%/dist}"
 echo "  注册 OK (node=${NODE_NAME}, controller=${CONTROLLER_URL})"
 
 # ── 3. 写 env 文件 ──────────────────────────────────────────────────
