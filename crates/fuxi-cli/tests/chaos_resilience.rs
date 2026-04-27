@@ -41,6 +41,8 @@ async fn enq_simple(ctrl: &fuxi_cli::dist::DistController, title: &str) -> Strin
         None,
         String::new(),
         vec![],
+        None,
+        None,
     )
     .await
 }

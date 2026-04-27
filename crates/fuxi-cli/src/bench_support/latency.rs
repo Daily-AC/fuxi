@@ -98,6 +98,8 @@ async fn measure_task_dispatch_latency() -> Vec<u128> {
             None,
             String::new(),
             vec![],
+            None,
+            None,
         )
         .await;
     wait_one(&harness, &warm, TASK_DEADLINE).await;
@@ -116,6 +118,8 @@ async fn measure_task_dispatch_latency() -> Vec<u128> {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         wait_one(&harness, &job_id, TASK_DEADLINE).await;

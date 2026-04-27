@@ -66,6 +66,17 @@ pub struct DistJob {
     /// codex 忽略。老版不填 → 空 Vec → cc adapter 不加 flag。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
+    /// home 端真相 task_id（`task-<uuid>` 全形式）——worker 端用此 id 给 cc/codex
+    /// agent 跑出来的所有 events 填 meta.task。否则 worker 自生成 TaskId 跟 home
+    /// 完全不同 → /api/tasks aggregate 永远拼不起来（#76 实测踩坑）。
+    /// 老版 worker 没此字段 → fallback `TaskId::new()` 保留旧行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// home 端 dispatch 时的目标 role（`"luban"` / `"pusong"` 等）——worker 端
+    /// spawn cc 前用此 publish AgentSpawning，让 home aggregate 能查到 role 不
+    /// fallback "unknown"（#77）。老版无此字段 → fallback `"unknown"` 旧行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +96,10 @@ pub struct DistEnqueueReq {
     pub cli: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -739,6 +754,8 @@ impl DistController {
         pinned_node: Option<String>,
         cli: String,
         allowed_tools: Vec<String>,
+        task_id: Option<String>,
+        role: Option<String>,
     ) -> String {
         let id = format!("job-{}", Uuid::new_v4());
         let job = DistJob {
@@ -752,6 +769,8 @@ impl DistController {
             pinned_node: pinned_node.clone(),
             cli,
             allowed_tools,
+            task_id,
+            role,
         };
         let cli_label = cli_label_of(&job.cli);
         // dual-write：先持久化（SQLite 是真相源）再 push 到 in-memory queue。
@@ -1241,6 +1260,8 @@ async fn enqueue_handler(
             req.pinned_node,
             req.cli,
             req.allowed_tools,
+            req.task_id,
+            req.role,
         )
         .await;
     Json(DistEnqueueResp { job_id }).into_response()
@@ -1524,6 +1545,10 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
         // 在分布式命令行直派 cc，Phase 4b 之后可扩 `fuxi dist enqueue --cli cc`。
         cli: String::new(),
         allowed_tools: Vec::new(),
+        // CLI 入口走分布式裸派，无 home 真相 task / role 概念——dist worker 端
+        // 自生成 TaskId / fallback role "unknown"。fuxi-im 走 gateway 时 Some。
+        task_id: None,
+        role: None,
     };
     let resp = crate::dist_auth_client::signed_post(&client, &secret, &url, &req)
         .await
@@ -2051,15 +2076,42 @@ async fn run_codex_job(
     // - agent_id：home 没有这个远端 sub-agent 的视图，新造一个 worker 侧 id；
     //   home 端 TUI 看到的是 "(unknown agent on node X)" 直到 δ 加上 source_node_id
     //   能把 worker node + agent_id 渲染成可识别名字。
-    // - task_id：同上——home 那侧的 TaskId 在 controller 端，worker 不持有；
-    //   起一个 worker-local TaskId 让 sentinel 的 AgentRequestReview 字段必填项有得填。
+    // - task_id：#76 修——优先用 home 真相 task_id，让事件 meta.task 跟 home
+    //   端 dispatch 时记的一致；无值才 fallback worker-local。
     // - translate_state：cc/codex 都有跨事件状态（thinking 块 / responded_this_turn /
     //   last_agent_message）。**per-job 新建 = job 边界即状态边界**——上 job 残留
     //   的 responded_this_turn 不会污染下 job 的冷场景 result-only 回复。
     let job_agent_id = AgentId::new();
-    let job_task_id = Some(TaskId::new());
+    let job_task_id = job
+        .task_id
+        .as_deref()
+        .and_then(|s| {
+            s.strip_prefix("task-")
+                .unwrap_or(s)
+                .parse::<uuid::Uuid>()
+                .ok()
+        })
+        .map(TaskId::from)
+        .or_else(|| Some(TaskId::new()));
     let pid_hint = child.id();
     let mut translate_state = fuxi_agent_codex::TranslateState::new();
+
+    // #77：worker spawn codex 后 publish AgentSpawning（同 cc 路径）。
+    if let Some(bus) = ctx.bus_client {
+        let role = job.role.clone().unwrap_or_else(|| "unknown".to_string());
+        let mut meta = fuxi_core::event::EventMeta::now();
+        meta.agent = Some(job_agent_id);
+        meta.task = job_task_id;
+        let _ = bus
+            .enqueue(fuxi_core::event::Event {
+                meta,
+                kind: fuxi_core::event::EventKind::AgentSpawning {
+                    role,
+                    cli: "codex".to_string(),
+                },
+            })
+            .await;
+    }
 
     let stdout = child.stdout.take().context("codex stdout pipe missing")?;
     let stderr = child.stderr.take();
@@ -2288,10 +2340,45 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         .with_context(|| format!("spawn claude binary failed: {bin}"))?;
 
     // γ：per-job 子门客 identity + parser state——见 run_codex_job 同段注释。
+    // #76：优先用 home 真相 task_id（job.task_id），让 worker 端 cc 跑出来的
+    // events.meta.task 跟 home 端 dispatch 时记的 task.id 一致——/api/tasks
+    // aggregate 才能把"home 端发的 TaskCreated"和"远端 cc 跑的 agent_responded"
+    // 拼到同一条 task 卡片上。无 task_id（老 gateway / cli enqueue 路径）回落
+    // worker 自生成。
     let job_agent_id = AgentId::new();
-    let job_task_id = Some(TaskId::new());
+    let job_task_id = job
+        .task_id
+        .as_deref()
+        .and_then(|s| {
+            s.strip_prefix("task-")
+                .unwrap_or(s)
+                .parse::<uuid::Uuid>()
+                .ok()
+        })
+        .map(TaskId::from)
+        .or_else(|| Some(TaskId::new()));
     let pid_hint = child.id();
     let mut translate_state = fuxi_agent_cc::TranslateState::new();
+
+    // #77：worker spawn cc 即刻 publish AgentSpawning + AgentReady 给 home bus，
+    // 让 home aggregate 能查到此 agent 的 role（不 fallback "unknown"）。home
+    // 端发起 dispatch 时已知道 role（profile.role），透传到 job.role；这里
+    // 没值时 fallback "unknown" 跟旧行为对齐。
+    if let Some(bus) = ctx.bus_client {
+        let role = job.role.clone().unwrap_or_else(|| "unknown".to_string());
+        let mut meta = fuxi_core::event::EventMeta::now();
+        meta.agent = Some(job_agent_id);
+        meta.task = job_task_id;
+        let _ = bus
+            .enqueue(fuxi_core::event::Event {
+                meta,
+                kind: fuxi_core::event::EventKind::AgentSpawning {
+                    role,
+                    cli: "claude-code".to_string(),
+                },
+            })
+            .await;
+    }
 
     let stdout = child.stdout.take().context("cc stdout pipe missing")?;
     let stderr = child.stderr.take();
@@ -2302,6 +2389,12 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
     let mut final_text = String::new();
     let mut got_error = false;
     let mut got_cancel = false;
+    // #79：track cc 是否真发了 sentinel JSON——cc haiku model 实测不可靠遵守
+    // addendum 文案。worker 跑完时若没观察到 AgentRequestReview，就兜底发一条
+    // research_summary（summary 取 cc final text 前 200 字符）让玄女知道交付。
+    // dist 路径 worker 跑 raw cc 没人格，always-nudge 是合理默认（不违 Decision 13
+    // "门客自决"——dist worker 本身就不是"门客"，是个跑 cc 的搬运工）。
+    let mut cc_emitted_review = false;
 
     loop {
         let line_res = tokio::time::timeout(
@@ -2337,6 +2430,13 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
                             &mut translate_state,
                             pid_hint,
                         ) {
+                            // #79：track cc 是否真发了 sentinel——没发的话末尾兜底。
+                            if matches!(
+                                event.kind,
+                                fuxi_core::event::EventKind::AgentRequestReview { .. }
+                            ) {
+                                cc_emitted_review = true;
+                            }
                             let _ = bus.enqueue(event).await;
                         }
                     }
@@ -2395,6 +2495,42 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
     } else {
         format!("cc exited with {status}")
     };
+
+    // #79：cc 没主动发 sentinel 但 task 跑 ok——worker 兜底发 AgentRequestReview
+    // 让玄女知道交付了。kind 默认 research_summary（最广义），summary 用 final
+    // assistant text 前 200 chars。无 final_text（极端 case）写"任务已完成"占位。
+    if ok
+        && !cc_emitted_review
+        && let Some(bus) = ctx.bus_client
+        && let Some(t) = job_task_id
+    {
+        let summary = if final_text.trim().is_empty() {
+            format!("任务「{}」已完成", job.title)
+        } else {
+            truncate_text(final_text.trim(), 200)
+        };
+        let mut meta = fuxi_core::event::EventMeta::now();
+        meta.agent = Some(job_agent_id);
+        meta.task = Some(t);
+        let _ = bus
+            .enqueue(fuxi_core::event::Event {
+                meta,
+                kind: fuxi_core::event::EventKind::AgentRequestReview {
+                    agent: job_agent_id,
+                    task: t,
+                    deliverable_kind: fuxi_core::event::DeliverableKind::ResearchSummary,
+                    summary,
+                    artifact_ref: None,
+                },
+            })
+            .await;
+        tracing::info!(
+            job_id = %job.id,
+            task = %t,
+            "worker-side always-nudge：cc 未输出 sentinel，兜底发 AgentRequestReview"
+        );
+    }
+
     Ok((ok, output))
 }
 
@@ -2479,6 +2615,8 @@ mod tests {
             pinned_node: None,
             cli: String::new(),
             allowed_tools: vec![],
+            task_id: None,
+            role: None,
         }
     }
 
@@ -2530,6 +2668,8 @@ mod tests {
             pinned_node: None,
             cli: String::new(),
             allowed_tools: vec![],
+            task_id: None,
+            role: None,
         };
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: DistEnqueueReq = serde_json::from_str(&encoded).unwrap();
@@ -2721,6 +2861,8 @@ mod tests {
             None,
             "codex".into(),
             vec![],
+            None,
+            None,
         )
         .await;
         let _job = ctrl.pull("dead").await.expect("pulled");
@@ -3089,6 +3231,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let _jid2 = ctrl
@@ -3101,6 +3245,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         ctrl.pull("nodeA").await.expect("pull1");
@@ -3133,6 +3279,8 @@ mod tests {
             None,
             String::new(),
             vec![],
+            None,
+            None,
         )
         .await
     }
@@ -3169,6 +3317,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         assert!(
@@ -3195,6 +3345,8 @@ mod tests {
                 Some("nodeB".into()),
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         assert!(ctrl.pull("nodeA").await.is_none(), "pin 到 B，A 不该取到");
@@ -3218,6 +3370,8 @@ mod tests {
                 Some("nodeB".into()),
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let free = enq_simple(&ctrl, "anyone").await;
@@ -3291,6 +3445,8 @@ mod tests {
             pinned_node: Some("home".into()),
             cli: String::new(),
             allowed_tools: vec![],
+            task_id: None,
+            role: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: DistEnqueueReq = serde_json::from_str(&s).unwrap();
@@ -3501,6 +3657,8 @@ mod tests {
                 pinned_node: None,
                 cli: String::new(),
                 allowed_tools: vec![],
+                task_id: None,
+                role: None,
             };
             let job_b = DistJob {
                 id: "B".into(),
@@ -3513,6 +3671,8 @@ mod tests {
                 pinned_node: None,
                 cli: String::new(),
                 allowed_tools: vec![],
+                task_id: None,
+                role: None,
             };
             g.inflight.insert("A".into(), job_a.clone());
             g.inflight.insert("B".into(), job_b.clone());
@@ -4222,6 +4382,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let _job = ctrl.pull("nodeA").await.expect("job pulled");
@@ -4284,6 +4446,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let _ = ctrl.pull("nodeA").await.expect("job pulled");
@@ -4890,6 +5054,8 @@ mod tests {
             pinned_node: None,
             cli: String::new(),
             allowed_tools: vec![],
+            task_id: None,
+            role: None,
         };
         let r = signed_post(&client, &secret, &format!("{base}/dist/enqueue"), &enq_req)
             .await
@@ -5295,6 +5461,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let row = p.job_row(&job_id).await.expect("row").expect("exists");
@@ -5319,6 +5487,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let pulled = ctrl.pull("nodeA").await.expect("job");
@@ -5345,6 +5515,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         ctrl.pull("nodeA").await.expect("job");
@@ -5379,6 +5551,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         ctrl.cancel_job(&job_id).await;
@@ -5411,6 +5585,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let id_q2 = ctrl_a
@@ -5423,6 +5599,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let id_inf = ctrl_a
@@ -5435,6 +5613,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         // pull 把 id_q1 翻 inflight（因为 pull 拿 queue head）。下面 restore 应该把它当 orphan。
@@ -5513,6 +5693,8 @@ mod tests {
                         None,
                         String::new(),
                         vec![],
+                        None,
+                        None,
                     )
                     .await,
             );
@@ -5545,6 +5727,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let new_q2 = ctrl_b
@@ -5557,6 +5741,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         ctrl_b.register("nodeB".into(), vec![], 10).await;
@@ -5593,6 +5779,8 @@ mod tests {
                 None,
                 String::new(),
                 vec![],
+                None,
+                None,
             )
             .await;
         let row = p.job_row(&job_id).await.expect("row").expect("exists");
