@@ -76,6 +76,8 @@ export interface TaskMember {
   last_tool_call?: ToolCallSummary | null;
   /** 可选 · 最近 N 条工具调用（β 暂不返）。*/
   recent_tool_calls?: ToolCallSummary[];
+  /** v3 #59 dist 加 · worker 当前所在节点 id（home / mac-local / ...）。 */
+  node_id?: string | null;
 }
 
 /** 任务分组卡片 · 视图模型（不要跟 types/events.ts 的旧 TaskCard 混淆，那是 v1 主屏列表用的）。*/

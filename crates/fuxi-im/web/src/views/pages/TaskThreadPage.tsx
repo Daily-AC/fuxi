@@ -268,12 +268,13 @@ const Banner: Component<{ task: TaskGroupCard }> = (props) => {
     return "";
   };
 
-  // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）
+  // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）· @node 标识（v3 #59）
   const memberLine = (): string => {
     return props.task.members
       .map((m) => {
         const tail = truncate(m.last_tool_call?.tool ?? memberStatusFallback(m), 12);
-        return `${m.role_display} · ${tail}`;
+        const node = m.node_id ? ` · @${m.node_id}` : "";
+        return `${m.role_display} · ${tail}${node}`;
       })
       .join(" ▎ ");
   };

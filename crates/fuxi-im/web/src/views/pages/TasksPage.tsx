@@ -156,7 +156,7 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
 };
 
 // v3：member 行变 inspection-only（div 不再 button）。
-// 数据：role · last_tool_call/activity 副文本（同 v2 副文本逻辑）。
+// 数据：role · last_tool_call/activity 副文本 · @node 标识（v3 #59）。
 const MemberRow: Component<{ member: TaskMember }> = (props) => {
   const sub = (): string => {
     const tool = props.member.last_tool_call?.tool;
@@ -178,6 +178,13 @@ const MemberRow: Component<{ member: TaskMember }> = (props) => {
       <div class={styles.memberMain}>
         <span class={styles.memberRole}>{props.member.role_display}</span>
         <span class={`${styles.memberSub} mono`}>{sub()}</span>
+        <Show when={props.member.node_id}>
+          {(nid) => (
+            <span class={`${styles.memberNode} mono`} data-testid={`member-node-${props.member.agent_id}`}>
+              @{nid()}
+            </span>
+          )}
+        </Show>
       </div>
     </li>
   );
