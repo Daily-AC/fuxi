@@ -39,6 +39,15 @@ export const TasksPage: Component = () => {
 const RenderTasks: Component = () => {
   const { client } = useApi();
   const [data] = createResource(() => client.fetchTasksOverview());
+  // v3 #64 · 同步拉 nodes topology · 给 MemberRow 区分 @node 在线/离线 dim red
+  // 注意：nodesData 未 ready 时返 null（不是 empty Set），下游按"未知态 = 默认在线 muted"处理
+  // 避免 race（首帧把所有 @node 闪成红色 → 加载完才正确）
+  const [nodesData] = createResource(() => client.fetchNodes());
+  const onlineNodeIds = createMemo<Set<string> | null>(() => {
+    const d = nodesData();
+    if (!d) return null;
+    return new Set(d.nodes.filter((n) => n.online).map((n) => n.node_id));
+  });
 
   return (
     <Show
@@ -54,12 +63,12 @@ const RenderTasks: Component = () => {
         </Show>
       }
     >
-      <TaskTree overview={data()!} />
+      <TaskTree overview={data()!} onlineNodeIds={onlineNodeIds()} />
     </Show>
   );
 };
 
-const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
+const TaskTree: Component<{ overview: TasksOverview; onlineNodeIds: Set<string> | null }> = (props) => {
   // 进行中段按 last_active_at 降序（最近活动优先）
   const running = createMemo(() => {
     const list = [...props.overview.running];
@@ -88,14 +97,14 @@ const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
       <Show when={running().length > 0}>
         <section class={styles.section} data-testid="tasks-running">
           <h3 class={styles.sectionLabel}>进行中</h3>
-          <For each={running()}>{(t) => <TaskCard task={t} />}</For>
+          <For each={running()}>{(t) => <TaskCard task={t} onlineNodeIds={props.onlineNodeIds} />}</For>
         </section>
       </Show>
 
       <Show when={completed().length > 0}>
         <section class={styles.section} data-testid="tasks-completed">
           <h3 class={styles.sectionLabel}>已完成</h3>
-          <For each={completed()}>{(t) => <TaskCard task={t} dim />}</For>
+          <For each={completed()}>{(t) => <TaskCard task={t} dim onlineNodeIds={props.onlineNodeIds} />}</For>
         </section>
       </Show>
     </div>
@@ -107,7 +116,7 @@ function parseTs(iso: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
+const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean; onlineNodeIds: Set<string> | null }> = (props) => {
   const { navPush } = useApi();
   const memberCount = (): number => props.task.members.length;
 
@@ -148,7 +157,7 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
       </button>
       <Show when={memberCount() > 0}>
         <ul class={styles.members}>
-          <For each={props.task.members}>{(m) => <MemberRow member={m} />}</For>
+          <For each={props.task.members}>{(m) => <MemberRow member={m} onlineNodeIds={props.onlineNodeIds} />}</For>
         </ul>
       </Show>
     </article>
@@ -157,7 +166,8 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
 
 // v3：member 行变 inspection-only（div 不再 button）。
 // 数据：role · last_tool_call/activity 副文本 · @node 标识（v3 #59）。
-const MemberRow: Component<{ member: TaskMember }> = (props) => {
+// v3 #64：@node 离线时切 dim red className 区分 stale 节点。
+const MemberRow: Component<{ member: TaskMember; onlineNodeIds: Set<string> | null }> = (props) => {
   const sub = (): string => {
     const tool = props.member.last_tool_call?.tool;
     if (tool) {
@@ -170,6 +180,12 @@ const MemberRow: Component<{ member: TaskMember }> = (props) => {
     return "运行中";
   };
 
+  // 仅在 onlineNodeIds 已 ready 且 node_id 不在内时算 offline；未知态默认在线（避免 race 闪红）
+  const offline = (): boolean =>
+    !!props.member.node_id
+    && props.onlineNodeIds !== null
+    && !props.onlineNodeIds.has(props.member.node_id);
+
   return (
     <li
       class={styles.memberRow}
@@ -180,7 +196,14 @@ const MemberRow: Component<{ member: TaskMember }> = (props) => {
         <span class={`${styles.memberSub} mono`}>{sub()}</span>
         <Show when={props.member.node_id}>
           {(nid) => (
-            <span class={`${styles.memberNode} mono`} data-testid={`member-node-${props.member.agent_id}`}>
+            <span
+              class={`${styles.memberNode} mono ${offline() ? styles.memberNodeOffline ?? "" : ""}`}
+              data-testid={
+                offline()
+                  ? `member-node-offline-${props.member.agent_id}`
+                  : `member-node-${props.member.agent_id}`
+              }
+            >
               @{nid()}
             </span>
           )}

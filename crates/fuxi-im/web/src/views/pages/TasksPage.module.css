@@ -222,5 +222,12 @@
   margin-left: 6px;
 }
 
+/* v3 #64 · @node 离线时 dim red 区分 stale 节点（spec gap d）。
+ * #C76A6A 暗红 + opacity 0.7（不亮过 muted 但能区分） */
+.memberNodeOffline {
+  color: #C76A6A;
+  opacity: 0.7;
+}
+
 /* v3 #44：已完成段 sticky tail 折叠已删（用户实测嫌没必要），直接平铺。
  * dim 卡片视觉用 .cardDim opacity 0.65。 */

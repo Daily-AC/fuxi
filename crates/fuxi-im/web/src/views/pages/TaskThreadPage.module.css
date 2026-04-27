@@ -106,6 +106,12 @@
   text-overflow: ellipsis;
 }
 
+/* v3 #64 · @node 离线时 dim red（spec gap d）。在线 @node 走 .bannerMembers 默认 muted gray。 */
+.bannerNodeOffline {
+  color: #C76A6A;
+  opacity: 0.7;
+}
+
 /* thread */
 .thread {
   flex: 1;
