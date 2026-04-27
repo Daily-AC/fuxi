@@ -590,6 +590,7 @@ mod tests {
                 mode: "append".into(),
                 text: text.into(),
                 mentions: vec![target],
+                pinned_node: None,
             },
         }
     }

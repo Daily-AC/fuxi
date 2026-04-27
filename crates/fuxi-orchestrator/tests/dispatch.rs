@@ -783,7 +783,7 @@ async fn intervene_append_emits_user_intervention_and_applied() {
     fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, false, "hello mid-task", Vec::new())
+    fuxi.intervene(id, false, "hello mid-task", Vec::new(), None)
         .await
         .expect("intervene");
 
@@ -842,7 +842,7 @@ async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
     fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, true, "stop and rework", Vec::new())
+    fuxi.intervene(id, true, "stop and rework", Vec::new(), None)
         .await
         .expect("intervene");
 
@@ -899,7 +899,7 @@ async fn intervene_on_idle_auto_degrades_to_dispatch() {
     );
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, false, "你好，鲁班", Vec::new())
+    fuxi.intervene(id, false, "你好，鲁班", Vec::new(), None)
         .await
         .expect("intervene");
 
@@ -1009,7 +1009,7 @@ async fn intervene_on_missing_agent_returns_not_found() {
 
     let bogus = AgentId::new();
     let err = fuxi
-        .intervene(bogus, false, "ghost", Vec::new())
+        .intervene(bogus, false, "ghost", Vec::new(), None)
         .await
         .expect_err("should fail on missing agent");
     let msg = format!("{err}");
@@ -1069,7 +1069,7 @@ async fn intervene_on_worker_publishes_cc_received_to_xuannv() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "加个注释", Vec::new())
+    fuxi.intervene(worker_id, false, "加个注释", Vec::new(), None)
         .await
         .expect("intervene worker");
 
@@ -1113,7 +1113,7 @@ async fn intervene_on_xuannv_herself_does_not_publish_cc_received() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(xuannv_id, false, "hi", Vec::new())
+    fuxi.intervene(xuannv_id, false, "hi", Vec::new(), None)
         .await
         .expect("intervene xuannv");
 
@@ -1144,7 +1144,7 @@ async fn intervene_without_xuannv_id_set_skips_cc_received() {
     let worker_id = fuxi.insert_agent(worker, None).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "hi", Vec::new())
+    fuxi.intervene(worker_id, false, "hi", Vec::new(), None)
         .await
         .expect("intervene");
 
@@ -1213,7 +1213,7 @@ async fn orchestrator_cc_received_carries_original_intervention_id() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "ping", Vec::new())
+    fuxi.intervene(worker_id, false, "ping", Vec::new(), None)
         .await
         .unwrap();
 
@@ -1479,4 +1479,132 @@ async fn xuannv_id_watch_borrow_returns_already_set_value() {
     let mut rx = fuxi.xuannv_id_watch();
 
     assert_eq!(*rx.borrow_and_update(), Some(preset));
+}
+
+// ============================================================================
+// β · #57 dispatch routing 决策树（spec gap e）
+// ============================================================================
+
+/// 测试用 stub DistEnqueuer：记录每次 enqueue 调用，返回固定 job_id。
+struct RecordingEnqueuer {
+    calls: Arc<tokio::sync::Mutex<Vec<Task>>>,
+}
+
+impl RecordingEnqueuer {
+    fn new() -> (Arc<Self>, Arc<tokio::sync::Mutex<Vec<Task>>>) {
+        let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let me = Arc::new(Self {
+            calls: calls.clone(),
+        });
+        (me, calls)
+    }
+}
+
+#[async_trait]
+impl fuxi_orchestrator::DistEnqueuer for RecordingEnqueuer {
+    async fn enqueue(&self, task: &Task) -> fuxi_orchestrator::Result<String> {
+        self.calls.lock().await.push(task.clone());
+        Ok(format!("stub-job-{}", task.id))
+    }
+}
+
+/// 决策树分支 1：task.pinned_node 非空 → 走 dist enqueue（不本地 spawn）。
+#[tokio::test]
+async fn dispatch_routes_to_dist_when_pinned_node_set() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let (enq, calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    // 注入一个本地 stub agent——agent_id 真实存在（dispatch 契约要求），
+    // 但 dist 路径不会调它的 dispatch。
+    let stub = StubAgent::new("dev", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("t1", "走远端").with_pinned_node("mac-local");
+    fuxi.dispatch(id, task.clone()).await.unwrap();
+
+    // dist enqueuer 应被调用一次
+    let recorded = calls.lock().await;
+    assert_eq!(recorded.len(), 1, "dist enqueuer 应被调用一次");
+    assert_eq!(recorded[0].id, task.id);
+    assert_eq!(recorded[0].pinned_node.as_deref(), Some("mac-local"));
+    drop(recorded);
+
+    // 本地 stub agent 不应被 dispatch
+    assert_eq!(stub.dispatches(), 0, "dist 路径不该调本地 agent.dispatch");
+}
+
+/// 决策树分支 2：task.required_tags 非空 → 走 dist enqueue。
+#[tokio::test]
+async fn dispatch_routes_to_dist_when_required_tags_nonempty() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let (enq, calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    let stub = StubAgent::new("dev", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("t1", "需要 erp 节点能力")
+        .with_required_tags(vec!["erp".to_string(), "local".to_string()]);
+    fuxi.dispatch(id, task.clone()).await.unwrap();
+
+    let recorded = calls.lock().await;
+    assert_eq!(recorded.len(), 1, "tags 非空也应走 dist");
+    assert_eq!(recorded[0].required_tags, vec!["erp", "local"]);
+    drop(recorded);
+    assert_eq!(stub.dispatches(), 0);
+}
+
+/// 决策树分支 3：pinned_node + required_tags 都空 → 本地 spawn 路径。
+#[tokio::test]
+async fn dispatch_falls_back_to_local_when_neither_pinned_nor_tags() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let (enq, calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    let stub = StubAgent::new("dev", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    // 默认 task：pinned_node=None, required_tags=[]
+    let task = Task::new("t1", "本地干就行");
+    fuxi.dispatch(id, task).await.unwrap();
+
+    // 给 pump 一点时间 emit 事件
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let recorded = calls.lock().await;
+    assert_eq!(recorded.len(), 0, "默认 task 不应走 dist");
+    drop(recorded);
+    assert_eq!(stub.dispatches(), 1, "应走本地 stub agent.dispatch");
+}
+
+/// 边界：dist 路径但 enqueuer 未注入 → fallback 本地 spawn + warn（不报错）。
+#[tokio::test]
+async fn dispatch_dist_without_enqueuer_falls_back_to_local() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+    // 注意：不调 set_dist_enqueuer——保持 None
+
+    let stub = StubAgent::new("dev", happy_script());
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+
+    let task = Task::new("t1", "本应远端但 enqueuer 没注入").with_pinned_node("mac-local");
+    fuxi.dispatch(id, task).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        stub.dispatches(),
+        1,
+        "enqueuer 缺失应 fallback 本地 spawn，不抛错"
+    );
 }

@@ -43,11 +43,14 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::Router;
+use fuxi_core::CoreError;
+use fuxi_core::task::Task;
 use fuxi_events::EventBus;
 use fuxi_im::nodes_provider::{
     NodeView, NodesProvider, ONLINE_HEARTBEAT_THRESHOLD_MS, home_workers_from_shelf,
 };
-use fuxi_orchestrator::Fuxi;
+use fuxi_orchestrator::dist_enqueuer::DistEnqueuer;
+use fuxi_orchestrator::{Fuxi, Result as OrchResult};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -246,6 +249,66 @@ impl NodesProvider for DistControllerNodesProvider {
         }
         out
     }
+}
+
+/// β · #57 production `DistEnqueuer` 包装 `Arc<DistController>`——
+/// `Fuxi::dispatch` 决策树命中 dist 路径时调本 impl 把 task 派到 dist controller。
+///
+/// 反向依赖 pattern：trait 在 fuxi-orchestrator，impl 放 fuxi-cli。
+pub struct DistControllerEnqueuer {
+    pub ctrl: Arc<DistController>,
+}
+
+impl DistControllerEnqueuer {
+    pub fn new(ctrl: Arc<DistController>) -> Self {
+        Self { ctrl }
+    }
+}
+
+#[async_trait]
+impl DistEnqueuer for DistControllerEnqueuer {
+    async fn enqueue(&self, task: &Task) -> OrchResult<String> {
+        // node_id_hint：pinned_node 优先，否则空串（让 dist matcher 按 tags 派）
+        let node_hint = task.pinned_node.clone().unwrap_or_default();
+        // body：把 description 作为 prompt body 给 worker——worker 端跑 cc/codex
+        // 时这是 user-turn 的输入。title 仅作展示。
+        let body = if task.description.is_empty() {
+            task.title.clone()
+        } else {
+            task.description.clone()
+        };
+        // v1 cli/allowed_tools 走默认 cc + 空——worker 端 launch CcLaunchConfig
+        // 时按 role-skill 自补真 allowed_tools。后续若需精细控制可 wire 进
+        // task 维度。
+        let job_id = self
+            .ctrl
+            .enqueue(
+                node_hint,
+                task.title.clone(),
+                body,
+                None, // system_prompt：暂走 worker 自带 role skill
+                task.required_tags.clone(),
+                task.pinned_node.clone(),
+                "cc".to_string(),
+                Vec::new(),
+            )
+            .await;
+        tracing::info!(
+            job_id = %job_id,
+            task_id = %task.id,
+            pinned_node = ?task.pinned_node,
+            required_tags = ?task.required_tags,
+            "dist enqueue 成功"
+        );
+        Ok(job_id)
+    }
+}
+
+// 让 enqueuer 失败能上抛 anyhow——目前 dist::enqueue 不返 Result，永远 ok；
+// 留 placeholder 万一未来 enqueue 改返 Result 时直接接进来。
+#[allow(dead_code)]
+fn map_dist_err(e: impl std::fmt::Display) -> CoreError {
+    CoreError::Other(format!("dist enqueue 失败：{e}"))
 }
 
 /// 简单随机串（hex）——用 OS RNG 而非 uuid 避免 dependency；secret/token 都用。

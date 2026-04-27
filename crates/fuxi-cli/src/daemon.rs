@@ -376,7 +376,10 @@ async fn dispatch_command(
                 let interrupt_first = matches!(mode, InterveneMode::Interrupt);
                 // daemon CLI 入口（fuxi-cli 子命令）—— v3 #N7' mentions 仅 PWA 用，
                 // CLI 不带 @；传空 Vec 维持现有 wire 语义。
-                match fuxi.intervene(id, interrupt_first, &text, Vec::new()).await {
+                match fuxi
+                    .intervene(id, interrupt_first, &text, Vec::new(), None)
+                    .await
+                {
                     Ok(()) => Response::ok(serde_json::json!({"delivered": true})),
                     Err(e) => Response::err(e.to_string()),
                 }

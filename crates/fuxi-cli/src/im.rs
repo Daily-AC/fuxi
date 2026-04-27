@@ -189,8 +189,18 @@ pub async fn run(args: StartArgs) -> Result<()> {
     let dist_token_plain = dist_layer.dist_token_plain.clone();
     // β · #55 NodesProvider 包 Arc<DistController>，注入 AppState 让
     // /api/nodes handler 能查 dist topology
-    let nodes_provider: Arc<dyn fuxi_im::nodes_provider::NodesProvider> =
-        Arc::new(crate::im_dist::DistControllerNodesProvider::new(dist_ctrl));
+    let nodes_provider: Arc<dyn fuxi_im::nodes_provider::NodesProvider> = Arc::new(
+        crate::im_dist::DistControllerNodesProvider::new(dist_ctrl.clone()),
+    );
+
+    // β · #57 DistEnqueuer 包 Arc<DistController>，注入 Fuxi 让 dispatch
+    // 决策树命中 dist 路径时把 task 派到 dist。`set_dist_enqueuer` async setter，
+    // 必须 await。
+    fuxi.set_dist_enqueuer(Arc::new(crate::im_dist::DistControllerEnqueuer::new(
+        dist_ctrl,
+    )))
+    .await;
+    tracing::info!("Fuxi.dist_enqueuer 已注入——dispatch routing 决策树启用");
 
     // β · #56 dist_secrets 给 /api/dist/setup-worker 派发用。
     // controller_url：用 FUXI_DIST_CONTROLLER_URL env（部署侧 nginx 反代时
