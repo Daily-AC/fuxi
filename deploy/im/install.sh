@@ -40,14 +40,30 @@ REMOTE_SRC_DIR="/home/e0-7/fuxi"
 REMOTE_BUILT_BIN="${REMOTE_SRC_DIR}/target/release/fuxi"
 REMOTE_CARGO="/home/e0-7/.cargo/bin/cargo"
 
-# SSH/SCP keepalive（2026-04-27 b18c8ed 部署两次踩坑后加）：
-# home 走 ProxyCommand + DDNS-go 公网 IP 解析，多秒静默命令（rsync 大文件 →
-# 紧接 ssh cargo build 56s）期间链路偶断，错误是 `Connection closed by UNKNOWN
-# port 65535`（client 端 nc 看不到 server）。ServerAliveInterval=30 让 ssh
-# 每 30s 主动发 keepalive 探活；3 次失败才放弃 = 90s 容忍窗口。
-SSH_OPTS="-o ServerAliveInterval=30 -o ServerAliveCountMax=3"
-# rsync 用的 ssh 走 -e 'ssh ...'——同款 keepalive
+# SSH/SCP/RSYNC 抗 ProxyCommand 抖断（2026-04-27 多次踩坑迭代）：
+# 1. b18c8ed 部署期间 cargo build 56s 静默 → 链路掉 → 加 ServerAliveInterval=30
+#    + CountMax=3（90s 容忍窗口）
+# 2. 进一步发现首发 ssh 也常抖：~/.ssh/config 的 Host home 用
+#    `ProxyCommand bash -c 'nc $(curl ... cloudflare-dns.com ...) %p'`，
+#    每个新 ssh 进程都跑一次 curl 解 DNS 拼 nc，公网链路偶 timeout，
+#    错误是 `Connection closed by UNKNOWN port 65535`（nc 端，ssh handshake
+#    都没开始，keepalive 救不了）。修法：ControlMaster 复用单条物理连接，
+#    后续 ssh / scp / rsync 全走那条已建好的 socket，跳过 ProxyCommand
+#    重新解析。脚本退出时 trap 关 master。
+SSH_CM_DIR="${HOME}/.ssh/cm-fuxi-deploy"
+SSH_CM_PATH="${SSH_CM_DIR}/home.sock"
+mkdir -p "${SSH_CM_DIR}"
+SSH_OPTS="-o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ControlMaster=auto -o ControlPath=${SSH_CM_PATH} -o ControlPersist=300 -o ConnectTimeout=15 -o ConnectionAttempts=3"
+# rsync 用的 ssh 走 -e 'ssh ...'——同款选项
 RSYNC_RSH="ssh ${SSH_OPTS}"
+
+# 脚本退出时把 ControlMaster 关掉，避免脚本退后还有遗留 ssh 进程
+cleanup_ssh_master() {
+    if [[ -S "${SSH_CM_PATH}" ]]; then
+        ssh -O exit -o ControlPath="${SSH_CM_PATH}" "${REMOTE_HOST}" 2>/dev/null || true
+    fi
+}
+trap cleanup_ssh_master EXIT
 
 # ── 模式 ────────────────────────────────────────────────────────────
 MODE=""
