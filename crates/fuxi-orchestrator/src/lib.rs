@@ -19,6 +19,7 @@
 //! - gemini / opencode 适配器纳入（codex 已接入）。
 
 pub mod bridge;
+pub mod dist_enqueuer;
 pub mod error;
 pub mod fuxi;
 pub mod idle_gc;
@@ -27,6 +28,7 @@ pub mod registry;
 pub mod sentinel_addendum;
 
 pub use bridge::{Intervener, SystemEventBridge};
+pub use dist_enqueuer::DistEnqueuer;
 pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use idle_gc::{

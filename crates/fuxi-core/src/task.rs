@@ -53,6 +53,17 @@ pub struct Task {
     pub assigned_to: Option<AgentId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// β · #57 dispatch routing：worker 必须满足 `required_tags ⊆ worker.tags`
+    /// 才能取此 task。空 Vec = 无 tag 要求（默认走本地 home spawn 或任意能力的
+    /// dist worker，按 `Fuxi::dispatch` 决策树）。
+    /// `#[serde(default)]` 让老 Task JSON（无该字段）反序列化得空 Vec。
+    #[serde(default)]
+    pub required_tags: Vec<String>,
+    /// β · #57 dispatch routing：玄女在 PWA composer 用 `@<node_id>` 显式 pin
+    /// 到特定 dist 节点（如 `mac-local`）。`Some(...)` 时 Fuxi::dispatch 直接
+    /// 派给该节点的 dist worker，跳过 tag 匹配 + 跳过本地 spawn。
+    #[serde(default)]
+    pub pinned_node: Option<String>,
 }
 
 impl Task {
@@ -66,7 +77,21 @@ impl Task {
             assigned_to: None,
             created_at: now,
             updated_at: now,
+            required_tags: Vec::new(),
+            pinned_node: None,
         }
+    }
+
+    /// β · #57 builder：声明本 task 必须路由到拥有这些 tag 的 worker。
+    pub fn with_required_tags(mut self, tags: Vec<String>) -> Self {
+        self.required_tags = tags;
+        self
+    }
+
+    /// β · #57 builder：把本 task pin 到指定 dist 节点。
+    pub fn with_pinned_node(mut self, node_id: impl Into<String>) -> Self {
+        self.pinned_node = Some(node_id.into());
+        self
     }
 }
 

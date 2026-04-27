@@ -178,6 +178,16 @@ pub enum EventKind {
         /// 维持向后兼容——SQLite WAL 已落地的事件不需要回填。
         #[serde(default)]
         mentions: Vec<AgentId>,
+        /// 用户在 PWA composer 用 `@<node_id>` 显式 pin 到的 dist 节点（如
+        /// `mac-local`）。
+        ///
+        /// β · #57（spec `2026-04-27-im-dist-接通-design.md` gap e）加：
+        /// 玄女 dispatch 决策树看到此字段非空 → 走 dist enqueue 到指定节点；
+        /// 否则按 `task.required_tags` 或 default home 路径。
+        ///
+        /// 老事件 `#[serde(default)]` 回放回 None，向后兼容。
+        #[serde(default)]
+        pinned_node: Option<String>,
     },
     /// 门客因介入被打断当前 turn（`control_request/interrupt` 已送达）。
     /// 仅在 `mode=interrupt` 的介入路径上发。
@@ -368,6 +378,7 @@ mod tests {
                 mode: "append".into(),
                 text: "查 ERP-1066".into(),
                 mentions: vec![target, other],
+                pinned_node: None,
             },
         };
         let json = serde_json::to_string(&ev).expect("ser");
@@ -377,6 +388,65 @@ mod tests {
         match back.kind {
             EventKind::UserInterventionSent { mentions, .. } => {
                 assert_eq!(mentions, vec![target, other]);
+            }
+            other => panic!("expect UserInterventionSent, got {other:?}"),
+        }
+    }
+
+    /// β · #57 `pinned_node` 字段加在 `UserInterventionSent` 上——
+    /// 老事件（v3 #N7' 时只有 mentions）反序列化必须不挂，回出来 `pinned_node`
+    /// 是 None。`#[serde(default)]` 是这套 wire 兼容的契约。
+    #[test]
+    fn user_intervention_legacy_with_mentions_only_deserializes_pinned_none() {
+        // 老 wire 形态：只有 mentions，无 pinned_node（pre-#57 已落地的事件）
+        let raw = serde_json::json!({
+            "meta": {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "at": "2026-04-26T10:00:00Z"
+            },
+            "kind": {
+                "type": "user_intervention_sent",
+                "target": "00000000-0000-0000-0000-000000000001",
+                "mode": "append",
+                "text": "old wire",
+                "mentions": ["00000000-0000-0000-0000-000000000001"]
+            }
+        });
+        let ev: Event = serde_json::from_value(raw).expect("legacy event");
+        match ev.kind {
+            EventKind::UserInterventionSent {
+                pinned_node,
+                mentions,
+                ..
+            } => {
+                assert!(pinned_node.is_none(), "老事件 pinned_node 应回 None");
+                assert_eq!(mentions.len(), 1);
+            }
+            other => panic!("expect UserInterventionSent, got {other:?}"),
+        }
+    }
+
+    /// β · #57 完整 round-trip：pinned_node Some 写入 + 读出保留语义。
+    #[test]
+    fn user_intervention_with_pinned_node_roundtrip() {
+        let target = AgentId::new();
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::UserInterventionSent {
+                target,
+                mode: "append".into(),
+                text: "@mac-local 帮我 ls ~/erp".into(),
+                mentions: vec![target],
+                pinned_node: Some("mac-local".into()),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("pinned_node"));
+        assert!(json.contains("mac-local"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        match back.kind {
+            EventKind::UserInterventionSent { pinned_node, .. } => {
+                assert_eq!(pinned_node.as_deref(), Some("mac-local"));
             }
             other => panic!("expect UserInterventionSent, got {other:?}"),
         }

@@ -253,6 +253,7 @@ mod filter_tests {
                 mode: "append".into(),
                 text: "x".into(),
                 mentions: Vec::new(),
+                pinned_node: None,
             },
         );
         assert!(task_thread_visible(&intervene, t));
@@ -264,6 +265,7 @@ mod filter_tests {
                 mode: "append".into(),
                 text: "x".into(),
                 mentions: Vec::new(),
+                pinned_node: None,
             },
         );
         assert!(!task_thread_visible(&other, t));

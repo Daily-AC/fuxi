@@ -40,6 +40,13 @@ pub struct InterveneBody {
     /// **后端 v1 不据此 fan-out 通知**——只 `target` 有路由效果。
     #[serde(default)]
     pub mentions: Vec<AgentId>,
+    /// 用户在 PWA composer 用 `@<node_id>` 显式 pin 到的 dist 节点（如
+    /// `mac-local`）。β · #57：写入 `EventKind::UserInterventionSent.pinned_node`
+    /// 供历史回放还原节点 chip 视觉；真路由要等 task 维度的 dispatch routing 决策树
+    /// 落地（target=local agent + 退化 dispatch 时把 pinned_node 注入 task）。
+    /// v1 暂仅记录，留 v1.x dispatch routing 一并消费。
+    #[serde(default)]
+    pub pinned_node: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,7 +73,13 @@ pub async fn intervene(
 
     state
         .fuxi
-        .intervene(target, body.interrupt, text, body.mentions)
+        .intervene(
+            target,
+            body.interrupt,
+            text,
+            body.mentions,
+            body.pinned_node,
+        )
         .await?;
 
     Ok(Json(InterveneResponse { ok: true }))

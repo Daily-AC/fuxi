@@ -103,6 +103,12 @@ pub struct Fuxi {
     /// dispatch pump silent skip，不阻塞 Done 流程。具体 impl 由 fuxi-cli 注入
     /// （参见 fuxi-cli/src/extractor_hook.rs 的反向依赖 pattern）。
     recall_sink: Arc<RwLock<Option<Arc<dyn RecallSink>>>>,
+    /// β · #57 dispatch routing 钩子——dispatch 决策树命中 dist 路径
+    /// （`task.pinned_node.is_some()` 或 `!task.required_tags.is_empty()`）时
+    /// 调本钩子把 task 派给 dist controller。`Option`：未注入 = 不路由，所有
+    /// dispatch 仍走本地 spawn（向后兼容 + 测试场景）。
+    /// 同 RecallSink 反向依赖 pattern：trait 在本 crate，impl 由 fuxi-cli 注入。
+    dist_enqueuer: Arc<RwLock<Option<Arc<dyn crate::DistEnqueuer>>>>,
 }
 
 impl Fuxi {
@@ -128,6 +134,7 @@ impl Fuxi {
             cfg,
             xuannv_id: xuannv_tx,
             recall_sink: Arc::new(RwLock::new(None)),
+            dist_enqueuer: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -179,6 +186,14 @@ impl Fuxi {
     /// 幂等：再次调用以最新值为准（测试场景偶尔会换 sink）。
     pub async fn set_recall_sink(&self, sink: Arc<dyn RecallSink>) {
         *self.recall_sink.write().await = Some(sink);
+    }
+
+    /// β · #57 注入 dispatch routing 钩子——dispatch 决策树命中 dist 路径
+    /// （task.pinned_node 或 task.required_tags 非空）时调它把 task 派给 dist
+    /// controller。
+    /// 幂等：再次调用以最新值为准。生产由 fuxi-cli 在 `fuxi im start` 注入。
+    pub async fn set_dist_enqueuer(&self, enqueuer: Arc<dyn crate::DistEnqueuer>) {
+        *self.dist_enqueuer.write().await = Some(enqueuer);
     }
 
     /// 读某门客分配的 worktree 路径——纯转发 shelf，供 TUI/CLI 用。
@@ -326,6 +341,10 @@ impl Fuxi {
         // 故注入点跟分支一对一耦合，下面在 match 内各做一次。
         let inject_addendum = !crate::sentinel_addendum::is_globally_disabled()
             && crate::sentinel_addendum::should_inject_for_role(&profile.role);
+        // β · #57 玄女专属 dispatch routing 教学——只 xuannv 注入，独立于 sentinel
+        // 注入开关（routing 是派活契约，不归 sentinel 全局逃生口管）。
+        let inject_routing =
+            crate::sentinel_addendum::should_inject_routing_for_role(&profile.role);
 
         // 适配器 launch。每个分支都返回一个统一的
         //    `Result<(Arc<dyn Agent>, String /* endpoint_hint */), CoreError>`，
@@ -340,6 +359,10 @@ impl Fuxi {
                 if inject_addendum {
                     // cc 专用：把 sentinel 教学拼到 --append-system-prompt
                     crate::sentinel_addendum::inject_cc(&mut cc_cfg);
+                }
+                if inject_routing {
+                    // β · #57 玄女专属：派活路由规则注入（独立于 sentinel）
+                    crate::sentinel_addendum::inject_xuannv_routing_cc(&mut cc_cfg);
                 }
                 match CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg).await {
                     Ok(a) => {
@@ -412,6 +435,40 @@ impl Fuxi {
     /// 保证：**pump task 退出时无论何种原因**（见到终结事件 / channel 被 agent
     /// 提前关闭 / bus 关闭），shelf 状态必然回到 Idle——避免门客被永久锁在 Busy。
     pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
+        // β · #57 routing 决策树（spec gap e）——pinned_node / required_tags 非空 →
+        // 走 dist enqueue（远端 worker 跑），否则继续本地 spawn / 已有 agent 路径。
+        //
+        // 已知缺口（v1）：
+        // - dist 路径仍**先验证 agent_id 在 shelf 里**——保留这步是为了 dispatch
+        //   契约一致（caller 传 agent_id 就该是个真 agent；玄女 dispatch 时给的
+        //   是某个 placeholder 鲁班 id 即可）。后续 v1.x 可加纯 `dispatch_to_dist`
+        //   入口允许 agent_id=None
+        // - dist 路径不发 TaskCreated/TaskDispatched 事件到本进程 EventBus——
+        //   dist worker 自己 emit 后通过 dist /dist/event publish 流回，本进程
+        //   bus 自然能看到（共享 bus，#54 装配）
+        let needs_dist = task.pinned_node.is_some() || !task.required_tags.is_empty();
+        if needs_dist {
+            let enqueuer_opt = self.dist_enqueuer.read().await.clone();
+            if let Some(enqueuer) = enqueuer_opt {
+                info!(
+                    task_id = %task.id,
+                    pinned_node = ?task.pinned_node,
+                    required_tags = ?task.required_tags,
+                    "dispatch routing: 走 dist enqueue（spec gap e）"
+                );
+                let _job_id = enqueuer.enqueue(&task).await?;
+                return Ok(());
+            }
+            // enqueuer 未注入但 task 要 dist——降级到本地 spawn + warn
+            // （生产 fuxi im start 必注入；走到这里一般是测试 / dev）
+            warn!(
+                task_id = %task.id,
+                pinned_node = ?task.pinned_node,
+                required_tags = ?task.required_tags,
+                "dispatch routing: dist 路径但 enqueuer 未注入，fallback 本地 spawn"
+            );
+        }
+
         let agent = self
             .shelf
             .get_agent(agent_id)
@@ -594,6 +651,14 @@ impl Fuxi {
     /// `target` 自身。后端不强制语义检查（前端保证），仅写入事件用作历史回放
     /// 时还原 chip 视觉。空 Vec = 无 @（对应 v0.1 旧入口、TUI、内部 degrade）。
     ///
+    /// `pinned_node`（β · #57）：用户在 PWA composer 用 `@<node_id>` 显式
+    /// pin 到的 dist 节点（如 `mac-local`）。**v1 范围内仅写入事件供 audit /
+    /// 历史回放使用**——真路由要走 `Fuxi::dispatch` 决策树（task.pinned_node /
+    /// task.required_tags），intervene 路径暂不直接派 dist enqueue。
+    /// **已知缺口**：intervene busy worker 时 send_message 仍走本地 agent；
+    /// `pinned_node` 在该路径暂忽略。idle 退化 dispatch 路径会通过 task.pinned_node
+    /// 把它真路由（spec gap e v1）。
+    ///
     /// cc 适配器忽略 task_id，这里传随机 id 兼容 trait 签名；事件上不挂
     /// task 维度（没有从 dispatch 回流最近 task 的路径）——v0.2 补上"最近
     /// dispatch 的 task 记忆"后再加。
@@ -603,6 +668,7 @@ impl Fuxi {
         interrupt_first: bool,
         text: &str,
         mentions: Vec<AgentId>,
+        pinned_node: Option<String>,
     ) -> Result<()> {
         let agent = self
             .shelf
@@ -630,6 +696,7 @@ impl Fuxi {
                         mode: "append_via_dispatch".to_string(),
                         text: text.to_string(),
                         mentions: mentions.clone(),
+                        pinned_node: pinned_node.clone(),
                     },
                 });
                 id
@@ -637,7 +704,15 @@ impl Fuxi {
             let _ = agent; // 不再直接操作 agent，下面 dispatch 内部会再拿一次
             // 2026-04-20 改：title 从 "intervention" → "user-turn"——
             // 语义上就是一轮用户对话，和 TUI Submit::Xuannv 统一，避免混两种 task 类型
-            let task = Task::new("user-turn", text);
+            //
+            // β · #57：把 intervene 的 pinned_node 写到 task 上，让下面
+            // self.dispatch 决策树命中 dist 路径派远端节点。required_tags v1
+            // 暂不从 intervene 入口传（玄女自己派活时填，PWA composer 仅显式
+            // pinned_node 一级 routing）。
+            let mut task = Task::new("user-turn", text);
+            if let Some(node) = pinned_node.clone() {
+                task = task.with_pinned_node(node);
+            }
             self.dispatch(agent_id, task).await?;
             // 抄送玄女
             let xuannv = self.xuannv_id().await;
@@ -677,6 +752,7 @@ impl Fuxi {
                     mode: mode_str.to_string(),
                     text: text.to_string(),
                     mentions,
+                    pinned_node,
                 },
             });
             id

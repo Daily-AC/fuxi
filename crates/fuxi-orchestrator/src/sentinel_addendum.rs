@@ -98,6 +98,26 @@ pub fn should_inject_for_role(role: &str) -> bool {
     !matches!(role, "xuannv" | "extractor")
 }
 
+/// β · #57 玄女专属 dispatch routing 教学。
+///
+/// 玄女不是 sentinel 接收方/发送方关系（她是接收方），但她是 **dispatch 决策方**。
+/// dist 接通后她需要知道"何时给 task 加 required_tags / pinned_node 让活走远端
+/// worker"。这段教学描述派活 5 条规则，注入她的 system prompt addendum，避免
+/// 依赖她主动 Read `roles/xuannv/instructions/dispatch-routing.md`。
+///
+/// 文案跟 instructions 文件**保持一致**（一个真相源）——这里的 const 是源，文件
+/// 是镜像（`include_str!` 拉文件 → 解决 maintenance 漂移）。
+pub const XUANNV_DISPATCH_ROUTING_ADDENDUM: &str =
+    include_str!("../../../roles/xuannv/instructions/dispatch-routing.md");
+
+/// 是否给该 role 注入 xuannv routing 教学。
+///
+/// 只玄女自己注入——其他 role 不需要。`xuannv` 只 dispatch 不消费派活规则
+/// 之外的 worker，不存在"玄女镜像"在远端 dispatch 的场景。
+pub fn should_inject_routing_for_role(role: &str) -> bool {
+    role == "xuannv"
+}
+
 /// 全局逃生口——`FUXI_DISABLE_SENTINEL_ADDENDUM=1` 跳过整套注入。
 ///
 /// 实验、A/B 对照、用户反馈复现时关掉用。每次调用都 read env，开销小（启动期一次性）。
@@ -134,6 +154,18 @@ pub fn inject_codex_profile(profile: &mut AgentProfile) {
     } else {
         profile.system_prompt = format!("{}\n\n{}", profile.system_prompt, trimmed);
     }
+}
+
+/// β · #57 把 dispatch routing 教学拼到玄女 cc 的 `append_system_prompt`。
+///
+/// 玄女目前只跑 cc（无 codex 镜像），故此 helper 只覆盖 cc 路径。
+/// 拼接顺序：已有 addendum → "\n\n" → routing addendum——跟 sentinel 注入对称。
+pub fn inject_xuannv_routing_cc(cfg: &mut CcLaunchConfig) {
+    let trimmed = XUANNV_DISPATCH_ROUTING_ADDENDUM.trim();
+    cfg.append_system_prompt = match cfg.append_system_prompt.take() {
+        Some(existing) if !existing.trim().is_empty() => Some(format!("{existing}\n\n{trimmed}")),
+        _ => Some(trimmed.to_string()),
+    };
 }
 
 #[cfg(test)]
@@ -233,6 +265,51 @@ mod tests {
         let role_pos = profile.system_prompt.find("# 你是鲁班").unwrap();
         let sentinel_pos = profile.system_prompt.find("_fuxi").unwrap();
         assert!(role_pos < sentinel_pos);
+    }
+
+    #[test]
+    fn should_inject_routing_only_for_xuannv() {
+        assert!(should_inject_routing_for_role("xuannv"));
+        assert!(!should_inject_routing_for_role("luban"));
+        assert!(!should_inject_routing_for_role("luban-codex"));
+        assert!(!should_inject_routing_for_role("extractor"));
+        assert!(!should_inject_routing_for_role("zhudiesi"));
+    }
+
+    #[test]
+    fn xuannv_routing_addendum_contains_5_rules() {
+        let txt = XUANNV_DISPATCH_ROUTING_ADDENDUM;
+        // 防漂移：5 条规则核心关键词必须在文案里
+        assert!(txt.contains("required_tags"));
+        assert!(txt.contains("pinned_node"));
+        assert!(txt.contains("local"));
+        assert!(txt.contains("erp"));
+        assert!(txt.contains("home"));
+        assert!(txt.contains("mac-local"));
+    }
+
+    #[test]
+    fn inject_xuannv_routing_cc_when_no_existing_addendum_sets_routing_only() {
+        let mut cfg = CcLaunchConfig::default();
+        assert!(cfg.append_system_prompt.is_none());
+        inject_xuannv_routing_cc(&mut cfg);
+        let got = cfg.append_system_prompt.expect("should be set");
+        assert!(got.contains("required_tags"));
+        assert!(got.contains("pinned_node"));
+    }
+
+    #[test]
+    fn inject_xuannv_routing_cc_appends_after_existing_addendum() {
+        // 玄女实战场景：sentinel skip xuannv，但她可能有别的 role-specific addendum；
+        // routing 注入应跟在已有内容后面，不覆盖。
+        let mut cfg = CcLaunchConfig {
+            append_system_prompt: Some("# 你是玄女 ...".to_string()),
+            ..Default::default()
+        };
+        inject_xuannv_routing_cc(&mut cfg);
+        let got = cfg.append_system_prompt.expect("should be set");
+        assert!(got.starts_with("# 你是玄女"), "role 段应在前");
+        assert!(got.contains("required_tags"), "routing 段应被附加");
     }
 
     #[test]
