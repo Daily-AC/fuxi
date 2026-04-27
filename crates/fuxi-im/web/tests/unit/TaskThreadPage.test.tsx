@@ -274,13 +274,78 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     unmount();
   });
 
-  it("4xx → toast 门客正忙", async () => {
+  it("4xx · 无 @ chip · toast \"玄女正忙\"（无 worker target = 玄女路径）", async () => {
     const { getByTestId, queryByTestId, unmount } = setup({ interveneSeq: [409] });
     await new Promise((r) => setTimeout(r, 50));
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "插一句" } });
     fireEvent.click(getByTestId("mention-send"));
     await new Promise((r) => setTimeout(r, 30));
+    expect(queryByTestId("toast")?.textContent).toContain("玄女正忙");
+    unmount();
+  });
+
+  it("v3 #68 (b) · 4xx · @worker chip · toast \"门客正忙\"（task running + worker target）", async () => {
+    const { getByTestId, queryByTestId, unmount } = setup({ interveneSeq: [409] });
+    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "@lu" } });
+    fireEvent.click(getByTestId("mention-item-" + LUBAN));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: " 帮我看" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
     expect(queryByTestId("toast")?.textContent).toContain("门客正忙");
+    unmount();
+  });
+
+  it("v3 #68 (b) · 任务 completed + 用户发文 4xx · toast \"玄女正忙\" 不是 \"门客正忙\"（用户撞 bug）", async () => {
+    // 模拟用户场景：任务 done 后在 thread composer 输 "hi" → 玄女自己 busy → 4xx
+    // 期望：toast 文案是"玄女正忙"，不是误导的"门客正忙"
+    const overview: TasksOverview = {
+      running: [],
+      completed: [
+        {
+          id: TASK_ID,
+          title: "查 ERP API",
+          status: "completed" as const,
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 19_000,
+          members: [
+            { agent_id: LUBAN, role: "luban", role_display: "鲁班", status: "idle" as const, node_id: "home" },
+          ],
+        },
+      ],
+    };
+    const { getByTestId, queryByTestId, unmount } = setup({ overview, interveneSeq: [409] });
+    await new Promise((r) => setTimeout(r, 50));
+    fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
+    fireEvent.click(getByTestId("mention-send"));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(queryByTestId("toast")?.textContent).toContain("玄女正忙");
+    expect(queryByTestId("toast")?.textContent).not.toContain("门客正忙");
+    unmount();
+  });
+
+  it("v3 #68 (c) · 任务 completed · banner member fallback 显 \"已歇\" 不是 \"待命\"", async () => {
+    const overview: TasksOverview = {
+      running: [],
+      completed: [
+        {
+          id: TASK_ID,
+          title: "查 ERP API",
+          status: "completed" as const,
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 19_000,
+          members: [
+            { agent_id: LUBAN, role: "luban", role_display: "鲁班", status: "idle" as const, node_id: "home" },
+          ],
+        },
+      ],
+    };
+    const { findByTestId, unmount } = setup({ overview });
+    const members = await findByTestId("task-banner-members");
+    expect(members.textContent).toContain("已歇");
+    expect(members.textContent).not.toContain("待命");
     unmount();
   });
 

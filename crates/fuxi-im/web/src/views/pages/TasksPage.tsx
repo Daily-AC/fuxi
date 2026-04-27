@@ -157,7 +157,15 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean; onlineNodeIds: S
       </button>
       <Show when={memberCount() > 0}>
         <ul class={styles.members}>
-          <For each={props.task.members}>{(m) => <MemberRow member={m} onlineNodeIds={props.onlineNodeIds} />}</For>
+          <For each={props.task.members}>
+            {(m) => (
+              <MemberRow
+                member={m}
+                onlineNodeIds={props.onlineNodeIds}
+                taskStatus={props.task.status}
+              />
+            )}
+          </For>
         </ul>
       </Show>
     </article>
@@ -167,7 +175,12 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean; onlineNodeIds: S
 // v3：member 行变 inspection-only（div 不再 button）。
 // 数据：role · last_tool_call/activity 副文本 · @node 标识（v3 #59）。
 // v3 #64：@node 离线时切 dim red className 区分 stale 节点。
-const MemberRow: Component<{ member: TaskMember; onlineNodeIds: Set<string> | null }> = (props) => {
+// #68 (c)：taskStatus 非 running 时 fallback 用 "已歇" 替代 "待命"，避免 completed 任务误以为 worker 还接活。
+const MemberRow: Component<{
+  member: TaskMember;
+  onlineNodeIds: Set<string> | null;
+  taskStatus?: string;
+}> = (props) => {
   const sub = (): string => {
     const tool = props.member.last_tool_call?.tool;
     if (tool) {
@@ -175,6 +188,8 @@ const MemberRow: Component<{ member: TaskMember; onlineNodeIds: Set<string> | nu
       return args ? `${tool} ${args}` : tool;
     }
     if (props.member.activity) return props.member.activity;
+    // 任务非 running（completed / failed）时 worker 已无任务，显 "已歇" 比 "待命" 更直观
+    if (props.taskStatus && props.taskStatus !== "running") return "已歇";
     if (props.member.status === "idle") return "待命";
     if (props.member.status === "thinking") return "思考中";
     return "运行中";

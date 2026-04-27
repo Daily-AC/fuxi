@@ -7,6 +7,10 @@
 
 .bubble {
   max-width: 78%;
+  /* #68 fix · width: fit-content 让 bubble 跟内容尺寸贴合，而不是被父级 .row(flex column align-end)
+   * 压到 min-content 让单字符 break 成竖排（"hi" → "h\ni"）。fit-content 在内容窄时贴内容，
+   * 内容超 max-width 时贴 max-width，正好达到"短文本不竖排 + 长文本仍折行"的效果。 */
+  width: fit-content;
   padding: 12px 14px;
   background: var(--user-bubble);
   color: var(--user-bubble-text);
