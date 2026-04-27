@@ -251,12 +251,28 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
         }
     }
 
-    // 2. 收集 agent role 映射（一次性查 shelf）
+    // 2. 收集 agent role 映射——live shelf + 历史 AgentSpawning 兜底
+    //    （#51 修：worker GC / shutdown 后 shelf 拿不到，role 拿空 fallback "unknown"
+    //    显在 PWA 任务卡上很难看。AgentSpawning 事件持久化在 EventStore，从历史
+    //    回扫一次能补上 role，让已完成 task 的 member 卡仍然显示正确角色名。
+    //    扫 recent(2000) 远大于 fuxi v1 50-task × ~30 events 的天花板，O(2000) 单调
+    //    序列遍历 ~ms 级，可接受。后续若 task 量级上去要换 indexed query）
     let cards = fuxi.list_workers().await;
-    let role_by_agent: HashMap<AgentId, String> = cards
+    let mut role_by_agent: HashMap<AgentId, String> = cards
         .iter()
         .map(|c| (c.id, c.profile.role.clone()))
         .collect();
+    let recent = bus
+        .store()
+        .recent(2000)
+        .await
+        .map_err(crate::Error::Events)?;
+    for ev in &recent {
+        if let (Some(agent), EventKind::AgentSpawning { role, .. }) = (ev.meta.agent, &ev.kind) {
+            // shelf 优先（live worker 的 role 最权威）；历史只填 shelf 缺失的
+            role_by_agent.entry(agent).or_insert_with(|| role.clone());
+        }
+    }
 
     // 3. 每条 task 拉历史事件聚合
     let mut running: Vec<TaskCard> = Vec::new();
@@ -302,17 +318,28 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
         let last = acc.last_active_at.unwrap_or(created);
         let duration_ms = (last - created).num_milliseconds().max(0) as u64;
 
+        // task 终态 snapshot——决定 member.status 显 live shelf 还是 task 完结状态。
+        // #51 修：task done 后 member.status 不应再读 live shelf——worker 可能已被
+        // 派到下一个 task 显示 busy，但用户看的是"这个 task 收尾了"应该 idle/done。
+        // task 内 task-thread banner 也用本字段判"运行中"vs"已完成"。
+        let task_terminated = matches!(
+            acc.terminal_state,
+            Some(TaskState::Done | TaskState::Cancelled | TaskState::Delivering)
+        );
+
         // 把 member 列表转成 MemberCard，过滤玄女
         let mut members: Vec<MemberCard> = Vec::new();
         for agent_id in &acc.member_ids {
             if Some(*agent_id) == xuannv_id {
                 continue;
             }
+            // #51 修：role 取 shelf 优先，shelf 缺失再走 AgentSpawning 历史兜底
+            // （已在上面 step 2 拼好），最后 fallback "unknown"——大多数路径都不会
+            // 到 fallback 这一步了。
             let role = role_by_agent
                 .get(agent_id)
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string());
-            let shelf_status = fuxi.status_of(*agent_id).await;
             let thinking = acc.agent_thinking.get(agent_id).copied().unwrap_or(false);
             let activity = acc
                 .agent_activity
@@ -320,13 +347,22 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 .or_else(|| acc.agent_last_text.get(agent_id))
                 .cloned();
             let last_tool_call = acc.agent_last_tool_call.get(agent_id).cloned();
+            // #51 修：task 已终结时强制 idle——前端 banner / member 卡显"已完成"
+            // 不再误把 worker 后续派活的 busy 状态算到本 task 头上。task 仍 running
+            // 时正常读 live shelf。
+            let status = if task_terminated {
+                "idle".into()
+            } else {
+                let shelf_status = fuxi.status_of(*agent_id).await;
+                member_status(shelf_status, thinking)
+            };
             members.push(MemberCard {
                 agent_id: agent_id.to_string(),
                 role: role.clone(),
                 role_display: role_display(&role),
                 activity,
                 tokens: None,
-                status: member_status(shelf_status, thinking),
+                status,
                 last_tool_call,
                 description: acc.description.clone(),
             });

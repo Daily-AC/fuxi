@@ -840,4 +840,140 @@ mod tests {
             "shelf 不在的 agent 应返 dead，得到 {status}"
         );
     }
+
+    /// #51 修：worker GC / shutdown 后 shelf 没了，role 应从 EventBus 历史
+    /// `AgentSpawning` 事件兜底拿，而不是 fallback 到字面 "unknown"。
+    #[tokio::test]
+    async fn role_display_falls_back_to_agent_spawning_event_when_shelf_missing() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new(); // 故意没插 shelf——模拟 GC / shutdown 后历史里仍有
+        let t0 = Utc::now();
+
+        // 历史第一条：AgentSpawning 记录 role
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0,
+            EventKind::AgentSpawning {
+                role: "luban".into(),
+                cli: "cc".into(),
+            },
+        ))
+        .unwrap();
+        // task 派给该 agent
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(2),
+            EventKind::TaskDispatched { to: agent },
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+
+        let v = fetch(app).await;
+        let m = &v["running"][0]["members"][0];
+        // role 从 AgentSpawning 兜底 → "luban" → role_display "鲁班"
+        assert_eq!(
+            m["role"], "luban",
+            "shelf 缺失时应从历史 AgentSpawning 兜底"
+        );
+        assert_eq!(m["role_display"], "鲁班", "role_display 不应是 'unknown'");
+    }
+
+    /// #51 修：task 已 Done 时 member.status 强制 "idle"——不读 live shelf
+    /// （worker 可能已被派下一个 task 显 busy，但本 task 已经收尾）。
+    #[tokio::test]
+    async fn member_status_forces_idle_when_task_done() {
+        let (_dir, app, bus, fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        let t0 = Utc::now();
+
+        bus.publish(make_event(
+            task,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: agent },
+        ))
+        .unwrap();
+        // task 终态：Done
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(5),
+            EventKind::TaskStateChanged {
+                from: TaskState::InProgress,
+                to: TaskState::Done,
+            },
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+
+        // 即使 shelf 不存在该 agent（live "dead"），task done 强制 idle
+        let _ = fuxi; // 不 insert agent，模拟 GC 后场景
+        let v = fetch(app).await;
+        let card = &v["completed"][0];
+        assert_eq!(card["status"], "completed", "task 应入 completed 桶");
+        assert_eq!(
+            card["members"][0]["status"], "idle",
+            "task done 后 member.status 应强制 idle，不读 live shelf"
+        );
+    }
+
+    /// #51 边界：task 仍 running 时 member.status 仍读 live shelf（行为不变）。
+    /// 确认 fix 不破坏 running task 的实时 status。
+    #[tokio::test]
+    async fn member_status_reads_live_shelf_when_task_running() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        let t0 = Utc::now();
+
+        bus.publish(make_event(
+            task,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: agent },
+        ))
+        .unwrap();
+        // 没发 TaskStateChanged → task 仍 running
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+
+        let v = fetch(app).await;
+        let card = &v["running"][0];
+        assert_eq!(card["status"], "running");
+        // shelf 没该 agent → live status 是 "dead"（前 fix 路径不被覆盖）
+        assert_eq!(card["members"][0]["status"], "dead");
+    }
 }
