@@ -1598,7 +1598,10 @@ async fn dispatch_dist_path_injects_sentinel_addendum_into_system_prompt() {
         .expect("dist 路径必须传 system_prompt（含 sentinel 教学）");
     assert!(sp.contains("# 你是鲁班"), "应保留 role-specific 段：{sp}");
     assert!(sp.contains("_fuxi"), "应含 sentinel 教学：{sp}");
-    assert!(sp.contains("request_review"), "sentinel kind 字段应在文案：{sp}");
+    assert!(
+        sp.contains("request_review"),
+        "sentinel kind 字段应在文案：{sp}"
+    );
 }
 
 /// β · #4 配套：玄女作为接收方不该被注 sentinel（`should_inject_for_role`

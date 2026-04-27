@@ -21,8 +21,14 @@
 //!   不跟 agent_id；要等 #57 dispatch routing 加 worker→node 真映射后才能填。
 //!   ε 端 #58 节点 tab 设计已考虑 `workers: []` 的合法形态，前端不破。
 
+use chrono::{DateTime, Duration, Utc};
+use fuxi_core::event::EventKind;
+use fuxi_core::id::AgentId;
+use fuxi_core::task::TaskState;
+use fuxi_events::EventBus;
 use fuxi_orchestrator::Fuxi;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// `/api/nodes` 响应里的单条节点视图。
 ///
@@ -107,6 +113,75 @@ pub async fn home_workers_from_shelf(fuxi: &Fuxi) -> Vec<WorkerView> {
     out
 }
 
+/// β · #74 远端 dist 节点的 worker 列表 fallback——从 EventBus 历史里
+/// 反查"source_node_id == 该节点 + 还没 task_state_changed 终态"的 cc agent。
+///
+/// dist worker 上的 cc 是 spawn-per-job 模型（不像 home 端 shelf 里的常驻 agent），
+/// 一旦 task done 就销毁——所以 worker 列表只显"当下还在跑的"。已终态或 5 分钟
+/// 内无新事件的视为已结束，从列表剔除。
+///
+/// 跟 `home_workers_from_shelf` 不同处：
+/// - 数据源是 EventBus 历史，不是 shelf（远端 cc 不在 home shelf）
+/// - 只显 busy，没 idle/dead——dist cc 没"挂着等任务"的 idle 态
+/// - role 通过 AgentSpawning 事件推断（home 端发的 dist_job_dispatched 事件无 role 信息）
+pub async fn dist_workers_from_events(bus: &EventBus, node_id: &str) -> Vec<WorkerView> {
+    let recent = match bus.store().recent(2000).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let cutoff = Utc::now() - Duration::seconds(300);
+    let mut role_by_agent: HashMap<AgentId, String> = HashMap::new();
+    let mut last_at: HashMap<AgentId, DateTime<Utc>> = HashMap::new();
+    let mut terminated: HashMap<AgentId, bool> = HashMap::new();
+
+    for ev in &recent {
+        if ev.meta.source_node_id.as_deref() != Some(node_id) {
+            continue;
+        }
+        let Some(agent) = ev.meta.agent else {
+            continue;
+        };
+        last_at
+            .entry(agent)
+            .and_modify(|t| {
+                if ev.meta.at > *t {
+                    *t = ev.meta.at;
+                }
+            })
+            .or_insert(ev.meta.at);
+        match &ev.kind {
+            EventKind::AgentSpawning { role, .. } => {
+                role_by_agent.entry(agent).or_insert_with(|| role.clone());
+            }
+            EventKind::TaskStateChanged {
+                to: TaskState::Done | TaskState::Cancelled | TaskState::Delivering,
+                ..
+            } => {
+                terminated.insert(agent, true);
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    for (agent, role) in role_by_agent {
+        if *terminated.get(&agent).unwrap_or(&false) {
+            continue;
+        }
+        if last_at.get(&agent).is_none_or(|at| *at < cutoff) {
+            continue;
+        }
+        out.push(WorkerView {
+            agent_id: agent.to_string(),
+            role_display: role_display(&role),
+            role,
+            status: "busy".to_string(),
+        });
+    }
+    out.sort_by(|a, b| status_rank(&a.status).cmp(&status_rank(&b.status)));
+    out
+}
+
 fn status_rank(s: &str) -> u8 {
     match s {
         "busy" => 0,
@@ -151,5 +226,124 @@ mod tests {
     fn online_threshold_is_30s() {
         // spec gap c 严格 30s——比 dist STALE_THRESHOLD (60s) 略严
         assert_eq!(ONLINE_HEARTBEAT_THRESHOLD_MS, 30_000);
+    }
+
+    /// β · #74 真因回归：dist 节点的 workers 列表必须从 events 历史里反查，
+    /// 否则用户看到 mac 节点 workers:[] 跟实测「明明有门客在干活」相悖。
+    #[tokio::test]
+    async fn dist_workers_from_events_returns_busy_agent_with_no_terminal_state() {
+        use fuxi_core::event::{Event, EventMeta};
+        use fuxi_core::id::TaskId;
+
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let agent = AgentId::new();
+        let task = TaskId::new();
+
+        // mac 节点上 cc spawn → 还在跑（无 terminal）
+        let mut meta1 = EventMeta::now();
+        meta1.agent = Some(agent);
+        meta1.task = Some(task);
+        meta1.source_node_id = Some("mac".into());
+        bus.publish(Event {
+            meta: meta1,
+            kind: EventKind::AgentSpawning {
+                role: "luban".into(),
+                cli: "claude-code".into(),
+            },
+        })
+        .expect("publish");
+
+        // 给 store 一点时间持久化
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let workers = dist_workers_from_events(&bus, "mac").await;
+        assert_eq!(workers.len(), 1, "应有 1 个跑中的 worker");
+        assert_eq!(workers[0].role, "luban");
+        assert_eq!(workers[0].role_display, "鲁班");
+        assert_eq!(workers[0].status, "busy");
+    }
+
+    #[tokio::test]
+    async fn dist_workers_from_events_skips_after_task_state_done() {
+        use fuxi_core::event::{Event, EventMeta};
+        use fuxi_core::id::TaskId;
+
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let agent = AgentId::new();
+        let task = TaskId::new();
+
+        // mac 节点：spawn → done
+        for kind in [
+            EventKind::AgentSpawning {
+                role: "luban".into(),
+                cli: "claude-code".into(),
+            },
+            EventKind::TaskStateChanged {
+                from: TaskState::Delivering,
+                to: TaskState::Done,
+            },
+        ] {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent);
+            meta.task = Some(task);
+            meta.source_node_id = Some("mac".into());
+            bus.publish(Event { meta, kind }).expect("publish");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let workers = dist_workers_from_events(&bus, "mac").await;
+        assert_eq!(workers.len(), 0, "task done 后远端 cc 视为销毁，不应再列");
+    }
+
+    #[tokio::test]
+    async fn dist_workers_from_events_filters_by_node_id() {
+        use fuxi_core::event::{Event, EventMeta};
+        use fuxi_core::id::TaskId;
+
+        let bus = EventBus::with_memory_store().await.expect("bus");
+
+        // mac 上一个跑中的 luban
+        let mac_agent = AgentId::new();
+        let mut meta1 = EventMeta::now();
+        meta1.agent = Some(mac_agent);
+        meta1.task = Some(TaskId::new());
+        meta1.source_node_id = Some("mac".into());
+        bus.publish(Event {
+            meta: meta1,
+            kind: EventKind::AgentSpawning {
+                role: "luban".into(),
+                cli: "claude-code".into(),
+            },
+        })
+        .expect("publish");
+
+        // mbp-2 上一个跑中的 pusong
+        let other_agent = AgentId::new();
+        let mut meta2 = EventMeta::now();
+        meta2.agent = Some(other_agent);
+        meta2.task = Some(TaskId::new());
+        meta2.source_node_id = Some("mbp-2".into());
+        bus.publish(Event {
+            meta: meta2,
+            kind: EventKind::AgentSpawning {
+                role: "pusong".into(),
+                cli: "claude-code".into(),
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mac_workers = dist_workers_from_events(&bus, "mac").await;
+        assert_eq!(mac_workers.len(), 1);
+        assert_eq!(mac_workers[0].role, "luban");
+
+        let mbp_workers = dist_workers_from_events(&bus, "mbp-2").await;
+        assert_eq!(mbp_workers.len(), 1);
+        assert_eq!(mbp_workers[0].role, "pusong");
+
+        let none_workers = dist_workers_from_events(&bus, "no-such-node").await;
+        assert_eq!(none_workers.len(), 0);
     }
 }
