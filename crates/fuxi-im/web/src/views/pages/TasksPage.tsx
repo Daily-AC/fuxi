@@ -3,7 +3,6 @@ import {
   Show,
   createMemo,
   createResource,
-  createSignal,
   type Component,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
@@ -61,11 +60,15 @@ const RenderTasks: Component = () => {
 };
 
 const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
-  const [completedExpanded, setCompletedExpanded] = createSignal(false);
-
   // 进行中段按 last_active_at 降序（最近活动优先）
   const running = createMemo(() => {
     const list = [...props.overview.running];
+    list.sort((a, b) => parseTs(b.last_active_at) - parseTs(a.last_active_at));
+    return list;
+  });
+  // v3 #44 实测反馈：已完成段不再 sticky tail 折叠，直接平铺；按 last_active_at 降序（无 completed_at 字段时的最佳代理）
+  const completed = createMemo(() => {
+    const list = [...props.overview.completed];
     list.sort((a, b) => parseTs(b.last_active_at) - parseTs(a.last_active_at));
     return list;
   });
@@ -89,24 +92,10 @@ const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
         </section>
       </Show>
 
-      <Show when={props.overview.completed.length > 0}>
+      <Show when={completed().length > 0}>
         <section class={styles.section} data-testid="tasks-completed">
-          <Show when={!completedExpanded()}>
-            <button
-              type="button"
-              class={styles.completedTail}
-              onClick={() => setCompletedExpanded(true)}
-              data-testid="tasks-completed-tail"
-              aria-expanded={false}
-            >
-              <span>已完成 · {props.overview.completed.length} 条</span>
-              <span class={styles.tailMark} aria-hidden="true">▸</span>
-            </button>
-          </Show>
-          <Show when={completedExpanded()}>
-            <h3 class={styles.sectionLabel}>已完成</h3>
-            <For each={props.overview.completed}>{(t) => <TaskCard task={t} dim />}</For>
-          </Show>
+          <h3 class={styles.sectionLabel}>已完成</h3>
+          <For each={completed()}>{(t) => <TaskCard task={t} dim />}</For>
         </section>
       </Show>
     </div>

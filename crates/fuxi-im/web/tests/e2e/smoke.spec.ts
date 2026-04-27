@@ -398,16 +398,15 @@ test("Pager · 切任务页 · 看到 mock 数据 + 切回玄女", async ({ page
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
 
-  // pager dot 切到任务页（C 方案两级行卡片，#N2）
+  // 任务 tab
   await page.getByTestId("tab-tasks").click();
   await expect(page.getByTestId("page-tasks")).toBeVisible();
   await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("修 ERP 客户列表");
   await expect(page.getByTestId("member-a-luban")).toContainText("鲁班");
   await expect(page.getByTestId("member-a-luban")).toContainText("cargo test --lib");
-  // C 方案 completed 默认折叠 sticky tail，需展开才看到 c1 卡
-  await page.getByTestId("tasks-completed-tail").click();
+  // v3 #44：已完成段直接平铺，无 sticky tail
   await expect(page.getByTestId("task-card-c1")).toContainText("升级 deps");
-  // dot 1 切回玄女
+  // 切回玄女
   await page.getByTestId("tab-xuannv").click();
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
 });
@@ -653,7 +652,7 @@ test("#N4' · @ 选鲁班 → intervene 带 task_id+target+mentions", async ({ p
 // 私聊页源码 src/views/pages/WorkerPage.tsx 暂留作 v2.x 备用（per spec），但 e2e 流不再走。
 // 单测 tests/unit/WorkerPage.test.tsx 也保留作 reducer/render 单元覆盖。
 
-test("#N2 · completed 卡折叠 sticky tail · 展开后显 members + tool 副文本", async ({ page }) => {
+test("#44 · completed 段直接平铺（无 sticky tail）+ 显 members + tool 副文本", async ({ page }) => {
   await page.addInitScript(() => {
     window.__FUXI_TASKS_OVERVIEW__ = {
       running: [],
@@ -689,13 +688,9 @@ test("#N2 · completed 卡折叠 sticky tail · 展开后显 members + tool 副�
   await page.getByTestId("tab-tasks").click();
   await expect(page.getByTestId("page-tasks")).toBeVisible();
 
-  // C 方案 · completed 默认折叠 sticky tail
-  await expect(page.getByTestId("tasks-completed-tail")).toContainText("已完成 · 1 条");
-  // 展开
-  await page.getByTestId("tasks-completed-tail").click();
+  // v3 #44：sticky tail 已删；卡片直接见底
+  await expect(page.getByTestId("tasks-completed-tail")).toHaveCount(0);
   await expect(page.getByTestId("task-card-c-dense")).toBeVisible();
-  // 完整 members 显（spec C 方案 completed 也显 members）
   await expect(page.getByTestId("member-a-c-luban")).toContainText("鲁班");
-  // 副文本 = last_tool_call.tool（C 方案不再单独显 tokens / exit 码 / 时长，改 #N3 私聊页才显详）
   await expect(page.getByTestId("member-a-c-luban")).toContainText("cargo update");
 });
