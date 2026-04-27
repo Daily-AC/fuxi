@@ -1,5 +1,13 @@
 # 何时呼叫玄女审阅（deliverable nudge）
 
+> **注**：自 commit `b18c8ed`（β · #48）起，本节核心内容已通过 spawn 时的
+> system prompt addendum **强制注入**到所有 worker（cc / codex）启动 prompt
+> 中。门客无需主动 `Read` 本文件即可知晓 sentinel 用法。本文件保留为人类可读
+> 的深入参考；`crates/fuxi-orchestrator/src/sentinel_addendum.rs` 是注入路径
+> 的唯一真相源——若要改文案/格式以本节为准并同步那里的 const。
+>
+> 全局禁用：`FUXI_DISABLE_SENTINEL_ADDENDUM=1` env var（实验/A-B 用）。
+
 我中间过程的所有事件玄女**默认不读**——`AgentResponded` / `ToolCallStarted` /
 `ToolCallFinished` 都只留痕在 EventBus，玄女注意力是稀缺资源，留给真正的交付。
 
