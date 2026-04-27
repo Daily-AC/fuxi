@@ -40,6 +40,15 @@ REMOTE_SRC_DIR="/home/e0-7/fuxi"
 REMOTE_BUILT_BIN="${REMOTE_SRC_DIR}/target/release/fuxi"
 REMOTE_CARGO="/home/e0-7/.cargo/bin/cargo"
 
+# SSH/SCP keepalive（2026-04-27 b18c8ed 部署两次踩坑后加）：
+# home 走 ProxyCommand + DDNS-go 公网 IP 解析，多秒静默命令（rsync 大文件 →
+# 紧接 ssh cargo build 56s）期间链路偶断，错误是 `Connection closed by UNKNOWN
+# port 65535`（client 端 nc 看不到 server）。ServerAliveInterval=30 让 ssh
+# 每 30s 主动发 keepalive 探活；3 次失败才放弃 = 90s 容忍窗口。
+SSH_OPTS="-o ServerAliveInterval=30 -o ServerAliveCountMax=3"
+# rsync 用的 ssh 走 -e 'ssh ...'——同款 keepalive
+RSYNC_RSH="ssh ${SSH_OPTS}"
+
 # ── 模式 ────────────────────────────────────────────────────────────
 MODE=""
 REBUILD_WEB="0"
@@ -93,7 +102,7 @@ echo "  fuxi root  : ${FUXI_ROOT}"
 echo "  deploy dir : ${DEPLOY_DIR}"
 echo "  ssh target : ${REMOTE_HOST}"
 
-if ! ssh -o ConnectTimeout=15 "${REMOTE_HOST}" "echo ok" >/dev/null 2>&1; then
+if ! ssh ${SSH_OPTS} -o ConnectTimeout=15 "${REMOTE_HOST}" "echo ok" >/dev/null 2>&1; then
     echo "  !! ssh ${REMOTE_HOST} 不通——检查 ~/.ssh/config Host home 配置 / 公网 IP DDNS" >&2
     if [[ "${MODE}" == "apply" ]]; then exit 1; fi
 fi
@@ -115,7 +124,7 @@ if [[ "${WEB_ONLY}" == "1" ]]; then
     echo "  (--web-only) 跳过 preflight a/b/c（service 在跑、9100 占用、vhost 已在 都是预期）"
     if [[ "${MODE}" == "apply" ]]; then
         echo "  preflight d) 全 nginx 配置无人占 im.qmledmq.cn（兜底防被劫持）："
-        grep_out=$(ssh "${REMOTE_HOST}" 'sudo grep -rln "im.qmledmq.cn" /etc/nginx/ 2>/dev/null || true' 2>&1)
+        grep_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'sudo grep -rln "im.qmledmq.cn" /etc/nginx/ 2>/dev/null || true' 2>&1)
         # web-only 模式期望 grep 命中**只**有 sites-enabled/im（我们自己装的），其它都是异常
         unexpected=$(echo "${grep_out}" | grep -v "/etc/nginx/sites-enabled/im$" || true)
         if [[ -n "${unexpected}" ]]; then
@@ -130,7 +139,7 @@ elif [[ "${MODE}" == "apply" ]]; then
     echo "  preflight a) 远端无残留 fuxi 进程："
     # `pgrep -fa fuxi` 会把本条 ssh 命令自身也匹配进去（它的命令行含 "fuxi"
     # 字符）——必须 grep -v 掉自身和 grep 自己，再过滤剩下的；剩 0 行才算"无残留"。
-    pgrep_out=$(ssh "${REMOTE_HOST}" "pgrep -fa fuxi | grep -Ev 'pgrep|grep ' || true" 2>&1)
+    pgrep_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" "pgrep -fa fuxi | grep -Ev 'pgrep|grep ' || true" 2>&1)
     if [[ -n "${pgrep_out}" ]]; then
         echo "    ${pgrep_out}"
         echo "  !! 远端有 fuxi 进程在跑——先 ssh home 'pkill fuxi' 或确认是否能停" >&2
@@ -139,7 +148,7 @@ elif [[ "${MODE}" == "apply" ]]; then
     echo "    no fuxi running"
 
     echo "  preflight b) 9100 端口空闲："
-    port_out=$(ssh "${REMOTE_HOST}" 'ss -tln 2>/dev/null | grep :9100 || echo "9100 free"' 2>&1)
+    port_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'ss -tln 2>/dev/null | grep :9100 || echo "9100 free"' 2>&1)
     echo "    ${port_out}"
     if [[ "${port_out}" != "9100 free" ]]; then
         echo "  !! 9100 已被占用——查谁在用：ssh home 'ss -tlnp | grep :9100'" >&2
@@ -147,7 +156,7 @@ elif [[ "${MODE}" == "apply" ]]; then
     fi
 
     echo "  preflight c) nginx vhost 文件不冲突："
-    nginx_out=$(ssh "${REMOTE_HOST}" 'test -e /etc/nginx/sites-enabled/im && echo CONFLICT || echo OK' 2>&1)
+    nginx_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'test -e /etc/nginx/sites-enabled/im && echo CONFLICT || echo OK' 2>&1)
     echo "    ${nginx_out}"
     if [[ "${nginx_out}" != "OK" ]]; then
         echo "  !! /etc/nginx/sites-enabled/im 已存在——人工确认是否覆盖再继续" >&2
@@ -159,7 +168,7 @@ elif [[ "${MODE}" == "apply" ]]; then
     # `im.qmledmq.cn` server_name 都会导致 conflicting server name + 我的
     # vhost 被 nginx 静默忽略。
     echo "  preflight d) 全 nginx 配置无人占 im.qmledmq.cn："
-    grep_out=$(ssh "${REMOTE_HOST}" 'sudo grep -rln "im.qmledmq.cn" /etc/nginx/ 2>/dev/null || true' 2>&1)
+    grep_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'sudo grep -rln "im.qmledmq.cn" /etc/nginx/ 2>/dev/null || true' 2>&1)
     if [[ -n "${grep_out}" ]]; then
         echo "    ${grep_out}"
         echo "  !! 上述文件已占 im.qmledmq.cn——清掉再继续" >&2
@@ -188,7 +197,7 @@ else
     # `-c` checksum 比对而不是 mtime+size 快查——为防 mtime collision（曾踩：
     # 本地新版 fuxi.rs 与 home 旧版 mtime 完全相同，size 不同，rsync quick check
     # 跳过，cargo build 用旧代码爆 E0599）。源码树小，CPU 代价可忽略。
-    run "rsync -azc --delete \
+    run "rsync -azc --delete -e '${RSYNC_RSH}' \
         --exclude '/target' \
         --exclude '/.git' \
         --exclude 'node_modules' \
@@ -197,7 +206,7 @@ else
         --exclude '*.log' \
         --exclude '/.claude' \
         ${FUXI_ROOT}/ ${REMOTE_HOST}:${REMOTE_SRC_DIR}/"
-    run "ssh ${REMOTE_HOST} 'cd ${REMOTE_SRC_DIR} && ${REMOTE_CARGO} build --release -p fuxi-cli'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'cd ${REMOTE_SRC_DIR} && ${REMOTE_CARGO} build --release -p fuxi-cli'"
 fi
 
 # ── 2. PWA dist build（按需）────────────────────────────────────────
@@ -214,33 +223,33 @@ if [[ "${WEB_ONLY}" == "1" ]]; then
     step "3. (--web-only) 跳过 binary 安装"
 else
     step "3. 远端 cp ${REMOTE_BUILT_BIN} → ${REMOTE_BIN}"
-    run "ssh ${REMOTE_HOST} 'mkdir -p $(dirname ${REMOTE_BIN})'"
-    run "ssh ${REMOTE_HOST} 'cp ${REMOTE_BUILT_BIN} ${REMOTE_BIN} && chmod 755 ${REMOTE_BIN}'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'mkdir -p $(dirname ${REMOTE_BIN})'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'cp ${REMOTE_BUILT_BIN} ${REMOTE_BIN} && chmod 755 ${REMOTE_BIN}'"
     # 跑一次 --version 兜底验证：架构对 + 没炸
-    run "ssh ${REMOTE_HOST} '${REMOTE_BIN} --version'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} '${REMOTE_BIN} --version'"
 fi
 
 # ── 4. 推送 PWA dist ────────────────────────────────────────────────
 step "4. rsync PWA dist → ${REMOTE_HOST}:${REMOTE_WEB}/"
-run "ssh ${REMOTE_HOST} 'mkdir -p ${REMOTE_WEB}'"
+run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'mkdir -p ${REMOTE_WEB}'"
 # rsync --delete 让远端和本地一致：旧 hash 资产清掉避免 sw.js 引用过期文件
 # `-c` checksum 同 step 1 理由——dist 一般 hash 命名（content-addressed），但
 # index.html / manifest.webmanifest / sw.js 不是 hash 命名，可能与旧版 mtime 一致 size 一致
 # 而内容微改（version field/timestamp 等），mtime 快查会跳过。
-run "rsync -azc --delete ${LOCAL_WEB_DIST}/ ${REMOTE_HOST}:${REMOTE_WEB}/"
+run "rsync -azc --delete -e '${RSYNC_RSH}' ${LOCAL_WEB_DIST}/ ${REMOTE_HOST}:${REMOTE_WEB}/"
 
 # ── 5. nginx vhost ──────────────────────────────────────────────────
 if [[ "${WEB_ONLY}" == "1" ]]; then
     step "5. (--web-only) 仅 nginx reload（不重写 vhost）"
     # vhost 内容不改，但 reload 让 nginx 把新 dist 的文件描述符重 open——保险
     # 起见走一次（cost 几十毫秒，避免 cache 行为偶发）。
-    run "ssh ${REMOTE_HOST} 'sudo systemctl reload nginx'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo systemctl reload nginx'"
 else
     step "5. nginx vhost"
-    run "scp ${NGINX_CONF} ${REMOTE_HOST}:/tmp/fuxi-im.nginx.conf"
-    run "ssh ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.nginx.conf ${REMOTE_NGINX_TARGET}'"
-    run "ssh ${REMOTE_HOST} 'sudo nginx -t'"
-    run "ssh ${REMOTE_HOST} 'sudo systemctl reload nginx'"
+    run "scp ${SSH_OPTS} ${NGINX_CONF} ${REMOTE_HOST}:/tmp/fuxi-im.nginx.conf"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.nginx.conf ${REMOTE_NGINX_TARGET}'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo nginx -t'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo systemctl reload nginx'"
 fi
 
 # ── 6. systemd unit ─────────────────────────────────────────────────
@@ -248,22 +257,22 @@ if [[ "${WEB_ONLY}" == "1" ]]; then
     step "6. (--web-only) 跳过 systemd unit 安装 + restart"
 else
     step "6. systemd unit"
-    run "scp ${SYSTEMD_UNIT} ${REMOTE_HOST}:/tmp/fuxi-im.service"
-    run "ssh ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.service ${REMOTE_SYSTEMD_TARGET}'"
-    run "ssh ${REMOTE_HOST} 'sudo systemctl daemon-reload'"
-    run "ssh ${REMOTE_HOST} 'sudo systemctl enable --now fuxi-im'"
+    run "scp ${SSH_OPTS} ${SYSTEMD_UNIT} ${REMOTE_HOST}:/tmp/fuxi-im.service"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo cp /tmp/fuxi-im.service ${REMOTE_SYSTEMD_TARGET}'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo systemctl daemon-reload'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'sudo systemctl enable --now fuxi-im'"
 fi
 
 # ── 7. 验证 ─────────────────────────────────────────────────────────
 step "7. 验证"
 if [[ "${WEB_ONLY}" == "1" ]]; then
     # web-only：service 没重启，只验"还活着"+ "PWA 已换新 dist"（看 index.html 的 asset hash）
-    run "ssh ${REMOTE_HOST} 'systemctl is-active fuxi-im'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'systemctl is-active fuxi-im'"
     run "curl -fsS --max-time 10 ${HEALTHZ_URL}"
     # grep index-*.js 提示新 hash——team-lead 比对 vite build 输出确认
     run "curl -fsS --max-time 10 ${PWA_URL} | grep -oE 'index-[A-Za-z0-9_-]+\\.js' | head -1"
 else
-    run "ssh ${REMOTE_HOST} 'systemctl status fuxi-im --no-pager | head -20'"
+    run "ssh ${SSH_OPTS} ${REMOTE_HOST} 'systemctl status fuxi-im --no-pager | head -20'"
     run "curl -fsS --max-time 10 ${HEALTHZ_URL}"
 fi
 echo
