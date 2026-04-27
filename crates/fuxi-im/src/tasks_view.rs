@@ -98,6 +98,18 @@ impl TaskAccumulator {
         let at = ev.meta.at;
         self.last_active_at = Some(self.last_active_at.map_or(at, |existing| existing.max(at)));
 
+        // 任何带 meta.agent + meta.task 的事件都视为 member 候选——dist 路径
+        // 远端 worker 不发 TaskDispatched（home 端 dispatch 已发 TaskCreated 但
+        // agent_id 那时还不知道；远端 cc spawn 后只发 agent_spawning/agent_ready/
+        // tool_call/agent_responded 等带 meta.agent+meta.task 的事件，靠这些累积
+        // member_ids fallback。本地路径仍由 TaskDispatched 直接命中——`contains`
+        // 去重保证不重复加）。
+        if let (Some(agent), Some(_)) = (ev.meta.agent, ev.meta.task)
+            && !self.member_ids.contains(&agent)
+        {
+            self.member_ids.push(agent);
+        }
+
         match &ev.kind {
             EventKind::TaskCreated { title, description } => {
                 self.title = Some(title.clone());

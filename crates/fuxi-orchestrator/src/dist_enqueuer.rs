@@ -38,7 +38,14 @@ pub trait DistEnqueuer: Send + Sync {
     /// 实装应当：
     /// 1. 根据 `task.pinned_node` / `task.required_tags` 调
     ///    `DistController::enqueue` 入队
-    /// 2. dist worker 自己 pull 后跑 cc/codex，事件流回 EventBus（共享 bus）
-    /// 3. 返 `job_id` 字串便于 caller 跟踪 / 关联 task_id
-    async fn enqueue(&self, task: &Task) -> Result<String>;
+    /// 2. 把 `system_prompt` 透传给 worker 端 cc/codex 的启动 prompt
+    ///    （worker `run_cc_job` 会 `--append-system-prompt` 注进 cc）
+    /// 3. dist worker 自己 pull 后跑 cc/codex，事件流回 EventBus（共享 bus）
+    /// 4. 返 `job_id` 字串便于 caller 跟踪 / 关联 task_id
+    ///
+    /// `system_prompt`：dispatch 路径合成的完整 worker system prompt
+    /// （含 role 心智 + sentinel addendum）。`None` 走 worker 默认。
+    /// 决策 13 的 deliverable nudge 教学就经此字段才能到达远端 cc——
+    /// 否则远端跑裸 cc，玄女永远收不到 sentinel。
+    async fn enqueue(&self, task: &Task, system_prompt: Option<String>) -> Result<String>;
 }
