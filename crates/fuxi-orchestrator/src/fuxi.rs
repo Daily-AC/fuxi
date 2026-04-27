@@ -464,8 +464,7 @@ impl Fuxi {
                         return None;
                     }
                     let role_part = profile.system_prompt.trim();
-                    let sentinel_part =
-                        crate::sentinel_addendum::SENTINEL_ADDENDUM_TEXT.trim();
+                    let sentinel_part = crate::sentinel_addendum::SENTINEL_ADDENDUM_TEXT.trim();
                     let assembled = match (role_part.is_empty(), want_sentinel) {
                         (true, true) => sentinel_part.to_string(),
                         (false, true) => format!("{role_part}\n\n{sentinel_part}"),

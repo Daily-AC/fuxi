@@ -25,6 +25,9 @@ const STICK_THRESHOLD = 80; // px
 export const Conversation: Component<ConversationProps> = (props) => {
   let scrollEl: HTMLDivElement | undefined;
   const [stickToBottom, setStickToBottom] = createSignal(true);
+  // 切 tab 重 mount 时，首次 anchor 必须 instant——smooth 会从顶滑到底
+  // 让用户晕（#75 用户反馈）。新消息持续追加才走 smooth。
+  let hasAnchored = false;
 
   const isAtBottom = (): boolean => {
     if (!scrollEl) return true;
@@ -47,9 +50,14 @@ export const Conversation: Component<ConversationProps> = (props) => {
       },
       () => {
         if (!stickToBottom() || !scrollEl) return;
+        const isFirst = !hasAnchored;
         queueMicrotask(() => {
-          scrollEl?.scrollTo({ top: scrollEl.scrollHeight, behavior: "smooth" });
+          scrollEl?.scrollTo({
+            top: scrollEl.scrollHeight,
+            behavior: isFirst ? "instant" : "smooth",
+          });
         });
+        hasAnchored = true;
       },
       { defer: true },
     ),
