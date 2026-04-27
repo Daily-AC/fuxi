@@ -260,7 +260,21 @@ pub async fn run(args: StartArgs) -> Result<()> {
         }
     });
 
-    // 7. webhook router（scheduler）+ IM router + ServeDir(/) 合并
+    // 7. webhook router（scheduler）+ IM router + dist controller router + ServeDir(/) 合并
+    //
+    // #54 新增 dist 内嵌：home 也是个真节点，dist controller 同进程跑（共享 EventBus +
+    // SQLite WAL）。`/dist/*` 走 HMAC layer，`/api/*` 走 cookie layer，两层互不干扰
+    // （cookie layer 的 is_exempt 分支放行 `!path.starts_with("/api/")`）。
+    let dist_home_dir = events_db_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dist_layer = crate::im_dist::build_dist_layer(&dist_home_dir, bus.clone())
+        .await
+        .context("装配 dist controller layer")?;
+    tracing::info!("dist controller 已内嵌——/dist/* 走 HMAC，home 节点已自注册");
+    let _dist_ctrl = dist_layer.ctrl.clone(); // #55 之后会接给 /api/nodes 用
+
     let webhook_router = fuxi_scheduler::webhook::router(WebhookState {
         store: sched_store.clone(),
         keeper: keeper.clone(),
@@ -272,6 +286,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
             tracing::info!(web_root = %root.display(), "PWA dist 已挂载到 /");
             im_router
                 .merge(webhook_router)
+                .merge(dist_layer.router)
                 .fallback_service(ServeDir::new(root))
         }
         Some(root) => {
@@ -279,11 +294,11 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 web_root = %root.display(),
                 "PWA dist 不存在——/ 将返 404；install.sh 没把 dist 推到位？"
             );
-            im_router.merge(webhook_router)
+            im_router.merge(webhook_router).merge(dist_layer.router)
         }
         None => {
             tracing::warn!("未指定 PWA dist 路径（--web-root + 默认都失败）；/ 将无静态资源");
-            im_router.merge(webhook_router)
+            im_router.merge(webhook_router).merge(dist_layer.router)
         }
     };
 
