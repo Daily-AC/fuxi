@@ -67,6 +67,23 @@ if [[ -z "${FUXI_BIN}" ]]; then
 fi
 echo "  fuxi     : ${FUXI_BIN}"
 
+# claude (cc) binary：worker spawn cc 必须能找到。launchd 默认 PATH 极简，
+# `~/.local/bin`（Anthropic claude 官方安装常见落点）不在里面。脚本里
+# `command -v claude` 探到的真路径，写进 plist `--cc-bin <abs>` 显式指定，
+# 同时把 `~/.local/bin` 前置到 plist PATH 双保险（cc 内部 spawn 子进程仍走 PATH）。
+# 2026-04-27 用户实测踩过：3 个测试 job 全部 ok=false 1 秒内回报，因为 cc spawn 失败。
+CLAUDE_BIN="$(command -v claude || true)"
+if [[ -z "${CLAUDE_BIN}" ]]; then
+    if [[ -x "${HOME}/.local/bin/claude" ]]; then
+        CLAUDE_BIN="${HOME}/.local/bin/claude"
+    else
+        echo "  !! 找不到 claude（cc）binary——worker spawn cc 一定失败" >&2
+        echo "     先装 claude：npm i -g @anthropic-ai/claude-code 或参考 docs.anthropic.com/claude-code/" >&2
+        exit 2
+    fi
+fi
+echo "  claude   : ${CLAUDE_BIN}"
+
 # jq：解析 setup-worker JSON 返回
 if ! command -v jq >/dev/null; then
     echo "  !! 缺 jq——macOS 装：brew install jq" >&2
@@ -179,6 +196,7 @@ cat >"${PLIST_TMP}" <<EOF
     <string>worker</string>
     <string>--controller</string><string>${CONTROLLER_URL}</string>
     <string>--node</string><string>${NODE_NAME}</string>
+    <string>--cc-bin</string><string>${CLAUDE_BIN}</string>
     <string>--tag</string><string>local</string>
     <string>--tag</string><string>mac</string>
     <string>--max-concurrency</string><string>2</string>
@@ -189,7 +207,7 @@ cat >"${PLIST_TMP}" <<EOF
     <key>FUXI_DIST_HMAC_SECRET</key><string>${HMAC_SECRET}</string>
     <key>FUXI_DIST_TOKEN</key><string>${DIST_TOKEN}</string>
     <key>HOME</key><string>${HOME}</string>
-    <key>PATH</key><string>${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>${HOME}/.local/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>NO_PROXY</key><string>127.0.0.1,localhost</string>
     <key>RUST_LOG</key><string>info,fuxi=info,fuxi_cli::dist=debug</string>
   </dict>
