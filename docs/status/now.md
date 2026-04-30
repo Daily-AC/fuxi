@@ -1,8 +1,8 @@
 # Now Status (Live Snapshot)
 
 更新时间：2026-04-30 CST
-分支：`feat/fuxi-v0.1`
-HEAD：`e926abf`
+分支：`main`
+HEAD：`0c51851`
 状态口径：以当前代码和本地验证为准；历史 handoff 只作背景。
 
 ---
@@ -16,6 +16,7 @@ HEAD：`e926abf`
 3. `fuxi im start` 是 home 部署组合根：同进程持有 EventBus、Fuxi、scheduler、IM API/PWA、dist controller。
 4. 玄女自启是 IM 可用性的硬前置；自启失败不应继续提供半可用 HTTP 服务。
 5. 长期记忆默认走显式 `fuxi memory record`；自动 extractor 是 opt-in。
+6. `feat/fuxi-v0.1` 已合入 `main` 并删除；后续按 `docs/git-workflow.md` 走短分支。
 
 ---
 
