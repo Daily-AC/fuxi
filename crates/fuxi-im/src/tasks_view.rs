@@ -133,10 +133,8 @@ impl TaskAccumulator {
                     self.created_at = Some(at);
                 }
             }
-            EventKind::TaskDispatched { to } => {
-                if !self.member_ids.contains(to) {
-                    self.member_ids.push(*to);
-                }
+            EventKind::TaskDispatched { to } if !self.member_ids.contains(to) => {
+                self.member_ids.push(*to);
             }
             EventKind::TaskStateChanged { to, .. } => {
                 if matches!(

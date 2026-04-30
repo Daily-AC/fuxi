@@ -109,7 +109,7 @@ pub async fn home_workers_from_shelf(fuxi: &Fuxi) -> Vec<WorkerView> {
         });
     }
     // busy 排前 → idle → dead（spec gap c "按 status 排序 busy > idle"）
-    out.sort_by(|a, b| status_rank(&a.status).cmp(&status_rank(&b.status)));
+    out.sort_by_key(|a| status_rank(&a.status));
     out
 }
 
@@ -178,7 +178,7 @@ pub async fn dist_workers_from_events(bus: &EventBus, node_id: &str) -> Vec<Work
             status: "busy".to_string(),
         });
     }
-    out.sort_by(|a, b| status_rank(&a.status).cmp(&status_rank(&b.status)));
+    out.sort_by_key(|a| status_rank(&a.status));
     out
 }
 
