@@ -1,5 +1,9 @@
 # 架构审查 · v1 现状盘点 + Gap + Debt
 
+> [!WARNING]
+> `historical`：此审查基于 commit `126e1a1` 和旧 `feat/fuxi-v0.1` 分支，保留用于追溯，不再代表当前架构状态。
+> 当前状态以 `docs/status/now.md` 和代码为准。
+
 > **范围**：commit `126e1a1`（2026-04-20）为准，对应 `feat/fuxi-v0.1` 分支。
 >
 > **方法**：crate API 清点（`docs/audit/cratewise-inventory.md`）+ 事件流矩阵（`docs/audit/event-flow.md`）+ v1 蓝图对照 + 6 份 decisions + 玄女自诊 9 条 + 用户实测 3 条（`docs/v1.1-agenda.md`）。

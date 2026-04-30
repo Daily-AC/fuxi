@@ -1,5 +1,9 @@
 # Crate 清点 · v1.1 架构审查
 
+> [!WARNING]
+> `historical`：此审计基于 2026-04-20 附近的旧代码快照，保留用于追溯，不再代表当前 crate 清单。
+> 当前架构状态以 `docs/status/now.md` 和代码为准。
+
 > 2026-04-20 · 10 个 crate 的 pub API、依赖、模块组织速查。Agent A (Explore) 扫 pub 签名 + Cargo.toml + 模块组织，不读全文。
 
 ---
