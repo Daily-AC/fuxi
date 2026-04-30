@@ -780,6 +780,7 @@ fn normalize_path_token(tok: &str) -> Option<PathBuf> {
     Some(PathBuf::from(t))
 }
 
+#[cfg(target_os = "macos")]
 fn default_attachment_dir() -> PathBuf {
     std::env::var_os("FUXI_ATTACHMENT_DIR")
         .map(PathBuf::from)
