@@ -1,5 +1,9 @@
 # v1.1 事件流 · 发布者/订阅者矩阵审计
 
+> [!WARNING]
+> `historical`：此审计基于 2026-04-20 附近的旧事件模型，保留用于追溯，不再代表当前 EventKind 全量矩阵。
+> 当前架构状态以 `docs/status/now.md` 和代码为准。
+
 > **2026-04-20 M3.6 更新**：删除 4 个真孤儿（TaskDelivered / TaskCancelled / MessageSent / MessageReceived），
 > 现总变体数 **35**（原 39）。`AgentSpawning`/`AgentShuttingDown` 经实测确为有发布点，
 > 不是孤儿（旧审计结论过时）。AgentInterrupted 颜色独立成 LightRed 警告色。
@@ -105,4 +109,3 @@
 - **summarize/color_for** (tui.rs:354/474)：exhaustive match，覆盖全。
 - **publisher 定位** (grep `kind: EventKind::\w+` + context)：跨 orchestrator/agent-cc/agent-codex/daemon/keeper。
 - **subscriber 定位** (grep `EventKind::\w+ =>` 在 repl/bridge/tests)：多数落在 repl.rs/ipc.rs 的 match 分支，或 hub.rs 测试。
-

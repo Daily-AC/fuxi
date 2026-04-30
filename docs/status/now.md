@@ -2,7 +2,7 @@
 
 更新时间：2026-04-30 CST
 分支：`main`
-HEAD：`0c51851`
+HEAD：以当前 `main` 为准，运行 `git rev-parse --short HEAD` 获取精确提交。
 状态口径：以当前代码和本地验证为准；历史 handoff 只作背景。
 
 ---
