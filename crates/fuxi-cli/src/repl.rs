@@ -2715,12 +2715,10 @@ impl ReplApp {
                     self.selection_dragged = false;
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.selection_anchor.is_some() {
-                    // Drag 可能越出 dialogue area；终点位置自然 clamp 在 render 时做。
-                    self.selection_cursor = Some((ev.column, ev.row));
-                    self.selection_dragged = true;
-                }
+            MouseEventKind::Drag(MouseButton::Left) if self.selection_anchor.is_some() => {
+                // Drag 可能越出 dialogue area；终点位置自然 clamp 在 render 时做。
+                self.selection_cursor = Some((ev.column, ev.row));
+                self.selection_dragged = true;
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 if let (Some(a), Some(b)) =
@@ -4454,10 +4452,8 @@ async fn drive_tui(
                         TermEvent::Paste(s) => {
                             app.handle_paste(&s);
                         }
-                        TermEvent::Mouse(m) => {
-                            if mouse_capture_enabled {
-                                app.handle_mouse(m);
-                            }
+                        TermEvent::Mouse(m) if mouse_capture_enabled => {
+                            app.handle_mouse(m);
                         }
                         _ => {}
                     }
