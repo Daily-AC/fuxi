@@ -166,11 +166,12 @@ async fn next_event(
     label: &str,
 ) -> Event {
     loop {
-        let msg = tokio::time::timeout(Duration::from_secs(3), stream.next())
-            .await
-            .unwrap_or_else(|_| panic!("[{label}] 等待 3s 没收到帧"))
-            .unwrap_or_else(|| panic!("[{label}] 流关闭"))
-            .unwrap_or_else(|e| panic!("[{label}] ws err: {e}"));
+        let msg = match tokio::time::timeout(Duration::from_secs(3), stream.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            Ok(Some(Err(e))) => panic!("[{label}] ws err: {e}"),
+            Ok(None) => panic!("[{label}] 流关闭"),
+            Err(_) => panic!("[{label}] 等待 3s 没收到帧"),
+        };
         match msg {
             Message::Text(t) => {
                 return serde_json::from_str::<Event>(&t)
