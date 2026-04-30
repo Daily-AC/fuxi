@@ -21,6 +21,8 @@ fuxi
 `fuxi` 启动时会**先探测自身在 PATH**——不在就直接报错指向 `scripts/install.sh`，
 不让 TUI 起来后才发现玄女工具瘫痪。
 
+Git 分支、提交和发布规则见 [`docs/git-workflow.md`](docs/git-workflow.md)。
+
 ### 开发者门禁
 
 ```bash
@@ -37,20 +39,32 @@ cargo test -p fuxi-events
 cargo run -p fuxi-cli -- --help
 ```
 
-## Crate 地图（P1 当前状态）
+## Crate 地图（当前状态）
 
 | Crate | 目的 | 状态 |
 |---|---|---|
-| `fuxi-core` | 核心 trait 与类型（Agent/Runtime/Workspace/Task/Event） | ✅ 完工（4/4） |
-| `fuxi-events` | EventBus：tokio broadcast + SQLite WAL + replay | ✅ 完工（8/8） |
-| `fuxi-a2a` | A2A v1.0 协议实现（types + axum server + reqwest client） | ✅ 完工（10/10） |
-| `fuxi-agent-cc` | Claude Code 门客适配器（headless stream-json） | ✅ 完工（40/40 + 1 gated E2E 跑通） |
-| `fuxi-firehose` | 实时观察器（WebSocket + SSE + REST + ratatui TUI） | ✅ 完工（30/30） |
-| `fuxi-cli` | 二进制 `fuxi`——`demo` / `up` / `watch` | ✅ 完工（2/2） |
+| `fuxi-core` | 核心 trait 与类型（Agent/Runtime/Workspace/Task/Event） | ✅ 可用 |
+| `fuxi-events` | EventBus：tokio broadcast + SQLite WAL + replay | ✅ 可用 |
+| `fuxi-a2a` | A2A v1.0 协议实现（types + axum server + reqwest client） | ✅ 可用 |
+| `fuxi-agent-cc` | Claude Code 门客适配器 | ✅ 可用 |
+| `fuxi-agent-codex` | Codex CLI 门客适配器 | ✅ 可用 |
+| `fuxi-firehose` | 实时观察器（WebSocket + SSE + REST + ratatui TUI） | ✅ 可用 |
+| `fuxi-orchestrator` | 玄女编排层：spawn / dispatch / bridge / dist enqueue | ✅ 可用 |
+| `fuxi-workspace` | git worktree 隔离 | ✅ 可用 |
+| `fuxi-skills` | 点将台：role loader / staging / ledger | ✅ 可用 |
+| `fuxi-memory` | 策府：甲骨 / 河图 / extractor | ✅ 可用；extractor 默认关闭 |
+| `fuxi-scheduler` | 更漏：cron / once / fs / webhook trigger | ✅ 可用 |
+| `fuxi-im` | IM API、PWA 后端、节点/任务视图、push、上传 | ✅ 可用 |
+| `fuxi-cli` | 二进制 `fuxi`：REPL / daemon / IM start / dist / tools | ✅ 可用 |
 
-**工作区合计：94 passing tests + 1 ignored（E2E gated by `FUXI_RUN_CC_E2E=1`）。**
+当前门禁：
 
-P1 已跑通 "玄女 spawn cc 门客 → 用户看到事件流" 的锚点场景最小切片：
+```bash
+cargo test --workspace --all-targets
+(cd crates/fuxi-im/web && pnpm test && pnpm typecheck && pnpm lint)
+```
+
+最小事件流切片：
 
 ```bash
 cargo run -p fuxi-cli -- demo "Reply with exactly: hi"
