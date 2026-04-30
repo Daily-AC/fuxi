@@ -72,11 +72,11 @@ crates/
 - **简册（事件流）**：复用现有 `events` 表，不抄 anya 的 `execution-log.jsonl`
 - **检索**：SQLite FTS5 （< 10k 记忆 p95 < 10ms），不上向量 / 图
 - **写入策略**：只 ADD（mem0 思想）。删除要显式 API，不自动 overwrite
-- **提取 pipeline**：对话结束后 async 跑 extractor → 抽 facts → 入甲骨。参考 anya `chat-memory-extractor.ts` 结构
+- **提取 pipeline**：extractor 已实装但默认关闭；需要 `FUXI_EXTRACTOR_ENABLED=1` 才会在任务结束后 async 抽 facts → 入甲骨。默认常态是玄女或用户显式调用 `fuxi memory record`，避免每个 task 都消耗 cc API 并产生噪音 fact。
 
 **TDD 契约**：
 - **单测**：`oracle::insert/query` / `hetu::record/promote` / FTS5 match 正确性（10k 样本假数据）
-- **Gated E2E**：真跑玄女 3 轮对话，抽 fact → 第 4 轮 `--resume` 能引用前 3 轮。`FUXI_RUN_MEMORY_E2E=1`
+- **Gated E2E**：真跑玄女 3 轮对话，手工 `fuxi memory record` 或显式启用 extractor 后，第 4 轮 `--resume` 能引用前 3 轮。`FUXI_RUN_MEMORY_E2E=1`
 - **先写测后写实装**
 
 **落地步骤**：
@@ -87,7 +87,7 @@ crates/
 5. 玄女 Skill 里 wire `Read @oracle/<subject>` 取 fact（bash tool 调 `fuxi memory query`）
 6. `fuxi-cli` 加子命令 `fuxi memory {query,record,list}`
 
-**衔接**：EventBus 订阅 → 门客任务结束后触发 extractor → 写甲骨 / 河图。
+**当前衔接**：默认长期记忆写入由显式 `fuxi memory record` 完成；自动 extractor 是 opt-in，启用后才订阅 EventBus，在任务 Done 后抽取事实写甲骨。
 
 ---
 

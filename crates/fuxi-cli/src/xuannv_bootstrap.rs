@@ -19,8 +19,8 @@
 //!   （#12 修：spawn 失败时不留脏 fact，避免下次启动 cc --resume 一个不存在的
 //!   session 直接死循环）。重启后命中 → cc --resume；与 REPL 启的玄女**共享**
 //!   session 连续性（两边都从同一 oracle_facts 读）
-//! - **不**起 SystemEventBridge：bridge 是 repl-only 的"用户输入桥"，IM daemon
-//!   场景下用户消息走 `/api/intervene` 直接 `Fuxi::intervene`，不经 bridge
+//! - 本 helper 只负责 spawn + set_xuannv；`fuxi im start` 的 caller 在拿到 id 后
+//!   统一装配 conv_store sync + SystemEventBridge，保持 IM 和 REPL 的系统事件语义一致。
 
 use anyhow::{Context, Result};
 use fuxi_agent_cc::CcLaunchConfig;

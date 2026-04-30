@@ -10,7 +10,7 @@
 //!
 //! 跟 `up.rs` 的差别：
 //! - 不挂 firehose hub（手机端走 IM WS，不需要 firehose 路由）
-//! - 不挂 dist controller（家用机自己也不是 dist controller）
+//! - 内嵌 dist controller（`/dist/*` HMAC；`/api/*` cookie，两套 auth 隔离）
 //! - 多挂 IM router（含静态 PWA + token 鉴权 + push 钩子）
 //! - 默认 bind `:9100`（nginx 反代到此），不是 `:4100`
 //!
@@ -261,47 +261,43 @@ pub async fn run(args: StartArgs) -> Result<()> {
     //     这是部署期就该看到的错（roles 路径错配 / cc 没装），不该静默降级。
     let xuannv_role = std::env::var("FUXI_IM_XUANNV_ROLE")
         .unwrap_or_else(|_| crate::xuannv_bootstrap::DEFAULT_XUANNV_ROLE.to_string());
-    let mut conv_sync_handle: Option<tokio::task::JoinHandle<()>> = None;
-    match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
-        Ok(id) => {
-            // set_xuannv 已经在 ensure_xuannv 里调用——上面 step 5 的 push_hooks_task
-            // 通过 watch::Receiver 立刻收到通知（#7 修：从 2s 轮询切换为 watch
-            // changed() 实时唤醒）。
-            tracing::info!(xuannv = %id, role = %xuannv_role, "玄女自启完成");
-            // β · #17 conv_store sync hook —— 玄女上线后立刻订 EventBus 翻消息进 messages 表。
-            // `spawn_xuannv_sync` 是 async 函数，**返回前**完成 ensure_scope + subscribe，
-            // 这样玄女后续任何 publish 都不会丢。
-            let h = fuxi_im::conv_store::spawn_xuannv_sync(
-                Arc::new(conv_store.clone()),
-                bus.clone(),
-                id,
-            )
-            .await;
-            conv_sync_handle = Some(h);
+    let conv_sync_handle =
+        match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
+            Ok(id) => {
+                // set_xuannv 已经在 ensure_xuannv 里调用——上面 step 5 的 push_hooks_task
+                // 通过 watch::Receiver 立刻收到通知（#7 修：从 2s 轮询切换为 watch
+                // changed() 实时唤醒）。
+                tracing::info!(xuannv = %id, role = %xuannv_role, "玄女自启完成");
+                // β · #17 conv_store sync hook —— 玄女上线后立刻订 EventBus 翻消息进 messages 表。
+                // `spawn_xuannv_sync` 是 async 函数，**返回前**完成 ensure_scope + subscribe，
+                // 这样玄女后续任何 publish 都不会丢。
+                let h = fuxi_im::conv_store::spawn_xuannv_sync(
+                    Arc::new(conv_store.clone()),
+                    bus.clone(),
+                    id,
+                )
+                .await;
 
-            // **CRITICAL** SystemEventBridge 装配——TUI REPL 在 repl.rs:394 装的，
-            // IM 重做时漏抄了！没装 bridge 玄女永远收不到 AgentRequestReview /
-            // AgentDead 这些系统事件 → 用户实测「门客明明完成了，玄女说没事件」
-            // 真因（事件入了 SQLite 但 bridge 没订阅 → 没把 nudge 注入玄女）。
-            //
-            // trigger_lookup 用 sched_store —— 跟 TUI 同一份 impl（fuxi_scheduler
-            // ::TriggerLookup for SchedulerStore）。bridge 任务的 JoinHandle 不存
-            // （bridge 是只读订阅，进程结束 tokio runtime drop 自动清）。
-            let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
-            SystemEventBridge::spawn(fuxi.clone(), bus.clone(), id, trigger_lookup);
-            tracing::info!(xuannv = %id, "SystemEventBridge 已装配");
-        }
-        Err(e) => {
-            // 即便自启失败也别让整个 daemon 死——降级到"等 REPL 起玄女"路径，
-            // 让 push hooks 的 wait_for_xuannv 继续轮询兜底，IM API 仍可用。
-            // `error = ?e` 走 Debug 拿完整 anyhow caused-by chain——`%e` Display
-            // 只露最外层 context（"玄女 spawn 失败"），ssh 部署调试时根因不可见。
-            tracing::warn!(error = ?e, role = %xuannv_role,
-                "玄女自启失败，降级等 REPL 启动；PWA /api/conv 在玄女就位前会 503");
-            // 注：conv_store sync 没起——REPL 起玄女后用户得重启 daemon 才补上消息。
-            // 后续做"延迟 sync"：等 set_xuannv 完才挂 hook。Task #17 v0.1 不处理。
-        }
-    }
+                // **CRITICAL** SystemEventBridge 装配——TUI REPL 在 repl.rs:394 装的，
+                // IM 重做时漏抄了！没装 bridge 玄女永远收不到 AgentRequestReview /
+                // AgentDead 这些系统事件 → 用户实测「门客明明完成了，玄女说没事件」
+                // 真因（事件入了 SQLite 但 bridge 没订阅 → 没把 nudge 注入玄女）。
+                //
+                // trigger_lookup 用 sched_store —— 跟 TUI 同一份 impl（fuxi_scheduler
+                // ::TriggerLookup for SchedulerStore）。bridge 任务的 JoinHandle 不存
+                // （bridge 是只读订阅，进程结束 tokio runtime drop 自动清）。
+                let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
+                SystemEventBridge::spawn(fuxi.clone(), bus.clone(), id, trigger_lookup);
+                tracing::info!(xuannv = %id, "SystemEventBridge 已装配");
+                h
+            }
+            Err(e) => {
+                // Fail fast：IM 的对话、push idle、deliverable nudge 都依赖玄女上线后
+                // 装配 conv_store sync + SystemEventBridge。吞掉这里的错误会把服务留在
+                // HTTP online 但核心链路永久 503 的半可用状态。
+                return Err(e).with_context(|| format!("玄女自启失败（role={xuannv_role}）"));
+            }
+        };
     let daemon = Daemon::new(
         fuxi.clone(),
         bus.clone(),
@@ -394,9 +390,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
     fs_rig.join.abort();
     drop(fs_rig);
     push_hooks_task.abort();
-    if let Some(h) = conv_sync_handle {
-        h.abort();
-    }
+    conv_sync_handle.abort();
 
     bus.publish(Event {
         meta: EventMeta::now(),
