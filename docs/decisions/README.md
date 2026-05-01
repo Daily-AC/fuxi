@@ -22,6 +22,7 @@
 | 16 | `16-im-tab-bar-task-thread.md` | IM tab bar + task thread 交互边界 |
 | 17 | `17-im-deploy-decoupling.md` | IM 部署组合与 dist/controller 解耦边界 |
 | 18 | `18-agentic-engineering-collaboration.md` | Agentic Engineering 协作原则：用户定目标边界，Codex 交付可验证闭环 |
+| 19 | `19-karpathy-coding-guardrails.md` | Karpathy coding guardrails：成功标准、最小实现、精确 diff、显性化歧义 |
 
 ## 写新 decision 怎么做
 
