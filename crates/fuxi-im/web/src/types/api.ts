@@ -54,7 +54,8 @@ export interface InterveneRequestV2 {
 
 // ---------- 阶段 4 · 任务 sheet 视图模型（β #21 契约目标） ----------
 
-export type TaskMemberStatus = "busy" | "idle" | "thinking";
+export type TaskMemberStatus = "busy" | "idle" | "thinking" | "dead";
+export type TaskMemberPhase = "idle" | "thinking" | "tool" | "responded" | "done";
 export type TaskGroupStatus = "running" | "completed" | "failed";
 
 /** 工具调用摘要 · 用于 task sheet 显 member 当前/最近一次工具（#26）。*/
@@ -74,12 +75,18 @@ export interface TaskMember {
   activity?: string | null; // 当前 tool call 短描述（旧字段，跟 last_tool_call.tool 同源）
   tokens?: number | null; // 累积 tokens
   status: TaskMemberStatus;
-  /** #26 加 · 当前 / 最近一次工具调用详情。*/
-  last_tool_call?: ToolCallSummary | null;
+  /** #26 加 · 当前 / 最近一次工具调用详情。后端 v3 起返回字符串快照；旧 mock/历史代码可仍给对象。*/
+  last_tool_call?: ToolCallSummary | string | null;
   /** 可选 · 最近 N 条工具调用（β 暂不返）。*/
   recent_tool_calls?: ToolCallSummary[];
   /** v3 #59 dist 加 · worker 当前所在节点 id（home / mac-local / ...）。 */
   node_id?: string | null;
+  /** 进度快照 · 从 EventBus 物化，不是事实源。*/
+  phase?: TaskMemberPhase;
+  tool_use_count?: number;
+  last_activity?: string | null;
+  recent_activities?: string[];
+  summary?: string | null;
 }
 
 /** 任务分组卡片 · 视图模型（不要跟 types/events.ts 的旧 TaskCard 混淆，那是 v1 主屏列表用的）。*/

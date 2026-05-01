@@ -49,6 +49,18 @@ pub struct MemberCard {
     /// 这里会变 "mac-local" / 自定义 node 名。前端 ε #59 用此字段在 member 行
     /// 渲染 `· @home` / `· @mac-local` 后缀。
     pub node_id: String,
+    /// 物化进度快照：从 task 事件流推导出的当前阶段。
+    /// 初版取值：`idle` / `thinking` / `tool` / `responded` / `done`。
+    pub phase: String,
+    /// 该 agent 在此 task 内发起的工具调用次数（按 ToolCallStarted 计数）。
+    pub tool_use_count: u64,
+    /// 最近一次可展示活动；优先工具调用，其次 assistant 文本摘要。
+    pub last_activity: Option<String>,
+    /// 最近工具活动，最多 5 条，时间升序。用于 IM/任务页渲染 teammate-style
+    /// progress line；不包含普通文本，避免列表过噪。
+    pub recent_activities: Vec<String>,
+    /// 最近 assistant 文本摘要。完整内容仍在 task thread 事件里，这里只做卡片快照。
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +102,12 @@ struct TaskAccumulator {
     agent_last_tool_call: HashMap<AgentId, String>,
     /// thinking 状态：True 表示正在 thinking；False/None 表示 idle 或 busy 工具中
     agent_thinking: HashMap<AgentId, bool>,
+    /// 进度快照字段——全部从事件流物化，不作为事实源。
+    agent_phase: HashMap<AgentId, String>,
+    agent_tool_use_count: HashMap<AgentId, u64>,
+    agent_recent_activities: HashMap<AgentId, Vec<String>>,
+    agent_last_activity: HashMap<AgentId, String>,
+    agent_summary: HashMap<AgentId, String>,
     /// #78：dist 路径下事件源节点 id（取自 `meta.source_node_id`）。home 端
     /// 本地 spawn 的事件无此字段，保持 None → MemberCard.node_id 回落 "home"。
     source_node_id: Option<String>,
@@ -146,32 +164,57 @@ impl TaskAccumulator {
             }
             EventKind::ToolCallStarted { tool, args } => {
                 if let Some(agent) = ev.meta.agent {
-                    self.agent_activity
-                        .insert(agent, summarize_tool_call(tool, args));
+                    let activity = summarize_tool_call(tool, args);
+                    self.agent_activity.insert(agent, activity.clone());
                     // 重设计 #25：last_tool_call 用 "·" 分隔（spec 严格格式）
+                    let dot_activity = summarize_tool_call_dot(tool, args);
                     self.agent_last_tool_call
-                        .insert(agent, summarize_tool_call_dot(tool, args));
+                        .insert(agent, dot_activity.clone());
                     self.agent_thinking.insert(agent, false);
+                    self.agent_phase.insert(agent, "tool".into());
+                    *self.agent_tool_use_count.entry(agent).or_insert(0) += 1;
+                    push_recent_activity(
+                        self.agent_recent_activities.entry(agent).or_default(),
+                        dot_activity.clone(),
+                    );
+                    self.agent_last_activity.insert(agent, dot_activity);
                 }
             }
             EventKind::AgentResponded { text } => {
                 if let Some(agent) = ev.meta.agent {
-                    self.agent_last_text.insert(agent, summarize_text(text));
+                    let summary = summarize_text(text);
+                    self.agent_last_text.insert(agent, summary.clone());
                     self.agent_thinking.insert(agent, false);
+                    self.agent_phase.insert(agent, "responded".into());
+                    self.agent_summary.insert(agent, summary.clone());
+                    self.agent_last_activity.insert(agent, summary);
                 }
             }
             EventKind::ThinkingStarted => {
                 if let Some(agent) = ev.meta.agent {
                     self.agent_thinking.insert(agent, true);
+                    self.agent_phase.insert(agent, "thinking".into());
                 }
             }
             EventKind::ThinkingFinished => {
                 if let Some(agent) = ev.meta.agent {
                     self.agent_thinking.insert(agent, false);
+                    self.agent_phase
+                        .entry(agent)
+                        .or_insert_with(|| "idle".into());
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn push_recent_activity(items: &mut Vec<String>, item: String) {
+    const MAX_RECENT_ACTIVITIES: usize = 5;
+    items.push(item);
+    if items.len() > MAX_RECENT_ACTIVITIES {
+        let drop_n = items.len() - MAX_RECENT_ACTIVITIES;
+        items.drain(0..drop_n);
     }
 }
 
@@ -382,6 +425,19 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 let shelf_status = fuxi.status_of(*agent_id).await;
                 member_status(shelf_status, thinking)
             };
+            let phase = if task_terminated {
+                "done".to_string()
+            } else {
+                acc.agent_phase
+                    .get(agent_id)
+                    .cloned()
+                    .unwrap_or_else(|| "idle".into())
+            };
+            let last_activity = acc
+                .agent_last_activity
+                .get(agent_id)
+                .cloned()
+                .or_else(|| activity.clone());
             members.push(MemberCard {
                 agent_id: agent_id.to_string(),
                 role: role.clone(),
@@ -395,6 +451,15 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 // node_id）；本地 spawn 路径默认 "home"。修了用户实测「mac 远端
                 // 任务卡显 @home」错显。
                 node_id: acc.source_node_id.clone().unwrap_or_else(|| "home".into()),
+                phase,
+                tool_use_count: acc.agent_tool_use_count.get(agent_id).copied().unwrap_or(0),
+                last_activity,
+                recent_activities: acc
+                    .agent_recent_activities
+                    .get(agent_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                summary: acc.agent_summary.get(agent_id).cloned(),
             });
         }
 
@@ -632,6 +697,70 @@ mod tests {
                 .get(&agent)
                 .unwrap()
                 .contains("Bash · cargo")
+        );
+    }
+
+    #[test]
+    fn accumulator_materializes_progress_snapshot() {
+        use chrono::Duration;
+        use fuxi_core::EventMeta;
+        let agent = AgentId::new();
+        let task = TaskId::new();
+        let t0 = Utc::now();
+
+        let mut acc = TaskAccumulator::default();
+        for (idx, cmd) in [
+            "rg foo",
+            "cargo test",
+            "cargo clippy",
+            "cargo fmt",
+            "git diff",
+            "git status",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut meta = EventMeta::now();
+            meta.task = Some(task);
+            meta.agent = Some(agent);
+            meta.at = t0 + Duration::seconds(idx as i64);
+            acc.ingest(&Event {
+                meta,
+                kind: EventKind::ToolCallStarted {
+                    tool: "Bash".into(),
+                    args: serde_json::json!({"command": cmd}),
+                },
+            });
+        }
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        meta.agent = Some(agent);
+        meta.at = t0 + Duration::seconds(10);
+        acc.ingest(&Event {
+            meta,
+            kind: EventKind::AgentResponded {
+                text: "已完成进度快照，测试通过".into(),
+            },
+        });
+
+        assert_eq!(
+            acc.agent_phase.get(&agent).map(String::as_str),
+            Some("responded")
+        );
+        assert_eq!(acc.agent_tool_use_count.get(&agent), Some(&6));
+        let recent = acc.agent_recent_activities.get(&agent).unwrap();
+        assert_eq!(recent.len(), 5, "recent activities capped at 5");
+        assert!(
+            recent[0].contains("cargo test"),
+            "oldest rg entry should be dropped: {recent:?}"
+        );
+        assert_eq!(
+            acc.agent_summary.get(&agent).map(String::as_str),
+            Some("已完成进度快照，测试通过")
+        );
+        assert_eq!(
+            acc.agent_last_activity.get(&agent).map(String::as_str),
+            Some("已完成进度快照，测试通过")
         );
     }
 

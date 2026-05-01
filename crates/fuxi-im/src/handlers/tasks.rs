@@ -660,6 +660,11 @@ mod tests {
             "last_tool_call",
             "description",
             "node_id",
+            "phase",
+            "tool_use_count",
+            "last_activity",
+            "recent_activities",
+            "summary",
         ] {
             assert!(m.get(k).is_some(), "MemberCard 缺字段 {k}");
         }
@@ -766,6 +771,80 @@ mod tests {
         );
         // description 也应进 member（task 派活时附的）
         assert_eq!(m["description"].as_str(), Some("复现 + 修"));
+    }
+
+    /// 进度快照：/api/tasks member 从真实事件流物化 teammate-style progress 字段。
+    #[tokio::test]
+    async fn member_progress_snapshot_materialized_from_events() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        let t0 = Utc::now();
+        bus.publish(make_event(
+            task,
+            None,
+            t0,
+            EventKind::TaskCreated {
+                title: "T".into(),
+                description: "补进度快照".into(),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            None,
+            t0 + ChronoDuration::seconds(1),
+            EventKind::TaskDispatched { to: agent },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0 + ChronoDuration::seconds(2),
+            EventKind::ThinkingStarted,
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0 + ChronoDuration::seconds(3),
+            EventKind::ToolCallStarted {
+                tool: "Bash".into(),
+                args: serde_json::json!({"command": "cargo test -p fuxi-im"}),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0 + ChronoDuration::seconds(4),
+            EventKind::ToolCallStarted {
+                tool: "Read".into(),
+                args: serde_json::json!({"file_path": "crates/fuxi-im/src/tasks_view.rs"}),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            t0 + ChronoDuration::seconds(5),
+            EventKind::AgentResponded {
+                text: "快照字段已接入".into(),
+            },
+        ))
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+
+        let v = fetch(app).await;
+        let m = &v["running"][0]["members"][0];
+        assert_eq!(m["phase"], "responded");
+        assert_eq!(m["tool_use_count"], 2);
+        assert_eq!(m["summary"], "快照字段已接入");
+        assert_eq!(m["last_activity"], "快照字段已接入");
+        let recent = m["recent_activities"].as_array().unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0], "Bash · cargo test -p fuxi-im");
+        assert_eq!(recent[1], "Read · crates/fuxi-im/src/tasks_view.rs");
     }
 
     /// 重设计 #25：没发过工具调用的 member，last_tool_call=null（而非 "" 或 fallback text）。

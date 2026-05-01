@@ -79,15 +79,19 @@ export function candidatesFromNodes(nodes: NodeView[]): MentionCandidate[] {
 }
 
 function hintForMember(m: TaskMember): string | null {
-  const tool = m.last_tool_call?.tool;
-  if (tool) {
-    const args = m.last_tool_call?.args_summary;
-    return args ? `${tool} ${args}` : tool;
-  }
+  if (m.last_activity) return m.last_activity;
+  const tool = toolCallText(m.last_tool_call);
+  if (tool) return tool;
   if (m.activity) return m.activity;
   if (m.status === "idle") return "待命";
   if (m.status === "thinking") return "思考中";
   return "运行中";
+}
+
+function toolCallText(call: TaskMember["last_tool_call"]): string | null {
+  if (!call) return null;
+  if (typeof call === "string") return call;
+  return call.args_summary ? `${call.tool} ${call.args_summary}` : call.tool;
 }
 
 /** 候选排序：last_active_at 降序，缺失值排底。原数组不变。*/
