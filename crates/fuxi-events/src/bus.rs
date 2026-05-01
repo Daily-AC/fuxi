@@ -207,6 +207,11 @@ impl EventBus {
         self.inner.store.list_task_ids().await
     }
 
+    /// 按 `kind_tag` 拉全部事件（升序）。薄包装 `EventStore::events_by_kind`。
+    pub async fn events_by_kind(&self, kind: &str) -> Result<Vec<fuxi_core::Event>> {
+        self.inner.store.events_by_kind(kind).await
+    }
+
     fn maybe_emit_lag_sentinel(&self, pending: usize) {
         // 为什么计数器：避免同一时刻狂刷 lag 哨兵反而加剧拥塞。
         let prev = self
