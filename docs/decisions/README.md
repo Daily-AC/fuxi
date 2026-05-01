@@ -15,6 +15,13 @@
 | 09 | `09-tui-opencode-learnings.md` | TUI 12 条系统性借鉴 opencode · M4-REDUX 一批全做 |
 | 10 | `10-task-bound-agents.md` | Task-bound agent lifecycle + 任务树 UI + `#N` 命名 + `@` 消歧 popup |
 | 11 | `11-tui-cc-learnings-v2.md` | TUI 借鉴 cc 第二轮 · 12 条分三批（Batch C/D/E）|
+| 12 | `12-dist-worker-true-concurrency.md` | dist worker 真并发 + cancel / heartbeat / capacity 对账 |
+| 13 | `13-deliverable-boundary-handoff.md` | 门客交付边界：完成后必须请求 review / handoff |
+| 14 | `14-im-mobile-frontend.md` | IM mobile-first 前端作为主入口 |
+| 15 | `15-im-task-tree-pager.md` | IM 任务树分页和可读性约束 |
+| 16 | `16-im-tab-bar-task-thread.md` | IM tab bar + task thread 交互边界 |
+| 17 | `17-im-deploy-decoupling.md` | IM 部署组合与 dist/controller 解耦边界 |
+| 18 | `18-agentic-engineering-collaboration.md` | Agentic Engineering 协作原则：用户定目标边界，Codex 交付可验证闭环 |
 
 ## 写新 decision 怎么做
 
