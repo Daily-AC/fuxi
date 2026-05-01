@@ -232,9 +232,11 @@ impl NodesProvider for DistControllerNodesProvider {
                 .unwrap_or(false);
             // workers：home 从 shelf 拿；远端 dist 节点从 events 历史反查
             // （`source_node_id == 节点` + 未终态的 cc agent，#74 实测修复用户
-            // 反馈"mac 节点 workers:[] 跟现实不符"）
+            // 反馈"mac 节点 workers:[] 跟现实不符"）。home_workers_from_shelf
+            // 必须传 `online`，否则节点掉线时 idle worker 仍报 idle，dispatcher
+            // claim_idle_by_role 会派活到死节点。
             let workers = if s.node_id == HOME_NODE_ID {
-                home_workers_from_shelf(fuxi).await
+                home_workers_from_shelf(fuxi, online).await
             } else {
                 fuxi_im::nodes_provider::dist_workers_from_events(fuxi.bus(), &s.node_id).await
             };

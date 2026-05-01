@@ -85,7 +85,13 @@ pub const ONLINE_HEARTBEAT_THRESHOLD_MS: u64 = 30_000;
 ///
 /// 抽函数让 production impl 直接复用——只是把 `list_workers` 转 `WorkerView`，
 /// 跳过玄女（不算门客实例）。前端节点卡按 status 排序，所以 status 字段必须准。
-pub async fn home_workers_from_shelf(fuxi: &Fuxi) -> Vec<WorkerView> {
+///
+/// `is_online`：节点本身是否在线（heartbeat lag 在阈值内）。**节点离线时**
+/// 即便 shelf 还登记着 idle/busy worker，对外一律报 `"dead"`——否则
+/// `Fuxi::dispatch_to_any(role)` 经由 `claim_idle_by_role` 会乐观地把任务派
+/// 给一个挂掉节点上的"幻 worker"，task 无声掉海里。返 dead 而非空：前端
+/// 仍能看到这门客的存在并标灰，比凭空消失对用户更直觉。
+pub async fn home_workers_from_shelf(fuxi: &Fuxi, is_online: bool) -> Vec<WorkerView> {
     let xuannv_id = fuxi.xuannv_id().await;
     let cards = fuxi.list_workers().await;
     let mut out = Vec::with_capacity(cards.len().saturating_sub(1));
@@ -94,13 +100,13 @@ pub async fn home_workers_from_shelf(fuxi: &Fuxi) -> Vec<WorkerView> {
             continue;
         }
         let role = card.profile.role.clone();
-        let status = match fuxi.status_of(card.id).await {
+        let raw_status = match fuxi.status_of(card.id).await {
             Some(fuxi_orchestrator::ShelfStatus::Idle) => "idle",
             Some(fuxi_orchestrator::ShelfStatus::Busy) => "busy",
             Some(fuxi_orchestrator::ShelfStatus::Dead) => "dead",
             None => "dead",
-        }
-        .to_string();
+        };
+        let status = if is_online { raw_status } else { "dead" }.to_string();
         out.push(WorkerView {
             agent_id: card.id.to_string(),
             role_display: role_display(&role),
@@ -226,6 +232,122 @@ mod tests {
     fn online_threshold_is_30s() {
         // spec gap c 严格 30s——比 dist STALE_THRESHOLD (60s) 略严
         assert_eq!(ONLINE_HEARTBEAT_THRESHOLD_MS, 30_000);
+    }
+
+    // ── home_workers_from_shelf 离线节点回归 ──────────────────────────
+    //
+    // 真因：home 节点 dist heartbeat 停了 (online=false) 但 shelf 里的 idle
+    // worker 还在 → 旧 impl 直接映射成 "idle"，dispatcher `claim_idle_by_role`
+    // 会派活给一个不存在的节点。修法：调用方显式传 `is_online`，离线时强制
+    // status="dead"，让 dispatcher 不会误派。
+
+    /// 在测试里给 shelf 塞一个最小的 idle 门客实例，不依赖 cc/codex 适配器。
+    async fn make_fuxi_with_idle_luban()
+    -> (tempfile::TempDir, std::sync::Arc<fuxi_orchestrator::Fuxi>) {
+        use async_trait::async_trait;
+        use fuxi_core::Result as CoreResult;
+        use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
+        use fuxi_core::event::Event;
+        use fuxi_core::id::TaskId;
+        use fuxi_core::task::Task;
+        use fuxi_orchestrator::Fuxi;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        struct Stub {
+            card: AgentCard,
+        }
+        #[async_trait]
+        impl Agent for Stub {
+            fn card(&self) -> &AgentCard {
+                &self.card
+            }
+            async fn dispatch(&self, _task: Task) -> CoreResult<mpsc::Receiver<Event>> {
+                let (_tx, rx) = mpsc::channel(1);
+                Ok(rx)
+            }
+            async fn send_message(&self, _task: TaskId, _text: &str) -> CoreResult<()> {
+                Ok(())
+            }
+            async fn cancel(&self, _task: TaskId) -> CoreResult<()> {
+                Ok(())
+            }
+            async fn shutdown(&self) -> CoreResult<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        let _ = tokio::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .await;
+        tokio::fs::write(path.join("README.md"), "x").await.unwrap();
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&path)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "init",
+            ])
+            .current_dir(&path)
+            .output()
+            .await;
+        let ws = Arc::new(fuxi_workspace::GitWorktreeWorkspace::with_default_base(
+            path,
+        ));
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+
+        let card = AgentCard {
+            id: AgentId::new(),
+            profile: AgentProfile {
+                name: "stub-luban".into(),
+                role: "luban".into(),
+                cli: "stub".into(),
+                system_prompt: String::new(),
+                tags: vec!["test".into()],
+                extra: Default::default(),
+            },
+            endpoint: "stub://local".into(),
+            status: AgentStatus::Idle,
+        };
+        let _ = fuxi.insert_agent(Arc::new(Stub { card }), None).await;
+        (dir, fuxi)
+    }
+
+    #[tokio::test]
+    async fn home_workers_from_shelf_maps_idle_when_online() {
+        // online=true 时维持原行为——shelf::Idle → wire "idle"。
+        let (_dir, fuxi) = make_fuxi_with_idle_luban().await;
+        let workers = home_workers_from_shelf(&fuxi, true).await;
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].role, "luban");
+        assert_eq!(workers[0].status, "idle");
+    }
+
+    #[tokio::test]
+    async fn home_workers_from_shelf_forces_dead_when_offline() {
+        // 真因回归：节点离线（heartbeat 停） → 即便 shelf 还登记着 idle worker，
+        // 对外也必须报 "dead"，否则 dispatcher claim_idle_by_role 会派活给死节点。
+        let (_dir, fuxi) = make_fuxi_with_idle_luban().await;
+        let workers = home_workers_from_shelf(&fuxi, false).await;
+        assert_eq!(workers.len(), 1, "worker 行还要在（前端能看到挂掉的门客）");
+        assert_eq!(workers[0].role, "luban");
+        assert_eq!(
+            workers[0].status, "dead",
+            "节点离线时 worker.status 必须强制 dead，否则 dispatcher 误派"
+        );
     }
 
     /// β · #74 真因回归：dist 节点的 workers 列表必须从 events 历史里反查，
