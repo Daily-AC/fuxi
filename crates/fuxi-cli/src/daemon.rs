@@ -1553,6 +1553,50 @@ mod tests {
         );
     }
 
+    /// codex 不是延期 adapter：ROLE.md 写 `metadata.cli: codex` 时，daemon 应走
+    /// `WorkerKind::Codex` 分支并把 codex worker 登记进 Fuxi。CodexAgent 是懒
+    /// spawn；这里验证控制面能 spawn 成功，同时不 fork 真 codex 子进程。
+    #[tokio::test]
+    async fn spawn_by_role_with_codex_metadata_registers_codex_worker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let role_dir = dir.path().join("luban-codex");
+        std::fs::create_dir_all(&role_dir).expect("role dir");
+        std::fs::write(
+            role_dir.join("ROLE.md"),
+            "---\nname: luban-codex\ndescription: codex test role\nmetadata:\n  cli: codex\n---\n# codex role prompt\n",
+        )
+        .expect("write role");
+
+        unsafe {
+            std::env::set_var("FUXI_ROLES_DIR", dir.path());
+        }
+
+        let (fuxi, _bus, _store, _keeper, _oracle) = mock_daemon_parts().await;
+        let id = spawn_by_role(
+            &fuxi,
+            "luban-codex",
+            None,
+            Some("local".into()),
+            None,
+            RecallHandle::default(),
+        )
+        .await
+        .expect("codex role should spawn");
+
+        unsafe {
+            std::env::remove_var("FUXI_ROLES_DIR");
+        }
+
+        let cards = fuxi.list_workers().await;
+        let card = cards
+            .iter()
+            .find(|card| card.id == id)
+            .expect("spawned worker card");
+        assert_eq!(card.profile.role, "luban-codex");
+        assert_eq!(card.profile.cli, "codex");
+        assert_eq!(card.endpoint, "pid:unspawned");
+    }
+
     /// subject 完全没记录 → 返 Err，避免静默退化让用户以为召回成功了实际是普通 spawn。
     #[tokio::test]
     async fn spawn_with_recall_no_record_errors() {

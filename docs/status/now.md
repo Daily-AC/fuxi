@@ -36,6 +36,10 @@ HEAD：以当前 `main` 为准，运行 `git rev-parse --short HEAD` 获取精�
 - `/dist/*` 走 HMAC auth。
 - `/api/nodes` 通过 `NodesProvider` 读取 dist topology。
 - `Fuxi::dispatch` 命中 `pinned_node` 或 `required_tags` 时通过 `DistEnqueuer` 入 dist 队列。
+- `codex` adapter 已接入本地 spawn 与 dist worker adapter 路径；`CodexAgent`
+  是 lazy spawn，一次 dispatch fork 一次 `codex exec`。当前缺口不是"不能
+  spawn codex"，而是继续补足 daemon/dist/workspace 交界处的回归测试和真实节点
+  e2e 证据。
 
 ### 记忆
 
