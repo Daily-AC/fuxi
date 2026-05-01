@@ -1,5 +1,9 @@
 # v1.1 重构路线图
 
+> [!WARNING]
+> `historical`：本文保留 2026-04-21 的 v1.1 计划语境。M2.2 的 codex
+> 接入已完成，当前状态以 `docs/status/now.md` 和代码为准。
+
 > **进度 · 2026-04-21**：M2 ✅（5/5）+ P2 召回 L2 ✅（commit `d5a8e02` e2e 闭环）+
 > M3 命名规整 ✅（7/7，commit 至 `8be9ed1`）+ extractor 改 prompt 驱动（`f2142c5`）。
 > **406 tests 绿**。下一步：M4 体验升级 + 用户验收 v1.1。
@@ -57,23 +61,26 @@
 
 ### M2.2 · D2 · codex 支持
 
-**现象**：`不能起 codex`。根因 Fuxi::spawn_worker 只路由 `WorkerKind::Cc`；`fuxi-agent-codex` crate 有骨架但没接入。
+**状态**：已完成。`codex` adapter 已接入：
 
-**设计**：
+1. `fuxi-agent-codex::CodexAgent` 实现 `fuxi_core::Agent`，采用 lazy spawn；
+   spawn 阶段只登记 worker，一次 dispatch fork 一次 `codex exec`。
+2. `fuxi-orchestrator::WorkerKind::Codex(CodexLaunchConfig)` 已接入
+   `Fuxi::spawn_worker` / `spawn_worker_in_worktree`。
+3. `fuxi-skills` loader 已读取 ROLE.md `metadata.cli: codex`。
+4. `fuxi-cli::daemon::spawn_by_role` 已按 `profile.cli == "codex"` 选择
+   `WorkerKind::Codex`。
+5. dist worker adapter 已支持 `cli == "codex"` / 空串 legacy 默认。
 
-1. Audit `fuxi-agent-codex` 现状（crate 存在但 trait impl 完整度未知）
-2. 实现 `CodexAgent: fuxi_core::Agent`（参考 `CcAgent`）+ `spawn_codex` + `launch_with_id`
-3. Fuxi::spawn_worker 增 `WorkerKind::Codex(CodexLaunchConfig)` 分支
-4. SKILL.md 里 `cli` 字段支持 `codex`（已有 role="luban" cli="claude-code"，加 cli="codex"）
-5. env 兼容 `FUXI_CODEX_MODEL`（CLAUDE.md 已提过 API key 用户需覆盖，ChatGPT account 需空串）
+**回归测试**：
+- `fuxi_agent_codex::agent::codex_agent_implements_agent_trait`
+- `fuxi_skills::loader::loader_reads_codex_cli_from_metadata`
+- `fuxi_orchestrator::fuxi::tests::cli_tag_distinguishes_cc_and_codex`
+- `fuxi_cli::daemon::tests::spawn_by_role_with_codex_metadata_registers_codex_worker`
+- `fuxi_cli::dist::tests::select_adapter_accepts_codex`
+- Gated E2E：`FUXI_RUN_CODEX_E2E=1 cargo test -p fuxi-agent-codex --test real_codex_smoke -- --ignored --nocapture`
 
-**TDD**：
-- `codex_adapter_implements_agent_trait`（编译级）
-- Gated E2E `FUXI_RUN_CODEX_E2E=1 cargo test`：codex 真跑一轮 helloworld
-
-**文件影响**：`fuxi-agent-codex/*` + `fuxi-orchestrator/src/fuxi.rs` + `fuxi-cli/src/subcommands.rs`（spawn --cli codex 参数）
-
-**退出**：`fuxi` 里说"起一个 codex 鲁班" → 玄女能 spawn + codex 真对话。
+**剩余不是接入缺口**：继续补 workspace / recall / dist / 真实远端节点的交界测试和 e2e 证据。
 
 ---
 

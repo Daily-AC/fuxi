@@ -62,9 +62,9 @@
 
 - **职责**：玄女编排 · 门客注册表 + spawn/dispatch/intervene + 系统事件桥
 - **pub 顶层 API**：`struct Fuxi` + `FuxiConfig` / `enum WorkerKind` / `struct Shelf` + `ShelfEntry` + `ShelfStatus` / `trait Intervener` / `struct SystemEventBridge` / `spawn_worker()`
-- **依赖**：fuxi-core, fuxi-events, fuxi-workspace, fuxi-agent-cc
+- **依赖**：fuxi-core, fuxi-events, fuxi-workspace, fuxi-agent-cc, fuxi-agent-codex
 - **内部模块**：fuxi.rs / registry.rs / bridge.rs / error.rs
-- **可疑点**：🔴 **4 项"尚未做"** P2.5/P3：玄女自己作 A2A server / 介入代理 / 对话权转交 / codex/gemini 适配器（注释明示）
+- **可疑点（历史）**：🔴 当时记录的 P2.5/P3 缺口包含玄女自己作 A2A server / 介入代理 / 对话权转交 / 多 CLI 适配器。当前 `codex` 已接入，剩余是 gemini/opencode 等新 adapter 与交界 e2e。
 
 ## fuxi-scheduler
 
@@ -111,7 +111,7 @@
 
 ## 最大可疑点
 
-1. 🔴 **fuxi-orchestrator** — 4 项 P2.5/P3 明确延期（玄女 A2A server、介入代理、让贤、codex/gemini 适配器）。**这是 N2 "不能起 codex" 的架构根因**。
+1. 🔴 **fuxi-orchestrator** — 历史记录里的 4 项 P2.5/P3 延期已部分收敛：`codex` adapter 已接入本地 spawn 与 dist worker adapter 路径；剩余是玄女 A2A server、介入代理、让贤、gemini/opencode 等新 adapter，以及 codex 的真实节点 e2e 覆盖。
 2. 🟡 **fuxi-memory::extractor** — v1 stub 未实现，对话结束后不自动抽 fact（策府依赖人工 `fuxi memory record`）
 3. 🟡 **fuxi-cli** — `allow(dead_code)` + `unwrap()` 多处，REPL/daemon/IPC 错误处理可加固
 4. 🟡 **fuxi-a2a::AgentCard ≠ fuxi_core::AgentCard** — 同名结构不同定义，手工转换。未来若 A2A 成为门客间通信基础会踩

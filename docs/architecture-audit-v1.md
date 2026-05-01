@@ -29,9 +29,9 @@
             │      ┌──── Intervener ─┐        │
             └──────┤                 ├────────┘
                    ↓                 ↑
-         ┌──── fuxi-agent-cc ─┐   ┌── fuxi-firehose (观察)
-         │  CcAgent + WS       │   │  Hub + EventStream + TUI
-         │  (codex 尚缺)       │   └──────────┬────────────
+         ┌──── agent adapters ─┐   ┌── fuxi-firehose (观察)
+         │  cc + codex          │   │  Hub + EventStream + TUI
+         │  (gemini 待扩)       │   └──────────┬────────────
          └─────────────────────┘              │
                    ↓           ↓               │
               ┌─ fuxi-a2a ─┐  ┌── fuxi-events (EventBus) ──┐
@@ -86,7 +86,7 @@
 | ID | 用户反馈 | 架构层根因 |
 |---|---|---|
 | N1 | 玄女 busy 时我发消息消失 | **fuxi-agent-cc::agent.rs::send_message** 只发 WS 消息不查 active_tx；intervene 通路在 busy 状态有黑洞（非 idle 情形 degrade 逻辑不覆盖）。消息进 cc stdin 但若 cc 当前 tool-loop 里不 poll stdin，就被吞 |
-| N2 | 不能起 codex 门客 | **fuxi-agent-codex 是 P2.5 延期项**（orchestrator 注释明示）。spawn_worker 只路由 `WorkerKind::Cc`；codex 适配器 crate 存在但没接入 Fuxi::spawn_worker |
+| N2 | ~~不能起 codex 门客~~ | **已覆盖**：当前 `codex` adapter 已接入本地 spawn 与 dist worker adapter 路径。daemon 层已有 `spawn_by_role_with_codex_metadata_registers_codex_worker` 回归测试固定 ROLE.md `metadata.cli: codex` → `WorkerKind::Codex` → shelf 登记 codex worker。剩余是交界测试和真实节点 e2e，不是 spawn 接入缺口。 |
 | N3 | spawn 后立即 TaskDone 抄送 | 可能是 commit `126e1a1` 补发 TaskCreated/Dispatched 时序 与 cc 的 system/init 交错；存疑需复现 |
 | N4 | 门客堆 3 个不回收 | **无 GC/TTL 架构**。Shelf 只做注册，无 idle_since 计时 + 无 kill_idle_older_than policy。spawn 也不去重（同 role 多次 spawn 不合并） |
 | N5 | resume 语义歧义 | CLI 命名债：`fuxi resume` = unblock Blocked task；用户直觉是"续对话"。cc 的 `--resume` 和 task 的 `Resume` 是两回事 |
