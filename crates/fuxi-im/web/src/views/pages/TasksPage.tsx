@@ -182,10 +182,10 @@ const MemberRow: Component<{
   taskStatus?: string;
 }> = (props) => {
   const sub = (): string => {
-    const tool = props.member.last_tool_call?.tool;
+    if (props.member.last_activity) return props.member.last_activity;
+    const tool = toolCallText(props.member.last_tool_call);
     if (tool) {
-      const args = props.member.last_tool_call?.args_summary;
-      return args ? `${tool} ${args}` : tool;
+      return tool;
     }
     if (props.member.activity) return props.member.activity;
     // 任务非 running（completed / failed）时 worker 已无任务，显 "已歇" 比 "待命" 更直观
@@ -227,3 +227,9 @@ const MemberRow: Component<{
     </li>
   );
 };
+
+function toolCallText(call: TaskMember["last_tool_call"]): string | null {
+  if (!call) return null;
+  if (typeof call === "string") return call;
+  return call.args_summary ? `${call.tool} ${call.args_summary}` : call.tool;
+}

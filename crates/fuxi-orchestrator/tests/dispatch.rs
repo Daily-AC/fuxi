@@ -15,7 +15,7 @@ use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::{Task, TaskState};
 use fuxi_core::{CoreError, Result};
 use fuxi_events::{EventBus, ReplayCursor};
-use fuxi_orchestrator::{Fuxi, FuxiConfig, WorkerKind};
+use fuxi_orchestrator::{Fuxi, FuxiConfig, MailboxMessageState, WorkerKind, mailbox_for_agent};
 use fuxi_workspace::GitWorktreeWorkspace;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -855,6 +855,53 @@ async fn intervene_append_emits_user_intervention_and_applied() {
     // wire 层确实调了 send_message；没调 cancel
     assert_eq!(stub.sends.load(Ordering::Relaxed), 1);
     assert_eq!(stub.cancels.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn send_agent_message_queues_and_delivers_mailbox_event() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+    let from = AgentId::new();
+    let target = InterveneTrackingStub::new("dev");
+    let to = fuxi.insert_agent(target.clone(), None).await;
+    let task = TaskId::new();
+
+    let message_id = fuxi
+        .send_agent_message(task, from, to, "看一下 diff", Some("review".into()))
+        .await
+        .expect("send agent message");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(target.sends.load(Ordering::Relaxed), 1);
+    let mailbox = mailbox_for_agent(&bus, task, to).await.expect("mailbox");
+    assert_eq!(mailbox.len(), 1);
+    assert_eq!(mailbox[0].message_id, message_id);
+    assert_eq!(mailbox[0].state, MailboxMessageState::Delivered);
+    assert_eq!(mailbox[0].summary.as_deref(), Some("review"));
+}
+
+#[tokio::test]
+async fn send_agent_message_records_failed_delivery_when_target_missing() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+    let from = AgentId::new();
+    let missing = AgentId::new();
+    let task = TaskId::new();
+
+    let err = fuxi
+        .send_agent_message(task, from, missing, "有人吗", None)
+        .await
+        .expect_err("missing target should error");
+    assert!(format!("{err}").contains("agent 未注册"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mailbox = mailbox_for_agent(&bus, task, missing)
+        .await
+        .expect("mailbox");
+    assert_eq!(mailbox.len(), 1);
+    assert!(matches!(mailbox[0].state, MailboxMessageState::Failed(_)));
 }
 
 #[tokio::test]

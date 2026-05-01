@@ -23,6 +23,7 @@ pub mod dist_enqueuer;
 pub mod error;
 pub mod fuxi;
 pub mod idle_gc;
+pub mod mailbox;
 pub mod recall;
 pub mod registry;
 pub mod sentinel_addendum;
@@ -33,6 +34,11 @@ pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use idle_gc::{
     DEFAULT_IDLE_TTL_SECS, DEFAULT_TICK_INTERVAL_SECS, IdleGcTask, IdleShutdowner, ttl_from_env,
+};
+pub use mailbox::{
+    MailboxMessage, MailboxMessageState, fold_mailbox, mailbox_for_agent,
+    mark_agent_message_delivered, mark_agent_message_failed, mark_agent_message_read,
+    queue_agent_message,
 };
 pub use recall::{RecallContext, RecallSink};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};

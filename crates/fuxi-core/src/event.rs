@@ -295,6 +295,35 @@ pub enum EventKind {
         waited_for_ms: u64,
     },
 
+    // ── task-scoped agent mailbox ─────────────────────────────
+    /// 门客间消息入队。初版是审计型 mailbox：所有消息必须挂 task，后续投递、已读、
+    /// 失败都用同一个 `message_id` 串起来；不允许绕过 EventBus 私连。
+    AgentMessageQueued {
+        message_id: Uuid,
+        from: AgentId,
+        to: AgentId,
+        text: String,
+        summary: Option<String>,
+    },
+    /// 消息已被传输层送到目标门客的 inbox/turn 队列。注意 delivered != read。
+    AgentMessageDelivered {
+        message_id: Uuid,
+        from: AgentId,
+        to: AgentId,
+    },
+    /// 目标门客已消费该消息。`reader` 通常等于 queued.to，单独字段便于审计异常。
+    AgentMessageRead {
+        message_id: Uuid,
+        reader: AgentId,
+    },
+    /// 消息投递失败。失败也要留痕，避免“看起来发了，其实黑洞”。
+    AgentMessageFailed {
+        message_id: Uuid,
+        from: AgentId,
+        to: AgentId,
+        error: String,
+    },
+
     // ── 分布式拓扑（Phase 6 P6 topology/metrics）─────────────
     /// Worker 向 controller 注册（首次或重连均发）。
     /// `tags` 决定路由匹配，`max_concurrency` 给容量调度。

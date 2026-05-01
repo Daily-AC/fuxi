@@ -77,6 +77,43 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
     unmount();
   });
 
+  it("member 行优先显示 progress last_activity", async () => {
+    const overview: TasksOverview = {
+      running: [
+        {
+          id: "t-progress",
+          title: "进度快照",
+          status: "running",
+          created_at: "",
+          last_active_at: "2026-04-26T11:00:00Z",
+          duration_ms: 0,
+          members: [
+            {
+              agent_id: "a-progress",
+              role: "luban",
+              role_display: "鲁班",
+              status: "busy",
+              last_tool_call: "Bash · cargo test",
+              activity: "Bash: old fallback",
+              phase: "responded",
+              tool_use_count: 3,
+              last_activity: "快照字段已接入",
+              recent_activities: ["Bash · cargo test"],
+              summary: "快照字段已接入",
+            },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    const { getByTestId, unmount } = setup(overview);
+    await new Promise((r) => setTimeout(r, 30));
+    const row = getByTestId("member-a-progress");
+    expect(row.textContent).toContain("快照字段已接入");
+    expect(row.textContent).not.toContain("old fallback");
+    unmount();
+  });
+
   it("member 行 inspection-only · v3 不可 tap（无 button）", async () => {
     const { getByTestId, unmount } = setup(RUNNING_FIXTURE);
     await new Promise((r) => setTimeout(r, 30));

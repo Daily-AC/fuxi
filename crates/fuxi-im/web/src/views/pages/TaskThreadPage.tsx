@@ -290,7 +290,8 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
   // v3 #64 · @node 在线 muted gray / 离线 dim red（区分 stale 节点）
   // #68 (c) · 任务 completed 时 member 副文 fallback 用 "已歇" 替代 "待命"（避免误导用户以为 worker 还在线等接活）
   const memberTail = (m: TaskGroupCard["members"][number]): string => {
-    const tool = m.last_tool_call?.tool;
+    if (m.last_activity) return m.last_activity;
+    const tool = toolCallText(m.last_tool_call);
     if (tool) return tool;
     if (props.task.status !== "running") return "已歇";
     return memberStatusFallback(m);
@@ -349,6 +350,12 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
     </div>
   );
 };
+
+function toolCallText(call: TaskGroupCard["members"][number]["last_tool_call"]): string | null {
+  if (!call) return null;
+  if (typeof call === "string") return call;
+  return call.args_summary ? `${call.tool} ${call.args_summary}` : call.tool;
+}
 
 interface ThreadProps {
   messages: Accessor<Message[]>;

@@ -326,6 +326,10 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         NoRoleMatched { .. } => "no_role_matched",
         AgentRequestReview { .. } => "agent_request_review",
         ReviewRequestTimeout { .. } => "review_request_timeout",
+        AgentMessageQueued { .. } => "agent_message_queued",
+        AgentMessageDelivered { .. } => "agent_message_delivered",
+        AgentMessageRead { .. } => "agent_message_read",
+        AgentMessageFailed { .. } => "agent_message_failed",
         WorkerRegistered { .. } => "worker_registered",
         WorkerHeartbeatStateChanged { .. } => "worker_heartbeat_state_changed",
         WorkerStaleSwept { .. } => "worker_stale_swept",
@@ -722,6 +726,90 @@ mod tests {
                 assert_eq!(*waited_for_ms, 60_000);
             }
             other => panic!("expect ReviewRequestTimeout，得到 {other:?}"),
+        }
+    }
+
+    /// task-scoped mailbox 四变体的 kind_tag + SQLite roundtrip。
+    /// 这是门客通信审计链的最低门禁：Queued/Delivered/Read/Failed 都必须可回放。
+    #[tokio::test]
+    async fn persists_agent_mailbox_variants() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let from = AgentId::new();
+        let to = AgentId::new();
+        let message_id = uuid::Uuid::new_v4();
+        let events = vec![
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::AgentMessageQueued {
+                    message_id,
+                    from,
+                    to,
+                    text: "review diff".into(),
+                    summary: Some("review".into()),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::AgentMessageDelivered {
+                    message_id,
+                    from,
+                    to,
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::AgentMessageRead {
+                    message_id,
+                    reader: to,
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::AgentMessageFailed {
+                    message_id,
+                    from,
+                    to,
+                    error: "receiver gone".into(),
+                },
+            },
+        ];
+        for ev in &events {
+            store.append(ev).await.expect("append");
+        }
+
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "agent_message_queued",
+                "agent_message_delivered",
+                "agent_message_read",
+                "agent_message_failed",
+            ]
+        );
+
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        assert_eq!(got.len(), 4);
+        match &got[0].kind {
+            EventKind::AgentMessageQueued { text, summary, .. } => {
+                assert_eq!(text, "review diff");
+                assert_eq!(summary.as_deref(), Some("review"));
+            }
+            other => panic!("expect AgentMessageQueued，得到 {other:?}"),
+        }
+        match &got[3].kind {
+            EventKind::AgentMessageFailed { error, .. } => {
+                assert_eq!(error, "receiver gone");
+            }
+            other => panic!("expect AgentMessageFailed，得到 {other:?}"),
         }
     }
 

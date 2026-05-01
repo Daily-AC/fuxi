@@ -927,6 +927,54 @@ impl Fuxi {
         Ok(())
     }
 
+    /// Task-scoped 门客消息。
+    ///
+    /// 这是 mailbox 的编排入口：先写 `AgentMessageQueued`，再尝试投递到目标 agent，
+    /// 成功写 `AgentMessageDelivered`，失败写 `AgentMessageFailed` 并把原错误返回给调用方。
+    /// 所有事件都挂同一个 task，后续 UI/审计/远端同步只读 EventBus。
+    pub async fn send_agent_message(
+        &self,
+        task_id: TaskId,
+        from: AgentId,
+        to: AgentId,
+        text: &str,
+        summary: Option<String>,
+    ) -> Result<uuid::Uuid> {
+        let message_id = crate::mailbox::queue_agent_message(
+            &self.bus,
+            task_id,
+            from,
+            to,
+            text.to_string(),
+            summary,
+        )?;
+        let Some(agent) = self.shelf.get_agent(to).await else {
+            let err = OrchestratorError::AgentNotFound(to);
+            let _ = crate::mailbox::mark_agent_message_failed(
+                &self.bus,
+                task_id,
+                message_id,
+                from,
+                to,
+                err.to_string(),
+            );
+            return Err(err);
+        };
+        if let Err(e) = agent.send_message(task_id, text).await {
+            let _ = crate::mailbox::mark_agent_message_failed(
+                &self.bus,
+                task_id,
+                message_id,
+                from,
+                to,
+                e.to_string(),
+            );
+            return Err(e.into());
+        }
+        crate::mailbox::mark_agent_message_delivered(&self.bus, task_id, message_id, from, to)?;
+        Ok(message_id)
+    }
+
     /// 把 task 置为 Blocked——玄女请示用户前发。v0.1 只发事件，**不动**
     /// orchestrator 的 shelf/运行时状态（cc 门客自己停在等待 user input 状态）。
     /// 事件是玄女和 Firehose 之间的"请示已就位"信号。
