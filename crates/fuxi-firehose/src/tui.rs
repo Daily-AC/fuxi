@@ -474,6 +474,28 @@ fn summarize(k: &EventKind) -> String {
             node_id,
             recycled_jobs,
         } => format!("worker✗ {node_id} recycled={}", recycled_jobs.len()),
+        AgentMessageQueued { from, to, text, .. } => format!(
+            "msg+ {}→{} {}",
+            short_id(&from.to_string()),
+            short_id(&to.to_string()),
+            one_line(text, 40)
+        ),
+        AgentMessageDelivered { from, to, .. } => format!(
+            "msg→ {}→{}",
+            short_id(&from.to_string()),
+            short_id(&to.to_string())
+        ),
+        AgentMessageRead { reader, .. } => {
+            format!("msg✓ reader={}", short_id(&reader.to_string()))
+        }
+        AgentMessageFailed {
+            from, to, error, ..
+        } => format!(
+            "msg✗ {}→{}: {}",
+            short_id(&from.to_string()),
+            short_id(&to.to_string()),
+            one_line(error, 40)
+        ),
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -543,6 +565,13 @@ fn color_for(k: &EventKind) -> Color {
         // 视觉接近不冲突，都是"flow 状态"），sweep 用 LightRed 强调失联。
         WorkerRegistered { .. } | WorkerHeartbeatStateChanged { .. } => Color::Cyan,
         WorkerStaleSwept { .. } => Color::LightRed,
+
+        // mailbox 一族 —— 门客 IM 风格通信，用 Yellow（与"介入家族"同色，因
+        // 都是"主动跨 agent 沟通"），失败用 LightRed 与 sweep 同级。
+        AgentMessageQueued { .. } | AgentMessageDelivered { .. } | AgentMessageRead { .. } => {
+            Color::Yellow
+        }
+        AgentMessageFailed { .. } => Color::LightRed,
 
         Custom { .. } => Color::DarkGray,
     }
