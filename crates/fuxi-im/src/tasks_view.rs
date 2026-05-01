@@ -89,6 +89,11 @@ struct TaskAccumulator {
     /// 重设计 #25：task description（派活时附的诉求）—— member 卡片继承同一份。
     description: Option<String>,
     created_at: Option<DateTime<Utc>>,
+    /// 历史里最早一条事件的时刻，用作 `created_at` 兜底。
+    /// WHY：旧 task 的事件流可能丢了 `TaskCreated`（被截断 / 早期未持久化），
+    /// 直接 fallback `Utc::now()` 会产生 `created_at > last_active_at` 的「未来
+    /// 创建」脏数据；用最早事件时刻兜底至少保证时间单调。
+    first_event_at: Option<DateTime<Utc>>,
     last_active_at: Option<DateTime<Utc>>,
     /// task 终态：None = 仍 running；Some(Done) = completed；Some(其它) = failed/cancelled
     terminal_state: Option<TaskState>,
@@ -115,9 +120,10 @@ struct TaskAccumulator {
 
 impl TaskAccumulator {
     fn ingest(&mut self, ev: &Event) {
-        // 时间戳追踪：每条事件的 meta.at 都更新 last_active_at
+        // 时间戳追踪：每条事件的 meta.at 都更新 last_active_at + first_event_at（min）
         let at = ev.meta.at;
         self.last_active_at = Some(self.last_active_at.map_or(at, |existing| existing.max(at)));
+        self.first_event_at = Some(self.first_event_at.map_or(at, |existing| existing.min(at)));
 
         // 任何带 meta.agent + meta.task 的事件都视为 member 候选——dist 路径
         // 远端 worker 不发 TaskDispatched（home 端 dispatch 已发 TaskCreated 但
@@ -323,20 +329,22 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
     // 2. 收集 agent role 映射——live shelf + 历史 AgentSpawning 兜底
     //    （#51 修：worker GC / shutdown 后 shelf 拿不到，role 拿空 fallback "unknown"
     //    显在 PWA 任务卡上很难看。AgentSpawning 事件持久化在 EventStore，从历史
-    //    回扫一次能补上 role，让已完成 task 的 member 卡仍然显示正确角色名。
-    //    扫 recent(2000) 远大于 fuxi v1 50-task × ~30 events 的天花板，O(2000) 单调
-    //    序列遍历 ~ms 级，可接受。后续若 task 量级上去要换 indexed query）
+    //    回扫一次能补上 role，让已完成 task 的 member 卡仍然显示正确角色名。）
+    //
+    //    Bug 3 修：旧版用 `recent(2000)` 取尾窗口，事件累积过 2000 条后老 task 的
+    //    AgentSpawning 会被挤出窗口，role 仍 fallback "unknown"。换 kind_tag 直查
+    //    `agent_spawning`——v1 task 数 O(几十) → spawning 事件数远小于 2000，
+    //    性能比尾窗口扫还好；正确性不再依赖窗口大小。
     let cards = fuxi.list_workers().await;
     let mut role_by_agent: HashMap<AgentId, String> = cards
         .iter()
         .map(|c| (c.id, c.profile.role.clone()))
         .collect();
-    let recent = bus
-        .store()
-        .recent(2000)
+    let spawning_events = bus
+        .events_by_kind("agent_spawning")
         .await
         .map_err(crate::Error::Events)?;
-    for ev in &recent {
+    for ev in &spawning_events {
         if let (Some(agent), EventKind::AgentSpawning { role, .. }) = (ev.meta.agent, &ev.kind) {
             // shelf 优先（live worker 的 role 最权威）；历史只填 shelf 缺失的
             role_by_agent.entry(agent).or_insert_with(|| role.clone());
@@ -383,7 +391,11 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
         }
 
         let title = acc.title.clone().unwrap_or_else(|| "（无标题）".into());
-        let created = acc.created_at.unwrap_or_else(Utc::now);
+        // Bug 1 修：缺失 TaskCreated 时回落到最早事件时刻——保证 created_at <= last_active_at。
+        let created = acc
+            .created_at
+            .or(acc.first_event_at)
+            .unwrap_or_else(Utc::now);
         let last = acc.last_active_at.unwrap_or(created);
         let duration_ms = (last - created).num_milliseconds().max(0) as u64;
 

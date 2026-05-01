@@ -209,6 +209,25 @@ impl EventStore {
         Ok(out)
     }
 
+    /// 拿全部 `kind_tag == kind` 的事件（按 rowid 升序）。
+    ///
+    /// `/api/tasks` role 兜底用：旧 task 的 `AgentSpawning` 事件可能远在 history
+    /// 尾部之外，用 `recent(N)` 窗口扫不到导致 role 显 "unknown"。这里用 kind_tag
+    /// 索引直接命中目标变体，O(spawning 事件数) 远小于 O(全表)。
+    pub async fn events_by_kind(&self, kind: &str) -> Result<Vec<Event>> {
+        let rows = sqlx::query("SELECT payload FROM events WHERE kind_tag = ?1 ORDER BY rowid ASC")
+            .bind(kind)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload: String = row.try_get("payload")?;
+            let ev: Event = serde_json::from_str(&payload)?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
+
     /// 同 crate 内暴露 pool 给 bus/测试使用。
     #[cfg(test)]
     pub(crate) fn pool(&self) -> &SqlitePool {

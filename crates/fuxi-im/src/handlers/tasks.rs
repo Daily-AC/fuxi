@@ -1026,6 +1026,142 @@ mod tests {
         );
     }
 
+    /// Bug 1 回归：task 事件流里**缺失** `TaskCreated`（旧库被截断 / 仅留下后段
+    /// ToolCall/AgentResponded 等）时，`created_at` 不应回落到 `Utc::now()`，
+    /// 否则会出现 `created_at > last_active_at` 的「未来创建」脏数据。
+    /// 期望：取该 task 最早事件时刻作 `created_at` 兜底，保 `created <= last_active`。
+    #[tokio::test]
+    async fn created_at_falls_back_to_first_event_when_task_created_missing() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        // 故意把所有 at 设为「过去」——若 fallback 用 Utc::now() 会比这些都大。
+        let past = Utc::now() - ChronoDuration::days(3);
+
+        // 没 TaskCreated；只有 ToolCall + AgentResponded（都带 meta.task + meta.agent）
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            past,
+            EventKind::ToolCallStarted {
+                tool: "Bash".into(),
+                args: serde_json::json!({"command": "cargo test"}),
+            },
+        ))
+        .unwrap();
+        bus.publish(make_event(
+            task,
+            Some(agent),
+            past + ChronoDuration::seconds(10),
+            EventKind::AgentResponded {
+                text: "完成".into(),
+            },
+        ))
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        let v = fetch(app).await;
+        let running = v["running"].as_array().unwrap();
+        assert_eq!(running.len(), 1, "task 应入列（有真 member 累积）");
+        let card = &running[0];
+        let created: chrono::DateTime<Utc> = card["created_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .expect("rfc3339");
+        let last_active: chrono::DateTime<Utc> = card["last_active_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .expect("rfc3339");
+        assert!(
+            created <= last_active,
+            "created_at ({created}) 不应晚于 last_active_at ({last_active})"
+        );
+        // 兜底应是最早事件时刻（3 天前），不是 Utc::now()。
+        assert!(
+            created < Utc::now() - ChronoDuration::hours(1),
+            "created_at 不应回落到当前时刻 ({created})；应取最早事件时刻"
+        );
+    }
+
+    /// Bug 3 回归：老 task 的 `AgentSpawning` 事件被 `recent(2000)` 窗口截断后，
+    /// role 兜底**仍**应该命中——证明聚合不依赖最近 N 条窗口，而是按 kind 全表扫。
+    /// 用 2100 条噪声 Custom 事件挤掉 AgentSpawning 出 recent(2000)。
+    #[tokio::test]
+    async fn role_falls_back_even_when_agent_spawning_outside_recent_2000() {
+        let (_dir, app, bus, _fuxi, _xn) = build_app().await;
+        let store = bus.store();
+        let task = TaskId::new();
+        let agent = AgentId::new();
+        let t0 = Utc::now() - ChronoDuration::days(4);
+
+        // 用 store.append 直接同步落库（绕开 broadcast 异步路径）——大批量灌也快。
+        store
+            .append(&make_event(
+                task,
+                Some(agent),
+                t0,
+                EventKind::AgentSpawning {
+                    role: "luban".into(),
+                    cli: "cc".into(),
+                },
+            ))
+            .await
+            .expect("append spawning");
+        store
+            .append(&make_event(
+                task,
+                None,
+                t0 + ChronoDuration::seconds(1),
+                EventKind::TaskCreated {
+                    title: "T".into(),
+                    description: "".into(),
+                },
+            ))
+            .await
+            .expect("append created");
+        store
+            .append(&make_event(
+                task,
+                None,
+                t0 + ChronoDuration::seconds(2),
+                EventKind::TaskDispatched { to: agent },
+            ))
+            .await
+            .expect("append dispatched");
+
+        // 灌 2100 条噪声 Custom 事件——使 AgentSpawning 落在 rowid 倒序的 2000 条之外。
+        let noise_task = TaskId::new();
+        for i in 0..2100u32 {
+            store
+                .append(&make_event(
+                    noise_task,
+                    None,
+                    t0 + ChronoDuration::seconds(10 + i as i64),
+                    EventKind::Custom {
+                        label: format!("noise-{i}"),
+                        payload: serde_json::json!({}),
+                    },
+                ))
+                .await
+                .expect("append noise");
+        }
+
+        let v = fetch(app).await;
+        let running = v["running"].as_array().unwrap();
+        let card = running
+            .iter()
+            .find(|c| c["id"].as_str().unwrap_or("").contains(&task.to_string()))
+            .expect("老 task 应入列");
+        let m = &card["members"][0];
+        assert_eq!(
+            m["role"], "luban",
+            "AgentSpawning 即便不在 recent(2000) 窗口内，role 兜底仍应命中"
+        );
+        assert_eq!(m["role_display"], "鲁班", "role_display 不应是 'unknown'");
+    }
+
     /// #51 边界：task 仍 running 时 member.status 仍读 live shelf（行为不变）。
     /// 确认 fix 不破坏 running task 的实时 status。
     #[tokio::test]
