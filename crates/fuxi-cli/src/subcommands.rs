@@ -557,6 +557,16 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
             node_id,
             recycled_jobs,
         } => format!("{node_id} recycled={}", recycled_jobs.len()),
+        AgentMessageQueued { from, to, text, .. } => {
+            format!("{from} -> {to}: {}", truncate_preview(text, 100))
+        }
+        AgentMessageDelivered { from, to, .. } => format!("{from} -> {to} delivered"),
+        AgentMessageRead { reader, .. } => format!("{reader} read"),
+        AgentMessageFailed {
+            from, to, error, ..
+        } => {
+            format!("{from} -> {to} failed: {}", truncate_preview(error, 100))
+        }
     }
 }
 
