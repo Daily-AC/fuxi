@@ -1,7 +1,8 @@
 # Decision 07 · P2 召回 Scope · 通用 wire + cc 特化层
 
 **日期**：2026-04-20
-**状态**：已拍板，L2 待实装（前序 commit `8feb7eb` 是窄化版 wire，本决定要重写）
+**状态**：已拍板，L2 已实装。当前代码里 codex 走 worktree-only recall；cc
+额外带 CLI session resume。
 
 ## 背景
 
@@ -21,10 +22,10 @@ fuxi 给每次 spawn 分配新 worktree（`.fuxi/worktrees/<agent_id>`）→ rou
 回头审视 P2 wire 的设计选择，发现几条**走偏 / 走窄**的痕迹：
 
 1. **`Agent::session_id() -> Option<String>` 把 cc 概念泄漏进通用 trait**
-   codex 永远 None，gemini 还不知道。默认 None 容忍度 OK，但暴露了我们把"召回 key"窄化成了"cc 那个 uuid"。
+   codex 永远 None，gemini 还不知道。默认 None 容忍度 OK，但暴露了我们把"召回 key"窄化成了"cc 那个 uuid"。当前实现已把召回真相扩到 worktree context，codex 通过 worktree-only 召回闭环。
 
 2. **RecallSink trait 签名绑死 `session_id: String`**
-   `record_task_session(agent_id, task_id, session_id)`——session_id 是 required。pump 用 `session_id.is_some()` 守门，**codex 门客永远不会进 sink**。用户下次想"召回上次那个 codex 鲁班看他写的代码"是 wire 层都不通。
+   历史问题：`record_task_session(agent_id, task_id, session_id)` 把 session_id 设为 required，pump 用 `session_id.is_some()` 守门，导致 codex 门客不会进 sink。当前已改为 `RecallContext`，codex 可以只记录 worktree，不需要 CLI session。
 
 3. **召回语义被窄化成"cc 对话线"**
    - 真相：召回 ≥ "整个工作环境"（cwd/worktree + CLI-specific session if any）
@@ -46,7 +47,7 @@ fuxi 给每次 spawn 分配新 worktree（`.fuxi/worktrees/<agent_id>`）→ rou
 sink 多写一条 `task-<id>, predicate=worktree`；recall spawn 时复用 worktree。
 - 1 session 工作量
 - 修了 cc bug，**没修 trait 走窄**
-- codex/gemini 仍永远不进 recall
+- 只救 cc；不覆盖 codex 的 worktree-only recall，也不为 gemini 留干净接口
 
 ### L2 · trait 通用化（推荐）
 RecallSink 签名改 `record(ctx: RecallContext)` 带完整 context；codex 走 worktree-only 召回；trait 不绑死 cc。
