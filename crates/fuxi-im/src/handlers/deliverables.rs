@@ -102,26 +102,148 @@ pub async fn list_deliverables(
 
 /// `POST /api/deliverables/{project}/{task}/accept` —— 标记交付已接收。
 ///
-/// v1 phase 2：仅 publish DeliverableAccepted 事件。文件**不**真实拷贝到
-/// `accepted_to`——拷贝逻辑留 phase 3，避免本期跨大量 path 边界 case 验证。
-/// 用户当前可手动 cp 或 PWA 下载链接拿。
+/// 行为：
+/// - 必发 DeliverableAccepted 事件（task + accepted_to 入 EventBus 审计）
+/// - 若 `body.accepted_to` 非空且是合法绝对路径目录 → 把 deliverables bucket 里
+///   每个 manifest 文件复制到 `<accepted_to>/<file.name>`（mkdir -p target；同名
+///   覆盖）。
+/// - accepted_to 为相对路径 / 系统敏感路径（`/etc` / `/sys` / `/proc` / `/usr`）
+///   → 400 BadRequest 拒绝
+/// - 文件 IO 失败（权限 / 磁盘满）→ 500 Internal，事件**已发**所以审计不丢
 pub async fn accept_deliverable(
     State(state): State<AppState>,
     AxumPath((project_raw, task_raw)): AxumPath<(String, String)>,
     Json(body): Json<AcceptRequest>,
 ) -> Result<StatusCode> {
     let (project_id, task_id) = parse_project_and_task(&state, &project_raw, &task_raw).await?;
+
+    // 校验 accepted_to——绝对路径 + 不在系统敏感目录
+    if let Some(target) = &body.accepted_to {
+        validate_accept_target(target)?;
+    }
+
+    // 先发事件——audit 优先；后续 copy 失败也保留事件痕迹
     let mut meta = EventMeta::now();
     meta.task = Some(task_id);
     let _ = state.fuxi.bus().publish(Event {
         meta,
         kind: EventKind::DeliverableAccepted {
             task: task_id,
-            accepted_to: body.accepted_to,
+            accepted_to: body.accepted_to.clone(),
         },
     });
-    let _ = project_id; // project 校验用，事件本身不带 project（meta.task 足够）
+
+    // accepted_to 提供 → 真实拷贝
+    if let Some(target_dir) = body.accepted_to {
+        let registry = state
+            .project_registry
+            .as_ref()
+            .ok_or_else(|| Error::Internal("project_registry 突然丢了——竞态？".into()))?;
+        copy_deliverable_files_to_target(registry, &project_id, task_id, &target_dir).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// 校验 accept 的 target_path：必须是绝对路径，不能在系统敏感目录。
+///
+/// 系统敏感目录列表保守：`/etc /sys /proc /usr /var /boot /bin /sbin /lib /lib64`。
+/// `$HOME / /tmp / /Users / /Volumes` 等 user-friendly 路径全放行。fuxi-im 跑在
+/// 用户 uid 下，OS 权限是兜底，但本端点先做应用层 sanity check 避免误操作。
+fn validate_accept_target(target: &std::path::Path) -> Result<()> {
+    if !target.is_absolute() {
+        return Err(Error::BadRequest(format!(
+            "accepted_to 必须是绝对路径: {}",
+            target.display()
+        )));
+    }
+    let s = target.to_string_lossy();
+    // macOS `tempfile::tempdir()` 返 `/var/folders/...`、Linux 也有 `/var/tmp` 是合法
+    // 用户 tmp——所以不能 blanket reject `/var/`。下面列具体系统子目录。
+    for prefix in [
+        "/etc/",
+        "/sys/",
+        "/proc/",
+        "/usr/",
+        "/boot/",
+        "/bin/",
+        "/sbin/",
+        "/lib/",
+        "/lib64/",
+        "/var/log/",
+        "/var/lib/",
+        "/var/run/",
+        "/var/cache/",
+        "/var/spool/",
+    ] {
+        if s.starts_with(prefix) {
+            return Err(Error::BadRequest(format!(
+                "accepted_to 不允许写入系统目录: {}",
+                target.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 把 deliverable bucket 里每个 manifest 文件复制到 target_dir。
+///
+/// - mkdir -p target_dir（不存在则建）
+/// - 每个文件源 = `<projects_root>/<project>/deliverables/<task>/<file.name>`
+/// - 每个文件目标 = `<target_dir>/<file.name>`，存在则覆盖
+/// - manifest.json 本身**不**复制（那是 fuxi 内部元信息，用户拿不上意义）
+async fn copy_deliverable_files_to_target(
+    registry: &fuxi_workspace::FileSystemProjectRegistry,
+    project_id: &ProjectId,
+    task: TaskId,
+    target_dir: &std::path::Path,
+) -> Result<()> {
+    let bucket = registry
+        .root()
+        .join(project_id.as_str())
+        .join("deliverables")
+        .join(task.to_string());
+    let manifest_path = bucket.join("manifest.json");
+    if !manifest_path.exists() {
+        return Err(Error::NotFound(format!(
+            "task {task} 无 deliverables bucket"
+        )));
+    }
+    let bytes = fs::read(&manifest_path)
+        .await
+        .map_err(|e| Error::Internal(format!("读 manifest 失败: {e}")))?;
+    let manifest: fuxi_workspace::DeliverableManifest = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Internal(format!("解析 manifest 失败: {e}")))?;
+
+    fs::create_dir_all(target_dir)
+        .await
+        .map_err(|e| Error::Internal(format!("mkdir target 失败: {e}")))?;
+
+    // 收所有 file.name，去重（同 task 多次 produce 可能同名 → 取最新一份；
+    // manifest entries 已按时间序，后写胜，HashMap 自然覆盖）
+    let mut latest_files: HashMap<String, ()> = HashMap::new();
+    for entry in &manifest.entries {
+        for file in &entry.files {
+            latest_files.insert(file.name.clone(), ());
+        }
+    }
+    for name in latest_files.keys() {
+        // 防 path traversal——name 不该含 `/` `\\` `..`，manifest 写时已校验，
+        // 但 defense in depth 再过一遍
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(Error::BadRequest(format!("manifest 含非法文件名 {name:?}")));
+        }
+        let src = bucket.join(name);
+        let dst = target_dir.join(name);
+        fs::copy(&src, &dst).await.map_err(|e| {
+            Error::Internal(format!(
+                "copy {} → {} 失败: {e}",
+                src.display(),
+                dst.display()
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// `POST /api/deliverables/{project}/{task}/reject`。
@@ -572,6 +694,155 @@ mod tests {
         let entries = v["deliverables"].as_array().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["status"], "accepted");
+    }
+
+    #[tokio::test]
+    async fn accept_with_target_path_copies_files() {
+        use axum::routing::post as axum_post;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo_td, repo) = make_repo().await;
+        let project_obj = registry.add(repo, Some("erp".into()), None).await.unwrap();
+
+        // 落两条文件 deliverable
+        let task = TaskId::new();
+        let mgr = DeliverablesManager::new(project_obj.id.clone(), registry.root());
+        let src_dir = tempfile::tempdir().unwrap();
+        let f1 = src_dir.path().join("report.md");
+        let f2 = src_dir.path().join("data.csv");
+        tokio::fs::write(&f1, "# 报告内容").await.unwrap();
+        tokio::fs::write(&f2, "a,b\n1,2").await.unwrap();
+        mgr.produce(task, DeliverableKind::ResearchSummary, &[f1, f2])
+            .await
+            .unwrap();
+
+        // 起 router
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(ws_dir.path()));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/deliverables/{project}/{task}/accept",
+                axum_post(accept_deliverable),
+            )
+            .with_state(state);
+
+        // 用户指定 accepted_to 在 tempdir（绝对路径，非系统敏感）
+        let target_dir = tempfile::tempdir().unwrap();
+        let target_path = target_dir.path().join("写作");
+
+        let body = serde_json::json!({
+            "accepted_to": target_path.to_string_lossy(),
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/deliverables/erp/task-{}/accept", task.0))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // target dir 下应有两份文件，内容同源
+        assert!(
+            target_path.join("report.md").is_file(),
+            "report.md 应被复制"
+        );
+        assert!(target_path.join("data.csv").is_file(), "data.csv 应被复制");
+        assert_eq!(
+            tokio::fs::read_to_string(target_path.join("report.md"))
+                .await
+                .unwrap(),
+            "# 报告内容"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_rejects_relative_target_path() {
+        use axum::routing::post as axum_post;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo_td, repo) = make_repo().await;
+        let project_obj = registry.add(repo, Some("erp".into()), None).await.unwrap();
+        let task = TaskId::new();
+        let mgr = DeliverablesManager::new(project_obj.id.clone(), registry.root());
+        let src_dir = tempfile::tempdir().unwrap();
+        let f = src_dir.path().join("x.md");
+        tokio::fs::write(&f, "x").await.unwrap();
+        mgr.produce(task, DeliverableKind::ResearchSummary, &[f])
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(ws_dir.path()));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/deliverables/{project}/{task}/accept",
+                axum_post(accept_deliverable),
+            )
+            .with_state(state);
+
+        // 相对路径 → 400
+        let body = serde_json::json!({"accepted_to": "relative/path"});
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/deliverables/erp/task-{}/accept", task.0))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn accept_rejects_system_path() {
+        use axum::routing::post as axum_post;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo_td, repo) = make_repo().await;
+        let project_obj = registry.add(repo, Some("erp".into()), None).await.unwrap();
+        let task = TaskId::new();
+        let mgr = DeliverablesManager::new(project_obj.id.clone(), registry.root());
+        let src_dir = tempfile::tempdir().unwrap();
+        let f = src_dir.path().join("x.md");
+        tokio::fs::write(&f, "x").await.unwrap();
+        mgr.produce(task, DeliverableKind::ResearchSummary, &[f])
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(ws_dir.path()));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/deliverables/{project}/{task}/accept",
+                axum_post(accept_deliverable),
+            )
+            .with_state(state);
+
+        // /etc 系统路径 → 400
+        let body = serde_json::json!({"accepted_to": "/etc/passwd"});
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/deliverables/erp/task-{}/accept", task.0))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
