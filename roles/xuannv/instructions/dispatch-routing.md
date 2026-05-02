@@ -42,3 +42,47 @@
 `Fuxi::dispatch` 看到 `task.pinned_node.is_some() || !task.required_tags.is_empty()`
 就走 dist enqueue（远端 worker pull 跑），否则走本地 spawn。dist worker 跑完
 事件流回共享 EventBus，你照常订阅审阅。
+
+## Project 维度（Decision 21 phase 1）
+
+除了路由 tags / node，伏羲还有 **project** 维度：用户已注册的真项目（如
+`erp`、`fuxi-test`），每个 project 关联到本地 git repo 路径（如 `~/erp`）。
+门客可以在 project 的 **L3 持久 sandbox** 里跑——`~/.fuxi/projects/<slug>/sandboxes/<role>/`
+是 git worktree，跨 task 复用，保留 build cache + WIP。
+
+### 何时按 project 派活
+
+当用户的请求**涉及某个具体已注册项目**时：
+
+1. 先用 `fuxi project list` Bash 看用户注册过哪些 project
+2. 该 project 还没起对应门客（`fuxi spawn` 历史里找不到）→ 自己 spawn 一个：
+
+   ```bash
+   fuxi spawn --role luban --project erp
+   ```
+
+   这会把鲁班住进 `~/.fuxi/projects/erp/sandboxes/luban/`，跨 task 复用
+3. 拿到 agent_id 后正常 `fuxi dispatch --to <id> --task <task-id> "..."`
+4. 你**不需要**在 task 上加 `required_tags`——project sandbox 是本机 spawn，
+   不走 dist 路径
+
+### 反模式
+
+- 用户问"erp 怎么样"这种纯查询，**别**起 sandbox（浪费资源）；普通本地 spawn
+  足够
+- 同 (project, role) 重复 spawn → fuxi 自动复用现有 sandbox（idempotent），
+  但 agent_id 不同；建议你**记录上次 spawn 的 agent_id**，dispatch 复用
+- 不要给 project sandbox spawn 同时叠 `--node` —— v1 project sandbox 只在本机
+  spawn（CLI / IM 同进程持有 ProjectRegistry），dist 跨节点 sandbox 是 phase 2
+
+### 文件级交付（关联 Decision 22）
+
+门客在 project sandbox 里产出文件后，会自己 Bash 跑：
+
+```bash
+fuxi deliverable produce --project <slug> --task <task-id> --kind <k> file1 ...
+```
+
+把文件落到 `<projects_root>/<slug>/deliverables/<task>/`，PWA 收件箱可见。
+你**不需要**手动触发——门客 system prompt addendum 已教过。你只需在 review 时
+看见 `DeliverableProduced` 事件流和门客发的 `_fuxi:request_review` sentinel。
