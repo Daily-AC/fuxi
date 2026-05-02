@@ -410,6 +410,13 @@ pub async fn run_sandbox_sweep(args: SandboxSweepArgs) -> Result<()> {
 
     let threshold = chrono::Duration::hours(args.threshold_hours as i64);
     let mut total = 0_usize;
+    // 同 deliverable produce 路径：CLI 跨进程没法走 EventBus.publish，直接
+    // append events.db 让 fuxi-im / firehose 能 replay 看到 WorkspaceCollected。
+    let events_db = default_events_db_path();
+    let store = match &events_db {
+        Some(p) if p.exists() => EventStore::connect_file(p).await.ok(),
+        _ => None,
+    };
     for project in projects {
         let mgr = EphemeralWorkspaceManager::new(project.clone(), registry.root());
         let collected = mgr
@@ -429,6 +436,18 @@ pub async fn run_sandbox_sweep(args: SandboxSweepArgs) -> Result<()> {
                 "  - task-{} archived_at={} branch={}",
                 task.0, meta.archived_at, meta.branch
             );
+            if let Some(s) = &store {
+                let workspace_id = fuxi_core::WorkspaceId::l2(&project.id, *task);
+                let mut ev_meta = EventMeta::now();
+                ev_meta.task = Some(*task);
+                let ev = Event {
+                    meta: ev_meta,
+                    kind: EventKind::WorkspaceCollected { workspace_id },
+                };
+                if let Err(e) = s.append(&ev).await {
+                    eprintln!("⚠ WorkspaceCollected 事件未写: {e}");
+                }
+            }
         }
         total += collected.len();
     }
@@ -436,6 +455,9 @@ pub async fn run_sandbox_sweep(args: SandboxSweepArgs) -> Result<()> {
         println!("（没什么可清；过期阈值 = {} 小时）", args.threshold_hours);
     } else {
         println!("\n共清掉 {} 条 L2 archived workspace", total);
+        if events_db.as_ref().is_some_and(|p| p.exists()) {
+            println!("  WorkspaceCollected 事件已发到 events.db ({} 条)", total);
+        }
     }
     Ok(())
 }
