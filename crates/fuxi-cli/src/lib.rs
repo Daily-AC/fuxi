@@ -35,6 +35,7 @@ pub mod im_dist;
 pub mod ipc;
 pub mod markdown;
 pub mod memory_cmd;
+pub mod project_cmd;
 pub mod prompt_history;
 pub mod recall_sink;
 pub mod repl;

@@ -12,7 +12,9 @@
 //! **用户只跟玄女对话**。这些子命令对玄女可见、对用户不可见。
 
 use clap::{Parser, Subcommand};
-use fuxi_cli::{banner, demo, dist, memory_cmd, repl, skill, subcommands, theme, up, watch};
+use fuxi_cli::{
+    banner, demo, dist, memory_cmd, project_cmd, repl, skill, subcommands, theme, up, watch,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "fuxi", version, about = "伏羲·玄女门客军团的指挥台", long_about = None)]
@@ -65,9 +67,22 @@ enum Command {
     /// IM 后端服务（家用部署：systemd 跑 `fuxi im start`）。
     #[command(subcommand)]
     Im(ImCmd),
+    /// 项目管理：注册 / 列出 / 删除（Decision 21）。
+    #[command(subcommand)]
+    Project(ProjectCmd),
     /// 【调试】打印启动 banner 后退出——给主人挑样式用。
     #[command(hide = true)]
     Banner,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectCmd {
+    /// 注册一个 project（`fuxi project add <canonical-path> [--name <slug>]`）。
+    Add(project_cmd::ProjectAddArgs),
+    /// 列出所有已注册 project。
+    List(project_cmd::ProjectListArgs),
+    /// 删除一个 project（连带 sandboxes / ephemeral / archive / deliverables）。
+    Rm(project_cmd::ProjectRemoveArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -160,6 +175,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Im(i)) => match i {
             ImCmd::Start(args) => subcommands::run_im_start(args).await,
             ImCmd::SetPassword(args) => subcommands::run_im_set_password(args).await,
+        },
+        Some(Command::Project(p)) => match p {
+            ProjectCmd::Add(args) => project_cmd::run_add(args).await,
+            ProjectCmd::List(args) => project_cmd::run_list(args).await,
+            ProjectCmd::Rm(args) => project_cmd::run_remove(args).await,
         },
     }
 }
