@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use fuxi_core::{DeliverableKind, Event, EventKind, EventMeta, ProjectId, TaskId};
 use fuxi_events::EventStore;
-use fuxi_workspace::{DeliverablesManager, FileSystemProjectRegistry};
+use fuxi_workspace::{DeliverablesManager, FileSystemProjectRegistry, PersistentSandboxManager};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -254,6 +254,76 @@ fn parse_deliverable_kind(s: &str) -> Result<DeliverableKind> {
             "未知 deliverable kind: {other}（可选：research_summary / code_change / test_result / decision_request / error_block）"
         ),
     }
+}
+
+/// `fuxi sandbox list --project <slug>` —— 列项目的 L3 持久 sandbox。
+#[derive(Debug, Args)]
+pub struct SandboxListArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long = "registry-root")]
+    pub registry_root: Option<PathBuf>,
+}
+
+/// `fuxi sandbox retire --project <slug> --role <role>` —— 删项目下某 role 的
+/// L3 sandbox（**destructive**：未 commit 的 WIP 一并丢）。
+#[derive(Debug, Args)]
+pub struct SandboxRetireArgs {
+    #[arg(long)]
+    pub project: String,
+    #[arg(long)]
+    pub role: String,
+    #[arg(long = "registry-root")]
+    pub registry_root: Option<PathBuf>,
+}
+
+pub async fn run_sandbox_list(args: SandboxListArgs) -> Result<()> {
+    let registry = registry_for(args.registry_root)?;
+    let project_id = ProjectId::new(args.project.clone())
+        .map_err(|e| anyhow::anyhow!("无效 project id {}: {e}", args.project))?;
+    let project = registry
+        .get(&project_id)
+        .await
+        .context("project lookup 失败")?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} 未注册"))?;
+    let mgr = PersistentSandboxManager::new(project.clone(), registry.root());
+    let handles = mgr.list().await.context("list sandboxes 失败")?;
+    if handles.is_empty() {
+        println!(
+            "（{} 暂无 sandbox；起一个：fuxi spawn --role <role> --project {}）",
+            project.id, project.id
+        );
+        return Ok(());
+    }
+    let max_role = handles.iter().map(|h| h.role.len()).max().unwrap_or(0);
+    for h in handles {
+        println!(
+            "  {:width$}  {}  →  {}",
+            h.role,
+            h.branch,
+            h.sandbox_path.display(),
+            width = max_role
+        );
+    }
+    Ok(())
+}
+
+pub async fn run_sandbox_retire(args: SandboxRetireArgs) -> Result<()> {
+    let registry = registry_for(args.registry_root)?;
+    let project_id = ProjectId::new(args.project.clone())
+        .map_err(|e| anyhow::anyhow!("无效 project id {}: {e}", args.project))?;
+    let project = registry
+        .get(&project_id)
+        .await
+        .context("project lookup 失败")?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} 未注册"))?;
+    let mgr = PersistentSandboxManager::new(project.clone(), registry.root());
+    mgr.retire(&args.role)
+        .await
+        .with_context(|| format!("retire {} sandbox 失败", args.role))?;
+    println!("已 retire {}/{} sandbox", project.id, args.role);
+    println!("  注意：未 commit 的 WIP 已丢（destructive 操作）");
+    Ok(())
 }
 
 pub async fn run_remove(args: ProjectRemoveArgs) -> Result<()> {
@@ -516,6 +586,66 @@ mod tests {
             full.contains("未知 deliverable kind") || full.contains("research_summary"),
             "got: {full}"
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_list_then_retire_e2e() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+
+        // 注册 project
+        run_add(ProjectAddArgs {
+            canonical_path: repo,
+            name: Some("erp".into()),
+            branch: None,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+        // 直接用 PersistentSandboxManager 起两个 sandbox（避免 spawn 真起 cc）
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let project = registry
+            .get(&ProjectId::new("erp").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let mgr = PersistentSandboxManager::new(project, registry.root());
+        mgr.get_or_create("luban").await.unwrap();
+        mgr.get_or_create("pusong").await.unwrap();
+
+        // sandbox list 不该 fail
+        run_sandbox_list(SandboxListArgs {
+            project: "erp".into(),
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(mgr.list().await.unwrap().len(), 2);
+
+        // retire luban
+        run_sandbox_retire(SandboxRetireArgs {
+            project: "erp".into(),
+            role: "luban".into(),
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+        let remaining = mgr.list().await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].role, "pusong");
+    }
+
+    #[tokio::test]
+    async fn sandbox_list_rejects_unknown_project() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let err = run_sandbox_list(SandboxListArgs {
+            project: "ghost".into(),
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .expect_err("未注册 project 应失败");
+        assert!(err.to_string().contains("未注册"), "got: {err}");
     }
 
     #[tokio::test]
