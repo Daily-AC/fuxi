@@ -451,6 +451,93 @@ impl Fuxi {
             .await
     }
 
+    /// Decision 21 phase 2：在已注册项目的 L2 ephemeral worktree 里 spawn 门客。
+    ///
+    /// 跟 `spawn_worker_in_project_sandbox` 关键差别：
+    /// - 索引键：(project, task_id) 而非 (project, role)——一次性 task 一个 worktree
+    /// - 路径：`<projects_root>/<project>/ephemeral/<task>/`
+    /// - 分支：`task/<task-uuid>` 一次性
+    /// - destroy 时**真**清（borrowed=false）；后续可被 archive→GC
+    /// - 不复用：每次新 task 都新 worktree；多次 spawn 同 task → AlreadyExists
+    ///
+    /// **本方法仍 opt-in**：调用方明确知道走 L2 才传；玄女默认 dispatch 路径
+    /// 仍走旧 spawn_worker / spawn_worker_in_project_sandbox。
+    pub async fn spawn_worker_in_ephemeral_workspace(
+        &self,
+        profile: AgentProfile,
+        kind: WorkerKind,
+        project_id: fuxi_core::ProjectId,
+        task: TaskId,
+    ) -> Result<AgentId> {
+        let registry_opt = self.project_registry.read().await.clone();
+        let registry = registry_opt.ok_or_else(|| {
+            OrchestratorError::Other(
+                "project_registry 未注入 —— 调 Fuxi::set_project_registry 后再用".into(),
+            )
+        })?;
+        let project = registry
+            .get(&project_id)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("project lookup 失败: {e}")))?
+            .ok_or_else(|| OrchestratorError::Other(format!("project {project_id} 未注册")))?;
+
+        let mgr = fuxi_workspace::EphemeralWorkspaceManager::new(project.clone(), registry.root());
+        let ws_handle = mgr
+            .create(task)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("ephemeral 创建失败: {e}")))?;
+
+        let agent_id = AgentId::new();
+        self.publish_with_agent(
+            agent_id,
+            EventKind::AgentSpawning {
+                role: profile.role.clone(),
+                cli: kind.cli_tag().to_string(),
+            },
+        );
+        // WorkspaceCreated{layer=L2}——本路径是 L2 worktree 实际产生点。
+        {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent_id);
+            meta.task = Some(task);
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::WorkspaceCreated {
+                    workspace_id: ws_handle.workspace_id.clone(),
+                    project: project.id.clone(),
+                    layer: fuxi_core::WorkspaceLayer::L2Ephemeral,
+                    role: None,
+                    task: Some(task),
+                    path: ws_handle.workspace_path.clone(),
+                },
+            });
+        }
+
+        // L2 不像 L3 那样 borrowed=true（长期保留）；这里 borrowed=false 让 destroy
+        // 真清。但 L2 的"完整生命"是 archive 而非 destroy——caller 在 task done 后
+        // 调 EphemeralWorkspaceManager::archive（事件层 publish WorkspaceArchived）。
+        // 当前 destroy 路径若被走（agent 异常死等），git worktree remove 会清掉，
+        // archive 不会出现——接受这个 corner case，destroy 是异常清理通道。
+        let handle = fuxi_core::workspace::WorkspaceHandle {
+            agent: agent_id,
+            repo_root: project.canonical_path.clone(),
+            worktree_path: ws_handle.workspace_path.clone(),
+            branch: ws_handle.branch.clone(),
+            borrowed: false,
+        };
+        info!(
+            agent = %agent_id,
+            role = %profile.role,
+            project = %project.id,
+            %task,
+            wt = %ws_handle.workspace_path.display(),
+            "spawn worker in L2 ephemeral worktree"
+        );
+
+        self.launch_and_register(agent_id, profile, kind, Some(handle))
+            .await
+    }
+
     /// `spawn_worker` / `spawn_worker_in_worktree` 共享的"已有 agent_id + 可选
     /// worktree → 跑 adapter launch → 注册 / 回滚"段。
     async fn launch_and_register(

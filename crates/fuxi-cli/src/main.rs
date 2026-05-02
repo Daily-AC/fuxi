@@ -108,6 +108,9 @@ enum SandboxCmd {
     /// 退役某项目下某 role 的 L3 sandbox（destructive：丢未 commit 的 WIP）。
     /// `fuxi sandbox retire --project erp --role luban`
     Retire(project_cmd::SandboxRetireArgs),
+    /// 扫归档区删过期 L2 ephemeral worktree（Decision 21 phase 2 GC）。
+    /// `fuxi sandbox sweep [--project erp] [--threshold-hours 24]`
+    Sweep(project_cmd::SandboxSweepArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -213,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Sandbox(s)) => match s {
             SandboxCmd::List(args) => project_cmd::run_sandbox_list(args).await,
             SandboxCmd::Retire(args) => project_cmd::run_sandbox_retire(args).await,
+            SandboxCmd::Sweep(args) => project_cmd::run_sandbox_sweep(args).await,
         },
     }
 }

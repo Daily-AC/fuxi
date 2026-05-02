@@ -15,7 +15,10 @@ use anyhow::{Context, Result};
 use clap::Args;
 use fuxi_core::{DeliverableKind, Event, EventKind, EventMeta, ProjectId, TaskId};
 use fuxi_events::EventStore;
-use fuxi_workspace::{DeliverablesManager, FileSystemProjectRegistry, PersistentSandboxManager};
+use fuxi_workspace::{
+    DeliverablesManager, EphemeralWorkspaceManager, FileSystemProjectRegistry,
+    PersistentSandboxManager,
+};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -369,6 +372,70 @@ pub async fn run_info(args: ProjectInfoArgs) -> Result<()> {
     println!("\n交付 (task buckets): {}", task_count);
     if task_count == 0 {
         println!("  （无；门客 produce 后会出现在 PWA「交付」tab）");
+    }
+    Ok(())
+}
+
+/// `fuxi sandbox sweep [--project <slug>] [--threshold-hours <n>]` —— 扫归档区
+/// 删过期的 L2 ephemeral worktree（Decision 21 phase 2 GC）。
+///
+/// 不传 `--project` → 扫所有已注册项目；不传 `--threshold-hours` → 默认 24h。
+#[derive(Debug, Args)]
+pub struct SandboxSweepArgs {
+    /// 限定扫某项目；不传扫所有。
+    #[arg(long)]
+    pub project: Option<String>,
+    /// 归档过期阈值（小时），默认 24。
+    #[arg(long = "threshold-hours", default_value_t = 24_u64)]
+    pub threshold_hours: u64,
+    #[arg(long = "registry-root")]
+    pub registry_root: Option<PathBuf>,
+}
+
+pub async fn run_sandbox_sweep(args: SandboxSweepArgs) -> Result<()> {
+    let registry = registry_for(args.registry_root)?;
+    let projects = match args.project {
+        Some(slug) => {
+            let id = ProjectId::new(slug.clone())
+                .map_err(|e| anyhow::anyhow!("无效 slug {slug}: {e}"))?;
+            let p = registry
+                .get(&id)
+                .await
+                .context("project lookup 失败")?
+                .ok_or_else(|| anyhow::anyhow!("project {id} 未注册"))?;
+            vec![p]
+        }
+        None => registry.list().await.context("project list 失败")?,
+    };
+
+    let threshold = chrono::Duration::hours(args.threshold_hours as i64);
+    let mut total = 0_usize;
+    for project in projects {
+        let mgr = EphemeralWorkspaceManager::new(project.clone(), registry.root());
+        let collected = mgr
+            .collect_expired(threshold)
+            .await
+            .with_context(|| format!("sweep {} 失败", project.id))?;
+        if collected.is_empty() {
+            continue;
+        }
+        println!(
+            "project {}: 清掉 {} 条过期归档",
+            project.id,
+            collected.len()
+        );
+        for (task, meta) in &collected {
+            println!(
+                "  - task-{} archived_at={} branch={}",
+                task.0, meta.archived_at, meta.branch
+            );
+        }
+        total += collected.len();
+    }
+    if total == 0 {
+        println!("（没什么可清；过期阈值 = {} 小时）", args.threshold_hours);
+    } else {
+        println!("\n共清掉 {} 条 L2 archived workspace", total);
     }
     Ok(())
 }
@@ -794,6 +861,55 @@ mod tests {
         let remaining = mgr.list().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].role, "pusong");
+    }
+
+    #[tokio::test]
+    async fn sandbox_sweep_collects_expired_archives() {
+        use chrono::Duration;
+        use fuxi_workspace::EphemeralWorkspaceManager;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+        run_add(ProjectAddArgs {
+            canonical_path: repo,
+            name: Some("erp".into()),
+            branch: None,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let project = registry
+            .get(&ProjectId::new("erp").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let mgr = EphemeralWorkspaceManager::new(project.clone(), registry.root());
+
+        // 起 + archive 一个 task，然后手工 backdate 让它过期
+        let task = TaskId::new();
+        mgr.create(task).await.unwrap();
+        mgr.archive(task).await.unwrap();
+        let meta_path = mgr
+            .archive_root()
+            .join(task.to_string())
+            .join("fuxi-archive-meta.json");
+        let mut meta: fuxi_workspace::ArchiveMeta =
+            serde_json::from_slice(&tokio::fs::read(&meta_path).await.unwrap()).unwrap();
+        meta.archived_at = chrono::Utc::now() - Duration::hours(48);
+        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
+            .await
+            .unwrap();
+
+        // sweep with 24h threshold → 应清掉
+        run_sandbox_sweep(SandboxSweepArgs {
+            project: Some("erp".into()),
+            threshold_hours: 24,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+        assert!(mgr.list_archived().await.unwrap().is_empty(), "应清空");
     }
 
     #[tokio::test]

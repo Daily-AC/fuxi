@@ -23,6 +23,7 @@
 //! - 不在库里 `unwrap()`——所有失败路径返回 [`WorkspaceError`]。
 
 pub mod deliverables;
+pub mod ephemeral_workspace;
 mod git;
 pub mod persistent_sandbox;
 pub mod porcelain;
@@ -33,6 +34,7 @@ use std::path::PathBuf;
 pub use deliverables::{
     DeliverableHandle, DeliverableManifest, DeliverableManifestEntry, DeliverablesManager,
 };
+pub use ephemeral_workspace::{ArchiveMeta, EphemeralWorkspaceHandle, EphemeralWorkspaceManager};
 pub use git::GitWorktreeWorkspace;
 pub use persistent_sandbox::{PersistentSandboxHandle, PersistentSandboxManager};
 pub use porcelain::{PorcelainWorktree, parse as parse_porcelain};
