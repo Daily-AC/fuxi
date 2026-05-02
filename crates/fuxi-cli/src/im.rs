@@ -260,6 +260,31 @@ pub async fn run(args: StartArgs) -> Result<()> {
         // detach 不动它即可（task 进程退出统一终结）。
     });
 
+    // 6.4 Decision 21 phase 3：L2 ephemeral GC 周期任务——每 1h 扫一次所有
+    //     注册项目的 archive/，把 archived_at 早于 (now - 24h) 的归档删除并
+    //     publish WorkspaceCollected。registry 缺省时静默跳过（home 部署期可能
+    //     还没 ~/.fuxi/projects/）。FUXI_L2_GC_INTERVAL_SECS / FUXI_L2_GC_MAX_AGE_SECS
+    //     可覆盖（测试 / 用户调优用）。
+    if let Some(reg) = project_registry_arc.clone() {
+        let gc_bus = bus.clone();
+        let gc_interval_secs = std::env::var("FUXI_L2_GC_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(3_600);
+        let gc_max_age_secs = std::env::var("FUXI_L2_GC_MAX_AGE_SECS")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(86_400);
+        tokio::spawn(async move {
+            crate::l2_gc::run(reg, gc_bus, gc_interval_secs, gc_max_age_secs).await;
+        });
+        tracing::info!(
+            interval_secs = gc_interval_secs,
+            max_age_secs = gc_max_age_secs,
+            "L2 ephemeral GC 周期任务已启动"
+        );
+    }
+
     // 6. Daemon socket + 策府（与 up.rs 同步逻辑；home 也要 daemon 让 TUI /pair 等
     //    工具可用）
     let oracle = OracleStore::connect_file(&events_db_path)

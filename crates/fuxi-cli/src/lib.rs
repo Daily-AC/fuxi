@@ -33,6 +33,7 @@ pub mod extractor_hook;
 pub mod im;
 pub mod im_dist;
 pub mod ipc;
+pub mod l2_gc;
 pub mod markdown;
 pub mod memory_cmd;
 pub mod project_cmd;
