@@ -228,7 +228,62 @@ async fn publish_deliverable_produced(
         },
     };
     store.append(&ev).await.context("append 事件失败")?;
+
+    // 顺带探测：若 cwd 在某 L3 sandbox 内（cwd 包含
+    // `<root>/projects/<project>/sandboxes/<role>/`），发一条 WorkspaceMutated。
+    // 让 firehose / IM 看到「sandbox 又被使用了」的活信号——没探到就 silent
+    // skip（CLI 也可能从普通 worktree 跑）。
+    if let Some((workspace_id, role)) = detect_l3_sandbox_from_cwd(&handle.project).await {
+        let mut meta = EventMeta::now();
+        meta.task = Some(handle.task);
+        let _ = role; // role 字段已编入 workspace_id；保留作 debug
+        let ev = Event {
+            meta,
+            kind: EventKind::WorkspaceMutated {
+                workspace_id,
+                files_changed: handle.files.len() as u32,
+            },
+        };
+        // 同 store 已 connect 复用——一次性 produce 两条事件
+        let _ = store.append(&ev).await; // 失败 silent skip，不影响 produce 结果
+    }
+
     Ok(())
+}
+
+/// 试图从当前 cwd 反查「这个 produce 是从哪个 L3 sandbox 跑的」。
+///
+/// 启发式：cwd 的祖先路径里若含 `sandboxes/<role>` 段且其上一级 dir 名匹配
+/// `<project>/sandboxes`（project 跟传入的 expected_project 一致），就认为
+/// 在该 sandbox 内。否则返 None。
+///
+/// 返回 (WorkspaceId, role)。
+async fn detect_l3_sandbox_from_cwd(
+    expected_project: &fuxi_core::ProjectId,
+) -> Option<(fuxi_core::WorkspaceId, String)> {
+    let cwd = std::env::current_dir().ok()?;
+    let canon = cwd.canonicalize().unwrap_or(cwd);
+    // 走祖先链：找到第一个 parent.parent.file_name() == "sandboxes" 的位置，
+    // 那个 dir 名 = role。再往上一层应该是 `<project_id>` (与 expected 比对)。
+    for dir in canon.ancestors() {
+        let role = match dir.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let parent = match dir.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+        if parent.file_name().and_then(|n| n.to_str()) != Some("sandboxes") {
+            continue;
+        }
+        let project_dir = parent.parent()?;
+        let project_name = project_dir.file_name().and_then(|n| n.to_str())?;
+        if project_name == expected_project.as_str() {
+            return Some((fuxi_core::WorkspaceId::l3(expected_project, &role), role));
+        }
+    }
+    None
 }
 
 fn parse_task_id(s: Option<&str>) -> Result<TaskId> {
