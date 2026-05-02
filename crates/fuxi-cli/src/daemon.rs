@@ -325,12 +325,13 @@ async fn dispatch_command(
             cli,
             recall_task,
             recall_role,
+            project,
         } => {
             let recall = match resolve_recall_handle(&oracle, recall_task, recall_role).await {
                 Ok(h) => h,
                 Err(resp) => return resp,
             };
-            match spawn_by_role(&fuxi, &role, name, node, cli, recall).await {
+            match spawn_by_role(&fuxi, &role, name, node, cli, recall, project).await {
                 Ok(id) => Response::ok(serde_json::json!({"agent_id": id.to_string()})),
                 Err(e) => Response::err(e.to_string()),
             }
@@ -1036,6 +1037,7 @@ async fn spawn_by_role(
     node_override: Option<String>,
     cli_override: Option<String>,
     recall: RecallHandle,
+    project_override: Option<String>,
 ) -> Result<AgentId> {
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let mut profile = loaded.profile;
@@ -1126,14 +1128,27 @@ async fn spawn_by_role(
         // branch_hint 用"recall-<role>"纯标签——borrowed handle 的 destroy 短路，
         // 这个 branch 名只在事件日志/ TUI 里出现，不会走 git。
         let branch_hint = format!("recall-{role}");
-        fuxi.spawn_worker_in_worktree(profile, kind, wt_path, branch_hint)
+        return fuxi
+            .spawn_worker_in_worktree(profile, kind, wt_path, branch_hint)
             .await
-            .map_err(|e| anyhow!(e.to_string()))
-    } else {
-        fuxi.spawn_worker(profile, kind)
-            .await
-            .map_err(|e| anyhow!(e.to_string()))
+            .map_err(|e| anyhow!(e.to_string()));
     }
+
+    // Decision 21 phase 1：CLI `--project erp` → 走 L3 持久 sandbox 路径
+    // （per-门客 per-project 长期 worktree，跨 task 复用 build cache + WIP）。
+    // role 同 sandbox 索引——一个项目的 luban 只有一个 sandbox，重复 spawn 即复用。
+    if let Some(project_slug) = project_override {
+        let project_id = fuxi_core::ProjectId::new(project_slug.clone())
+            .with_context(|| format!("无效 project slug: {project_slug}"))?;
+        return fuxi
+            .spawn_worker_in_project_sandbox(profile, kind, project_id, role.to_string())
+            .await
+            .map_err(|e| anyhow!(e.to_string()));
+    }
+
+    fuxi.spawn_worker(profile, kind)
+        .await
+        .map_err(|e| anyhow!(e.to_string()))
 }
 
 fn build_dist_gateway_config(
@@ -1579,6 +1594,7 @@ mod tests {
             Some("local".into()),
             None,
             RecallHandle::default(),
+            None,
         )
         .await
         .expect("codex role should spawn");
