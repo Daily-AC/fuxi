@@ -8,9 +8,11 @@
 //! a Rust enum so exhaustive matches are compile-checked.
 
 use crate::id::{AgentId, SessionId, TaskId};
+use crate::project::ProjectId;
 use crate::task::TaskState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 /// 门客向玄女呈递的 deliverable 类别（Decision 13 §4 初版枚举）。
@@ -24,6 +26,87 @@ pub enum DeliverableKind {
     TestResult,
     DecisionRequest,
     ErrorBlock,
+}
+
+/// Workspace 五层 lifecycle（Decision 21）—— wire JSON 用 snake_case。
+///
+/// L0 / L-1 不需要事件流（前者是无 workspace、后者是脚踏地临时目录），
+/// 故 enum 只列 L1/L2/L3 三种带身份的层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLayer {
+    L1ReadOnly,
+    L2Ephemeral,
+    L3Persistent,
+}
+
+/// Workspace 跨事件关联键——`<project>/<layer>/<handle>` 字符串形态。
+///
+/// 例：`erp/L3/luban`、`erp/L2/<task-uuid>`、`fuxi/L1/<session>`。
+/// WHY 不拆 struct 字段：事件持久化 / firehose 渲染 / SQL 查询都最爱 stable
+/// string；构造时用 helper 保形态对齐。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceId(pub String);
+
+impl WorkspaceId {
+    /// L3 持久 sandbox：`<project>/L3/<role>`。
+    pub fn l3(project: &ProjectId, role: &str) -> Self {
+        Self(format!("{project}/L3/{role}"))
+    }
+
+    /// L2 ephemeral worktree：`<project>/L2/<task-uuid>`。
+    pub fn l2(project: &ProjectId, task: TaskId) -> Self {
+        Self(format!("{project}/L2/{}", task.0))
+    }
+
+    /// L1 read-only mount：`<project>/L1/<handle>`。handle 由调用方决定
+    /// （session id / 任务关联、视实装方便）。
+    pub fn l1(project: &ProjectId, handle: &str) -> Self {
+        Self(format!("{project}/L1/{handle}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for WorkspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// L2 / L3 archive 原因——审计用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveReason {
+    /// 关联 task 终态（Done / Cancelled / Delivering）→ workspace 归档
+    TaskCompleted,
+    /// L2 promote 成 L3 后，原 L2 sandbox 进归档
+    Promoted,
+    /// 用户 / 玄女 显式归档
+    ManualArchive,
+}
+
+/// 配额维度——`WorkspaceQuotaExceeded.quota_kind` 用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaKind {
+    DiskBytes,
+    ConcurrentSandboxes,
+}
+
+/// 文件级 deliverable 的单文件元信息——`DeliverableProduced.files` 用。
+///
+/// sha256 给审计校验防篡改 / 重复检测；size_bytes 给配额 / UI 显示。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliverableFileMeta {
+    /// 文件名（不含路径，相对于 deliverables/<task-id>/）。
+    pub name: String,
+    /// 文件内容 sha256，hex 小写。
+    pub sha256: String,
+    pub size_bytes: u64,
 }
 
 /// 远端 worker 心跳状态——`WorkerHeartbeatStateChanged.status` 的类型。
@@ -352,6 +435,87 @@ pub enum EventKind {
     WorkerStaleSwept {
         node_id: String,
         recycled_jobs: Vec<String>,
+    },
+
+    // ── workspace lifecycle（Decision 21）─────────────────────
+    /// 工作区物理创建——L1 mount / L2 worktree / L3 sandbox 建好时发。
+    ///
+    /// `role` 仅 L3 有意义（哪位门客的 sandbox），L2/L1 None。
+    /// `task` 仅 L2 / L1 ephemeral 有意义，L3 None。
+    /// `path` 是创建后的绝对路径（canonicalize 后）。
+    WorkspaceCreated {
+        workspace_id: WorkspaceId,
+        project: ProjectId,
+        layer: WorkspaceLayer,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<TaskId>,
+        path: PathBuf,
+    },
+    /// 工作区有写入——`files_changed` 是相对上次 mutated/commit 之后变化的
+    /// 文件数（粗粒度，给审计用，不必精确到字节）。批量发布即可，不每次写都发。
+    WorkspaceMutated {
+        workspace_id: WorkspaceId,
+        files_changed: u32,
+    },
+    /// 门客在 sandbox / ephemeral 里 commit 了。
+    /// `commit_sha` 长 hex；`branch` 是写入的 branch 名。
+    WorkspaceCommitted {
+        workspace_id: WorkspaceId,
+        commit_sha: String,
+        branch: String,
+    },
+    /// 工作区进入归档区（不立即删，PWA 可见 24h）。
+    WorkspaceArchived {
+        workspace_id: WorkspaceId,
+        reason: ArchiveReason,
+    },
+    /// 归档过期 GC 删除——审计兜底。
+    WorkspaceCollected {
+        workspace_id: WorkspaceId,
+    },
+    /// 配额超限——拒绝新建工作区时发，前端可据此提示用户清理 / 升 quota。
+    WorkspaceQuotaExceeded {
+        project: ProjectId,
+        quota_kind: QuotaKind,
+        requested: u64,
+        limit: u64,
+    },
+    /// L2 ephemeral 被 promote 成 L3 持久 sandbox（用户 / 玄女判定值得继续）。
+    /// `to_role` 是新 L3 sandbox 关联的门客角色。
+    WorkspacePromoted {
+        from_workspace_id: WorkspaceId,
+        to_role: String,
+        project: ProjectId,
+    },
+
+    // ── deliverables（Decision 22）────────────────────────────
+    /// 门客交付一组文件——Decision 13 的 `AgentRequestReview.artifact_ref`
+    /// 物理存储侧的对应事件。`deliverable_kind` 沿用 Decision 13 五类枚举。
+    DeliverableProduced {
+        task: TaskId,
+        project: ProjectId,
+        deliverable_kind: DeliverableKind,
+        files: Vec<DeliverableFileMeta>,
+    },
+    /// 用户接收交付——`accepted_to` 非 None 表 Direct 模式 / 用户在 PWA 指定
+    /// 落地路径；None 表保持在 deliverables/<task-id>/ 不外迁。
+    DeliverableAccepted {
+        task: TaskId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accepted_to: Option<PathBuf>,
+    },
+    /// 用户拒绝交付。
+    DeliverableRejected {
+        task: TaskId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// 交付过期未处理被 GC——v1 default 是「永久保留」，本变体留给后续若开
+    /// auto-GC 用。schema 现在就锁好，避免将来再走五处同步。
+    DeliverableExpired {
+        task: TaskId,
     },
 
     // ── escape hatch ────────────────────────────────────────
@@ -708,6 +872,166 @@ mod tests {
         });
         let ev: Event = serde_json::from_value(legacy).expect("legacy de");
         assert!(ev.meta.source_node_id.is_none());
+    }
+
+    /// Decision 21 phase 1：workspace 7 个变体的 serde tag + roundtrip。
+    /// 加新 EventKind 变体必须同步五处 + 加 roundtrip 测试做门禁。
+    #[test]
+    fn workspace_lifecycle_tags_match_snake_case() {
+        let pid = ProjectId::new("erp").unwrap();
+        let task = TaskId::new();
+        let ws_l3 = WorkspaceId::l3(&pid, "luban");
+        let ws_l2 = WorkspaceId::l2(&pid, task);
+
+        for (kind, expect) in [
+            (
+                EventKind::WorkspaceCreated {
+                    workspace_id: ws_l3.clone(),
+                    project: pid.clone(),
+                    layer: WorkspaceLayer::L3Persistent,
+                    role: Some("luban".into()),
+                    task: None,
+                    path: PathBuf::from("/tmp/erp/sandboxes/luban"),
+                },
+                "workspace_created",
+            ),
+            (
+                EventKind::WorkspaceMutated {
+                    workspace_id: ws_l3.clone(),
+                    files_changed: 3,
+                },
+                "workspace_mutated",
+            ),
+            (
+                EventKind::WorkspaceCommitted {
+                    workspace_id: ws_l3.clone(),
+                    commit_sha: "abc1234567890".into(),
+                    branch: "luban/erp-main".into(),
+                },
+                "workspace_committed",
+            ),
+            (
+                EventKind::WorkspaceArchived {
+                    workspace_id: ws_l2.clone(),
+                    reason: ArchiveReason::TaskCompleted,
+                },
+                "workspace_archived",
+            ),
+            (
+                EventKind::WorkspaceCollected {
+                    workspace_id: ws_l2.clone(),
+                },
+                "workspace_collected",
+            ),
+            (
+                EventKind::WorkspaceQuotaExceeded {
+                    project: pid.clone(),
+                    quota_kind: QuotaKind::DiskBytes,
+                    requested: 6_000_000_000,
+                    limit: 5_000_000_000,
+                },
+                "workspace_quota_exceeded",
+            ),
+            (
+                EventKind::WorkspacePromoted {
+                    from_workspace_id: ws_l2,
+                    to_role: "luban".into(),
+                    project: pid.clone(),
+                },
+                "workspace_promoted",
+            ),
+        ] {
+            let v = serde_json::to_value(&kind).expect("ser");
+            assert_eq!(v.get("type").and_then(|x| x.as_str()), Some(expect));
+            // round-trip 通过——SQLite payload 反序列化不会挂
+            let back: EventKind = serde_json::from_value(v).expect("de");
+            let again = serde_json::to_value(&back).expect("re-ser");
+            assert_eq!(again.get("type").and_then(|x| x.as_str()), Some(expect));
+        }
+    }
+
+    /// Decision 22：deliverable 4 个变体的 serde tag + roundtrip。
+    #[test]
+    fn deliverable_tags_match_snake_case() {
+        let task = TaskId::new();
+        let pid = ProjectId::new("erp").unwrap();
+
+        for (kind, expect) in [
+            (
+                EventKind::DeliverableProduced {
+                    task,
+                    project: pid.clone(),
+                    deliverable_kind: DeliverableKind::ResearchSummary,
+                    files: vec![DeliverableFileMeta {
+                        name: "report.md".into(),
+                        sha256: "abc123".into(),
+                        size_bytes: 1024,
+                    }],
+                },
+                "deliverable_produced",
+            ),
+            (
+                EventKind::DeliverableAccepted {
+                    task,
+                    accepted_to: Some(PathBuf::from("/Users/e0_7/写作/2026-某文章.md")),
+                },
+                "deliverable_accepted",
+            ),
+            (
+                EventKind::DeliverableRejected {
+                    task,
+                    reason: Some("内容不对".into()),
+                },
+                "deliverable_rejected",
+            ),
+            (
+                EventKind::DeliverableExpired { task },
+                "deliverable_expired",
+            ),
+        ] {
+            let v = serde_json::to_value(&kind).expect("ser");
+            assert_eq!(v.get("type").and_then(|x| x.as_str()), Some(expect));
+            let back: EventKind = serde_json::from_value(v).expect("de");
+            let again = serde_json::to_value(&back).expect("re-ser");
+            assert_eq!(again.get("type").and_then(|x| x.as_str()), Some(expect));
+        }
+    }
+
+    /// WorkspaceId 构造器对齐 Decision 21 的命名约定 `<project>/<layer>/<handle>`。
+    #[test]
+    fn workspace_id_helpers_format_consistently() {
+        let pid = ProjectId::new("erp").unwrap();
+        let task = TaskId::new();
+        assert_eq!(WorkspaceId::l3(&pid, "luban").as_str(), "erp/L3/luban");
+        let l2 = WorkspaceId::l2(&pid, task);
+        assert!(l2.as_str().starts_with("erp/L2/"));
+        assert_eq!(WorkspaceId::l1(&pid, "sess123").as_str(), "erp/L1/sess123");
+    }
+
+    /// Workspace/Deliverable 各 enum 的 snake_case wire 形态——给跨语言客户端
+    /// 一个稳定契约。
+    #[test]
+    fn workspace_layer_serde_snake_case() {
+        for (layer, expect) in [
+            (WorkspaceLayer::L1ReadOnly, "\"l1_read_only\""),
+            (WorkspaceLayer::L2Ephemeral, "\"l2_ephemeral\""),
+            (WorkspaceLayer::L3Persistent, "\"l3_persistent\""),
+        ] {
+            assert_eq!(serde_json::to_string(&layer).unwrap(), expect);
+        }
+        for (reason, expect) in [
+            (ArchiveReason::TaskCompleted, "\"task_completed\""),
+            (ArchiveReason::Promoted, "\"promoted\""),
+            (ArchiveReason::ManualArchive, "\"manual_archive\""),
+        ] {
+            assert_eq!(serde_json::to_string(&reason).unwrap(), expect);
+        }
+        for (qk, expect) in [
+            (QuotaKind::DiskBytes, "\"disk_bytes\""),
+            (QuotaKind::ConcurrentSandboxes, "\"concurrent_sandboxes\""),
+        ] {
+            assert_eq!(serde_json::to_string(&qk).unwrap(), expect);
+        }
     }
 
     #[test]

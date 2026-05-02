@@ -50,8 +50,9 @@ pub struct ProjectRemoveArgs {
 fn registry_for(root: Option<PathBuf>) -> Result<FileSystemProjectRegistry> {
     match root {
         Some(r) => Ok(FileSystemProjectRegistry::new(r)),
-        None => FileSystemProjectRegistry::with_default_root()
-            .context("无法构造默认 ProjectRegistry"),
+        None => {
+            FileSystemProjectRegistry::with_default_root().context("无法构造默认 ProjectRegistry")
+        }
     }
 }
 

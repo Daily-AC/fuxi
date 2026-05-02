@@ -567,6 +567,60 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
         } => {
             format!("{from} -> {to} failed: {}", truncate_preview(error, 100))
         }
+        WorkspaceCreated {
+            workspace_id,
+            layer,
+            ..
+        } => format!("{workspace_id} ({layer:?})"),
+        WorkspaceMutated {
+            workspace_id,
+            files_changed,
+        } => format!("{workspace_id} files={files_changed}"),
+        WorkspaceCommitted {
+            workspace_id,
+            commit_sha,
+            branch,
+        } => format!(
+            "{workspace_id} {} on {branch}",
+            truncate_preview(commit_sha, 12)
+        ),
+        WorkspaceArchived {
+            workspace_id,
+            reason,
+        } => format!("{workspace_id} archived ({reason:?})"),
+        WorkspaceCollected { workspace_id } => format!("{workspace_id} collected"),
+        WorkspaceQuotaExceeded {
+            project,
+            quota_kind,
+            requested,
+            limit,
+        } => format!("{project} {quota_kind:?} {requested}>{limit}"),
+        WorkspacePromoted {
+            from_workspace_id,
+            to_role,
+            project,
+        } => format!("{from_workspace_id} -> {project}/L3/{to_role}"),
+        DeliverableProduced {
+            task,
+            deliverable_kind,
+            files,
+            ..
+        } => format!("{task} [{deliverable_kind:?}] files={}", files.len()),
+        DeliverableAccepted { task, accepted_to } => format!(
+            "{task} -> {}",
+            accepted_to
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(inbox)".into())
+        ),
+        DeliverableRejected { task, reason } => format!(
+            "{task}{}",
+            reason
+                .as_deref()
+                .map(|s| format!(": {}", truncate_preview(s, 100)))
+                .unwrap_or_default()
+        ),
+        DeliverableExpired { task } => format!("{task} expired"),
     }
 }
 

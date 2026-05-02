@@ -352,6 +352,17 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         WorkerRegistered { .. } => "worker_registered",
         WorkerHeartbeatStateChanged { .. } => "worker_heartbeat_state_changed",
         WorkerStaleSwept { .. } => "worker_stale_swept",
+        WorkspaceCreated { .. } => "workspace_created",
+        WorkspaceMutated { .. } => "workspace_mutated",
+        WorkspaceCommitted { .. } => "workspace_committed",
+        WorkspaceArchived { .. } => "workspace_archived",
+        WorkspaceCollected { .. } => "workspace_collected",
+        WorkspaceQuotaExceeded { .. } => "workspace_quota_exceeded",
+        WorkspacePromoted { .. } => "workspace_promoted",
+        DeliverableProduced { .. } => "deliverable_produced",
+        DeliverableAccepted { .. } => "deliverable_accepted",
+        DeliverableRejected { .. } => "deliverable_rejected",
+        DeliverableExpired { .. } => "deliverable_expired",
         Custom { .. } => "custom",
     }
 }
@@ -919,6 +930,222 @@ mod tests {
                 );
             }
             other => panic!("expect WorkerStaleSwept，得到 {other:?}"),
+        }
+    }
+
+    /// Decision 21 phase 1：workspace 七变体 kind_tag + SQLite roundtrip + 字段保真。
+    /// 加 EventKind 变体时必须同步五处；此测试做门禁。
+    #[tokio::test]
+    async fn persists_workspace_lifecycle_variants() {
+        use fuxi_core::{ArchiveReason, ProjectId, QuotaKind, WorkspaceId, WorkspaceLayer};
+        use std::path::PathBuf;
+        let store = EventStore::connect_memory().await.expect("connect");
+        let pid = ProjectId::new("erp").unwrap();
+        let task = TaskId::new();
+        let ws_l3 = WorkspaceId::l3(&pid, "luban");
+        let ws_l2 = WorkspaceId::l2(&pid, task);
+
+        let events = vec![
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceCreated {
+                    workspace_id: ws_l3.clone(),
+                    project: pid.clone(),
+                    layer: WorkspaceLayer::L3Persistent,
+                    role: Some("luban".into()),
+                    task: None,
+                    path: PathBuf::from("/tmp/erp/sandboxes/luban"),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceMutated {
+                    workspace_id: ws_l3.clone(),
+                    files_changed: 5,
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceCommitted {
+                    workspace_id: ws_l3.clone(),
+                    commit_sha: "abc1234567890".into(),
+                    branch: "luban/erp-main".into(),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceArchived {
+                    workspace_id: ws_l2.clone(),
+                    reason: ArchiveReason::TaskCompleted,
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceCollected {
+                    workspace_id: ws_l2.clone(),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceQuotaExceeded {
+                    project: pid.clone(),
+                    quota_kind: QuotaKind::DiskBytes,
+                    requested: 6_000_000_000,
+                    limit: 5_000_000_000,
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspacePromoted {
+                    from_workspace_id: ws_l2.clone(),
+                    to_role: "luban".into(),
+                    project: pid.clone(),
+                },
+            },
+        ];
+        for ev in &events {
+            store.append(ev).await.expect("append");
+        }
+
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "workspace_created",
+                "workspace_mutated",
+                "workspace_committed",
+                "workspace_archived",
+                "workspace_collected",
+                "workspace_quota_exceeded",
+                "workspace_promoted",
+            ]
+        );
+
+        // 字段保真：抽样校 path / branch / quota_kind 三处
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        match &got[0].kind {
+            EventKind::WorkspaceCreated { path, layer, .. } => {
+                assert_eq!(path, &PathBuf::from("/tmp/erp/sandboxes/luban"));
+                assert_eq!(*layer, WorkspaceLayer::L3Persistent);
+            }
+            other => panic!("expect WorkspaceCreated，得到 {other:?}"),
+        }
+        match &got[2].kind {
+            EventKind::WorkspaceCommitted { branch, .. } => assert_eq!(branch, "luban/erp-main"),
+            other => panic!("expect WorkspaceCommitted，得到 {other:?}"),
+        }
+        match &got[5].kind {
+            EventKind::WorkspaceQuotaExceeded {
+                quota_kind,
+                requested,
+                limit,
+                ..
+            } => {
+                assert_eq!(*quota_kind, QuotaKind::DiskBytes);
+                assert_eq!(*requested, 6_000_000_000);
+                assert_eq!(*limit, 5_000_000_000);
+            }
+            other => panic!("expect WorkspaceQuotaExceeded，得到 {other:?}"),
+        }
+    }
+
+    /// Decision 22：deliverable 四变体 kind_tag + SQLite roundtrip + 字段保真。
+    #[tokio::test]
+    async fn persists_deliverable_storage_variants() {
+        use fuxi_core::{DeliverableFileMeta, DeliverableKind, ProjectId};
+        use std::path::PathBuf;
+        let store = EventStore::connect_memory().await.expect("connect");
+        let task = TaskId::new();
+        let pid = ProjectId::new("erp").unwrap();
+
+        let events = vec![
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::DeliverableProduced {
+                    task,
+                    project: pid.clone(),
+                    deliverable_kind: DeliverableKind::ResearchSummary,
+                    files: vec![DeliverableFileMeta {
+                        name: "report.md".into(),
+                        sha256: "abc123def456".into(),
+                        size_bytes: 4096,
+                    }],
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::DeliverableAccepted {
+                    task,
+                    accepted_to: Some(PathBuf::from("/Users/e0_7/写作/2026.md")),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::DeliverableRejected {
+                    task,
+                    reason: Some("内容不对题".into()),
+                },
+            },
+            Event {
+                meta: EventMeta::now(),
+                kind: EventKind::DeliverableExpired { task },
+            },
+        ];
+        for ev in &events {
+            store.append(ev).await.expect("append");
+        }
+
+        let tags: Vec<String> = sqlx::query("SELECT kind_tag FROM events ORDER BY rowid ASC")
+            .fetch_all(store.pool())
+            .await
+            .expect("fetch")
+            .into_iter()
+            .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
+            .collect();
+        assert_eq!(
+            tags,
+            vec![
+                "deliverable_produced",
+                "deliverable_accepted",
+                "deliverable_rejected",
+                "deliverable_expired",
+            ]
+        );
+
+        let got = collect_ok(store.replay(ReplayCursor::Beginning))
+            .await
+            .expect("replay");
+        match &got[0].kind {
+            EventKind::DeliverableProduced {
+                deliverable_kind,
+                files,
+                ..
+            } => {
+                assert_eq!(*deliverable_kind, DeliverableKind::ResearchSummary);
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].name, "report.md");
+                assert_eq!(files[0].size_bytes, 4096);
+            }
+            other => panic!("expect DeliverableProduced，得到 {other:?}"),
+        }
+        match &got[1].kind {
+            EventKind::DeliverableAccepted { accepted_to, .. } => {
+                assert_eq!(
+                    accepted_to
+                        .as_deref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    Some("/Users/e0_7/写作/2026.md".to_string())
+                );
+            }
+            other => panic!("expect DeliverableAccepted，得到 {other:?}"),
         }
     }
 
