@@ -538,6 +538,48 @@ impl Fuxi {
             .await
     }
 
+    /// Decision 21 phase 2：把指定 task 的 L2 ephemeral workspace 归档。
+    ///
+    /// 跟 `spawn_worker_in_ephemeral_workspace` 配对——task 完成或进入归档窗口
+    /// 时调本方法，物理 move ephemeral/<task> → archive/<task>，并 publish
+    /// `WorkspaceArchived` 事件让 firehose / IM 看到。
+    ///
+    /// 调用时机由 caller 决定（v1 留给玄女或 dispatch hook 显式触发；v2 后续
+    /// 加自动 hook on AgentDead）。
+    pub async fn archive_l2_workspace(
+        &self,
+        project_id: fuxi_core::ProjectId,
+        task: TaskId,
+        reason: fuxi_core::ArchiveReason,
+    ) -> Result<()> {
+        let registry_opt = self.project_registry.read().await.clone();
+        let registry = registry_opt.ok_or_else(|| {
+            OrchestratorError::Other(
+                "project_registry 未注入 —— 调 Fuxi::set_project_registry 后再用".into(),
+            )
+        })?;
+        let project = registry
+            .get(&project_id)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("project lookup 失败: {e}")))?
+            .ok_or_else(|| OrchestratorError::Other(format!("project {project_id} 未注册")))?;
+        let mgr = fuxi_workspace::EphemeralWorkspaceManager::new(project, registry.root());
+        mgr.archive(task)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("archive 失败: {e}")))?;
+        let workspace_id = fuxi_core::WorkspaceId::l2(&project_id, task);
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        let _ = self.bus.publish(Event {
+            meta,
+            kind: EventKind::WorkspaceArchived {
+                workspace_id,
+                reason,
+            },
+        });
+        Ok(())
+    }
+
     /// `spawn_worker` / `spawn_worker_in_worktree` 共享的"已有 agent_id + 可选
     /// worktree → 跑 adapter launch → 注册 / 回滚"段。
     async fn launch_and_register(
