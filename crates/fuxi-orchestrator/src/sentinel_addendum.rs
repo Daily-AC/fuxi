@@ -88,6 +88,26 @@ message 中**单独一行**输出 sentinel JSON 通知玄女审阅：
 - 一个 turn 里可以发多条 sentinel（每个 deliverable 一条），但每条单独一行
 
 若任务无明确 deliverable（如打个招呼），用 `kind=research_summary` + `summary` 简述即可。
+
+## 文件级交付（Decision 22）
+
+如果你产出了**用户要拿走的文件**（markdown 报告 / csv / 配置 / 图等，**不**包括代码 commit），
+在发 sentinel **之前**先在 Bash 里把文件落进 PWA 收件箱：
+
+```bash
+fuxi deliverable produce --project <slug> --task <task-uuid> --kind <5 类之一> file1 [file2 ...]
+```
+
+`<task-uuid>` 形态 `task-<uuid>`——若派活 prompt 里有标注用它（同 task 的多份
+deliverable 集中在一个 bucket，便于 PWA 按 task 聚合）；不确定就**省略 `--task`**，
+平台会随机生成（PWA 仍能看到，只是不跟此 task 关联）。`<slug>` 是用户已注册的 project；
+不知道就发 `decision_request` sentinel 问玄女。
+
+平台会 sha256 + 复制到 `~/.fuxi/projects/<slug>/deliverables/<task>/` + 发 DeliverableProduced
+事件 + PWA「交付」tab 立刻可见可下载。
+
+**纯代码 commit 不要走 produce**——commit 已是 git artifact，PWA 后续会接 PR 视图。
+**纯 summary 文字不需要 produce**——sentinel summary 已够玄女决策。
 "#;
 
 /// 是否给该 role 注入 sentinel 教学。
