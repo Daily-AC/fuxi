@@ -324,6 +324,64 @@ impl EphemeralWorkspaceManager {
         Ok(collected)
     }
 
+    /// 把 active L2 ephemeral 提升为 L3 持久 sandbox（Decision 21 决策树第 5 条）。
+    ///
+    /// 行为：
+    /// - 物理 move ephemeral/<task>/ → sandboxes/<role>/
+    /// - rename branch `task/<uuid>` → `<role>/<project>-main`
+    /// - prune git 元数据
+    /// - 失败前置校验：L2 必须存在；同 role 的 L3 已存在 → 拒（避免覆盖既有 sandbox）
+    pub async fn promote_to_l3(&self, task: TaskId, role: &str) -> Result<(), WorkspaceError> {
+        if role.is_empty() {
+            return Err(WorkspaceError::Other("role 不能空".into()));
+        }
+        let active_path = self.path_for(task);
+        if !active_path.exists() {
+            return Err(WorkspaceError::Other(format!(
+                "L2 ephemeral 不存在: task-{}",
+                task.0
+            )));
+        }
+        let sandboxes_root = self
+            .ephemeral_root
+            .parent()
+            .map(|p| p.join("sandboxes"))
+            .ok_or_else(|| WorkspaceError::Other("ephemeral_root 无父级".into()))?;
+        let target_path = sandboxes_root.join(role);
+        if target_path.exists() {
+            return Err(WorkspaceError::AlreadyExists(target_path));
+        }
+        tokio::fs::create_dir_all(&sandboxes_root).await?;
+
+        let new_branch = format!("{role}/{}-main", self.project.id.as_str());
+        let old_branch = format!("task/{}", task.0);
+        info!(
+            project = %self.project.id,
+            %task,
+            role,
+            from = %active_path.display(),
+            to = %target_path.display(),
+            new_branch = %new_branch,
+            "promote L2 → L3"
+        );
+
+        // git branch rename 必须在 worktree move 之前——branch -m 旧名 新名
+        // 不依赖 worktree 路径；rename 后再 fs::rename 物理目录。git worktree
+        // prune 兜底元数据。
+        if let Err(e) = run_git(
+            &["branch", "-m", &old_branch, &new_branch],
+            &self.project.canonical_path,
+        )
+        .await
+        {
+            warn!(error = %e, %old_branch, %new_branch, "branch rename 失败，promote 中止");
+            return Err(e);
+        }
+        tokio::fs::rename(&active_path, &target_path).await?;
+        let _ = run_git(&["worktree", "prune"], &self.project.canonical_path).await;
+        Ok(())
+    }
+
     fn path_for(&self, task: TaskId) -> PathBuf {
         self.ephemeral_root.join(task.to_string())
     }
@@ -518,6 +576,72 @@ mod tests {
         let remaining = mgr.list_archived().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].0, new_task);
+    }
+
+    #[tokio::test]
+    async fn promote_to_l3_moves_path_and_renames_branch() {
+        let projects_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+        let project = make_project(repo.canonicalize().unwrap());
+        let mgr = EphemeralWorkspaceManager::new(project.clone(), projects_root.path());
+
+        let task = TaskId::new();
+        let h = mgr.create(task).await.unwrap();
+        // 改一行让 sandbox 有内容
+        tokio::fs::write(h.workspace_path.join("WIP.md"), "在做")
+            .await
+            .unwrap();
+
+        mgr.promote_to_l3(task, "luban").await.expect("promote");
+
+        // 旧路径应消失
+        assert!(!h.workspace_path.exists());
+        // 新路径应有
+        let new_path = projects_root
+            .path()
+            .join("erp")
+            .join("sandboxes")
+            .join("luban");
+        assert!(new_path.is_dir());
+        assert!(new_path.join("WIP.md").is_file(), "WIP 应保留");
+
+        // branch list 验：task/ 没了，luban/erp-main 在
+        let out = Command::new("git")
+            .current_dir(&project.canonical_path)
+            .args(["branch", "--list"])
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("luban/erp-main"), "got: {stdout}");
+        assert!(
+            !stdout.contains(&format!("task/{}", task.0)),
+            "old task branch 应没了"
+        );
+    }
+
+    #[tokio::test]
+    async fn promote_rejects_when_l3_already_exists() {
+        let projects_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+        let project = make_project(repo.canonicalize().unwrap());
+        let mgr = EphemeralWorkspaceManager::new(project.clone(), projects_root.path());
+
+        // 起 L3 sandbox 占位
+        let l3_path = projects_root
+            .path()
+            .join("erp")
+            .join("sandboxes")
+            .join("luban");
+        tokio::fs::create_dir_all(&l3_path).await.unwrap();
+
+        let task = TaskId::new();
+        mgr.create(task).await.unwrap();
+        let err = mgr
+            .promote_to_l3(task, "luban")
+            .await
+            .expect_err("L3 已存在应拒");
+        assert!(matches!(err, WorkspaceError::AlreadyExists(_)));
     }
 
     #[tokio::test]
