@@ -1,0 +1,132 @@
+/* 项目 tab · Decision 21 phase 1
+ * 风格沿用 Nodes / Tasks 页面：#16110E 卡 + 12px 圆角 + var(--bg) 背景。
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--size-title);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  margin: 0;
+}
+
+.errMsg {
+  color: var(--danger);
+  font-size: var(--size-aux);
+  margin: 0;
+}
+
+.empty {
+  padding: var(--space-7) var(--space-4);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.emptyTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--size-heading);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+
+.emptyHint {
+  margin: 0;
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.card {
+  padding: var(--space-3) var(--space-4);
+  background: #16110E;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.cardId {
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.cardBranch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-aux);
+}
+
+.branchLabel {
+  color: var(--text-muted);
+}
+
+.branchValue {
+  color: var(--text-secondary);
+  background: var(--bg-elev);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+}
+
+.cardPath {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.cardCreated {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}

@@ -11,7 +11,9 @@ import { LoginView } from "./components/LoginView";
 import { BottomTabBar, type TabSpec } from "./components/BottomTabBar";
 import { NavigationStack } from "./components/NavigationStack";
 import { Toast } from "./components/Toast";
+import { DeliverablesPage } from "./views/pages/DeliverablesPage";
 import { NodesPage } from "./views/pages/NodesPage";
+import { ProjectsPage } from "./views/pages/ProjectsPage";
 import { XuannvPage } from "./views/pages/XuannvPage";
 import { TasksPage } from "./views/pages/TasksPage";
 import { TaskThreadPage } from "./views/pages/TaskThreadPage";
@@ -64,6 +66,8 @@ const AuthGate: Component = () => {
 const TABS: TabSpec[] = [
   { key: "xuannv", label: "玄女" },
   { key: "tasks", label: "任务" },
+  { key: "projects", label: "项目" },
+  { key: "deliverables", label: "交付" },
   { key: "nodes", label: "节点" },
 ];
 
@@ -117,6 +121,12 @@ const MainShell: Component = () => {
             />
           </Match>
           <Match when={activeTab() === 2}>
+            <ProjectsPage />
+          </Match>
+          <Match when={activeTab() === 3}>
+            <DeliverablesPage />
+          </Match>
+          <Match when={activeTab() === 4}>
             <NodesPage />
           </Match>
         </Switch>

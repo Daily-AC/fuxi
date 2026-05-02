@@ -12,8 +12,10 @@ import type {
 } from "~/types/events";
 import type {
   ConversationHistoryResponse,
+  DeliverablesResponse,
   InterveneRequestV2,
   NodesResponse,
+  ProjectsResponse,
   StoredMessage,
   TasksOverview,
   Upload,
@@ -47,6 +49,10 @@ export interface MockState {
   tasksOverview?: TasksOverview;
   /** v3 #58 dist topology · /api/nodes 返回值。空 = { nodes: [] }。*/
   nodes?: NodesResponse;
+  /** Decision 21 phase 1 · /api/projects 返回值。空 = { projects: [] }。*/
+  projects?: ProjectsResponse;
+  /** Decision 22 phase 1 · /api/deliverables 返回值。空 = { deliverables: [] }。*/
+  deliverables?: DeliverablesResponse;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -135,6 +141,8 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     uploads: [],
     tasksOverview: initial?.tasksOverview,
     nodes: initial?.nodes,
+    projects: initial?.projects,
+    deliverables: initial?.deliverables,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -196,6 +204,14 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     fetchTasksOverview: async (): Promise<TasksOverview> =>
       state.tasksOverview ?? { running: [], completed: [] },
     fetchNodes: async (): Promise<NodesResponse> => state.nodes ?? { nodes: [] },
+    fetchProjects: async (): Promise<ProjectsResponse> =>
+      state.projects ?? { projects: [] },
+    fetchDeliverables: async (): Promise<DeliverablesResponse> =>
+      state.deliverables ?? { deliverables: [] },
+    deliverableFileUrl: (project: string, task: string, name: string): string => {
+      const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
+      return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/files/${encodeURIComponent(name)}`;
+    },
     fetchWorkerEvents: async (agentId: string): Promise<EventHistoryResponse> => ({
       events: state.events[`worker:${agentId}`] ?? [],
       next_cursor: null,
