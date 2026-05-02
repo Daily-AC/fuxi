@@ -1,7 +1,8 @@
 # Handoff · v1 · Session 6 开工指引
 
 > 上一 session（2026-05-02 → 05-03 凌晨）专推 Decision 21/22（workspace + 交付
-> 产物）—— 22 个 commit 全闭环，phase 1 + 部分 phase 2 已 ship。
+> 产物）—— 26 个 commit 全闭环，phase 1 + phase 2 完整 ship（含 L2 ephemeral
+> lifecycle / archive GC / promote / quota）。
 > 上份 handoff: `docs/handoff/v1-session5.md`（保留）。
 
 ---
@@ -52,13 +53,16 @@ Agent prompt:
 - sentinel addendum 加「文件级交付」教学指向 `fuxi deliverable produce`
 - 玄女 dispatch-routing.md 加 project 维度规则
 
-事件流通：
-- `WorkspaceCreated` → spawn_worker_in_project_sandbox（活）
-- `WorkspaceMutated` → fuxi deliverable produce CLI cwd 反查（活）
-- `WorkspaceCommitted` → bridge.rs sentinel `code_change` + `sha:` artifact_ref（活）
-- `DeliverableProduced` / `Accepted` / `Rejected` → 全活
-- `WorkspaceArchived` / `Collected` / `Promoted` / `QuotaExceeded` / `DeliverableExpired` —
-  schema 已锁但**还是死字段**（depends on phase 2 lifecycle）
+事件流通（11/11 全活，DeliverableExpired 仅 schema 占位 v1 永久保留）：
+- `WorkspaceCreated` → spawn_worker_in_project_sandbox（L3）/ spawn_worker_in_ephemeral_workspace（L2）
+- `WorkspaceMutated` → fuxi deliverable produce CLI cwd 反查
+- `WorkspaceCommitted` → bridge.rs sentinel `code_change` + `sha:` artifact_ref
+- `WorkspaceArchived` → Fuxi::archive_l2_workspace
+- `WorkspaceCollected` → fuxi sandbox sweep CLI（直写 events.db）
+- `WorkspacePromoted` → Fuxi::promote_l2_to_l3
+- `WorkspaceQuotaExceeded` → spawn paths 配额检查
+- `DeliverableProduced/Accepted/Rejected` → CLI/API 全活
+- `DeliverableExpired` → schema 占位（v1 default 永久保留，无 GC）
 
 文档：
 - `docs/decisions/21-workspace-design.md` · 五层架构 + 5 个产品口味决策 default
@@ -75,53 +79,51 @@ Agent prompt:
 
 ## 3 · 下一动作（按价值排）
 
-### A. L2 ephemeral lifecycle 真实装（M）
+### A. dispatch 自动决策走 L2 vs L3（M）
 
-**目的**：让一次性 task 走 `<projects_root>/<project>/ephemeral/<task>/`
-worktree fork off canonical（或 L3 sandbox），任务完后 archive 24h，然后 GC。
+**目的**：让玄女在派活时自动判断"这是一次性活 → L2"还是"持续活 → L3"，
+不必用户手动选 spawn 入口。
 
 **当前状态**：
-- 五层模型设计文档已写明（Decision 21）
-- 路径骨架 FileSystemProjectRegistry 注册时已 mkdir `ephemeral/` 子目录
-- **没有任何代码实际创建 / 用 / 清理 L2 worktree**
-- `WorkspaceArchived` / `Collected` 事件类型已锁但无发布点
+- L2 / L3 spawn API 都已就位（`Fuxi::spawn_worker_in_project_sandbox` 走 L3，
+  `Fuxi::spawn_worker_in_ephemeral_workspace` 走 L2）
+- CLI `fuxi spawn --project erp` 走 L3；没 `--ephemeral` 走 L2 的入口
+- 玄女 dispatch-routing.md 教学只覆盖 L3，L2 决策没教
 
 **实装范围**：
-1. `Fuxi::spawn_worker_in_ephemeral_workspace(project, task)` 入口（symmetric to L3）
-2. PersistentSandboxManager 的 ephemeral 兄弟（`EphemeralWorkspaceManager`）
-3. 一个 scheduler tick task（每 N 分钟扫一次 archive/，超 24h 删）
-4. 玄女 dispatch 路径决策：什么时候走 L2 vs L3
-5. WorkspaceArchived / Collected 事件发布
+1. CLI `fuxi spawn --project erp --ephemeral` 走 L2 spawn 入口
+2. 玄女 system prompt addendum 加判断规则：
+   - 用户说"调研一下" / "试一下" → 一次性 → L2
+   - 用户说"接着搞那个 feature" / "继续修 bug" → 长期 → L3
+3. 自动 archive 钩子：AgentDead + L2 workspace → 自动调
+   `Fuxi::archive_l2_workspace`（reason=TaskCompleted）
+4. archive 24h GC 自动化：fuxi-im 启动起一个 tokio interval task，每 1h
+   调一次 `EphemeralWorkspaceManager::collect_expired(24h)`
 
-**风险**：影响 dispatch 决策树语义，跟现有 spawn_worker 老路径互动复杂。
+### B. PWA 二层视图（M）
 
-### B. WorkspaceQuotaExceeded 实装（S）
+**目的**：
+- 项目卡 tap → 项目 detail 页（sandboxes + 交付 + L2 active/archive）
+- 交付卡 tap → 详情页（manifest 全文 + 文件预览）
 
-**目的**：用户配 quota（每 project 5GB / 每节点 8 active sandbox），超过拒
-新建 + publish QuotaExceeded。
-
-**实装范围**：
-1. Project meta.json 加 `quota_bytes` / `max_concurrent_sandboxes`
-2. spawn_worker_in_project_sandbox 入口先检查 quota
-3. 命中 → 拒绝 + publish 事件 + CLI / API 返 429
-
-**风险**：低，孤立功能。
+**当前状态**：sandboxes 已 inline 在项目卡。Layer 2 需要扩 NavigationStack
+到项目 tab（当前只在任务 tab 用）。
 
 ### C. 跨节点 sandbox（L）
 
-**目的**：mac sandbox vs home sandbox 是 per-node 独立体（per Decision 21
+**目的**：mac sandbox vs home sandbox 是 per-node 独立体（Decision 21
 default 5）。当前 fuxi spawn --project 只在本机 spawn——跨节点没考虑。
 
 **实装范围**：完整跨节点路由 + dist worker 拉项目 sandbox 起 cc → 更复杂。
-建议 phase 3 单独动。
+phase 3 单独动。
 
-### D. PWA 项目 detail Layer 2（M）
+### D. 磁盘 quota（S）
 
-**目的**：项目卡 tap → 进二层页，显示该项目 sandboxes + 交付 + 历史
-事件流。
+**目的**：phase 2 只接通了"并发 sandbox 数"quota（默认 8）。Decision 21
+还讲了"每 project 5GB 磁盘 quota"——没实装。
 
-**当前状态**：sandboxes 已 inline 显示。Layer 2 navigation 需要扩 NavigationStack
-到项目 tab（当前只在任务 tab）。
+**实装范围**：递归算 project 目录大小 → spawn 时检查 → 超过 publish
+QuotaExceeded(DiskBytes)。要 cache 否则每次 spawn 全量扫太慢。
 
 ---
 
