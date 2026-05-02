@@ -13,9 +13,10 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use fuxi_core::ProjectId;
-use fuxi_workspace::FileSystemProjectRegistry;
+use fuxi_core::{DeliverableKind, ProjectId, TaskId};
+use fuxi_workspace::{DeliverablesManager, FileSystemProjectRegistry};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Args)]
 pub struct ProjectAddArgs {
@@ -98,6 +99,105 @@ pub async fn run_list(args: ProjectListArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `fuxi deliverable produce` —— 手动让某 project 的某 task 落一组文件作 deliverable。
+///
+/// v1 用途：跑测、手工验证 PWA 收件箱、模拟门客交付（agent hook 还没接通时
+/// 让用户能端到端走通）。production agent 集成后，门客自己调 produce_deliverable
+/// API 不走这个 CLI。
+#[derive(Debug, Args)]
+pub struct DeliverableProduceArgs {
+    /// 项目 slug（必须已 `fuxi project add` 注册过）。
+    #[arg(long)]
+    pub project: String,
+    /// 任务 id。`task-<uuid>` 或裸 uuid。不传走随机新生成（适合纯手工测）。
+    #[arg(long)]
+    pub task: Option<String>,
+    /// deliverable 类型——Decision 13 五类：
+    /// research_summary / code_change / test_result / decision_request / error_block。
+    #[arg(long, default_value = "research_summary")]
+    pub kind: String,
+    /// 要交付的文件路径列表（必须是已存在的文件）。
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    /// 注册表 root 覆写（同 project add）。
+    #[arg(long = "registry-root")]
+    pub registry_root: Option<PathBuf>,
+}
+
+pub async fn run_deliverable_produce(args: DeliverableProduceArgs) -> Result<()> {
+    let registry = registry_for(args.registry_root.clone())?;
+    let project_id = ProjectId::new(args.project.clone())
+        .map_err(|e| anyhow::anyhow!("无效 project id {}: {e}", args.project))?;
+    let project = registry
+        .get(&project_id)
+        .await
+        .context("project lookup 失败")?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} 未注册——先跑 fuxi project add"))?;
+
+    let task = parse_task_id(args.task.as_deref())?;
+    let kind = parse_deliverable_kind(&args.kind)?;
+
+    // canonicalize sources：相对路径转绝对，文件不存在或不是文件直接报错
+    let mut sources = Vec::with_capacity(args.files.len());
+    for f in &args.files {
+        let canon = f
+            .canonicalize()
+            .with_context(|| format!("文件无法解析: {}", f.display()))?;
+        if !canon.is_file() {
+            anyhow::bail!("源不是文件: {}", canon.display());
+        }
+        sources.push(canon);
+    }
+
+    // 落地用 registry root（同样 root 下 deliverables/ 跟 projects/ 同级）
+    let mgr = DeliverablesManager::new(project.id.clone(), registry.root());
+    let handle = mgr
+        .produce(task, kind, &sources)
+        .await
+        .context("produce_deliverable 失败")?;
+
+    println!("已交付 deliverable");
+    println!("  project: {}", handle.project);
+    println!("  task: {}", handle.task);
+    println!("  kind: {:?}", handle.kind);
+    println!("  bucket: {}", handle.bucket_path.display());
+    println!("  files:");
+    for f in &handle.files {
+        println!(
+            "    {} ({} bytes, sha256={})",
+            f.name,
+            f.size_bytes,
+            &f.sha256[..16]
+        );
+    }
+    Ok(())
+}
+
+fn parse_task_id(s: Option<&str>) -> Result<TaskId> {
+    match s {
+        None => Ok(TaskId::new()),
+        Some(raw) => {
+            let trimmed = raw.strip_prefix("task-").unwrap_or(raw);
+            uuid::Uuid::from_str(trimmed)
+                .map(TaskId::from)
+                .map_err(|e| anyhow::anyhow!("无效 task id {raw}: {e}"))
+        }
+    }
+}
+
+fn parse_deliverable_kind(s: &str) -> Result<DeliverableKind> {
+    match s {
+        "research_summary" => Ok(DeliverableKind::ResearchSummary),
+        "code_change" => Ok(DeliverableKind::CodeChange),
+        "test_result" => Ok(DeliverableKind::TestResult),
+        "decision_request" => Ok(DeliverableKind::DecisionRequest),
+        "error_block" => Ok(DeliverableKind::ErrorBlock),
+        other => anyhow::bail!(
+            "未知 deliverable kind: {other}（可选：research_summary / code_change / test_result / decision_request / error_block）"
+        ),
+    }
 }
 
 pub async fn run_remove(args: ProjectRemoveArgs) -> Result<()> {
@@ -201,6 +301,99 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("不存在"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn deliverable_produce_writes_files_to_bucket() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+
+        // 先 add 一个 project
+        run_add(ProjectAddArgs {
+            canonical_path: repo,
+            name: Some("erp".into()),
+            branch: None,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+        // 准备一个源文件
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("report.md");
+        tokio::fs::write(&src, "# 调研结果").await.unwrap();
+
+        let task = TaskId::new();
+        run_deliverable_produce(DeliverableProduceArgs {
+            project: "erp".into(),
+            task: Some(task.to_string()),
+            kind: "research_summary".into(),
+            files: vec![src],
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .expect("produce");
+
+        // 文件应已落到 deliverables/<task>/
+        let bucket = registry_root
+            .path()
+            .join("erp")
+            .join("deliverables")
+            .join(task.to_string());
+        assert!(bucket.is_dir(), "bucket 应建好");
+        assert!(bucket.join("report.md").is_file(), "文件应落地");
+        assert!(bucket.join("manifest.json").is_file(), "manifest 应写");
+    }
+
+    #[tokio::test]
+    async fn deliverable_produce_rejects_unknown_project() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("x.md");
+        tokio::fs::write(&src, "x").await.unwrap();
+        let err = run_deliverable_produce(DeliverableProduceArgs {
+            project: "no-such-project".into(),
+            task: None,
+            kind: "research_summary".into(),
+            files: vec![src],
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .expect_err("未注册 project 应拒");
+        assert!(err.to_string().contains("未注册"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn deliverable_produce_rejects_unknown_kind() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_td, repo) = make_git_repo().await;
+        run_add(ProjectAddArgs {
+            canonical_path: repo,
+            name: Some("erp".into()),
+            branch: None,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("x.md");
+        tokio::fs::write(&src, "x").await.unwrap();
+
+        let err = run_deliverable_produce(DeliverableProduceArgs {
+            project: "erp".into(),
+            task: None,
+            kind: "wrong_kind".into(),
+            files: vec![src],
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .expect_err("未知 kind 应拒");
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("未知 deliverable kind") || full.contains("research_summary"),
+            "got: {full}"
+        );
     }
 
     #[tokio::test]

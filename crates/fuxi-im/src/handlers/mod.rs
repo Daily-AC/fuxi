@@ -6,6 +6,8 @@
 
 pub mod auth;
 pub mod conv;
+// Decision 22 phase 1：交付收件箱（list / download）
+pub mod deliverables;
 pub mod dispatch;
 pub mod health;
 pub mod intervene;
