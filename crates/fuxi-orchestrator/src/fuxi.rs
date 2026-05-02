@@ -372,6 +372,34 @@ impl Fuxi {
             .map_err(|e| OrchestratorError::Other(format!("project lookup 失败: {e}")))?
             .ok_or_else(|| OrchestratorError::Other(format!("project {project_id} 未注册")))?;
 
+        // Decision 21 phase 2 quota：先看是否还有名额；超 → publish QuotaExceeded
+        // 然后报错。get_or_create 是幂等（同 role 复用），所以已存在的 sandbox
+        // 不算新建——只在物理目录还不存在时才 enforce。
+        let target_sandbox_path = registry
+            .root()
+            .join(project_id.as_str())
+            .join("sandboxes")
+            .join(&role_for_sandbox);
+        if !target_sandbox_path.exists() {
+            let active = Self::count_active_workspaces(&registry, &project).await?;
+            let limit = Self::project_sandbox_quota();
+            if active >= limit {
+                let _ = self.bus.publish(Event {
+                    meta: EventMeta::now(),
+                    kind: EventKind::WorkspaceQuotaExceeded {
+                        project: project_id.clone(),
+                        quota_kind: fuxi_core::QuotaKind::ConcurrentSandboxes,
+                        requested: active + 1,
+                        limit,
+                    },
+                });
+                return Err(OrchestratorError::Other(format!(
+                    "项目 {project_id} sandbox 配额已满（{active}/{limit}），\
+                     先 retire 旧 sandbox 或调 FUXI_PROJECT_SANDBOX_QUOTA"
+                )));
+            }
+        }
+
         // 2. 用 PersistentSandboxManager 起 / 复用 sandbox
         let mgr = fuxi_workspace::PersistentSandboxManager::new(project.clone(), registry.root());
         let sandbox_handle = mgr
@@ -481,6 +509,26 @@ impl Fuxi {
             .map_err(|e| OrchestratorError::Other(format!("project lookup 失败: {e}")))?
             .ok_or_else(|| OrchestratorError::Other(format!("project {project_id} 未注册")))?;
 
+        // Decision 21 phase 2 quota：跟 L3 spawn 同款 enforcement——L2 每次 create
+        // 都是新 worktree（无幂等复用），故每次都查名额。
+        let active = Self::count_active_workspaces(&registry, &project).await?;
+        let limit = Self::project_sandbox_quota();
+        if active >= limit {
+            let _ = self.bus.publish(Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceQuotaExceeded {
+                    project: project_id.clone(),
+                    quota_kind: fuxi_core::QuotaKind::ConcurrentSandboxes,
+                    requested: active + 1,
+                    limit,
+                },
+            });
+            return Err(OrchestratorError::Other(format!(
+                "项目 {project_id} sandbox 配额已满（{active}/{limit}），\
+                 先 retire 旧 sandbox 或调 FUXI_PROJECT_SANDBOX_QUOTA"
+            )));
+        }
+
         let mgr = fuxi_workspace::EphemeralWorkspaceManager::new(project.clone(), registry.root());
         let ws_handle = mgr
             .create(task)
@@ -578,6 +626,76 @@ impl Fuxi {
             },
         });
         Ok(())
+    }
+
+    /// Decision 21 phase 2：把 L2 ephemeral 提升为 L3 持久 sandbox。
+    ///
+    /// 调用方一般是用户在 PWA 或 CLI 上明示「这次任务做得不错，留下 sandbox
+    /// 继续用」。物理路径 / 分支重命名后 publish WorkspacePromoted。
+    pub async fn promote_l2_to_l3(
+        &self,
+        project_id: fuxi_core::ProjectId,
+        task: TaskId,
+        to_role: String,
+    ) -> Result<()> {
+        let registry_opt = self.project_registry.read().await.clone();
+        let registry = registry_opt.ok_or_else(|| {
+            OrchestratorError::Other(
+                "project_registry 未注入 —— 调 Fuxi::set_project_registry 后再用".into(),
+            )
+        })?;
+        let project = registry
+            .get(&project_id)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("project lookup 失败: {e}")))?
+            .ok_or_else(|| OrchestratorError::Other(format!("project {project_id} 未注册")))?;
+        let from_workspace_id = fuxi_core::WorkspaceId::l2(&project_id, task);
+        let mgr = fuxi_workspace::EphemeralWorkspaceManager::new(project, registry.root());
+        mgr.promote_to_l3(task, &to_role)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("promote 失败: {e}")))?;
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        let _ = self.bus.publish(Event {
+            meta,
+            kind: EventKind::WorkspacePromoted {
+                from_workspace_id,
+                to_role,
+                project: project_id,
+            },
+        });
+        Ok(())
+    }
+
+    /// 默认每项目最多并发 sandbox 数（L3 + active L2 之和）。
+    /// 跟 Decision 21 phase 1 default 一致：8。
+    /// 可通过 `FUXI_PROJECT_SANDBOX_QUOTA` env 覆盖。
+    fn project_sandbox_quota() -> u64 {
+        std::env::var("FUXI_PROJECT_SANDBOX_QUOTA")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(8)
+    }
+
+    /// 算项目当前 active workspace 数（L3 sandboxes + 未归档 L2 ephemerals）。
+    /// quota 检查用——超过即拒新建并 publish WorkspaceQuotaExceeded。
+    async fn count_active_workspaces(
+        registry: &fuxi_workspace::FileSystemProjectRegistry,
+        project: &fuxi_core::Project,
+    ) -> Result<u64> {
+        let l3_count =
+            fuxi_workspace::PersistentSandboxManager::new(project.clone(), registry.root())
+                .list()
+                .await
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+        let l2_count =
+            fuxi_workspace::EphemeralWorkspaceManager::new(project.clone(), registry.root())
+                .list_active()
+                .await
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+        Ok(l3_count + l2_count)
     }
 
     /// `spawn_worker` / `spawn_worker_in_worktree` 共享的"已有 agent_id + 可选
