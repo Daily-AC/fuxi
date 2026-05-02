@@ -27,7 +27,8 @@ use fuxi_core::task::Task;
 use fuxi_core::workspace::Workspace;
 use fuxi_events::EventBus;
 use fuxi_workspace::GitWorktreeWorkspace;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 use tracing::{debug, info, warn};
@@ -113,6 +114,10 @@ pub struct Fuxi {
     /// 才能 lookup project canonical_path 然后驱动 PersistentSandboxManager。
     /// `Option`：未注入 = 走旧 agent-id worktree 路径（向后兼容）。
     project_registry: Arc<RwLock<Option<Arc<fuxi_workspace::FileSystemProjectRegistry>>>>,
+    /// Decision 21 phase 3 磁盘 quota 缓存——`(measured_at, total_bytes)`。
+    /// 每次 spawn 检查时若距上次 < TTL 用缓存值，否则递归扫描 `<projects_root>/<project>/`。
+    /// **避免每次 spawn 全量扫多 GB sandbox 拖慢启动**。
+    disk_quota_cache: Arc<RwLock<HashMap<fuxi_core::ProjectId, (std::time::Instant, u64)>>>,
 }
 
 impl Fuxi {
@@ -140,6 +145,7 @@ impl Fuxi {
             recall_sink: Arc::new(RwLock::new(None)),
             dist_enqueuer: Arc::new(RwLock::new(None)),
             project_registry: Arc::new(RwLock::new(None)),
+            disk_quota_cache: Arc::new(RwLock::new(HashMap::new())),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -398,6 +404,8 @@ impl Fuxi {
                      先 retire 旧 sandbox 或调 FUXI_PROJECT_SANDBOX_QUOTA"
                 )));
             }
+            // Decision 21 phase 3 磁盘 quota——并发 sandbox 数过了再看磁盘上限。
+            self.enforce_disk_quota(&registry, &project_id).await?;
         }
 
         // 2. 用 PersistentSandboxManager 起 / 复用 sandbox
@@ -528,6 +536,8 @@ impl Fuxi {
                  先 retire 旧 sandbox 或调 FUXI_PROJECT_SANDBOX_QUOTA"
             )));
         }
+        // Decision 21 phase 3 磁盘 quota
+        self.enforce_disk_quota(&registry, &project_id).await?;
 
         let mgr = fuxi_workspace::EphemeralWorkspaceManager::new(project.clone(), registry.root());
         let ws_handle = mgr
@@ -696,6 +706,87 @@ impl Fuxi {
                 .map(|v| v.len() as u64)
                 .unwrap_or(0);
         Ok(l3_count + l2_count)
+    }
+
+    /// Decision 21 phase 3 磁盘 quota：每项目默认 5 GB。可由
+    /// `FUXI_PROJECT_DISK_QUOTA_BYTES` env 覆盖（设 0 = 关闭检查）。
+    fn project_disk_quota_bytes() -> u64 {
+        std::env::var("FUXI_PROJECT_DISK_QUOTA_BYTES")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(5 * 1024 * 1024 * 1024)
+    }
+
+    /// 缓存 TTL——同 project 60s 内重复 spawn 不再扫盘。可调
+    /// `FUXI_PROJECT_DISK_CACHE_SECS` 覆盖。
+    fn project_disk_cache_secs() -> u64 {
+        std::env::var("FUXI_PROJECT_DISK_CACHE_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(60)
+    }
+
+    /// 拿到（cache hit 或重算）项目当前总占盘字节数。
+    async fn measure_project_disk_bytes(
+        &self,
+        registry: &fuxi_workspace::FileSystemProjectRegistry,
+        project_id: &fuxi_core::ProjectId,
+    ) -> u64 {
+        let ttl = std::time::Duration::from_secs(Self::project_disk_cache_secs());
+        {
+            let cache = self.disk_quota_cache.read().await;
+            if let Some((measured_at, bytes)) = cache.get(project_id)
+                && measured_at.elapsed() < ttl
+            {
+                return *bytes;
+            }
+        }
+        let project_root = registry.root().join(project_id.as_str());
+        // 阻塞 fs walk 放进 spawn_blocking——递归扫多 GB sandbox 不能在 async runtime 里直跑。
+        let bytes = match tokio::task::spawn_blocking(move || dir_size_bytes(&project_root)).await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(project = %project_id, error = %e, "disk size 任务 panic，回 0 跳过 quota");
+                0
+            }
+        };
+        let mut cache = self.disk_quota_cache.write().await;
+        cache.insert(project_id.clone(), (std::time::Instant::now(), bytes));
+        bytes
+    }
+
+    /// spawn 路径共享的"先看磁盘 quota，超 → publish + Err"。
+    async fn enforce_disk_quota(
+        &self,
+        registry: &fuxi_workspace::FileSystemProjectRegistry,
+        project_id: &fuxi_core::ProjectId,
+    ) -> Result<()> {
+        let limit = Self::project_disk_quota_bytes();
+        if limit == 0 {
+            return Ok(());
+        }
+        let used = self.measure_project_disk_bytes(registry, project_id).await;
+        if used >= limit {
+            let _ = self.bus.publish(Event {
+                meta: EventMeta::now(),
+                kind: EventKind::WorkspaceQuotaExceeded {
+                    project: project_id.clone(),
+                    quota_kind: fuxi_core::QuotaKind::DiskBytes,
+                    requested: used,
+                    limit,
+                },
+            });
+            return Err(OrchestratorError::Other(format!(
+                "项目 {project_id} 磁盘占用已超 quota（{used}B / {limit}B），\
+                 先 retire 旧 sandbox + GC archive 或调 FUXI_PROJECT_DISK_QUOTA_BYTES"
+            )));
+        }
+        Ok(())
+    }
+
+    /// **测试 / GC 触发后**主动失效缓存——下次 spawn 重扫。
+    pub async fn invalidate_disk_quota_cache(&self, project_id: &fuxi_core::ProjectId) {
+        self.disk_quota_cache.write().await.remove(project_id);
     }
 
     /// `spawn_worker` / `spawn_worker_in_worktree` 共享的"已有 agent_id + 可选
@@ -1627,6 +1718,44 @@ fn spawn_death_watcher(bus: EventBus, shelf: Arc<Shelf>) {
     });
 }
 
+/// Decision 21 phase 3：递归求 `path` 子树所有 regular file 的字节数和。
+///
+/// - 不跟 symlink（避免 `<projects_root>/<project>/sandboxes/<role>` worktree 里的
+///   symlink 跳出 sandbox 双计 / 死循环）
+/// - 单条 entry 元数据失败 silent skip 不传错——quota 估算允许少算
+pub(crate) fn dir_size_bytes(path: &Path) -> u64 {
+    if !path.exists() {
+        return 0;
+    }
+    let mut total: u64 = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            // symlink_metadata 走 std::fs 模块函数路径——DirEntry::metadata 会
+            // 跟 symlink，dir entries 没有 symlink_metadata 方法。
+            let path = entry.path();
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod worker_kind_tests {
     use super::*;
@@ -1640,6 +1769,35 @@ mod worker_kind_tests {
         let codex = WorkerKind::Codex(CodexLaunchConfig::default());
         assert_eq!(cc.cli_tag(), "claude-code");
         assert_eq!(codex.cli_tag(), "codex");
+    }
+}
+
+#[cfg(test)]
+mod disk_size_tests {
+    use super::*;
+
+    #[test]
+    fn dir_size_bytes_recurses_and_skips_symlinks() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("a.bin"), vec![0u8; 1024]).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.bin"), vec![0u8; 2048]).unwrap();
+
+        // symlink 指向同一根 → 必须不死循环 / 不重复计数
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(dir.path(), dir.path().join("loop"));
+        }
+
+        let total = dir_size_bytes(dir.path());
+        assert_eq!(total, 1024 + 2048);
+    }
+
+    #[test]
+    fn dir_size_bytes_returns_zero_for_missing_path() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(dir_size_bytes(&missing), 0);
     }
 }
 
