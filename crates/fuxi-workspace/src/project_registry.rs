@@ -39,7 +39,9 @@ impl FileSystemProjectRegistry {
         let home = std::env::var_os("HOME").ok_or_else(|| {
             WorkspaceError::Other("$HOME 未设置，无法定位默认 project 注册表根".into())
         })?;
-        Ok(Self::new(PathBuf::from(home).join(".fuxi").join("projects")))
+        Ok(Self::new(
+            PathBuf::from(home).join(".fuxi").join("projects"),
+        ))
     }
 
     pub fn root(&self) -> &Path {
@@ -129,10 +131,7 @@ impl FileSystemProjectRegistry {
             match load_meta(&meta_path).await {
                 Ok(p) => out.push(p),
                 Err(e) => {
-                    tracing::warn!(
-                        "skip malformed project meta {}: {e}",
-                        meta_path.display()
-                    );
+                    tracing::warn!("skip malformed project meta {}: {e}", meta_path.display());
                 }
             }
         }
@@ -225,10 +224,7 @@ mod tests {
 
         let (_repo_td, repo) = make_git_repo().await;
         // tempdir basename 一般是 random hex chars——slug_from_path 能 normalize
-        let project = registry
-            .add(repo.clone(), None, None)
-            .await
-            .expect("add");
+        let project = registry.add(repo.clone(), None, None).await.expect("add");
 
         // slug 派生符合规则
         assert!(
@@ -251,7 +247,11 @@ mod tests {
         // 子目录骨架建好
         for sub in SUBDIRS {
             assert!(
-                registry_root.path().join(project.id.as_str()).join(sub).is_dir(),
+                registry_root
+                    .path()
+                    .join(project.id.as_str())
+                    .join(sub)
+                    .is_dir(),
                 "subdir {sub} 应预创"
             );
         }
@@ -330,18 +330,9 @@ mod tests {
         let (_t1, r1) = make_git_repo().await;
         let (_t2, r2) = make_git_repo().await;
         let (_t3, r3) = make_git_repo().await;
-        registry
-            .add(r1, Some("zebra".into()), None)
-            .await
-            .unwrap();
-        registry
-            .add(r2, Some("alpha".into()), None)
-            .await
-            .unwrap();
-        registry
-            .add(r3, Some("middle".into()), None)
-            .await
-            .unwrap();
+        registry.add(r1, Some("zebra".into()), None).await.unwrap();
+        registry.add(r2, Some("alpha".into()), None).await.unwrap();
+        registry.add(r3, Some("middle".into()), None).await.unwrap();
 
         let listed = registry.list().await.unwrap();
         let ids: Vec<_> = listed.iter().map(|p| p.id.as_str()).collect();
@@ -354,15 +345,14 @@ mod tests {
         let registry = FileSystemProjectRegistry::new(registry_root.path());
 
         let (_td, repo) = make_git_repo().await;
-        registry
-            .add(repo, Some("good".into()), None)
-            .await
-            .unwrap();
+        registry.add(repo, Some("good".into()), None).await.unwrap();
 
         // 手工在 root 里塞一个坏 meta 目录
         let bad_dir = registry_root.path().join("bad");
         fs::create_dir_all(&bad_dir).await.unwrap();
-        fs::write(bad_dir.join(META_FILENAME), "{not json").await.unwrap();
+        fs::write(bad_dir.join(META_FILENAME), "{not json")
+            .await
+            .unwrap();
 
         let listed = registry.list().await.unwrap();
         let ids: Vec<_> = listed.iter().map(|p| p.id.as_str()).collect();
@@ -373,8 +363,7 @@ mod tests {
     async fn list_empty_when_no_root() {
         // 故意指向不存在的 root——不该 fail，返空列表
         let nope = tempfile::tempdir().unwrap();
-        let registry =
-            FileSystemProjectRegistry::new(nope.path().join("nonexistent"));
+        let registry = FileSystemProjectRegistry::new(nope.path().join("nonexistent"));
         let listed = registry.list().await.unwrap();
         assert!(listed.is_empty());
     }
@@ -393,10 +382,7 @@ mod tests {
         let registry = FileSystemProjectRegistry::new(registry_root.path());
 
         let (_td, repo) = make_git_repo().await;
-        let added = registry
-            .add(repo, Some("erp".into()), None)
-            .await
-            .unwrap();
+        let added = registry.add(repo, Some("erp".into()), None).await.unwrap();
         let fetched = registry
             .get(&added.id)
             .await

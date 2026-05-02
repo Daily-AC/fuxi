@@ -496,6 +496,66 @@ fn summarize(k: &EventKind) -> String {
             short_id(&to.to_string()),
             one_line(error, 40)
         ),
+        WorkspaceCreated {
+            workspace_id,
+            layer,
+            ..
+        } => format!("ws+ {workspace_id} ({layer:?})"),
+        WorkspaceMutated {
+            workspace_id,
+            files_changed,
+        } => format!("ws~ {workspace_id} files={files_changed}"),
+        WorkspaceCommitted {
+            workspace_id,
+            commit_sha,
+            branch,
+        } => format!("ws✓ {workspace_id} {} on {branch}", short_id(commit_sha)),
+        WorkspaceArchived {
+            workspace_id,
+            reason,
+        } => format!("ws→archive {workspace_id} ({reason:?})"),
+        WorkspaceCollected { workspace_id } => format!("ws✗ collected {workspace_id}"),
+        WorkspaceQuotaExceeded {
+            project,
+            quota_kind,
+            requested,
+            limit,
+        } => format!("ws! quota {project} {quota_kind:?} {requested}>{limit}"),
+        WorkspacePromoted {
+            from_workspace_id,
+            to_role,
+            project,
+        } => format!("ws⇧ {from_workspace_id} → {project}/L3/{to_role}"),
+        DeliverableProduced {
+            task,
+            deliverable_kind,
+            files,
+            ..
+        } => format!(
+            "deliv+ {} [{:?}] files={}",
+            short_id(&task.to_string()),
+            deliverable_kind,
+            files.len()
+        ),
+        DeliverableAccepted { task, accepted_to } => format!(
+            "deliv✓ {} → {}",
+            short_id(&task.to_string()),
+            accepted_to
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(inbox)".into())
+        ),
+        DeliverableRejected { task, reason } => format!(
+            "deliv✗ {} {}",
+            short_id(&task.to_string()),
+            reason
+                .as_deref()
+                .map(|s| one_line(s, 40))
+                .unwrap_or_default()
+        ),
+        DeliverableExpired { task } => {
+            format!("deliv⌛ {}", short_id(&task.to_string()))
+        }
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -572,6 +632,20 @@ fn color_for(k: &EventKind) -> Color {
             Color::Yellow
         }
         AgentMessageFailed { .. } => Color::LightRed,
+
+        // workspace 一族 —— 物理工作区生灭，用 Green（与 Task 一族同色，
+        // 因都是"实体生命周期"）；quota 和 GC collected 用 LightRed 提醒资源压力。
+        WorkspaceCreated { .. }
+        | WorkspaceMutated { .. }
+        | WorkspaceCommitted { .. }
+        | WorkspaceArchived { .. }
+        | WorkspacePromoted { .. } => Color::Green,
+        WorkspaceCollected { .. } | WorkspaceQuotaExceeded { .. } => Color::LightRed,
+
+        // deliverable 一族 —— 用 LightYellow 与 AgentRequestReview 同色，
+        // 因都是"门客主动呈给玄女/用户"的同语义；rejected/expired 走 LightRed。
+        DeliverableProduced { .. } | DeliverableAccepted { .. } => Color::LightYellow,
+        DeliverableRejected { .. } | DeliverableExpired { .. } => Color::LightRed,
 
         Custom { .. } => Color::DarkGray,
     }

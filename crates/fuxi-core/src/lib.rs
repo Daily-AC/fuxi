@@ -14,7 +14,10 @@ pub mod trigger_lookup;
 pub mod workspace;
 
 pub use agent::{Agent, AgentCard, AgentProfile, AgentStatus};
-pub use event::{DeliverableKind, Event, EventKind, EventMeta, WorkerStatus};
+pub use event::{
+    ArchiveReason, DeliverableFileMeta, DeliverableKind, Event, EventKind, EventMeta, QuotaKind,
+    WorkerStatus, WorkspaceId, WorkspaceLayer,
+};
 pub use id::{AgentId, SessionId, TaskId};
 pub use project::{Project, ProjectId, slug_from_path};
 pub use runtime::{Runtime, RuntimeHandle};

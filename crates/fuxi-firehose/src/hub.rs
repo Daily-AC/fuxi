@@ -324,6 +324,17 @@ pub(crate) fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         AgentMessageDelivered { .. } => "agent_message_delivered",
         AgentMessageRead { .. } => "agent_message_read",
         AgentMessageFailed { .. } => "agent_message_failed",
+        WorkspaceCreated { .. } => "workspace_created",
+        WorkspaceMutated { .. } => "workspace_mutated",
+        WorkspaceCommitted { .. } => "workspace_committed",
+        WorkspaceArchived { .. } => "workspace_archived",
+        WorkspaceCollected { .. } => "workspace_collected",
+        WorkspaceQuotaExceeded { .. } => "workspace_quota_exceeded",
+        WorkspacePromoted { .. } => "workspace_promoted",
+        DeliverableProduced { .. } => "deliverable_produced",
+        DeliverableAccepted { .. } => "deliverable_accepted",
+        DeliverableRejected { .. } => "deliverable_rejected",
+        DeliverableExpired { .. } => "deliverable_expired",
         Custom { .. } => "custom",
     }
 }
