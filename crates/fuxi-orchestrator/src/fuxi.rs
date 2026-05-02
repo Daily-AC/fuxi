@@ -354,7 +354,7 @@ impl Fuxi {
     /// 默认走 sandbox 模式，再单独切换调用方。
     pub async fn spawn_worker_in_project_sandbox(
         &self,
-        profile: AgentProfile,
+        mut profile: AgentProfile,
         kind: WorkerKind,
         project_id: fuxi_core::ProjectId,
         role_for_sandbox: String,
@@ -378,6 +378,30 @@ impl Fuxi {
             .get_or_create(&role_for_sandbox)
             .await
             .map_err(|e| OrchestratorError::Other(format!("sandbox 创建失败: {e}")))?;
+
+        // 2.5 给门客 system_prompt 后段附「项目身份」段——让他知道自己住在
+        // 哪个项目的 sandbox 里，调 `fuxi deliverable produce --project ...` 时
+        // 自动用对的 slug。spawn 后所有 turn 都能看到这一段（agent 维度，跟
+        // dispatch 时的 [FUXI_TASK_ID=...] task 维度互补）。
+        // 注入到 profile.system_prompt 让 cc / codex 两 adapter 都生效——
+        // codex compose_prompt 直接 prepend；cc launch_and_register 也读 profile。
+        let project_context = format!(
+            "\n\n## 项目身份（Decision 21）\n\n你住在项目 `{slug}` 的 L3 持久 sandbox：\n\
+             - 工作目录：`{path}`\n\
+             - 长期 branch：`{branch}`\n\
+             - canonical 真项目：`{canonical}`\n\n\
+             调 `fuxi deliverable produce` / `fuxi project list` 等命令时，\
+             `--project` 参数填 `{slug}`。",
+            slug = project.id,
+            path = sandbox_handle.sandbox_path.display(),
+            branch = sandbox_handle.branch,
+            canonical = project.canonical_path.display(),
+        );
+        if profile.system_prompt.trim().is_empty() {
+            profile.system_prompt = project_context.trim().to_string();
+        } else {
+            profile.system_prompt.push_str(&project_context);
+        }
 
         // 3. 包成 borrowed WorkspaceHandle
         let agent_id = AgentId::new();
