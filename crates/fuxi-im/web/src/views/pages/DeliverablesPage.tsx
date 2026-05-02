@@ -1,9 +1,18 @@
-import { For, Show, createMemo, createResource, type Component } from "solid-js";
+import {
+  For,
+  Show,
+  createMemo,
+  createResource,
+  createSignal,
+  type Component,
+} from "solid-js";
+import { ApiError } from "~/lib/api";
 import { useApi } from "~/components/ApiProvider";
 import type {
   DeliverableEntry,
   DeliverableFileMeta,
   DeliverableKind,
+  DeliverableStatus,
 } from "~/types/api";
 import styles from "./DeliverablesPage.module.css";
 
@@ -25,61 +34,64 @@ const KIND_LABEL: Record<DeliverableKind, string> = {
   error_block: "错误阻塞",
 };
 
+const STATUS_LABEL: Record<DeliverableStatus, string> = {
+  pending: "待处理",
+  accepted: "已接收",
+  rejected: "已拒绝",
+  expired: "已过期",
+};
+
 export const DeliverablesPage: Component = () => {
+  const { client } = useApi();
+  const [data, { refetch }] = createResource(() => client.fetchDeliverables());
+
   return (
     <div class={styles.page} data-testid="page-deliverables">
       <header class={styles.header}>
         <h1 class={styles.title}>交付</h1>
       </header>
       <div class={styles.body}>
-        <RenderDeliverables />
+        <Show
+          when={data()}
+          fallback={
+            <Show
+              when={data.error}
+              fallback={
+                <p class={styles.muted} data-testid="deliverables-loading">
+                  加载中…
+                </p>
+              }
+            >
+              <p class={styles.errMsg} role="alert">
+                加载失败：{String(data.error)}
+              </p>
+            </Show>
+          }
+        >
+          <Show
+            when={data()!.deliverables.length > 0}
+            fallback={
+              <div class={styles.empty} data-testid="deliverables-empty">
+                <p class={styles.emptyTitle}>暂无交付</p>
+                <p class={styles.emptyHint}>门客把活做完会在这里出现</p>
+              </div>
+            }
+          >
+            <ul class={styles.list}>
+              <For each={data()!.deliverables}>
+                {(e) => <EntryCard entry={e} onChanged={() => void refetch()} />}
+              </For>
+            </ul>
+          </Show>
+        </Show>
       </div>
     </div>
   );
 };
 
-const RenderDeliverables: Component = () => {
-  const { client } = useApi();
-  const [data] = createResource(() => client.fetchDeliverables());
-
-  return (
-    <Show
-      when={data()}
-      fallback={
-        <Show
-          when={data.error}
-          fallback={
-            <p class={styles.muted} data-testid="deliverables-loading">
-              加载中…
-            </p>
-          }
-        >
-          <p class={styles.errMsg} role="alert">
-            加载失败：{String(data.error)}
-          </p>
-        </Show>
-      }
-    >
-      <Show
-        when={data()!.deliverables.length > 0}
-        fallback={
-          <div class={styles.empty} data-testid="deliverables-empty">
-            <p class={styles.emptyTitle}>暂无交付</p>
-            <p class={styles.emptyHint}>
-              门客把活做完会在这里出现
-            </p>
-          </div>
-        }
-      >
-        <ul class={styles.list}>
-          <For each={data()!.deliverables}>{(e) => <EntryCard entry={e} />}</For>
-        </ul>
-      </Show>
-    </Show>
-  );
-};
-
-const EntryCard: Component<{ entry: DeliverableEntry }> = (props) => {
+const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> = (
+  props,
+) => {
   const produced = (): string => {
     const t = new Date(props.entry.produced_at);
     if (Number.isNaN(t.getTime())) return props.entry.produced_at;
@@ -94,11 +106,40 @@ const EntryCard: Component<{ entry: DeliverableEntry }> = (props) => {
     const t = props.entry.task;
     return t.length > 8 ? t.slice(0, 8) : t;
   });
+  const { client } = useApi();
+  const [busy, setBusy] = createSignal(false);
+  const [err, setErr] = createSignal<string | null>(null);
+
+  const onAccept = async (): Promise<void> => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await client.acceptDeliverable(props.entry.project, props.entry.task);
+      props.onChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const onReject = async (): Promise<void> => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await client.rejectDeliverable(props.entry.project, props.entry.task);
+      props.onChanged();
+    } catch (e) {
+      setErr(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <li
       class={styles.card}
       data-testid={`deliverable-card-${props.entry.task}-${props.entry.kind}`}
+      data-status={props.entry.status}
     >
       <div class={styles.cardHead}>
         <span class={styles.cardKind}>
@@ -123,6 +164,45 @@ const EntryCard: Component<{ entry: DeliverableEntry }> = (props) => {
           )}
         </For>
       </ul>
+      <div class={styles.cardActions}>
+        <Show
+          when={props.entry.status === "pending"}
+          fallback={
+            <span
+              class={`${styles.statusBadge} ${
+                styles[`status_${props.entry.status}`] ?? ""
+              }`}
+              data-testid={`deliverable-status-${props.entry.task}`}
+            >
+              {STATUS_LABEL[props.entry.status]}
+            </span>
+          }
+        >
+          <button
+            type="button"
+            class={styles.btnReject}
+            disabled={busy()}
+            onClick={() => void onReject()}
+            data-testid={`deliverable-reject-${props.entry.task}`}
+          >
+            拒绝
+          </button>
+          <button
+            type="button"
+            class={styles.btnAccept}
+            disabled={busy()}
+            onClick={() => void onAccept()}
+            data-testid={`deliverable-accept-${props.entry.task}`}
+          >
+            {busy() ? "…" : "接收"}
+          </button>
+        </Show>
+      </div>
+      <Show when={err()}>
+        <p class={styles.errMsg} role="alert">
+          {err()}
+        </p>
+      </Show>
     </li>
   );
 };
