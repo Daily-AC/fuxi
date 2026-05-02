@@ -11,6 +11,8 @@ pub mod health;
 pub mod intervene;
 // β · #55 dist topology 节点 tab 数据源
 pub mod nodes;
+// Decision 21 phase 1：Project 注册表读视图
+pub mod projects;
 pub mod push;
 // β · #56 本地 worker onboarding：主密码 → secret/token + 静态脚本端点
 pub mod setup_worker;

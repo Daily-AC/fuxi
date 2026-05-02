@@ -16,6 +16,7 @@ use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
 use crate::uploads::UploadStore;
 use fuxi_orchestrator::Fuxi;
+use fuxi_workspace::FileSystemProjectRegistry;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,6 +44,10 @@ pub struct AppState {
     /// production 由 fuxi-cli 在 `im_dist::build_dist_layer` 后注入；
     /// `Option`：smoke / 单测默认 None；setup-worker handler 返 503。
     pub dist_secrets: Option<DistSecrets>,
+    /// Decision 21 phase 1：Project 注册表——`/api/projects` 数据源。
+    /// `Option`：smoke / 单测默认 None；handler 返 503。production
+    /// `fuxi im start` 用 `FileSystemProjectRegistry::with_default_root()` 注入。
+    pub project_registry: Option<Arc<FileSystemProjectRegistry>>,
 }
 
 /// β · #56 dist worker onboarding 派给本地 macOS 节点的三件套。
@@ -97,6 +102,7 @@ impl AppState {
             upload_store: None,
             nodes_provider: None,
             dist_secrets: None,
+            project_registry: None,
         }
     }
 
@@ -135,6 +141,12 @@ impl AppState {
     /// 用同一组 secret 配 [`with_nodes_provider`] 一并注入。
     pub fn with_dist_secrets(mut self, secrets: DistSecrets) -> Self {
         self.dist_secrets = Some(secrets);
+        self
+    }
+
+    /// Decision 21 phase 1：注入 Project 注册表，激活 `/api/projects` 端点。
+    pub fn with_project_registry(mut self, registry: FileSystemProjectRegistry) -> Self {
+        self.project_registry = Some(Arc::new(registry));
         self
     }
 }

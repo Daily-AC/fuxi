@@ -215,13 +215,24 @@ pub async fn run(args: StartArgs) -> Result<()> {
         controller_url,
     };
 
-    let app_state = AppState::new(fuxi.clone())
+    // Decision 21 phase 1：Project 注册表落 $HOME/.fuxi/projects/。
+    // $HOME 缺失时跳过注册表注入——/api/projects 会返 503，不致命。
+    let project_registry = fuxi_workspace::FileSystemProjectRegistry::with_default_root();
+
+    let app_state_base = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
         .with_im_push(im_push)
         .with_conv_store(conv_store.clone())
         .with_upload_store(upload_store)
         .with_nodes_provider(nodes_provider)
         .with_dist_secrets(dist_secrets);
+    let app_state = match project_registry {
+        Ok(reg) => app_state_base.with_project_registry(reg),
+        Err(e) => {
+            tracing::warn!("project_registry 未注入，/api/projects 将返 503: {e}");
+            app_state_base
+        }
+    };
 
     // 5. push hooks —— 订阅 EventBus 触发 web push（玄女 idle / task done）。
     //    必须在 fuxi 已 ready 之后挂；玄女 id 若此刻为 None 就 fallback 到内存
