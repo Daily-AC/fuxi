@@ -3,12 +3,15 @@ import { render } from "@solidjs/testing-library";
 import { ApiProvider, setApiOverride } from "~/components/ApiProvider";
 import { ProjectsPage } from "~/views/pages/ProjectsPage";
 import { createMockApi } from "../mocks/api";
-import type { ProjectsResponse } from "~/types/api";
+import type { ProjectsResponse, SandboxView } from "~/types/api";
 
 afterEach(() => setApiOverride(null));
 
-function setup(projects?: ProjectsResponse) {
-  const api = createMockApi({ projects });
+function setup(
+  projects?: ProjectsResponse,
+  sandboxesByProject?: Record<string, SandboxView[]>,
+) {
+  const api = createMockApi({ projects, sandboxesByProject });
   setApiOverride(api);
   return render(() => (
     <ApiProvider initialAuth="in" initialTab={2}>
@@ -90,6 +93,53 @@ describe("ProjectsPage", () => {
     const card = await findByTestId("project-card-erp");
     expect(card).toBeTruthy();
     expect(queryByTestId("projects-add-modal")).toBeNull(); // modal 关掉
+  });
+
+  it("renders sandbox list when project has L3 sandboxes", async () => {
+    const { findByTestId } = setup(
+      {
+        projects: [
+          {
+            id: "erp",
+            canonical_path: "/Users/e0_7/erp",
+            default_branch: "main",
+            created_at: "2026-05-02T10:00:00Z",
+          },
+        ],
+      },
+      {
+        erp: [
+          {
+            role: "luban",
+            workspace_id: "erp/L3/luban",
+            path: "/Users/e0_7/.fuxi/projects/erp/sandboxes/luban",
+            branch: "luban/erp-main",
+          },
+        ],
+      },
+    );
+    const list = await findByTestId("sandboxes-erp");
+    expect(list.textContent).toContain("luban");
+    expect(list.textContent).toContain("luban/erp-main");
+  });
+
+  it("renders empty hint when project has no sandbox", async () => {
+    const { findByTestId } = setup(
+      {
+        projects: [
+          {
+            id: "erp",
+            canonical_path: "/Users/e0_7/erp",
+            default_branch: "main",
+            created_at: "2026-05-02T10:00:00Z",
+          },
+        ],
+      },
+      { erp: [] },
+    );
+    const empty = await findByTestId("sandboxes-empty-erp");
+    expect(empty.textContent).toContain("暂无 sandbox");
+    expect(empty.textContent).toContain("fuxi spawn");
   });
 
   it("delete confirmation: cancel keeps card; confirm removes", async () => {

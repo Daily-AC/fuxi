@@ -18,6 +18,7 @@ import type {
   NodesResponse,
   ProjectsResponse,
   RejectDeliverableRequest,
+  SandboxesResponse,
   TasksOverview,
   Upload,
 } from "~/types/api";
@@ -63,6 +64,8 @@ export interface ApiClient {
   /** Decision 21 phase 1 · DELETE /api/projects/:id · 删项目（连带 sandboxes 等）。
    *  失败映射：404 not found / 400 非法 id。 */
   removeProject(id: string): Promise<void>;
+  /** Decision 21 phase 1 · GET /api/projects/{id}/sandboxes · 列项目的 L3 sandboxes。 */
+  fetchSandboxes(projectId: string): Promise<SandboxesResponse>;
   /** Decision 22 phase 1 · GET /api/deliverables · 跨项目交付收件箱（按 produced_at 倒序）。 */
   fetchDeliverables(): Promise<DeliverablesResponse>;
   /** Decision 22 phase 1 · 拼接交付文件直链 URL，给 <a href> / window.open 用。
@@ -168,6 +171,10 @@ export function createHttpClient(): ApiClient {
         throw new ApiError(res.status, body || res.statusText);
       }
     },
+    fetchSandboxes: (projectId) =>
+      jsonFetch<SandboxesResponse>(
+        `/api/projects/${encodeURIComponent(projectId)}/sandboxes`,
+      ),
     fetchDeliverables: () => jsonFetch<DeliverablesResponse>(`/api/deliverables`),
     deliverableFileUrl: (project, task, name) => {
       // backend wire 用裸 uuid，路由要 `task-<uuid>` 前缀；统一在前端拼合让调用方

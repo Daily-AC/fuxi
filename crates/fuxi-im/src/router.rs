@@ -53,6 +53,10 @@ pub fn build(state: AppState) -> Router {
             "/api/projects/{id}",
             axum::routing::delete(handlers::projects::remove_project),
         )
+        .route(
+            "/api/projects/{id}/sandboxes",
+            get(handlers::projects::list_sandboxes),
+        )
         // Decision 22 phase 1：交付收件箱列表 + 文件下载
         .route(
             "/api/deliverables",

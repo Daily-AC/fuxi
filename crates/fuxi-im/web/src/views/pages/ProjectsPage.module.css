@@ -131,6 +131,52 @@
   color: var(--text-muted);
 }
 
+/* ===== L3 sandbox 列表（每项目卡里展示） ===== */
+
+.sandboxEmpty {
+  margin: var(--space-1) 0 0;
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.sandboxList {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2);
+  background: var(--bg-elev);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sandboxRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-aux);
+}
+
+.sandboxRole {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+  min-width: 4em;
+}
+
+.sandboxBranch {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+}
+
+.sandboxPath {
+  color: var(--text-muted);
+  word-break: break-all;
+  flex: 1;
+}
+
 /* ===== 注册按钮 + 删除按钮 ===== */
 
 .addBtn {

@@ -15,6 +15,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use fuxi_core::ProjectId;
+use fuxi_workspace::PersistentSandboxManager;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -116,6 +117,61 @@ pub async fn remove_project(
         .await
         .map_err(|e| Error::Internal(format!("删项目失败: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `/api/projects/{id}/sandboxes` 单条响应——展示 L3 持久 sandbox 给 PWA。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxView {
+    /// L3 sandbox 关联的门客 role，比如 "luban"。
+    pub role: String,
+    /// `<project>/L3/<role>` 跨事件关联键（同 EventBus WorkspaceId 形态）。
+    pub workspace_id: String,
+    /// sandbox 在磁盘上的绝对路径——用户可 cd / IDE 打开。
+    pub path: PathBuf,
+    /// 长期 branch 名，比如 `luban/erp-main`。
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxesResponse {
+    pub sandboxes: Vec<SandboxView>,
+}
+
+/// `GET /api/projects/{id}/sandboxes` —— 列出某项目的所有 L3 持久 sandbox。
+///
+/// 数据源：扫 `<projects_root>/<project>/sandboxes/` 子目录。每个子目录名 = role。
+/// 不查 git workspace 也不动 fuxi shelf——纯 fs view，跟 spawn 解耦。
+pub async fn list_sandboxes(
+    State(state): State<AppState>,
+    AxumPath(id_raw): AxumPath<String>,
+) -> Result<Json<SandboxesResponse>> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let id = ProjectId::new(id_raw.clone())
+        .map_err(|e| Error::BadRequest(format!("非法 project id {id_raw:?}: {e}")))?;
+    let project = registry
+        .get(&id)
+        .await
+        .map_err(|e| Error::Internal(format!("project lookup 失败: {e}")))?
+        .ok_or_else(|| Error::NotFound(format!("project {id}")))?;
+
+    let mgr = PersistentSandboxManager::new(project.clone(), registry.root());
+    let handles = mgr
+        .list()
+        .await
+        .map_err(|e| Error::Internal(format!("list sandboxes 失败: {e}")))?;
+    let sandboxes = handles
+        .into_iter()
+        .map(|h| SandboxView {
+            role: h.role,
+            workspace_id: h.workspace_id.0,
+            path: h.sandbox_path,
+            branch: h.branch,
+        })
+        .collect();
+    Ok(Json(SandboxesResponse { sandboxes }))
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> Result<Json<ProjectsResponse>> {
@@ -329,6 +385,69 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_sandboxes_returns_existing_sandboxes() {
+        use fuxi_workspace::PersistentSandboxManager;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo_td, repo_path) = make_workspace_repo().await;
+        let project = registry
+            .add(repo_path, Some("erp".into()), None)
+            .await
+            .unwrap();
+
+        // 起两个 L3 sandbox（luban + pusong）
+        let mgr = PersistentSandboxManager::new(project.clone(), registry.root());
+        mgr.get_or_create("luban").await.unwrap();
+        mgr.get_or_create("pusong").await.unwrap();
+
+        // 起 router
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects/{id}/sandboxes", axum_get(list_sandboxes))
+            .with_state(state);
+
+        let req = Request::builder()
+            .uri("/api/projects/erp/sandboxes")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let sandboxes = v["sandboxes"].as_array().unwrap();
+        assert_eq!(sandboxes.len(), 2);
+        // 字典序：luban < pusong
+        assert_eq!(sandboxes[0]["role"], "luban");
+        assert_eq!(sandboxes[0]["workspace_id"], "erp/L3/luban");
+        assert_eq!(sandboxes[0]["branch"], "luban/erp-main");
+        assert_eq!(sandboxes[1]["role"], "pusong");
+    }
+
+    #[tokio::test]
+    async fn list_sandboxes_404_for_unknown_project() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects/{id}/sandboxes", axum_get(list_sandboxes))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/projects/nope/sandboxes")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

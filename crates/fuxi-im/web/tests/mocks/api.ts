@@ -16,6 +16,7 @@ import type {
   InterveneRequestV2,
   NodesResponse,
   ProjectsResponse,
+  SandboxView,
   StoredMessage,
   TasksOverview,
   Upload,
@@ -53,6 +54,8 @@ export interface MockState {
   projects?: ProjectsResponse;
   /** Decision 22 phase 1 · /api/deliverables 返回值。空 = { deliverables: [] }。*/
   deliverables?: DeliverablesResponse;
+  /** Decision 21 phase 1 · /api/projects/{id}/sandboxes 数据按 project_id 索引。 */
+  sandboxesByProject?: Record<string, SandboxView[]>;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -143,6 +146,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     nodes: initial?.nodes,
     projects: initial?.projects,
     deliverables: initial?.deliverables,
+    sandboxesByProject: initial?.sandboxesByProject,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -230,6 +234,11 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
         throw new ApiError(404, "not found");
       }
       state.projects = { projects: next };
+    },
+    fetchSandboxes: async (projectId) => {
+      // mock：从 state.sandboxesByProject 取（默认空）
+      const map = state.sandboxesByProject ?? {};
+      return { sandboxes: map[projectId] ?? [] };
     },
     fetchDeliverables: async (): Promise<DeliverablesResponse> =>
       state.deliverables ?? { deliverables: [] },
