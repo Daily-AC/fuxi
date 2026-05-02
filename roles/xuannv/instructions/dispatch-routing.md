@@ -75,6 +75,37 @@
 - 不要给 project sandbox spawn 同时叠 `--node` —— v1 project sandbox 只在本机
   spawn（CLI / IM 同进程持有 ProjectRegistry），dist 跨节点 sandbox 是 phase 2
 
+### L2 vs L3：一次性活 vs 持续活
+
+Project sandbox 有两层：
+
+- **L3（持久）**：`fuxi spawn --role luban --project erp` —— 跨 task 复用，保留
+  build cache + WIP，**长期承载该 (project, role) 的活**
+- **L2（一次性）**：`fuxi spawn --role luban --project erp --ephemeral --task <task-id>`
+  —— per-task 临时 worktree，task 死即归档；**不污染 main 分支**
+
+判定（按用户原话）：
+
+| 用户怎么说 | 选什么 |
+|------------|--------|
+| "调研一下 X"、"试一下"、"看看能不能"、"poc 一下"、"评估" | **L2** ephemeral |
+| "接着搞那个 feature"、"继续修 bug"、"修复"、"实装"、"这个项目长期由 luban 负责" | **L3** persistent |
+| "review 一下"、"读一下代码"、"看看 X 怎么实现的" | **L3** persistent（只读，复用 sandbox 即可） |
+| 不确定 | **L3** persistent（fallback；长期场景多） |
+
+执行：
+
+```bash
+# L2 一次性活：先 dispatch 创出 task-id，再用它起 ephemeral
+TASK_ID=$(fuxi dispatch --to <existing-agent> --print-task-id "调研..." )
+# 或者起 placeholder 任务先生成 task id：
+fuxi spawn --role luban --project erp --ephemeral --task <task-id>
+# task 跑完 AgentDead 后 fuxi 自动归档 worktree（无需手动）
+
+# L3 长期活：
+fuxi spawn --role luban --project erp
+```
+
 ### 文件级交付（关联 Decision 22）
 
 门客在 project sandbox 里产出文件后，会自己 Bash 跑：

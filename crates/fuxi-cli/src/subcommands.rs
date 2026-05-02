@@ -44,9 +44,29 @@ pub struct SpawnArgs {
     /// 不传 = 走旧 generic agent-id worktree 路径。
     #[arg(long)]
     pub project: Option<String>,
+    /// Decision 21 phase 2：走 L2 ephemeral worktree 而非 L3 持久 sandbox。
+    /// 一次性活用——`~/.fuxi/projects/<slug>/ephemeral/<task>/`，任务完后
+    /// 用 `fuxi sandbox archive` 归档；24h 后被 `fuxi sandbox sweep` 清掉。
+    /// **必须**配 `--project` 用；同时给 `--task <task-uuid>` 钉死 task id。
+    /// 不给 `--task` → 服务端拒。
+    #[arg(long, requires = "project")]
+    pub ephemeral: bool,
+    /// `--ephemeral` 模式下指定 task uuid。task-<uuid> 或裸 uuid 都行。
+    /// 跟 P2 召回的 `--recall-task` 互斥（召回是复用旧 task 的 worktree，
+    /// ephemeral 是为新 task 起 worktree）。
+    #[arg(long = "task", conflicts_with = "recall_task")]
+    pub task_for_ephemeral: Option<String>,
 }
 
 pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
+    let ephemeral_task =
+        if args.ephemeral {
+            Some(args.task_for_ephemeral.ok_or_else(|| {
+                anyhow!("--ephemeral 必须配 --task <task-uuid>（一次性 task 的 id）")
+            })?)
+        } else {
+            None
+        };
     let resp = client::send(Command::Spawn {
         role: args.role,
         name: args.name,
@@ -55,6 +75,7 @@ pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
         recall_task: args.recall_task,
         recall_role: args.recall_role,
         project: args.project,
+        ephemeral_task,
     })
     .await?;
     print_response(resp)
