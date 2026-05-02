@@ -70,6 +70,9 @@ enum Command {
     /// 项目管理：注册 / 列出 / 删除（Decision 21）。
     #[command(subcommand)]
     Project(ProjectCmd),
+    /// 文件级交付产物（Decision 22）—— 手动 produce 用。
+    #[command(subcommand)]
+    Deliverable(DeliverableCmd),
     /// 【调试】打印启动 banner 后退出——给主人挑样式用。
     #[command(hide = true)]
     Banner,
@@ -83,6 +86,13 @@ enum ProjectCmd {
     List(project_cmd::ProjectListArgs),
     /// 删除一个 project（连带 sandboxes / ephemeral / archive / deliverables）。
     Rm(project_cmd::ProjectRemoveArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum DeliverableCmd {
+    /// 手动产生一条 deliverable——给某 project 的某 task 落一组文件。
+    /// `fuxi deliverable produce --project erp --task task-... --kind research_summary file1 file2`
+    Produce(project_cmd::DeliverableProduceArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -180,6 +190,9 @@ async fn main() -> anyhow::Result<()> {
             ProjectCmd::Add(args) => project_cmd::run_add(args).await,
             ProjectCmd::List(args) => project_cmd::run_list(args).await,
             ProjectCmd::Rm(args) => project_cmd::run_remove(args).await,
+        },
+        Some(Command::Deliverable(d)) => match d {
+            DeliverableCmd::Produce(args) => project_cmd::run_deliverable_produce(args).await,
         },
     }
 }

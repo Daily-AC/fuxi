@@ -46,6 +46,15 @@ pub fn build(state: AppState) -> Router {
         .route("/api/nodes", get(handlers::nodes::list_nodes))
         // Decision 21 phase 1：Project 注册表读视图——PWA 项目列表
         .route("/api/projects", get(handlers::projects::list_projects))
+        // Decision 22 phase 1：交付收件箱列表 + 文件下载
+        .route(
+            "/api/deliverables",
+            get(handlers::deliverables::list_deliverables),
+        )
+        .route(
+            "/api/deliverables/{project}/{task}/files/{name}",
+            get(handlers::deliverables::download_file),
+        )
         // β · #56 worker onboarding——主密码鉴权派 secret/token + 静态脚本端点
         // setup-worker 路径在 cookie middleware is_exempt 已豁免（同 /api/auth/login）；
         // setup-local-worker.sh 不在 /api/* 自然过 layer，脚本本身无 secret
