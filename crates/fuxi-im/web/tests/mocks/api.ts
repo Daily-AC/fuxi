@@ -237,6 +237,21 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
       return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/files/${encodeURIComponent(name)}`;
     },
+    acceptDeliverable: async (_project, task) => {
+      // mock：把对应 task 的 entries status 都翻 "accepted"
+      const list = state.deliverables?.deliverables ?? [];
+      const next = list.map((e) =>
+        e.task === task ? { ...e, status: "accepted" as const } : e,
+      );
+      state.deliverables = { deliverables: next };
+    },
+    rejectDeliverable: async (_project, task) => {
+      const list = state.deliverables?.deliverables ?? [];
+      const next = list.map((e) =>
+        e.task === task ? { ...e, status: "rejected" as const } : e,
+      );
+      state.deliverables = { deliverables: next };
+    },
     fetchWorkerEvents: async (agentId: string): Promise<EventHistoryResponse> => ({
       events: state.events[`worker:${agentId}`] ?? [],
       next_cursor: null,

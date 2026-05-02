@@ -38,6 +38,7 @@ describe("DeliverablesPage", () => {
             { name: "data.csv", sha256: "fedcba0987654321", size_bytes: 1024 },
           ],
           produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
         },
       ],
     });
@@ -65,6 +66,7 @@ describe("DeliverablesPage", () => {
           kind: "code_change",
           files: [{ name: "patch.diff", sha256: "1234", size_bytes: 100 }],
           produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
         },
       ],
     });
@@ -73,6 +75,67 @@ describe("DeliverablesPage", () => {
     )) as HTMLAnchorElement;
     expect(link.href).toContain(`/api/deliverables/erp/task-${TASK_UUID}/files/patch.diff`);
     expect(link.getAttribute("download")).toBe("patch.diff");
+  });
+
+  it("accept button publishes accept and refetches → status changes to accepted", async () => {
+    const { findByTestId, queryByTestId } = setup({
+      deliverables: [
+        {
+          project: "erp",
+          task: TASK_UUID,
+          kind: "research_summary",
+          files: [{ name: "report.md", sha256: "abc", size_bytes: 100 }],
+          produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
+        },
+      ],
+    });
+    const acceptBtn = await findByTestId(`deliverable-accept-${TASK_UUID}`);
+    acceptBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    // 接受成功后 buttons 替换成 status badge
+    expect(queryByTestId(`deliverable-accept-${TASK_UUID}`)).toBeNull();
+    const badge = await findByTestId(`deliverable-status-${TASK_UUID}`);
+    expect(badge.textContent).toContain("已接收");
+  });
+
+  it("reject button publishes reject and refetches → status changes to rejected", async () => {
+    const { findByTestId, queryByTestId } = setup({
+      deliverables: [
+        {
+          project: "erp",
+          task: TASK_UUID,
+          kind: "research_summary",
+          files: [{ name: "report.md", sha256: "abc", size_bytes: 100 }],
+          produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
+        },
+      ],
+    });
+    (await findByTestId(`deliverable-reject-${TASK_UUID}`)).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(queryByTestId(`deliverable-reject-${TASK_UUID}`)).toBeNull();
+    const badge = await findByTestId(`deliverable-status-${TASK_UUID}`);
+    expect(badge.textContent).toContain("已拒绝");
+  });
+
+  it("non-pending entry shows status badge instead of buttons", async () => {
+    const { findByTestId, queryByTestId } = setup({
+      deliverables: [
+        {
+          project: "erp",
+          task: TASK_UUID,
+          kind: "research_summary",
+          files: [{ name: "x.md", sha256: "abc", size_bytes: 10 }],
+          produced_at: "2026-05-02T10:00:00Z",
+          status: "accepted",
+        },
+      ],
+    });
+    expect(queryByTestId(`deliverable-accept-${TASK_UUID}`)).toBeNull();
+    expect(queryByTestId(`deliverable-reject-${TASK_UUID}`)).toBeNull();
+    const badge = await findByTestId(`deliverable-status-${TASK_UUID}`);
+    expect(badge.textContent).toContain("已接收");
   });
 
   it("kind label maps each of 5 kinds", async () => {
@@ -84,6 +147,7 @@ describe("DeliverablesPage", () => {
           kind: "error_block",
           files: [{ name: "err.txt", sha256: "x", size_bytes: 10 }],
           produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
         },
       ],
     });

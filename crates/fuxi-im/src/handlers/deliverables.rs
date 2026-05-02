@@ -17,19 +17,34 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use chrono::{DateTime, Utc};
-use fuxi_core::{DeliverableFileMeta, DeliverableKind, ProjectId, TaskId};
+use fuxi_core::{
+    DeliverableFileMeta, DeliverableKind, Event, EventKind, EventMeta, ProjectId, TaskId,
+};
 use fuxi_workspace::{DeliverableManifest, FileSystemProjectRegistry};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::str::FromStr;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
-// PathBuf 在 tests 模块用——top-level 重新 import 给 tests use super::* 借
-#[cfg(test)]
-use std::path::PathBuf;
+/// 单 task 当前的处理状态（Decision 22 phase 2 加）—— `/api/deliverables`
+/// 列表项 + 单 task 视图都返此状态字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverableStatus {
+    /// 未处理——manifest 落了但用户没 accept/reject。
+    Pending,
+    Accepted,
+    Rejected,
+    Expired,
+}
 
 /// `/api/deliverables` 单条记录——一次 produce 调用 = 一条。
 ///
 /// 同一 task 多次 produce 出多条（按时间序）。前端可按 task 聚合显示。
+/// `status` 由扫描 events.db 里的 DeliverableAccepted/Rejected/Expired 事件
+/// 推出——按 task 维度，最近一条状态变化事件赢。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliverableEntry {
     pub project: ProjectId,
@@ -37,6 +52,25 @@ pub struct DeliverableEntry {
     pub kind: DeliverableKind,
     pub files: Vec<DeliverableFileMeta>,
     pub produced_at: DateTime<Utc>,
+    /// Decision 22 phase 2 加。任一未处理 entry 默认 `pending`；同 task 的多条
+    /// entries 共用同一 task-级 status（accept/reject 是 task 维度的，不分单条）。
+    pub status: DeliverableStatus,
+}
+
+/// `POST /api/deliverables/{project}/{task}/accept` 请求体。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AcceptRequest {
+    /// 用户在 PWA 指定的目标路径——可选；不传 = inbox 模式（文件留在 deliverables/）。
+    /// v1 phase 2 仅记事件，不真实拷贝文件（拷贝逻辑留 phase 3）。
+    #[serde(default)]
+    pub accepted_to: Option<PathBuf>,
+}
+
+/// `POST /api/deliverables/{project}/{task}/reject` 请求体。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RejectRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,9 +88,115 @@ pub async fn list_deliverables(
     let mut all = collect_all_deliverables(registry)
         .await
         .map_err(|e| Error::Internal(format!("扫 deliverables 失败: {e}")))?;
+    // 叠加 task 维度的 accept/reject/expired 状态。
+    let status_by_task = scan_task_status(&state).await?;
+    for entry in &mut all {
+        if let Some(s) = status_by_task.get(&entry.task) {
+            entry.status = *s;
+        }
+    }
     // 倒序：新的在前
     all.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
     Ok(Json(DeliverablesResponse { deliverables: all }))
+}
+
+/// `POST /api/deliverables/{project}/{task}/accept` —— 标记交付已接收。
+///
+/// v1 phase 2：仅 publish DeliverableAccepted 事件。文件**不**真实拷贝到
+/// `accepted_to`——拷贝逻辑留 phase 3，避免本期跨大量 path 边界 case 验证。
+/// 用户当前可手动 cp 或 PWA 下载链接拿。
+pub async fn accept_deliverable(
+    State(state): State<AppState>,
+    AxumPath((project_raw, task_raw)): AxumPath<(String, String)>,
+    Json(body): Json<AcceptRequest>,
+) -> Result<StatusCode> {
+    let (project_id, task_id) = parse_project_and_task(&state, &project_raw, &task_raw).await?;
+    let mut meta = EventMeta::now();
+    meta.task = Some(task_id);
+    let _ = state.fuxi.bus().publish(Event {
+        meta,
+        kind: EventKind::DeliverableAccepted {
+            task: task_id,
+            accepted_to: body.accepted_to,
+        },
+    });
+    let _ = project_id; // project 校验用，事件本身不带 project（meta.task 足够）
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/deliverables/{project}/{task}/reject`。
+pub async fn reject_deliverable(
+    State(state): State<AppState>,
+    AxumPath((project_raw, task_raw)): AxumPath<(String, String)>,
+    Json(body): Json<RejectRequest>,
+) -> Result<StatusCode> {
+    let (_project, task_id) = parse_project_and_task(&state, &project_raw, &task_raw).await?;
+    let mut meta = EventMeta::now();
+    meta.task = Some(task_id);
+    let _ = state.fuxi.bus().publish(Event {
+        meta,
+        kind: EventKind::DeliverableRejected {
+            task: task_id,
+            reason: body.reason,
+        },
+    });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 校验 + 解析路径段为 (ProjectId, TaskId)。统一 accept/reject 两端点用。
+///
+/// 失败映射：project 不存在 / task 格式错 → 404；id 非法 slug → 400。
+async fn parse_project_and_task(
+    state: &AppState,
+    project_raw: &str,
+    task_raw: &str,
+) -> Result<(ProjectId, TaskId)> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let project_id = ProjectId::new(project_raw.to_string())
+        .map_err(|_| Error::NotFound(format!("project {project_raw}")))?;
+    if registry
+        .get(&project_id)
+        .await
+        .map_err(|e| Error::Internal(format!("project lookup 失败: {e}")))?
+        .is_none()
+    {
+        return Err(Error::NotFound(format!("project {project_id}")));
+    }
+    // task path 通常是 `task-<uuid>`，但也兼容裸 uuid
+    let trimmed = task_raw.strip_prefix("task-").unwrap_or(task_raw);
+    let uuid = uuid::Uuid::from_str(trimmed)
+        .map_err(|_| Error::BadRequest(format!("task id 不是合法 UUID: {task_raw}")))?;
+    Ok((project_id, TaskId::from(uuid)))
+}
+
+/// 扫 events.db 里的 DeliverableAccepted / Rejected / Expired——按 task 维度推出
+/// 当前 status。最近一条事件赢（按 rowid 升序遍历，覆盖 update 取末态）。
+async fn scan_task_status(state: &AppState) -> Result<HashMap<TaskId, DeliverableStatus>> {
+    let store = state.fuxi.bus().store();
+    let mut out = HashMap::new();
+    for kind_tag in [
+        "deliverable_accepted",
+        "deliverable_rejected",
+        "deliverable_expired",
+    ] {
+        let events = store
+            .events_by_kind(kind_tag)
+            .await
+            .map_err(|e| Error::Internal(format!("scan {kind_tag} 失败: {e}")))?;
+        for ev in events {
+            let (task, status) = match ev.kind {
+                EventKind::DeliverableAccepted { task, .. } => (task, DeliverableStatus::Accepted),
+                EventKind::DeliverableRejected { task, .. } => (task, DeliverableStatus::Rejected),
+                EventKind::DeliverableExpired { task } => (task, DeliverableStatus::Expired),
+                _ => continue,
+            };
+            out.insert(task, status); // 末写胜（events_by_kind 返 rowid 升序）
+        }
+    }
+    Ok(out)
 }
 
 /// `GET /api/deliverables/:project/:task/files/:name` —— 下载交付文件。
@@ -202,6 +342,7 @@ async fn collect_all_deliverables(
                     kind: entry.kind,
                     files: entry.files,
                     produced_at: entry.produced_at,
+                    status: DeliverableStatus::Pending,
                 });
             }
         }
@@ -371,6 +512,144 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         // 应被 BadRequest 或 NotFound 拒绝
         assert_ne!(resp.status(), StatusCode::OK, "path traversal 不该 200");
+    }
+
+    #[tokio::test]
+    async fn accept_publishes_event_and_status_changes() {
+        use axum::routing::post as axum_post;
+
+        // 不复用 make_app_with_data——本 test 要装两端点（list + accept）共用同一
+        // state，重建更直接。
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo_td, repo) = make_repo().await;
+        let project_obj = registry.add(repo, Some("erp".into()), None).await.unwrap();
+
+        // 落一条 deliverable
+        let task = TaskId::new();
+        let mgr = DeliverablesManager::new(project_obj.id.clone(), registry.root());
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("report.md");
+        tokio::fs::write(&src, "x").await.unwrap();
+        mgr.produce(task, DeliverableKind::ResearchSummary, &[src])
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(ws_dir.path()));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/deliverables", axum_get(list_deliverables))
+            .route(
+                "/api/deliverables/{project}/{task}/accept",
+                axum_post(accept_deliverable),
+            )
+            .with_state(state);
+
+        // 1. POST accept
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/deliverables/erp/task-{}/accept", task.0))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"accepted_to":"/tmp/keep.md"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // 给 EventStore writer 一点 flush 时间（broadcast → store 异步）
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 2. GET 列表 status 应是 accepted
+        let req2 = Request::builder()
+            .uri("/api/deliverables")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        let bytes = to_bytes(resp2.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = v["deliverables"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["status"], "accepted");
+    }
+
+    #[tokio::test]
+    async fn reject_publishes_event_and_status_changes() {
+        use axum::routing::post as axum_post;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo_td, repo) = make_repo().await;
+        let project_obj = registry.add(repo, Some("erp".into()), None).await.unwrap();
+
+        let task = TaskId::new();
+        let mgr = DeliverablesManager::new(project_obj.id.clone(), registry.root());
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("x.md");
+        tokio::fs::write(&src, "y").await.unwrap();
+        mgr.produce(task, DeliverableKind::ResearchSummary, &[src])
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(ws_dir.path()));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/deliverables", axum_get(list_deliverables))
+            .route(
+                "/api/deliverables/{project}/{task}/reject",
+                axum_post(reject_deliverable),
+            )
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/deliverables/erp/task-{}/reject", task.0))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"reason":"内容不对"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let req2 = Request::builder()
+            .uri("/api/deliverables")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        let bytes = to_bytes(resp2.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["deliverables"][0]["status"], "rejected");
+    }
+
+    #[tokio::test]
+    async fn accept_404_for_unknown_project() {
+        use axum::routing::post as axum_post;
+        let registry_root = tempfile::tempdir().unwrap();
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(ws_dir.path()));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/deliverables/{project}/{task}/accept",
+                axum_post(accept_deliverable),
+            )
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/deliverables/no-such/task-00000000-0000-0000-0000-000000000000/accept")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

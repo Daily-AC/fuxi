@@ -62,6 +62,15 @@ pub fn build(state: AppState) -> Router {
             "/api/deliverables/{project}/{task}/files/{name}",
             get(handlers::deliverables::download_file),
         )
+        // Decision 22 phase 2：用户接收 / 拒绝（POST publish 事件，phase 3 加文件 copy）
+        .route(
+            "/api/deliverables/{project}/{task}/accept",
+            post(handlers::deliverables::accept_deliverable),
+        )
+        .route(
+            "/api/deliverables/{project}/{task}/reject",
+            post(handlers::deliverables::reject_deliverable),
+        )
         // β · #56 worker onboarding——主密码鉴权派 secret/token + 静态脚本端点
         // setup-worker 路径在 cookie middleware is_exempt 已豁免（同 /api/auth/login）；
         // setup-local-worker.sh 不在 /api/* 自然过 layer，脚本本身无 secret

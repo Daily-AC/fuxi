@@ -9,6 +9,7 @@ import type {
   VapidPubResponse,
 } from "~/types/events";
 import type {
+  AcceptDeliverableRequest,
   AddProjectRequest,
   AddProjectResponse,
   ConversationHistoryResponse,
@@ -16,6 +17,7 @@ import type {
   InterveneRequestV2,
   NodesResponse,
   ProjectsResponse,
+  RejectDeliverableRequest,
   TasksOverview,
   Upload,
 } from "~/types/api";
@@ -66,6 +68,18 @@ export interface ApiClient {
   /** Decision 22 phase 1 · 拼接交付文件直链 URL，给 <a href> / window.open 用。
    *  注意 task 在 backend wire 是裸 uuid，但路由用的是 `task-<uuid>`——前端拼时加前缀。 */
   deliverableFileUrl(project: string, task: string, name: string): string;
+  /** Decision 22 phase 2 · 接收交付（POST → 后端 publish DeliverableAccepted 事件）。 */
+  acceptDeliverable(
+    project: string,
+    task: string,
+    req?: AcceptDeliverableRequest,
+  ): Promise<void>;
+  /** Decision 22 phase 2 · 拒绝交付。 */
+  rejectDeliverable(
+    project: string,
+    task: string,
+    req?: RejectDeliverableRequest,
+  ): Promise<void>;
   /** #N3 私聊页 · 拉门客历史（β #N5 / #27 目标契约）。
    *  filter by meta.agent==agent_id；事件 kind 白名单见 spec §私聊页"事件 filter"。*/
   fetchWorkerEvents(agentId: string, fromCursor?: string): Promise<EventHistoryResponse>;
@@ -160,6 +174,34 @@ export function createHttpClient(): ApiClient {
       // 直接传 task uuid 拼下载 URL 不易出错。
       const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
       return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/files/${encodeURIComponent(name)}`;
+    },
+    acceptDeliverable: async (project, task, req) => {
+      const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
+      const url = `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/accept`;
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers: jsonHeaders,
+        body: JSON.stringify(req ?? {}),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new ApiError(res.status, body || res.statusText);
+      }
+    },
+    rejectDeliverable: async (project, task, req) => {
+      const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
+      const url = `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/reject`;
+      const res = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers: jsonHeaders,
+        body: JSON.stringify(req ?? {}),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new ApiError(res.status, body || res.statusText);
+      }
     },
     fetchWorkerEvents: (agentId, from) => {
       const q = from ? `?from=${encodeURIComponent(from)}` : "";

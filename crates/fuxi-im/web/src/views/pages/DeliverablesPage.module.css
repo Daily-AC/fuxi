@@ -180,3 +180,65 @@
 .fileSha {
   color: var(--text-muted);
 }
+
+/* ===== Accept / Reject 按钮 + status badge（Decision 22 phase 2） ===== */
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border-subtle, var(--border));
+  padding-top: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.btnAccept,
+.btnReject {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  font-size: var(--size-aux);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.btnAccept {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
+}
+
+.btnReject {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.btnAccept:disabled,
+.btnReject:disabled {
+  opacity: 0.5;
+}
+
+.statusBadge {
+  font-size: var(--size-aux);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev);
+  color: var(--text-muted);
+}
+
+.status_accepted {
+  background: rgba(64, 192, 96, 0.15);
+  color: rgb(120, 220, 140);
+}
+
+.status_rejected {
+  background: rgba(220, 64, 64, 0.15);
+  color: rgb(240, 130, 130);
+}
+
+.status_expired {
+  background: var(--bg-elev);
+  color: var(--text-muted);
+}

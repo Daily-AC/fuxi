@@ -184,6 +184,8 @@ export interface DeliverableFileMeta {
   size_bytes: number;
 }
 
+export type DeliverableStatus = "pending" | "accepted" | "rejected" | "expired";
+
 /** 一次 produce 调用 = 一条 entry。同 task 多次产出多条。 */
 export interface DeliverableEntry {
   project: string;
@@ -193,6 +195,21 @@ export interface DeliverableEntry {
   files: DeliverableFileMeta[];
   /** ISO 8601 UTC。 */
   produced_at: string;
+  /** Decision 22 phase 2：处理状态。pending = 待用户接收/拒绝；accepted/rejected/expired
+   *  = 已处理。同 task 的多 entries 共用同一 task-级 status。 */
+  status: DeliverableStatus;
+}
+
+/** POST /api/deliverables/{project}/{task}/accept 请求体。 */
+export interface AcceptDeliverableRequest {
+  /** 接收文件落地的目标路径。可选；不传 = 留在 inbox 不外迁（v1 phase 2 仅记
+   *  事件，不真实拷贝；填了也是审计用）。 */
+  accepted_to?: string;
+}
+
+/** POST /api/deliverables/{project}/{task}/reject 请求体。 */
+export interface RejectDeliverableRequest {
+  reason?: string;
 }
 
 export interface DeliverablesResponse {
