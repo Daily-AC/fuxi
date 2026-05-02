@@ -13,6 +13,7 @@ import type {
 import type {
   ConversationHistoryResponse,
   DeliverablesResponse,
+  EphemeralResponse,
   InterveneRequestV2,
   NodesResponse,
   ProjectsResponse,
@@ -56,6 +57,8 @@ export interface MockState {
   deliverables?: DeliverablesResponse;
   /** Decision 21 phase 1 · /api/projects/{id}/sandboxes 数据按 project_id 索引。 */
   sandboxesByProject?: Record<string, SandboxView[]>;
+  /** Decision 21 phase 3 · /api/projects/{id}/ephemeral 数据按 project_id 索引。 */
+  ephemeralByProject?: Record<string, EphemeralResponse>;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -147,6 +150,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     projects: initial?.projects,
     deliverables: initial?.deliverables,
     sandboxesByProject: initial?.sandboxesByProject,
+    ephemeralByProject: initial?.ephemeralByProject,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -239,6 +243,10 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       // mock：从 state.sandboxesByProject 取（默认空）
       const map = state.sandboxesByProject ?? {};
       return { sandboxes: map[projectId] ?? [] };
+    },
+    fetchEphemeral: async (projectId) => {
+      const map = state.ephemeralByProject ?? {};
+      return map[projectId] ?? { active: [], archived: [] };
     },
     fetchDeliverables: async (): Promise<DeliverablesResponse> =>
       state.deliverables ?? { deliverables: [] },

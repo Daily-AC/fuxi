@@ -105,10 +105,14 @@ const ProjectCard: Component<{ project: ProjectView; onChanged: () => void }> = 
       day: "2-digit",
     });
   };
-  const { client } = useApi();
+  const { client, navPush } = useApi();
   const [confirming, setConfirming] = createSignal(false);
   const [deleting, setDeleting] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+
+  const openDetail = (): void => {
+    navPush({ kind: "project", project_id: props.project.id });
+  };
 
   const onDelete = async (): Promise<void> => {
     setDeleting(true);
@@ -129,18 +133,27 @@ const ProjectCard: Component<{ project: ProjectView; onChanged: () => void }> = 
       class={styles.card}
       data-testid={`project-card-${props.project.id}`}
     >
-      <div class={styles.cardHead}>
-        <span class={styles.cardId}>{props.project.id}</span>
-        <span class={styles.cardBranch}>
-          <span class={styles.branchLabel}>默认分支</span>
-          <span class={`${styles.branchValue} mono`}>
-            {props.project.default_branch}
+      <button
+        type="button"
+        class={styles.cardHeadBtn}
+        onClick={openDetail}
+        data-testid={`project-open-${props.project.id}`}
+        aria-label={`查看 ${props.project.id} 详情`}
+      >
+        <div class={styles.cardHead}>
+          <span class={styles.cardId}>{props.project.id}</span>
+          <span class={styles.cardBranch}>
+            <span class={styles.branchLabel}>默认分支</span>
+            <span class={`${styles.branchValue} mono`}>
+              {props.project.default_branch}
+            </span>
           </span>
-        </span>
-      </div>
-      <div class={`${styles.cardPath} mono`} title={props.project.canonical_path}>
-        {props.project.canonical_path}
-      </div>
+          <span class={styles.cardChevron} aria-hidden="true">›</span>
+        </div>
+        <div class={`${styles.cardPath} mono`} title={props.project.canonical_path}>
+          {props.project.canonical_path}
+        </div>
+      </button>
       <SandboxList projectId={props.project.id} />
       <div class={styles.cardMeta}>
         <time class={styles.cardCreated}>注册于 {created()}</time>

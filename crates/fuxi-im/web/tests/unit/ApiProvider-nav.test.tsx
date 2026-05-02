@@ -69,7 +69,10 @@ describe("ApiProvider · nav state (v3)", () => {
       const navId = (): string => {
         const r = navRoute();
         if (!r) return "null";
-        return r.kind === "task" ? r.task_id : r.agent_id;
+        if (r.kind === "task") return r.task_id;
+        if (r.kind === "worker") return r.agent_id;
+        if (r.kind === "project") return r.project_id;
+        return r.task_id;
       };
       return (
         <div>
@@ -105,7 +108,10 @@ describe("ApiProvider · nav state (v3)", () => {
       const id = (): string => {
         const r = navRoute();
         if (!r) return "null";
-        return r.kind === "task" ? r.task_id : r.agent_id;
+        if (r.kind === "task") return r.task_id;
+        if (r.kind === "worker") return r.agent_id;
+        if (r.kind === "project") return r.project_id;
+        return r.task_id;
       };
       return <span data-testid="nav-now">{id()}</span>;
     };
@@ -130,7 +136,10 @@ describe("ApiProvider · nav state (v3)", () => {
       const id = (): string => {
         const r = navRoute();
         if (!r) return "null";
-        return r.kind === "task" ? r.task_id : r.agent_id;
+        if (r.kind === "task") return r.task_id;
+        if (r.kind === "worker") return r.agent_id;
+        if (r.kind === "project") return r.project_id;
+        return r.task_id;
       };
       return <span data-testid="nav-now">{id()}</span>;
     };

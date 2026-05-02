@@ -106,9 +106,17 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
     const t = props.entry.task;
     return t.length > 8 ? t.slice(0, 8) : t;
   });
-  const { client } = useApi();
+  const { client, navPush } = useApi();
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
+
+  const openDetail = (): void => {
+    navPush({
+      kind: "deliverable",
+      project_id: props.entry.project,
+      task_id: props.entry.task,
+    });
+  };
 
   const onAccept = async (): Promise<void> => {
     setBusy(true);
@@ -141,18 +149,27 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
       data-testid={`deliverable-card-${props.entry.task}-${props.entry.kind}`}
       data-status={props.entry.status}
     >
-      <div class={styles.cardHead}>
-        <span class={styles.cardKind}>
-          {KIND_LABEL[props.entry.kind] ?? props.entry.kind}
-        </span>
-        <span class={styles.cardMeta}>
-          <span class={styles.metaProj}>{props.entry.project}</span>
-          <span class={styles.metaSep} aria-hidden="true">·</span>
-          <span class={`${styles.metaTask} mono`}>task-{taskShort()}</span>
-          <span class={styles.metaSep} aria-hidden="true">·</span>
-          <time class={styles.metaTime}>{produced()}</time>
-        </span>
-      </div>
+      <button
+        type="button"
+        class={styles.cardHeadBtn}
+        onClick={openDetail}
+        data-testid={`deliverable-open-${props.entry.task}`}
+        aria-label="查看交付详情"
+      >
+        <div class={styles.cardHead}>
+          <span class={styles.cardKind}>
+            {KIND_LABEL[props.entry.kind] ?? props.entry.kind}
+          </span>
+          <span class={styles.cardMeta}>
+            <span class={styles.metaProj}>{props.entry.project}</span>
+            <span class={styles.metaSep} aria-hidden="true">·</span>
+            <span class={`${styles.metaTask} mono`}>task-{taskShort()}</span>
+            <span class={styles.metaSep} aria-hidden="true">·</span>
+            <time class={styles.metaTime}>{produced()}</time>
+            <span class={styles.cardChevron} aria-hidden="true">›</span>
+          </span>
+        </div>
+      </button>
       <ul class={styles.files}>
         <For each={props.entry.files}>
           {(f) => (

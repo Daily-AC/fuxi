@@ -183,6 +183,36 @@ export interface SandboxesResponse {
   sandboxes: SandboxView[];
 }
 
+// ---------- Decision 21 phase 3 · L2 ephemeral 工作区视图 ----------
+
+/** L2 active worktree——尚未归档的一次性工作区。 */
+export interface EphemeralActiveView {
+  /** task 显示形 `task-<uuid>`。 */
+  task: string;
+  /** `<project>/L2/<task-uuid>` 跨事件关联键。 */
+  workspace_id: string;
+  /** 一次性 branch（`task/<uuid>`）。 */
+  branch: string;
+  /** worktree 物理路径。 */
+  path: string;
+}
+
+/** L2 已归档 worktree——24h 内 PWA 可见，逾期 GC 删。 */
+export interface EphemeralArchivedView {
+  task: string;
+  workspace_id: string;
+  branch: string;
+  /** ISO 8601 UTC。 */
+  archived_at: string;
+  /** archive 物理目录路径。 */
+  archive_path: string;
+}
+
+export interface EphemeralResponse {
+  active: EphemeralActiveView[];
+  archived: EphemeralArchivedView[];
+}
+
 // ---------- Decision 22 phase 1 · 交付收件箱视图 ----------
 
 /** Decision 13 五类 deliverable_kind。 */
