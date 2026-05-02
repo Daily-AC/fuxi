@@ -828,23 +828,15 @@ impl Fuxi {
     }
 
     pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
-        // Decision 22 phase 1：在派活前给 task.description 注入
-        // [FUXI_TASK_ID=task-<uuid>]，让门客在 Bash 里跑
-        // `fuxi deliverable produce --task ...` 时能拿到当前 task uuid，
-        // 不用玄女主动告诉。黑名单（xuannv / extractor）跳过避免污染对话。
-        // 局限：role 从 shelf 现取，shelf 没该 agent 时（dist 派 placeholder）
-        // 跳过注入——v1 接受这个 corner case。
-        let task = {
-            let role = self
-                .shelf
-                .get_agent(agent_id)
-                .await
-                .map(|a| a.card().profile.role.clone());
-            match role {
-                Some(r) => Self::maybe_inject_task_id(&r, task),
-                None => task,
-            }
-        };
+        // Decision 22 phase 1：把 [FUXI_TASK_ID=...] 注入要送给 agent 的 task copy。
+        // 事件流（TaskCreated 等）仍用**原** description——审计保真，不被平台
+        // marker 污染。注入只为让门客 Bash 里跑 `fuxi deliverable produce --task`
+        // 能 grep 到 task uuid。黑名单（xuannv / extractor）跳过。
+        let inject_role = self
+            .shelf
+            .get_agent(agent_id)
+            .await
+            .map(|a| a.card().profile.role.clone());
 
         // β · #57 routing 决策树（spec gap e）——pinned_node / required_tags 非空 →
         // 走 dist enqueue（远端 worker 跑），否则继续本地 spawn / 已有 agent 路径。
@@ -917,7 +909,12 @@ impl Fuxi {
                     task_id: Some(task.id.to_string()),
                     role: role_for_worker,
                 };
-                let _job_id = enqueuer.enqueue(&task, opts).await?;
+                // dist 路径也注入——远端 worker 跑 cc，鲁班 prompt 应能看到 task_id
+                let task_for_worker = match &inject_role {
+                    Some(r) => Self::maybe_inject_task_id(r, task),
+                    None => task,
+                };
+                let _job_id = enqueuer.enqueue(&task_for_worker, opts).await?;
                 return Ok(());
             }
             // enqueuer 未注入但 task 要 dist——降级到本地 spawn + warn
@@ -965,7 +962,13 @@ impl Fuxi {
 
         self.shelf.set_status(agent_id, ShelfStatus::Busy).await;
 
-        let mut rx = agent.dispatch(task).await?;
+        // 本地 spawn 路径：注入 [FUXI_TASK_ID=...] 到送给 agent 的 task copy
+        // （事件已发了原 description，agent 看到带 marker 的版本不污染审计）。
+        let task_for_agent = match inject_role {
+            Some(r) => Self::maybe_inject_task_id(&r, task),
+            None => task,
+        };
+        let mut rx = agent.dispatch(task_for_agent).await?;
         let bus = self.bus.clone();
         let shelf = self.shelf.clone();
         // P2 召回：把 sink 和 agent 引用 clone 进 pump——Done 时 best-effort 入库。
