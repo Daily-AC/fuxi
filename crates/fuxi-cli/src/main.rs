@@ -73,6 +73,9 @@ enum Command {
     /// 文件级交付产物（Decision 22）—— 手动 produce 用。
     #[command(subcommand)]
     Deliverable(DeliverableCmd),
+    /// L3 持久 sandbox 管理（Decision 21）—— per-门客 per-project 长期工作区。
+    #[command(subcommand)]
+    Sandbox(SandboxCmd),
     /// 【调试】打印启动 banner 后退出——给主人挑样式用。
     #[command(hide = true)]
     Banner,
@@ -93,6 +96,16 @@ enum DeliverableCmd {
     /// 手动产生一条 deliverable——给某 project 的某 task 落一组文件。
     /// `fuxi deliverable produce --project erp --task task-... --kind research_summary file1 file2`
     Produce(project_cmd::DeliverableProduceArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum SandboxCmd {
+    /// 列出某项目的所有 L3 持久 sandbox。
+    /// `fuxi sandbox list --project erp`
+    List(project_cmd::SandboxListArgs),
+    /// 退役某项目下某 role 的 L3 sandbox（destructive：丢未 commit 的 WIP）。
+    /// `fuxi sandbox retire --project erp --role luban`
+    Retire(project_cmd::SandboxRetireArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -193,6 +206,10 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Command::Deliverable(d)) => match d {
             DeliverableCmd::Produce(args) => project_cmd::run_deliverable_produce(args).await,
+        },
+        Some(Command::Sandbox(s)) => match s {
+            SandboxCmd::List(args) => project_cmd::run_sandbox_list(args).await,
+            SandboxCmd::Retire(args) => project_cmd::run_sandbox_retire(args).await,
         },
     }
 }
