@@ -15,7 +15,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use fuxi_core::ProjectId;
-use fuxi_workspace::PersistentSandboxManager;
+use fuxi_workspace::{EphemeralWorkspaceManager, PersistentSandboxManager};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -172,6 +172,88 @@ pub async fn list_sandboxes(
         })
         .collect();
     Ok(Json(SandboxesResponse { sandboxes }))
+}
+
+/// L2 ephemeral active 单条响应——展示给 PWA 项目详情页。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralActiveView {
+    /// task uuid 显示形（`task-<uuid>`）。
+    pub task: String,
+    /// `<project>/L2/<task-uuid>`。
+    pub workspace_id: String,
+    /// 一次性 branch（`task/<uuid>`）。
+    pub branch: String,
+    /// 实际 worktree 路径（用户 cd / IDE 用）。
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralArchivedView {
+    pub task: String,
+    pub workspace_id: String,
+    pub branch: String,
+    /// 归档时间——前端可用来显示 "x 小时前 archived"。
+    pub archived_at: DateTime<Utc>,
+    /// archive 物理目录绝对路径（用户可手动取回 / IDE diff 用）。
+    pub archive_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EphemeralResponse {
+    pub active: Vec<EphemeralActiveView>,
+    pub archived: Vec<EphemeralArchivedView>,
+}
+
+/// `GET /api/projects/{id}/ephemeral` —— 列出某项目的 L2 ephemeral 工作区
+/// （active + archived）。Decision 21 phase 3 的 PWA 项目详情页数据源。
+pub async fn list_ephemeral(
+    State(state): State<AppState>,
+    AxumPath(id_raw): AxumPath<String>,
+) -> Result<Json<EphemeralResponse>> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let id = ProjectId::new(id_raw.clone())
+        .map_err(|e| Error::BadRequest(format!("非法 project id {id_raw:?}: {e}")))?;
+    let project = registry
+        .get(&id)
+        .await
+        .map_err(|e| Error::Internal(format!("project lookup 失败: {e}")))?
+        .ok_or_else(|| Error::NotFound(format!("project {id}")))?;
+
+    let mgr = EphemeralWorkspaceManager::new(project.clone(), registry.root());
+    let active = mgr
+        .list_active()
+        .await
+        .map_err(|e| Error::Internal(format!("list_active 失败: {e}")))?
+        .into_iter()
+        .map(|h| EphemeralActiveView {
+            task: h.task.to_string(),
+            workspace_id: h.workspace_id.0,
+            branch: h.branch,
+            path: h.workspace_path,
+        })
+        .collect();
+
+    let archived = mgr
+        .list_archived()
+        .await
+        .map_err(|e| Error::Internal(format!("list_archived 失败: {e}")))?
+        .into_iter()
+        .map(|(task, meta)| EphemeralArchivedView {
+            task: task.to_string(),
+            workspace_id: fuxi_core::WorkspaceId::l2(&project.id, task).0,
+            branch: meta.branch,
+            archived_at: meta.archived_at,
+            archive_path: mgr
+                .ephemeral_root()
+                .with_file_name("archive")
+                .join(task.to_string()),
+        })
+        .collect();
+
+    Ok(Json(EphemeralResponse { active, archived }))
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> Result<Json<ProjectsResponse>> {
