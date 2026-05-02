@@ -109,6 +109,10 @@ pub struct Fuxi {
     /// dispatch 仍走本地 spawn（向后兼容 + 测试场景）。
     /// 同 RecallSink 反向依赖 pattern：trait 在本 crate，impl 由 fuxi-cli 注入。
     dist_enqueuer: Arc<RwLock<Option<Arc<dyn crate::DistEnqueuer>>>>,
+    /// Decision 21 phase 1：注册 + 找 Project；持有了之后 `spawn_worker_in_project_sandbox`
+    /// 才能 lookup project canonical_path 然后驱动 PersistentSandboxManager。
+    /// `Option`：未注入 = 走旧 agent-id worktree 路径（向后兼容）。
+    project_registry: Arc<RwLock<Option<Arc<fuxi_workspace::FileSystemProjectRegistry>>>>,
 }
 
 impl Fuxi {
@@ -135,6 +139,7 @@ impl Fuxi {
             xuannv_id: xuannv_tx,
             recall_sink: Arc::new(RwLock::new(None)),
             dist_enqueuer: Arc::new(RwLock::new(None)),
+            project_registry: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -194,6 +199,18 @@ impl Fuxi {
     /// 幂等：再次调用以最新值为准。生产由 fuxi-cli 在 `fuxi im start` 注入。
     pub async fn set_dist_enqueuer(&self, enqueuer: Arc<dyn crate::DistEnqueuer>) {
         *self.dist_enqueuer.write().await = Some(enqueuer);
+    }
+
+    /// Decision 21 phase 1：注入 ProjectRegistry。
+    /// 注入后 `spawn_worker_in_project_sandbox` 才能用——否则该方法返
+    /// `Other("project_registry 未注入")`。生产 `fuxi im start` 时由 caller 注入
+    /// 同一 `FileSystemProjectRegistry::with_default_root()` 实例（PWA / CLI 跟
+    /// orchestrator 共享一份注册表）。
+    pub async fn set_project_registry(
+        &self,
+        registry: Arc<fuxi_workspace::FileSystemProjectRegistry>,
+    ) {
+        *self.project_registry.write().await = Some(registry);
     }
 
     /// 读某门客分配的 worktree 路径——纯转发 shelf，供 TUI/CLI 用。
@@ -320,6 +337,92 @@ impl Fuxi {
             wt = %handle.worktree_path.display(),
             "spawn worker in borrowed worktree (recall)"
         );
+        self.launch_and_register(agent_id, profile, kind, Some(handle))
+            .await
+    }
+
+    /// Decision 21 phase 1：在已注册项目的 L3 持久 sandbox 里 spawn 门客。
+    ///
+    /// 跟 `spawn_worker_in_worktree` 关键差别：
+    /// - worktree 路径不是 caller 算的，而是 `PersistentSandboxManager::get_or_create`
+    ///   按 (project, role) 算的——同 role 的不同 task 共用 sandbox（保 build cache + WIP）
+    /// - branch 是 `<role>/<project>-main` 长期 branch，不是 task-级 short ttl
+    /// - WorkspaceHandle 仍标 `borrowed: true`，destroy 不动 git（sandbox 长期存活）
+    /// - `project_registry` 必须先 `set_project_registry` 注入；未注入返 Other 错误
+    ///
+    /// **不**改老 `spawn_worker` 路径——本方法是 opt-in 入口。CLI / IM 后续若要
+    /// 默认走 sandbox 模式，再单独切换调用方。
+    pub async fn spawn_worker_in_project_sandbox(
+        &self,
+        profile: AgentProfile,
+        kind: WorkerKind,
+        project_id: fuxi_core::ProjectId,
+        role_for_sandbox: String,
+    ) -> Result<AgentId> {
+        // 1. 拿 project registry + project meta
+        let registry_opt = self.project_registry.read().await.clone();
+        let registry = registry_opt.ok_or_else(|| {
+            OrchestratorError::Other(
+                "project_registry 未注入 —— 调 Fuxi::set_project_registry 后再用".into(),
+            )
+        })?;
+        let project = registry
+            .get(&project_id)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("project lookup 失败: {e}")))?
+            .ok_or_else(|| OrchestratorError::Other(format!("project {project_id} 未注册")))?;
+
+        // 2. 用 PersistentSandboxManager 起 / 复用 sandbox
+        let mgr = fuxi_workspace::PersistentSandboxManager::new(project.clone(), registry.root());
+        let sandbox_handle = mgr
+            .get_or_create(&role_for_sandbox)
+            .await
+            .map_err(|e| OrchestratorError::Other(format!("sandbox 创建失败: {e}")))?;
+
+        // 3. 包成 borrowed WorkspaceHandle
+        let agent_id = AgentId::new();
+        self.publish_with_agent(
+            agent_id,
+            EventKind::AgentSpawning {
+                role: profile.role.clone(),
+                cli: kind.cli_tag().to_string(),
+            },
+        );
+        // 顺带打 WorkspaceCreated 事件——本路径是 L3 sandbox 的实际产生点之一
+        // （PersistentSandboxManager 不打事件，由 caller 包装；见 module doc 的
+        // 设计取舍）。
+        {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent_id);
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::WorkspaceCreated {
+                    workspace_id: sandbox_handle.workspace_id.clone(),
+                    project: project.id.clone(),
+                    layer: fuxi_core::WorkspaceLayer::L3Persistent,
+                    role: Some(role_for_sandbox.clone()),
+                    task: None,
+                    path: sandbox_handle.sandbox_path.clone(),
+                },
+            });
+        }
+
+        let handle = fuxi_core::workspace::WorkspaceHandle {
+            agent: agent_id,
+            repo_root: project.canonical_path.clone(),
+            worktree_path: sandbox_handle.sandbox_path.clone(),
+            branch: sandbox_handle.branch.clone(),
+            borrowed: true, // L3 sandbox 长期保留，destroy 不动
+        };
+        info!(
+            agent = %agent_id,
+            role = %profile.role,
+            project = %project.id,
+            sandbox = %sandbox_handle.sandbox_path.display(),
+            branch = %sandbox_handle.branch,
+            "spawn worker in L3 persistent sandbox"
+        );
+
         self.launch_and_register(agent_id, profile, kind, Some(handle))
             .await
     }
@@ -1263,6 +1366,81 @@ mod worker_kind_tests {
         let codex = WorkerKind::Codex(CodexLaunchConfig::default());
         assert_eq!(cc.cli_tag(), "claude-code");
         assert_eq!(codex.cli_tag(), "codex");
+    }
+}
+
+#[cfg(test)]
+mod project_sandbox_tests {
+    //! `spawn_worker_in_project_sandbox` 失败路径单测——不实际 launch cc/codex
+    //! （需要二进制 + cwd），只验输入校验。完整 e2e 留 integration test。
+
+    use super::*;
+    use fuxi_agent_codex::CodexLaunchConfig;
+    use fuxi_core::ProjectId;
+    use fuxi_core::agent::AgentProfile;
+    use fuxi_events::EventBus;
+    use fuxi_workspace::{FileSystemProjectRegistry, GitWorktreeWorkspace};
+
+    async fn make_fuxi() -> (tempfile::TempDir, Arc<Fuxi>) {
+        let dir = tempfile::tempdir().unwrap();
+        // 假 workspace—— spawn_worker_in_project_sandbox 不会用它（用
+        // PersistentSandboxManager），这里只为构造 Fuxi 占位
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        (dir, fuxi)
+    }
+
+    fn dummy_profile(role: &str) -> AgentProfile {
+        AgentProfile {
+            name: format!("test-{role}"),
+            role: role.to_string(),
+            cli: "codex".to_string(),
+            system_prompt: String::new(),
+            tags: Vec::new(),
+            extra: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn errors_when_registry_not_injected() {
+        let (_dir, fuxi) = make_fuxi().await;
+        let err = fuxi
+            .spawn_worker_in_project_sandbox(
+                dummy_profile("luban"),
+                WorkerKind::Codex(CodexLaunchConfig::default()),
+                ProjectId::new("erp").unwrap(),
+                "luban".into(),
+            )
+            .await
+            .expect_err("未注入 registry 应失败");
+        assert!(
+            err.to_string().contains("project_registry 未注入"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn errors_when_project_not_registered() {
+        let (_dir, fuxi) = make_fuxi().await;
+        let registry_root = tempfile::tempdir().unwrap();
+        fuxi.set_project_registry(Arc::new(FileSystemProjectRegistry::new(
+            registry_root.path(),
+        )))
+        .await;
+
+        let err = fuxi
+            .spawn_worker_in_project_sandbox(
+                dummy_profile("luban"),
+                WorkerKind::Codex(CodexLaunchConfig::default()),
+                ProjectId::new("ghost").unwrap(),
+                "luban".into(),
+            )
+            .await
+            .expect_err("未注册 project 应失败");
+        assert!(err.to_string().contains("未注册"), "got: {err}");
     }
 }
 

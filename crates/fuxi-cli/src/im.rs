@@ -217,7 +217,17 @@ pub async fn run(args: StartArgs) -> Result<()> {
 
     // Decision 21 phase 1：Project 注册表落 $HOME/.fuxi/projects/。
     // $HOME 缺失时跳过注册表注入——/api/projects 会返 503，不致命。
+    // 同一 registry 同时给 AppState（PWA 端点）和 Fuxi（spawn_worker_in_project_sandbox）
+    // 用——共享一份避免 PWA 看到的 project list 跟 orchestrator 派活时认的脱钩。
     let project_registry = fuxi_workspace::FileSystemProjectRegistry::with_default_root();
+    let project_registry_arc = match &project_registry {
+        Ok(reg) => Some(Arc::new(reg.clone())),
+        Err(_) => None,
+    };
+    if let Some(reg) = &project_registry_arc {
+        fuxi.set_project_registry(reg.clone()).await;
+        tracing::info!("Fuxi.project_registry 已注入——spawn_worker_in_project_sandbox 启用");
+    }
 
     let app_state_base = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
