@@ -33,6 +33,10 @@ pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// 资源已存在——比如 `POST /api/projects` 撞 id 唯一约束。走 409。
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// 暂时不可用——玄女未就绪、密码未设等"现在不能服务，但路径正确"。
     /// 走 503，PWA 应在 N 秒后重试。
     #[error("service unavailable: {0}")]
@@ -70,6 +74,7 @@ impl Error {
             Error::BadRequest(_) | Error::Json(_) => StatusCode::BAD_REQUEST,
             Error::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::Conflict(_) => StatusCode::CONFLICT,
             Error::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             // 玄女不在 → 503（让 PWA 区分"路由错"和"暂时不可用，请重试"）；
             // 其余编排错走 500。
@@ -98,6 +103,7 @@ impl IntoResponse for Error {
             Error::BadRequest(_) => "bad_request",
             Error::Unauthorized(_) => "unauthorized",
             Error::NotFound(_) => "not_found",
+            Error::Conflict(_) => "conflict",
             Error::Unavailable(_) => "unavailable",
             Error::NotImplemented(_) => "not_implemented",
             Error::Json(_) => "json",

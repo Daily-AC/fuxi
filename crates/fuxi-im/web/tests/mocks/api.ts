@@ -206,6 +206,31 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     fetchNodes: async (): Promise<NodesResponse> => state.nodes ?? { nodes: [] },
     fetchProjects: async (): Promise<ProjectsResponse> =>
       state.projects ?? { projects: [] },
+    addProject: async (req) => {
+      const list = state.projects?.projects ?? [];
+      // 简单 mock 行为：撞 id → 409；否则附 view 返。realbacked 走 canonical
+      // path 校验 git repo——mock 不验，假定调用方按合法 path 传入。
+      const id = req.name ?? "unnamed";
+      if (list.some((p) => p.id === id)) {
+        throw new ApiError(409, "conflict");
+      }
+      const view = {
+        id,
+        canonical_path: req.canonical_path,
+        default_branch: req.default_branch ?? "main",
+        created_at: new Date().toISOString(),
+      };
+      state.projects = { projects: [...list, view] };
+      return view;
+    },
+    removeProject: async (id) => {
+      const list = state.projects?.projects ?? [];
+      const next = list.filter((p) => p.id !== id);
+      if (next.length === list.length) {
+        throw new ApiError(404, "not found");
+      }
+      state.projects = { projects: next };
+    },
     fetchDeliverables: async (): Promise<DeliverablesResponse> =>
       state.deliverables ?? { deliverables: [] },
     deliverableFileUrl: (project: string, task: string, name: string): string => {

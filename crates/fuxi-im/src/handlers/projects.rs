@@ -11,7 +11,8 @@
 use crate::error::{Error, Result};
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use fuxi_core::ProjectId;
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,88 @@ pub struct ProjectView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectsResponse {
     pub projects: Vec<ProjectView>,
+}
+
+/// `POST /api/projects` 请求体——PWA「+ 注册项目」按钮的载荷。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddProjectRequest {
+    /// 用户真项目目录（绝对路径，必须已是 git repo）。
+    pub canonical_path: PathBuf,
+    /// 可选 slug。不传从 basename 派生；非 ASCII basename 派生失败 → 必须传。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 可选默认 branch。不传默认 `main`。
+    #[serde(default)]
+    pub default_branch: Option<String>,
+}
+
+/// `POST /api/projects` —— 注册一个项目。
+///
+/// 业务规则：
+/// - canonical 必须存在 + 是 git repo（含 `.git`）→ 否则 400/404
+/// - id 重名 → 409
+/// - 成功 200 返 ProjectView（同 GET 单条形态）
+///
+/// **不**支持远端 path（需 SSH）—— 假定 fuxi-im 跟用户 repo 同机器。跨机
+/// repo 后续走 dist worker 路径，不在本端点 scope。
+pub async fn add_project(
+    State(state): State<AppState>,
+    Json(req): Json<AddProjectRequest>,
+) -> Result<(StatusCode, Json<ProjectView>)> {
+    let registry = state.project_registry.as_ref().ok_or_else(|| {
+        Error::Unavailable("project_registry 未注入（fuxi im start 未配置？）".into())
+    })?;
+    let project = registry
+        .add(req.canonical_path, req.name, req.default_branch)
+        .await
+        .map_err(|e| match e {
+            fuxi_workspace::WorkspaceError::AlreadyExists(_) => {
+                Error::Conflict(format!("project 已存在: {e}"))
+            }
+            fuxi_workspace::WorkspaceError::NotAGitRepo(p) => {
+                Error::BadRequest(format!("路径不是 git repo: {}", p.display()))
+            }
+            other => Error::BadRequest(format!("注册失败: {other}")),
+        })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ProjectView {
+            id: project.id,
+            canonical_path: project.canonical_path,
+            default_branch: project.default_branch,
+            created_at: project.created_at,
+        }),
+    ))
+}
+
+/// `DELETE /api/projects/{id}` —— 删项目。
+///
+/// **destructive**：sandboxes / ephemeral / archive / deliverables 一并清掉。
+/// 调用方负责确认（PWA 二次确认弹窗）。
+/// 不存在 → 404；id 非法 slug → 400。
+pub async fn remove_project(
+    State(state): State<AppState>,
+    AxumPath(id_raw): AxumPath<String>,
+) -> Result<StatusCode> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let id = ProjectId::new(id_raw.clone())
+        .map_err(|e| Error::BadRequest(format!("非法 project id {id_raw:?}: {e}")))?;
+    if registry
+        .get(&id)
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(Error::NotFound(format!("project {id}")));
+    }
+    registry
+        .remove(&id)
+        .await
+        .map_err(|e| Error::Internal(format!("删项目失败: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn list_projects(State(state): State<AppState>) -> Result<Json<ProjectsResponse>> {
@@ -143,6 +226,149 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["projects"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn add_project_creates_then_lists() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo_path) = make_workspace_repo().await;
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects", axum_get(list_projects).post(add_project))
+            .with_state(state);
+
+        // POST 注册
+        let body = serde_json::json!({
+            "canonical_path": repo_path.to_string_lossy(),
+            "name": "from-pwa",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // GET 应能看到
+        let req2 = Request::builder()
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let bytes = to_bytes(resp2.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let projects = v["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0]["id"], "from-pwa");
+    }
+
+    #[tokio::test]
+    async fn add_project_409_on_duplicate() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo_path) = make_workspace_repo().await;
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        registry
+            .add(repo_path.clone(), Some("dup".into()), None)
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects", axum_get(list_projects).post(add_project))
+            .with_state(state);
+
+        let body = serde_json::json!({
+            "canonical_path": repo_path.to_string_lossy(),
+            "name": "dup",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn add_project_400_on_non_git_path() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let non_git = tempfile::tempdir().unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects", axum_get(list_projects).post(add_project))
+            .with_state(state);
+
+        let body = serde_json::json!({
+            "canonical_path": non_git.path().to_string_lossy(),
+            "name": "nogit",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn delete_project_removes_then_404() {
+        use axum::routing::delete as axum_delete;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo_path) = make_workspace_repo().await;
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        registry
+            .add(repo_path, Some("doomed".into()), None)
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects/{id}", axum_delete(remove_project))
+            .with_state(state);
+
+        // 第一次 DELETE → 204
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/projects/doomed")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // 第二次 → 404（已删）
+        let req2 = Request::builder()
+            .method("DELETE")
+            .uri("/api/projects/doomed")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
