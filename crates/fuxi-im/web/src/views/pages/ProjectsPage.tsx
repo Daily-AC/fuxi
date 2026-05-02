@@ -7,7 +7,11 @@ import {
 } from "solid-js";
 import { ApiError } from "~/lib/api";
 import { useApi } from "~/components/ApiProvider";
-import type { AddProjectRequest, ProjectView } from "~/types/api";
+import type {
+  AddProjectRequest,
+  ProjectView,
+  SandboxView,
+} from "~/types/api";
 import styles from "./ProjectsPage.module.css";
 
 // 项目 tab · Decision 21 phase 1
@@ -137,6 +141,7 @@ const ProjectCard: Component<{ project: ProjectView; onChanged: () => void }> = 
       <div class={`${styles.cardPath} mono`} title={props.project.canonical_path}>
         {props.project.canonical_path}
       </div>
+      <SandboxList projectId={props.project.id} />
       <div class={styles.cardMeta}>
         <time class={styles.cardCreated}>注册于 {created()}</time>
         <Show
@@ -180,6 +185,54 @@ const ProjectCard: Component<{ project: ProjectView; onChanged: () => void }> = 
           {error()}
         </p>
       </Show>
+    </li>
+  );
+};
+
+const SandboxList: Component<{ projectId: string }> = (props) => {
+  const { client } = useApi();
+  const [data] = createResource(() => client.fetchSandboxes(props.projectId));
+  return (
+    <Show when={data()}>
+      <Show
+        when={data()!.sandboxes.length > 0}
+        fallback={
+          <p
+            class={styles.sandboxEmpty}
+            data-testid={`sandboxes-empty-${props.projectId}`}
+          >
+            暂无 sandbox · 在 home 上跑{" "}
+            <span class="mono">fuxi spawn --role &lt;role&gt; --project {props.projectId}</span> 起一个
+          </p>
+        }
+      >
+        <ul
+          class={styles.sandboxList}
+          data-testid={`sandboxes-${props.projectId}`}
+        >
+          <For each={data()!.sandboxes}>
+            {(s) => <SandboxRow sandbox={s} />}
+          </For>
+        </ul>
+      </Show>
+    </Show>
+  );
+};
+
+const SandboxRow: Component<{ sandbox: SandboxView }> = (props) => {
+  return (
+    <li
+      class={styles.sandboxRow}
+      data-testid={`sandbox-${props.sandbox.workspace_id}`}
+    >
+      <span class={styles.sandboxRole}>{props.sandbox.role}</span>
+      <span class={`${styles.sandboxBranch} mono`}>{props.sandbox.branch}</span>
+      <span
+        class={`${styles.sandboxPath} mono`}
+        title={props.sandbox.path}
+      >
+        {props.sandbox.path}
+      </span>
     </li>
   );
 };

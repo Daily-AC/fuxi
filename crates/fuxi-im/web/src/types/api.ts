@@ -167,6 +167,22 @@ export interface AddProjectRequest {
 /** POST /api/projects 成功响应——同 GET 单条形态（ProjectView）。 */
 export type AddProjectResponse = ProjectView;
 
+/** GET /api/projects/{id}/sandboxes 单条 sandbox 视图。 */
+export interface SandboxView {
+  /** 关联门客 role，如 "luban"。 */
+  role: string;
+  /** `<project>/L3/<role>` 跟 EventBus WorkspaceId 同形态。 */
+  workspace_id: string;
+  /** sandbox 在磁盘上的绝对路径。 */
+  path: string;
+  /** 长期 branch，如 `luban/erp-main`。 */
+  branch: string;
+}
+
+export interface SandboxesResponse {
+  sandboxes: SandboxView[];
+}
+
 // ---------- Decision 22 phase 1 · 交付收件箱视图 ----------
 
 /** Decision 13 五类 deliverable_kind。 */
