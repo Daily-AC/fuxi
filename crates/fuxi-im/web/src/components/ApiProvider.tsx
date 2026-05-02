@@ -19,17 +19,23 @@ export type AuthState = "unknown" | "in" | "out";
 export type TabIndex = 0 | 1 | 2 | 3 | 4;
 
 /** NavigationStack 顶部的 push 路由。
- *  v3 仅在"任务 tab"下生效（Layer 1 任务列表 → Layer 2 任务 thread）。
+ *  - 任务 tab (1) · kind="task"|"worker"
+ *  - 项目 tab (2) · kind="project" · Decision 21 phase 3 项目详情页
+ *  - 交付 tab (3) · kind="deliverable" · Decision 22 phase 3 交付详情页
  *  null = 没 push，base 直接见底。
  *
  *  类型说明：
  *    - kind: "task" · v3 主路：任务卡片 → 任务 thread (#38/#N3' 落)
  *    - kind: "worker" · v2 残留 · per-worker 私聊（#40/#N5' 推 v3 时移除）
  *      保留只是为了让 TasksPage v2 member-row tap 不立即编译错；
- *      App.tsx renderTaskTop 仅渲染 kind==="task"，其他 kind 视作 noop。*/
+ *      App.tsx renderTaskTop 仅渲染 kind==="task"，其他 kind 视作 noop。
+ *    - kind: "project" · 项目 detail 页：sandboxes / L2 active+archive / 交付汇总
+ *    - kind: "deliverable" · 交付 detail 页：manifest 全文 + 文件预览 + accept/reject 入口 */
 export type NavRoute =
   | { kind: "task"; task_id: string; title?: string }
   | { kind: "worker"; agent_id: string; role_display?: string }
+  | { kind: "project"; project_id: string }
+  | { kind: "deliverable"; project_id: string; task_id: string }
   | null;
 
 export interface ApiContextValue {
@@ -78,9 +84,12 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
   const [activeTab, _setActiveTab] = createSignal<TabIndex>(props.initialTab ?? 0);
   const [navRoute, setNavRoute] = createSignal<NavRoute>(null);
 
-  // tab 切换时清空 navRoute · 跨 tab 不保留二层 push（spec §A "navPush 仅任务 tab 下生效"）
+  // tab 切换时清空 navRoute · 跨 tab 不保留二层 push（spec §A "navPush 仅任务 tab 下生效"）。
+  // Decision 21/22 phase 3：项目 / 交付 tab 也开二层 push（项目详情 / 交付详情）。
+  // 切到 0 (玄女) / 4 (节点) 这类无二层的 tab 时强制清栈避免幽灵 top 渲染。
+  const TABS_WITH_NAV: ReadonlyArray<TabIndex> = [1, 2, 3];
   const setActiveTab = (i: TabIndex): void => {
-    if (i !== 1) setNavRoute(null);
+    if (!TABS_WITH_NAV.includes(i)) setNavRoute(null);
     _setActiveTab(i);
   };
 
@@ -122,9 +131,14 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         activeTab,
         setActiveTab,
         navRoute,
-        // navPush 只允许在任务 tab 下；其他 tab 调用静默 noop（防御 misuse）
+        // navPush 仅允许在有二层栈的 tab 下；其他 tab 调用静默 noop（防御 misuse）。
+        // 同时按 kind 校验 tab 匹配 —— 防止 task push 跑到项目 tab 上让 App.Switch 渲染错位。
         navPush: (route) => {
-          if (activeTab() !== 1) return;
+          const tab = activeTab();
+          if (!TABS_WITH_NAV.includes(tab)) return;
+          if ((route.kind === "task" || route.kind === "worker") && tab !== 1) return;
+          if (route.kind === "project" && tab !== 2) return;
+          if (route.kind === "deliverable" && tab !== 3) return;
           setNavRoute(route);
         },
         navPop: () => setNavRoute(null),

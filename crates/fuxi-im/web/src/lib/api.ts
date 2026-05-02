@@ -14,6 +14,7 @@ import type {
   AddProjectResponse,
   ConversationHistoryResponse,
   DeliverablesResponse,
+  EphemeralResponse,
   InterveneRequestV2,
   NodesResponse,
   ProjectsResponse,
@@ -66,6 +67,8 @@ export interface ApiClient {
   removeProject(id: string): Promise<void>;
   /** Decision 21 phase 1 · GET /api/projects/{id}/sandboxes · 列项目的 L3 sandboxes。 */
   fetchSandboxes(projectId: string): Promise<SandboxesResponse>;
+  /** Decision 21 phase 3 · GET /api/projects/{id}/ephemeral · L2 active + archived。 */
+  fetchEphemeral(projectId: string): Promise<EphemeralResponse>;
   /** Decision 22 phase 1 · GET /api/deliverables · 跨项目交付收件箱（按 produced_at 倒序）。 */
   fetchDeliverables(): Promise<DeliverablesResponse>;
   /** Decision 22 phase 1 · 拼接交付文件直链 URL，给 <a href> / window.open 用。
@@ -174,6 +177,10 @@ export function createHttpClient(): ApiClient {
     fetchSandboxes: (projectId) =>
       jsonFetch<SandboxesResponse>(
         `/api/projects/${encodeURIComponent(projectId)}/sandboxes`,
+      ),
+    fetchEphemeral: (projectId) =>
+      jsonFetch<EphemeralResponse>(
+        `/api/projects/${encodeURIComponent(projectId)}/ephemeral`,
       ),
     fetchDeliverables: () => jsonFetch<DeliverablesResponse>(`/api/deliverables`),
     deliverableFileUrl: (project, task, name) => {

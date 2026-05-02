@@ -11,8 +11,10 @@ import { LoginView } from "./components/LoginView";
 import { BottomTabBar, type TabSpec } from "./components/BottomTabBar";
 import { NavigationStack } from "./components/NavigationStack";
 import { Toast } from "./components/Toast";
+import { DeliverableDetailPage } from "./views/pages/DeliverableDetailPage";
 import { DeliverablesPage } from "./views/pages/DeliverablesPage";
 import { NodesPage } from "./views/pages/NodesPage";
+import { ProjectDetailPage } from "./views/pages/ProjectDetailPage";
 import { ProjectsPage } from "./views/pages/ProjectsPage";
 import { XuannvPage } from "./views/pages/XuannvPage";
 import { TasksPage } from "./views/pages/TasksPage";
@@ -82,27 +84,51 @@ const MainShell: Component = () => {
     if (r.kind === "task") {
       return <TaskThreadPage task_id={r.task_id} fallback_title={r.title} />;
     }
-    return (
-      <div class={styles.taskTopStub} data-testid="worker-route-legacy">
-        <header class={styles.stubHead}>
-          <button
-            type="button"
-            class={styles.stubBack}
-            onClick={() => navPop()}
-            data-testid="task-thread-back"
-            aria-label="返回"
-          >
-            ‹ 返回
-          </button>
-          <span class={styles.stubTitle}>{r.role_display ?? "门客"}</span>
-          <span class={styles.stubRight} aria-hidden="true" />
-        </header>
-        <div class={styles.stubBody}>
-          <p class={styles.stubMsg}>
-            v2 私聊页路由已废，请从任务卡 push 进任务 thread。
-          </p>
+    if (r.kind === "worker") {
+      return (
+        <div class={styles.taskTopStub} data-testid="worker-route-legacy">
+          <header class={styles.stubHead}>
+            <button
+              type="button"
+              class={styles.stubBack}
+              onClick={() => navPop()}
+              data-testid="task-thread-back"
+              aria-label="返回"
+            >
+              ‹ 返回
+            </button>
+            <span class={styles.stubTitle}>{r.role_display ?? "门客"}</span>
+            <span class={styles.stubRight} aria-hidden="true" />
+          </header>
+          <div class={styles.stubBody}>
+            <p class={styles.stubMsg}>
+              v2 私聊页路由已废，请从任务卡 push 进任务 thread。
+            </p>
+          </div>
         </div>
-      </div>
+      );
+    }
+    // tab 1 不渲染 project / deliverable kind（路由保护已在 ApiProvider 拦），
+    // 走到这里说明被错误推入——返 undefined 不渲染 top 即可。
+    return undefined;
+  };
+
+  // 项目 tab Layer 2 · Decision 21 phase 3 ProjectDetailPage
+  const renderProjectTop = (): JSX.Element | undefined => {
+    const r = navRoute();
+    if (!r || r.kind !== "project") return undefined;
+    return <ProjectDetailPage project_id={r.project_id} />;
+  };
+
+  // 交付 tab Layer 2 · Decision 22 phase 3 DeliverableDetailPage
+  const renderDeliverableTop = (): JSX.Element | undefined => {
+    const r = navRoute();
+    if (!r || r.kind !== "deliverable") return undefined;
+    return (
+      <DeliverableDetailPage
+        project_id={r.project_id}
+        task_id={r.task_id}
+      />
     );
   };
 
@@ -121,10 +147,18 @@ const MainShell: Component = () => {
             />
           </Match>
           <Match when={activeTab() === 2}>
-            <ProjectsPage />
+            <NavigationStack
+              base={<ProjectsPage />}
+              top={renderProjectTop()}
+              onPop={navPop}
+            />
           </Match>
           <Match when={activeTab() === 3}>
-            <DeliverablesPage />
+            <NavigationStack
+              base={<DeliverablesPage />}
+              top={renderDeliverableTop()}
+              onPop={navPop}
+            />
           </Match>
           <Match when={activeTab() === 4}>
             <NodesPage />
