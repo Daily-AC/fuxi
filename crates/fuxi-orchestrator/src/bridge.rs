@@ -131,6 +131,15 @@ pub trait Intervener: Send + Sync {
     /// 查门客当前登记的 role 标签——主要拿来给玄女读（"codex 门客下线"比裸 id 可读）。
     /// 未找到返回 None；调用方自行 fallback。
     async fn role_of(&self, agent_id: AgentId) -> Option<String>;
+
+    /// 查门客的 worktree 路径——bridge 在 AgentRequestReview kind=code_change 时
+    /// 反查 path 推断 WorkspaceId 给 WorkspaceCommitted 用。未注册 / 无 worktree
+    /// → None。
+    async fn worktree_of(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
+        // 默认实现 None——单测 mock 不强求实现；生产 Fuxi 实装会覆盖。
+        let _ = agent_id;
+        None
+    }
 }
 
 #[async_trait]
@@ -149,6 +158,33 @@ impl Intervener for Fuxi {
             .find(|c| c.id == agent_id)
             .map(|c| c.profile.role.clone())
     }
+
+    async fn worktree_of(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
+        Fuxi::worktree_of(self, agent_id).await
+    }
+}
+
+/// 从 worktree path 反查它属于哪个 L3 sandbox——仅 Decision 21 phase 1 路径
+/// `<projects_root>/<project>/sandboxes/<role>/...` 形态命中。
+///
+/// 命中返 (WorkspaceId, branch)，未命中 None。沿用 deliverable produce 同款
+/// 启发式（路径段两层 ancestor 匹配 sandboxes/<role> + 上一层 project 名）。
+fn workspace_id_from_l3_path(path: &std::path::Path) -> Option<(fuxi_core::WorkspaceId, String)> {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for dir in canon.ancestors() {
+        let role = dir.file_name().and_then(|n| n.to_str())?;
+        let parent = dir.parent()?;
+        if parent.file_name().and_then(|n| n.to_str()) != Some("sandboxes") {
+            continue;
+        }
+        let project_dir = parent.parent()?;
+        let project_name = project_dir.file_name().and_then(|n| n.to_str())?;
+        let project_id = fuxi_core::ProjectId::new(project_name.to_string()).ok()?;
+        let workspace_id = fuxi_core::WorkspaceId::l3(&project_id, role);
+        let branch = format!("{role}/{project_name}-main");
+        return Some((workspace_id, branch));
+    }
+    None
 }
 
 /// 三段式 TriggerFired 唤醒 prompt——契约见 `docs/architecture-v1.md` §M1.3。
@@ -414,6 +450,31 @@ async fn handle_event(
                 summary,
                 artifact_ref.as_deref(),
             );
+            // Decision 21 phase 1：kind=code_change + artifact_ref 形如 "sha:<hex>"
+            // → 推断为 WorkspaceCommitted。从 worktree path 反查 (project, role)
+            // 拼 WorkspaceId，命中即发；否则 silent skip。
+            // 让 WorkspaceCommitted EventKind 不再是死字段——agent 自报 commit
+            // 时事件流自动留痕，玄女 / firehose / IM 可见。
+            if matches!(deliverable_kind, fuxi_core::DeliverableKind::CodeChange)
+                && let Some(sha) = artifact_ref.as_deref().and_then(|s| s.strip_prefix("sha:"))
+                && let Some(path) = intervener.worktree_of(agent).await
+                && let Some((workspace_id, branch)) = workspace_id_from_l3_path(&path)
+            {
+                let mut meta = EventMeta::now();
+                meta.agent = ev.meta.agent;
+                meta.task = ev.meta.task;
+                meta.session = ev.meta.session;
+                if let Err(e) = bus.publish(Event {
+                    meta,
+                    kind: EventKind::WorkspaceCommitted {
+                        workspace_id,
+                        commit_sha: sha.to_string(),
+                        branch,
+                    },
+                }) {
+                    debug!(error = %e, "bridge: publish WorkspaceCommitted 失败 (silent)");
+                }
+            }
             // AgentRequestReview 永远 interrupt——门客主动找玄女 = 高优先级
             // attention 信号，不让中间 turn 把它挤晚。
             let started = std::time::Instant::now();
