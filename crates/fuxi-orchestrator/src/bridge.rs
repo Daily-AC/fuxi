@@ -140,6 +140,19 @@ pub trait Intervener: Send + Sync {
         let _ = agent_id;
         None
     }
+
+    /// Decision 21 phase 3：把指定 (project, task) 的 L2 ephemeral workspace
+    /// 归档。bridge 在 AgentDead 时若识别出工作区是 L2 → 自动调本方法回收。
+    /// 默认实现 silent Ok——单测 mock 不强求实现；生产 Fuxi 覆盖。
+    async fn archive_l2_workspace(
+        &self,
+        project_id: fuxi_core::ProjectId,
+        task: TaskId,
+        reason: fuxi_core::ArchiveReason,
+    ) -> Result<()> {
+        let _ = (project_id, task, reason);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -162,6 +175,15 @@ impl Intervener for Fuxi {
     async fn worktree_of(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
         Fuxi::worktree_of(self, agent_id).await
     }
+
+    async fn archive_l2_workspace(
+        &self,
+        project_id: fuxi_core::ProjectId,
+        task: TaskId,
+        reason: fuxi_core::ArchiveReason,
+    ) -> Result<()> {
+        Fuxi::archive_l2_workspace(self, project_id, task, reason).await
+    }
 }
 
 /// 从 worktree path 反查它属于哪个 L3 sandbox——仅 Decision 21 phase 1 路径
@@ -183,6 +205,31 @@ fn workspace_id_from_l3_path(path: &std::path::Path) -> Option<(fuxi_core::Works
         let workspace_id = fuxi_core::WorkspaceId::l3(&project_id, role);
         let branch = format!("{role}/{project_name}-main");
         return Some((workspace_id, branch));
+    }
+    None
+}
+
+/// Decision 21 phase 3：从 worktree path 反查 L2 ephemeral 归属——形如
+/// `<projects_root>/<project>/ephemeral/<task-display>/...`。
+///
+/// 命中返 (ProjectId, TaskId)，未命中 None。task-display 形态 `task-<uuid>` 或
+/// 裸 uuid 都接受（与 EphemeralWorkspaceManager::list_active 同款宽容）。
+pub(crate) fn project_task_from_l2_path(
+    path: &std::path::Path,
+) -> Option<(fuxi_core::ProjectId, TaskId)> {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    for dir in canon.ancestors() {
+        let task_seg = dir.file_name().and_then(|n| n.to_str())?;
+        let parent = dir.parent()?;
+        if parent.file_name().and_then(|n| n.to_str()) != Some("ephemeral") {
+            continue;
+        }
+        let project_dir = parent.parent()?;
+        let project_name = project_dir.file_name().and_then(|n| n.to_str())?;
+        let trimmed = task_seg.strip_prefix("task-").unwrap_or(task_seg);
+        let task_uuid = uuid::Uuid::parse_str(trimmed).ok()?;
+        let project_id = fuxi_core::ProjectId::new(project_name.to_string()).ok()?;
+        return Some((project_id, TaskId::from(task_uuid)));
     }
     None
 }
@@ -421,6 +468,30 @@ async fn handle_event(
             {
                 warn!(error = %e, "bridge: intervene(AgentDead) 失败");
             }
+            // Decision 21 phase 3：若该门客住在 L2 ephemeral 工作区 → 自动归档。
+            // 反查门客 worktree path → 命中 ephemeral/<task>/ 形态 → 调
+            // archive_l2_workspace（reason=TaskCompleted）。worktree_of None 或
+            // 路径不匹配 → silent skip（属 L0/L1/L3 / 已不在册门客）。
+            if let Some(path) = intervener.worktree_of(agent_id).await
+                && let Some((project_id, task_id)) = project_task_from_l2_path(&path)
+            {
+                info!(
+                    %agent_id,
+                    %project_id,
+                    %task_id,
+                    "bridge: AgentDead 触发 L2 ephemeral 自动归档"
+                );
+                if let Err(e) = intervener
+                    .archive_l2_workspace(
+                        project_id,
+                        task_id,
+                        fuxi_core::ArchiveReason::TaskCompleted,
+                    )
+                    .await
+                {
+                    warn!(error = %e, "bridge: AgentDead 自动归档 L2 失败");
+                }
+            }
         }
         EventKind::AgentRequestReview {
             agent,
@@ -596,6 +667,8 @@ mod tests {
         /// 前 N 次 intervene 返 Err，第 N+1 次起返 Ok。
         /// `None` = 全 Ok（默认）；`Some(usize::MAX)` = 永远失败。
         fail_first_n: Mutex<Option<usize>>,
+        worktrees: Mutex<HashMap<AgentId, std::path::PathBuf>>,
+        archive_calls: Mutex<Vec<(fuxi_core::ProjectId, TaskId, fuxi_core::ArchiveReason)>>,
     }
 
     impl MockIntervener {
@@ -619,6 +692,16 @@ mod tests {
 
         async fn snapshot(&self) -> Vec<(AgentId, bool, String)> {
             self.calls.lock().await.clone()
+        }
+
+        async fn set_worktree(&self, id: AgentId, path: std::path::PathBuf) {
+            self.worktrees.lock().await.insert(id, path);
+        }
+
+        async fn archive_snapshot(
+            &self,
+        ) -> Vec<(fuxi_core::ProjectId, TaskId, fuxi_core::ArchiveReason)> {
+            self.archive_calls.lock().await.clone()
         }
     }
 
@@ -650,6 +733,21 @@ mod tests {
         }
         async fn role_of(&self, agent_id: AgentId) -> Option<String> {
             self.roles.lock().await.get(&agent_id).cloned()
+        }
+        async fn worktree_of(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
+            self.worktrees.lock().await.get(&agent_id).cloned()
+        }
+        async fn archive_l2_workspace(
+            &self,
+            project_id: fuxi_core::ProjectId,
+            task: TaskId,
+            reason: fuxi_core::ArchiveReason,
+        ) -> Result<()> {
+            self.archive_calls
+                .lock()
+                .await
+                .push((project_id, task, reason));
+            Ok(())
         }
     }
 
@@ -716,6 +814,94 @@ mod tests {
         assert!(text.contains("下线"), "prompt 含下线: {text}");
         assert!(text.contains("codex-coder"), "prompt 含 role: {text}");
         assert!(text.contains("cc stream closed"), "prompt 含 cause: {text}");
+    }
+
+    /// Decision 21 phase 3：门客死且 worktree 在 L2 ephemeral 路径下 → 桥
+    /// 自动调 archive_l2_workspace（reason=TaskCompleted），无需玄女手动介入。
+    #[tokio::test]
+    async fn agent_dead_in_l2_ephemeral_auto_archives() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let task = TaskId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        // 假造 L2 ephemeral 路径——文件不必真实存在；project_task_from_l2_path
+        // 走 ancestors() 字符串匹配（canonicalize 失败时 fallback to_path_buf）。
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let l2_path = dir
+            .path()
+            .join("erp")
+            .join("ephemeral")
+            .join(task.to_string());
+        std::fs::create_dir_all(&l2_path).expect("mkdir l2");
+        mock.set_worktree(worker, l2_path).await;
+
+        let _handle =
+            SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "task done".into(),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        // 给 archive 调用一点时间——它在 intervene 之后跑。
+        for _ in 0..100 {
+            if !mock.archive_snapshot().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let archives = mock.archive_snapshot().await;
+        assert_eq!(archives.len(), 1, "应触发一次 L2 archive");
+        let (project_id, archived_task, reason) = &archives[0];
+        assert_eq!(project_id.as_str(), "erp");
+        assert_eq!(*archived_task, task);
+        assert_eq!(*reason, fuxi_core::ArchiveReason::TaskCompleted);
+    }
+
+    /// 门客在 L3 sandbox / 普通 worktree 死亡 → 不应误归档（L2 hook 严格匹配 ephemeral/）。
+    #[tokio::test]
+    async fn agent_dead_in_l3_sandbox_does_not_archive_l2() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let l3_path = dir.path().join("erp").join("sandboxes").join("luban");
+        std::fs::create_dir_all(&l3_path).expect("mkdir l3");
+        mock.set_worktree(worker, l3_path).await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "shutdown".into(),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.archive_snapshot().await.is_empty(),
+            "L3 sandbox 死不应触发 L2 archive"
+        );
     }
 
     /// 玄女自己 AgentDead → 桥不 intervene（否则就是对死人说话 + 回响）。
