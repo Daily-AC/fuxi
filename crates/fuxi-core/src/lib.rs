@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod event;
 pub mod id;
+pub mod project;
 pub mod runtime;
 pub mod task;
 pub mod trigger_lookup;
@@ -15,6 +16,7 @@ pub mod workspace;
 pub use agent::{Agent, AgentCard, AgentProfile, AgentStatus};
 pub use event::{DeliverableKind, Event, EventKind, EventMeta, WorkerStatus};
 pub use id::{AgentId, SessionId, TaskId};
+pub use project::{Project, ProjectId, slug_from_path};
 pub use runtime::{Runtime, RuntimeHandle};
 pub use task::{Task, TaskState};
 pub use trigger_lookup::TriggerLookup;

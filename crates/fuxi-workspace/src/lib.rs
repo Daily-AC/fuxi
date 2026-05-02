@@ -24,11 +24,13 @@
 
 mod git;
 pub mod porcelain;
+pub mod project_registry;
 
 use std::path::PathBuf;
 
 pub use git::GitWorktreeWorkspace;
 pub use porcelain::{PorcelainWorktree, parse as parse_porcelain};
+pub use project_registry::FileSystemProjectRegistry;
 
 /// 本 crate 的错误类型。
 ///
