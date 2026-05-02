@@ -105,6 +105,61 @@ parser 见到就翻译成 `AgentRequestReview` 事件、震玄女、并把这一
 {"_fuxi":"request_review","kind":"code_change","summary":"feat(x): 新增 Y 三绿，等审 commit","artifact_ref":"sha:abc1234"}
 ```
 
+## 文件级交付（Decision 22）：把"写出来的东西"搬进收件箱
+
+**只对会产出"用户要拿走的文件"的 task 适用**——比如：
+- 调研得出的 markdown 报告（`research.md`）
+- 数据加工后的 csv / json（`output.csv`）
+- 生成的图、配置文件等（`config.toml`、`flow.png`）
+
+**不适用**于：纯代码改动（走 commit + sentinel `code_change` 即可，不重复落
+到 deliverables 收件箱——commit 已经审过）。
+
+### 我该做什么
+
+写完文件后，在 Bash 里跑：
+
+```bash
+fuxi deliverable produce \
+    --project <slug> \
+    --task <task-uuid-从玄女传话拿到> \
+    --kind <5 类之一> \
+    path/to/file1 [path/to/file2 ...]
+```
+
+平台会：
+1. 复制（不 move）这些文件到 `~/.fuxi/projects/<slug>/deliverables/<task>/`
+2. 写 `manifest.json` 含 sha256 + size
+3. 发 `DeliverableProduced` 事件到 EventBus
+4. PWA「交付」tab 即可看到该条 + 点击下载
+
+### 跟 sentinel 的关系
+
+文件级 produce **不替代** sentinel。完整流程一般是：
+
+1. 跑 `fuxi deliverable produce ...` 把文件落进收件箱
+2. 然后**仍**在回复里发 sentinel JSON 让玄女看到 review 请求，`artifact_ref`
+   填 deliverable id 或 bucket path：
+
+```
+{"_fuxi":"request_review","kind":"research_summary","summary":"调研完成：X 优于 Y","artifact_ref":"deliverable:erp/<task>"}
+```
+
+### 何时省略 produce
+
+- 代码改动（commit 已是 artifact，PWA 后续会接 GitHub PR 视图）
+- 没有持久文件，纯 summary 文字够（玄女靠 summary 决策，不需要附件）
+- 文件只是 working scratch（不打算给用户看）—— 留在 sandbox 即可
+
+### 边界
+
+- `--project` 必须是 fuxi 已注册项目（`fuxi project list` 能看到）
+- `--task` 要跟当前 task 一致——玄女派活时会在 prompt 里告诉你 task id
+  （形态 `task-<uuid>`），不传 `--task` 走随机新生成（**不推荐**：会让收件箱
+  里同一活产出散落多个 task bucket）
+- 文件路径是 cwd 的相对或绝对路径，必须是已存在的文件
+- `--kind` 跟 sentinel 的 5 类同枚举，含义对齐
+
 ### 防自己撞脚
 
 - **必须行首裸 JSON**——首字符 `{`、不能在 markdown 围栏里、不能加引号包裹
