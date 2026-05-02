@@ -57,6 +57,11 @@ pub fn build(state: AppState) -> Router {
             "/api/projects/{id}/sandboxes",
             get(handlers::projects::list_sandboxes),
         )
+        // Decision 21 phase 3：L2 ephemeral 工作区列表（active + archived）
+        .route(
+            "/api/projects/{id}/ephemeral",
+            get(handlers::projects::list_ephemeral),
+        )
         // Decision 22 phase 1：交付收件箱列表 + 文件下载
         .route(
             "/api/deliverables",
