@@ -311,6 +311,68 @@ fn parse_deliverable_kind(s: &str) -> Result<DeliverableKind> {
     }
 }
 
+/// `fuxi project info <id>` —— 一屏显示项目元信息 + sandbox 数 + 交付数。
+#[derive(Debug, Args)]
+pub struct ProjectInfoArgs {
+    pub id: String,
+    #[arg(long = "registry-root")]
+    pub registry_root: Option<PathBuf>,
+}
+
+pub async fn run_info(args: ProjectInfoArgs) -> Result<()> {
+    let registry = registry_for(args.registry_root)?;
+    let project_id = ProjectId::new(args.id.clone())
+        .map_err(|e| anyhow::anyhow!("无效 project id {}: {e}", args.id))?;
+    let project = registry
+        .get(&project_id)
+        .await
+        .context("project lookup 失败")?
+        .ok_or_else(|| anyhow::anyhow!("project {project_id} 未注册"))?;
+
+    println!("project: {}", project.id);
+    println!("  canonical:      {}", project.canonical_path.display());
+    println!("  default branch: {}", project.default_branch);
+    println!(
+        "  registered at:  {}",
+        project.created_at.format("%Y-%m-%d %H:%M:%S")
+    );
+
+    // sandbox 数
+    let sandbox_mgr = PersistentSandboxManager::new(project.clone(), registry.root());
+    let sandboxes = sandbox_mgr.list().await.context("list sandboxes 失败")?;
+    println!("\nL3 持久 sandboxes ({}): ", sandboxes.len());
+    if sandboxes.is_empty() {
+        println!(
+            "  （无；起一个：fuxi spawn --role <role> --project {}）",
+            project.id
+        );
+    } else {
+        for h in &sandboxes {
+            println!("  - {}  branch: {}", h.role, h.branch);
+        }
+    }
+
+    // 交付 task 数（扫 deliverables/ 子目录）
+    let deliverables_dir = registry
+        .root()
+        .join(project.id.as_str())
+        .join("deliverables");
+    let mut task_count = 0_usize;
+    if deliverables_dir.exists() {
+        let mut iter = tokio::fs::read_dir(&deliverables_dir).await?;
+        while let Some(entry) = iter.next_entry().await? {
+            if entry.path().join("manifest.json").exists() {
+                task_count += 1;
+            }
+        }
+    }
+    println!("\n交付 (task buckets): {}", task_count);
+    if task_count == 0 {
+        println!("  （无；门客 produce 后会出现在 PWA「交付」tab）");
+    }
+    Ok(())
+}
+
 /// `fuxi sandbox list --project <slug>` —— 列项目的 L3 持久 sandbox。
 #[derive(Debug, Args)]
 pub struct SandboxListArgs {
@@ -641,6 +703,49 @@ mod tests {
             full.contains("未知 deliverable kind") || full.contains("research_summary"),
             "got: {full}"
         );
+    }
+
+    #[tokio::test]
+    async fn project_info_shows_sandboxes_and_deliverables_count() {
+        use fuxi_workspace::DeliverablesManager;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+        run_add(ProjectAddArgs {
+            canonical_path: repo,
+            name: Some("erp".into()),
+            branch: None,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+        // 起 1 个 sandbox + 落 2 个 task 的 deliverable
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let project = registry
+            .get(&ProjectId::new("erp").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let mgr = PersistentSandboxManager::new(project.clone(), registry.root());
+        mgr.get_or_create("luban").await.unwrap();
+        let dmgr = DeliverablesManager::new(project.id.clone(), registry.root());
+        let src_dir = tempfile::tempdir().unwrap();
+        for name in ["a.md", "b.md"] {
+            let f = src_dir.path().join(name);
+            tokio::fs::write(&f, name).await.unwrap();
+            dmgr.produce(TaskId::new(), DeliverableKind::ResearchSummary, &[f])
+                .await
+                .unwrap();
+        }
+
+        // info 不该 fail
+        run_info(ProjectInfoArgs {
+            id: "erp".into(),
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
