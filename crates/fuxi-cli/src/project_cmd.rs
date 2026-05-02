@@ -13,7 +13,8 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use fuxi_core::{DeliverableKind, ProjectId, TaskId};
+use fuxi_core::{DeliverableKind, Event, EventKind, EventMeta, ProjectId, TaskId};
+use fuxi_events::EventStore;
 use fuxi_workspace::{DeliverablesManager, FileSystemProjectRegistry};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -124,6 +125,12 @@ pub struct DeliverableProduceArgs {
     /// 注册表 root 覆写（同 project add）。
     #[arg(long = "registry-root")]
     pub registry_root: Option<PathBuf>,
+    /// EventBus SQLite 文件路径覆写。默认 `$HOME/.fuxi/events.db`——跟
+    /// `fuxi im start` 的默认路径一致；指定则两进程共享同一文件，DeliverableProduced
+    /// 事件可被 firehose TUI / IM 后端 replay 看到。
+    /// 缺失（路径不存在或文件不可写）→ warn 但不致命，仍正常 produce 文件。
+    #[arg(long = "events-db")]
+    pub events_db: Option<PathBuf>,
 }
 
 pub async fn run_deliverable_produce(args: DeliverableProduceArgs) -> Result<()> {
@@ -172,6 +179,55 @@ pub async fn run_deliverable_produce(args: DeliverableProduceArgs) -> Result<()>
             &f.sha256[..16]
         );
     }
+
+    // 发 DeliverableProduced 事件——直写共享 events.db 让 fuxi-im / firehose 能看到。
+    // 失败 (events.db 路径不通 / WAL 撞锁) → warn 不致命，本次 produce 已落盘有效。
+    let events_db = args.events_db.or_else(default_events_db_path);
+    match events_db {
+        Some(path) if path.exists() => {
+            if let Err(e) = publish_deliverable_produced(&path, &handle).await {
+                eprintln!(
+                    "⚠ DeliverableProduced 事件未写入 ({path}): {e}",
+                    path = path.display()
+                );
+            } else {
+                println!("  事件: DeliverableProduced 已发到 {}", path.display());
+            }
+        }
+        _ => {
+            eprintln!(
+                "⚠ events.db 不存在或未指定——DeliverableProduced 事件未发；\
+                 跑 fuxi im start 后再 produce 才能看到事件流"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 默认 events.db 路径——跟 `fuxi im start` 同源（`$HOME/.fuxi/events.db`）。
+fn default_events_db_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fuxi").join("events.db"))
+}
+
+async fn publish_deliverable_produced(
+    db_path: &std::path::Path,
+    handle: &fuxi_workspace::DeliverableHandle,
+) -> anyhow::Result<()> {
+    let store = EventStore::connect_file(db_path)
+        .await
+        .with_context(|| format!("connect events.db {} 失败", db_path.display()))?;
+    let mut meta = EventMeta::now();
+    meta.task = Some(handle.task);
+    let ev = Event {
+        meta,
+        kind: EventKind::DeliverableProduced {
+            task: handle.task,
+            project: handle.project.clone(),
+            deliverable_kind: handle.kind,
+            files: handle.files.clone(),
+        },
+    };
+    store.append(&ev).await.context("append 事件失败")?;
     Ok(())
 }
 
@@ -304,6 +360,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deliverable_produce_publishes_event_when_events_db_provided() {
+        use futures_util::StreamExt;
+        use fuxi_events::ReplayCursor;
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let (_repo_td, repo) = make_git_repo().await;
+        run_add(ProjectAddArgs {
+            canonical_path: repo,
+            name: Some("erp".into()),
+            branch: None,
+            registry_root: Some(registry_root.path().to_path_buf()),
+        })
+        .await
+        .unwrap();
+
+        // 起一个 events.db
+        let events_dir = tempfile::tempdir().unwrap();
+        let events_db = events_dir.path().join("events.db");
+        // 先 connect 一次让 schema 建好
+        let _store = EventStore::connect_file(&events_db).await.unwrap();
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("report.md");
+        tokio::fs::write(&src, "# 报告").await.unwrap();
+
+        let task = TaskId::new();
+        run_deliverable_produce(DeliverableProduceArgs {
+            project: "erp".into(),
+            task: Some(task.to_string()),
+            kind: "research_summary".into(),
+            files: vec![src],
+            registry_root: Some(registry_root.path().to_path_buf()),
+            events_db: Some(events_db.clone()),
+        })
+        .await
+        .expect("produce");
+
+        // 重 connect 同 events.db 验证事件已落盘
+        let store2 = EventStore::connect_file(&events_db).await.unwrap();
+        let mut stream = store2.replay(ReplayCursor::Beginning);
+        let mut found = false;
+        while let Some(item) = stream.next().await {
+            let ev = item.unwrap();
+            if let EventKind::DeliverableProduced {
+                task: t,
+                project: p,
+                deliverable_kind,
+                files,
+            } = &ev.kind
+            {
+                assert_eq!(*t, task);
+                assert_eq!(p.as_str(), "erp");
+                assert_eq!(*deliverable_kind, DeliverableKind::ResearchSummary);
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].name, "report.md");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "DeliverableProduced 事件应已落盘");
+    }
+
+    #[tokio::test]
     async fn deliverable_produce_writes_files_to_bucket() {
         let registry_root = tempfile::tempdir().unwrap();
         let (_repo_td, repo) = make_git_repo().await;
@@ -330,6 +449,7 @@ mod tests {
             kind: "research_summary".into(),
             files: vec![src],
             registry_root: Some(registry_root.path().to_path_buf()),
+            events_db: None,
         })
         .await
         .expect("produce");
@@ -357,6 +477,7 @@ mod tests {
             kind: "research_summary".into(),
             files: vec![src],
             registry_root: Some(registry_root.path().to_path_buf()),
+            events_db: None,
         })
         .await
         .expect_err("未注册 project 应拒");
@@ -386,6 +507,7 @@ mod tests {
             kind: "wrong_kind".into(),
             files: vec![src],
             registry_root: Some(registry_root.path().to_path_buf()),
+            events_db: None,
         })
         .await
         .expect_err("未知 kind 应拒");
