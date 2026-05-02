@@ -22,6 +22,7 @@
 //!   内存 registry 只是缓存。
 //! - 不在库里 `unwrap()`——所有失败路径返回 [`WorkspaceError`]。
 
+pub mod deliverables;
 mod git;
 pub mod persistent_sandbox;
 pub mod porcelain;
@@ -29,6 +30,9 @@ pub mod project_registry;
 
 use std::path::PathBuf;
 
+pub use deliverables::{
+    DeliverableHandle, DeliverableManifest, DeliverableManifestEntry, DeliverablesManager,
+};
 pub use git::GitWorktreeWorkspace;
 pub use persistent_sandbox::{PersistentSandboxHandle, PersistentSandboxManager};
 pub use porcelain::{PorcelainWorktree, parse as parse_porcelain};
