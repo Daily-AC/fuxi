@@ -51,6 +51,11 @@ pub enum Command {
         /// 但 dist gateway 有跨版本交互）。
         #[serde(default)]
         project: Option<String>,
+        /// Decision 21 phase 2：非空 = 走 L2 ephemeral 路径，task uuid 锚定
+        /// `~/.fuxi/projects/<project>/ephemeral/<task>/`。必须跟 `project`
+        /// 配套。serde default 兼容老 wire。
+        #[serde(default)]
+        ephemeral_task: Option<String>,
     },
     /// 给指定门客派个任务。
     Dispatch {
@@ -259,6 +264,7 @@ mod tests {
             recall_task: None,
             recall_role: None,
             project: None,
+            ephemeral_task: None,
         };
         let s = serde_json::to_string(&cmd).unwrap();
         assert!(s.contains(r#""cmd":"spawn""#), "got: {s}");
@@ -281,6 +287,7 @@ mod tests {
             recall_task: None,
             recall_role: None,
             project: Some("erp".into()),
+            ephemeral_task: None,
         };
         let s = serde_json::to_string(&cmd).unwrap();
         assert!(s.contains(r#""project":"erp""#), "got: {s}");
@@ -301,6 +308,37 @@ mod tests {
         }
     }
 
+    /// Decision 21 phase 3：`ephemeral_task` 字段 roundtrip + serde(default) 兼容性。
+    #[test]
+    fn spawn_command_serdes_ephemeral_task_flag() {
+        let cmd = Command::Spawn {
+            role: "luban".into(),
+            name: None,
+            node: None,
+            cli: None,
+            recall_task: None,
+            recall_role: None,
+            project: Some("erp".into()),
+            ephemeral_task: Some("task-abc".into()),
+        };
+        let s = serde_json::to_string(&cmd).unwrap();
+        assert!(s.contains(r#""ephemeral_task":"task-abc""#), "got: {s}");
+        let back: Command = serde_json::from_str(&s).unwrap();
+        match back {
+            Command::Spawn { ephemeral_task, .. } => {
+                assert_eq!(ephemeral_task.as_deref(), Some("task-abc"))
+            }
+            _ => panic!("not Spawn"),
+        }
+        // 老 wire 无 ephemeral_task → 必须 default 回 None
+        let legacy = r#"{"cmd":"spawn","role":"luban","name":null,"node":null,"cli":null,"recall_task":null,"recall_role":null,"project":"erp"}"#;
+        let back: Command = serde_json::from_str(legacy).unwrap();
+        match back {
+            Command::Spawn { ephemeral_task, .. } => assert!(ephemeral_task.is_none()),
+            _ => panic!("not Spawn"),
+        }
+    }
+
     /// P2 召回：`recall_task` / `recall_role` 字段必须能完整 roundtrip——daemon
     /// 端反序列化失败 = 召回功能整条链路死。
     #[test]
@@ -313,6 +351,7 @@ mod tests {
             recall_task: Some("task-abc".into()),
             recall_role: None,
             project: None,
+            ephemeral_task: None,
         };
         let s = serde_json::to_string(&cmd).unwrap();
         let back: Command = serde_json::from_str(&s).unwrap();

@@ -326,12 +326,24 @@ async fn dispatch_command(
             recall_task,
             recall_role,
             project,
+            ephemeral_task,
         } => {
             let recall = match resolve_recall_handle(&oracle, recall_task, recall_role).await {
                 Ok(h) => h,
                 Err(resp) => return resp,
             };
-            match spawn_by_role(&fuxi, &role, name, node, cli, recall, project).await {
+            match spawn_by_role(
+                &fuxi,
+                &role,
+                name,
+                node,
+                cli,
+                recall,
+                project,
+                ephemeral_task,
+            )
+            .await
+            {
                 Ok(id) => Response::ok(serde_json::json!({"agent_id": id.to_string()})),
                 Err(e) => Response::err(e.to_string()),
             }
@@ -1030,6 +1042,7 @@ async fn emit_terminal_error(
 /// 或 spawn_worker_in_worktree（有召回 worktree 时）。
 ///
 /// CLI 选择来自 `LoadedSkill.profile.cli`。新增 CLI 同步更新三处（同上版注释）。
+#[allow(clippy::too_many_arguments)]
 async fn spawn_by_role(
     fuxi: &Fuxi,
     role: &str,
@@ -1038,6 +1051,7 @@ async fn spawn_by_role(
     cli_override: Option<String>,
     recall: RecallHandle,
     project_override: Option<String>,
+    ephemeral_task_override: Option<String>,
 ) -> Result<AgentId> {
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let mut profile = loaded.profile;
@@ -1130,6 +1144,28 @@ async fn spawn_by_role(
         let branch_hint = format!("recall-{role}");
         return fuxi
             .spawn_worker_in_worktree(profile, kind, wt_path, branch_hint)
+            .await
+            .map_err(|e| anyhow!(e.to_string()));
+    }
+
+    // Decision 21 phase 3：CLI `--project erp --ephemeral --task task-...` →
+    // 走 L2 ephemeral 路径（per-task 临时 worktree，task 死即归档/回收）。
+    // 优先级高于 L3——明示 ephemeral 时不退回默认 L3。
+    if let (Some(project_slug), Some(task_raw)) =
+        (project_override.as_ref(), ephemeral_task_override.as_ref())
+    {
+        let project_id = fuxi_core::ProjectId::new(project_slug.clone())
+            .with_context(|| format!("无效 project slug: {project_slug}"))?;
+        let trimmed = task_raw.strip_prefix("task-").unwrap_or(task_raw);
+        let task_uuid =
+            Uuid::parse_str(trimmed).with_context(|| format!("无效 task uuid '{task_raw}'"))?;
+        return fuxi
+            .spawn_worker_in_ephemeral_workspace(
+                profile,
+                kind,
+                project_id,
+                fuxi_core::TaskId::from(task_uuid),
+            )
             .await
             .map_err(|e| anyhow!(e.to_string()));
     }
@@ -1594,6 +1630,7 @@ mod tests {
             Some("local".into()),
             None,
             RecallHandle::default(),
+            None,
             None,
         )
         .await
