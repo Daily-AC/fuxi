@@ -434,7 +434,44 @@ impl Fuxi {
     ///
     /// 保证：**pump task 退出时无论何种原因**（见到终结事件 / channel 被 agent
     /// 提前关闭 / bus 关闭），shelf 状态必然回到 Idle——避免门客被永久锁在 Busy。
+    /// 决策 13 + 22 配套：派活时给门客 prompt 前置一行
+    /// `[FUXI_TASK_ID=task-<uuid>]`，让门客调 `fuxi deliverable produce --task ...`
+    /// 时知道当前 task uuid（不必玄女主动告诉）。
+    ///
+    /// 黑名单：xuannv / extractor 不注入——
+    /// - xuannv 是接收方（user-turn 类 task description 是用户原文，注入会污染对话）
+    /// - extractor 是幕后工，跟 deliverable 模型无关
+    ///
+    /// 跟 sentinel addendum 黑名单同步。
+    fn maybe_inject_task_id(role: &str, mut task: Task) -> Task {
+        if !crate::sentinel_addendum::should_inject_for_role(role) {
+            return task;
+        }
+        // 单独一行 + 分隔空行——LLM grep 友好，不污染 markdown 渲染
+        let prefix = format!("[FUXI_TASK_ID={}]\n\n", task.id);
+        task.description = format!("{prefix}{}", task.description);
+        task
+    }
+
     pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
+        // Decision 22 phase 1：在派活前给 task.description 注入
+        // [FUXI_TASK_ID=task-<uuid>]，让门客在 Bash 里跑
+        // `fuxi deliverable produce --task ...` 时能拿到当前 task uuid，
+        // 不用玄女主动告诉。黑名单（xuannv / extractor）跳过避免污染对话。
+        // 局限：role 从 shelf 现取，shelf 没该 agent 时（dist 派 placeholder）
+        // 跳过注入——v1 接受这个 corner case。
+        let task = {
+            let role = self
+                .shelf
+                .get_agent(agent_id)
+                .await
+                .map(|a| a.card().profile.role.clone());
+            match role {
+                Some(r) => Self::maybe_inject_task_id(&r, task),
+                None => task,
+            }
+        };
+
         // β · #57 routing 决策树（spec gap e）——pinned_node / required_tags 非空 →
         // 走 dist enqueue（远端 worker 跑），否则继续本地 spawn / 已有 agent 路径。
         //
@@ -1226,5 +1263,70 @@ mod worker_kind_tests {
         let codex = WorkerKind::Codex(CodexLaunchConfig::default());
         assert_eq!(cc.cli_tag(), "claude-code");
         assert_eq!(codex.cli_tag(), "codex");
+    }
+}
+
+#[cfg(test)]
+mod task_id_injection_tests {
+    use super::*;
+    use fuxi_core::TaskId;
+
+    /// luban / 普通门客 dispatch 时 description 头部应被注入 [FUXI_TASK_ID=...]，
+    /// 让它在 Bash 里跑 `fuxi deliverable produce --task` 能从 prompt grep 拿。
+    #[test]
+    fn injects_task_id_for_luban_role() {
+        let original = "修 ERP-1066";
+        let task_id = TaskId::new();
+        let task = {
+            let mut t = Task::new("title", original);
+            t.id = task_id;
+            t
+        };
+        let injected = Fuxi::maybe_inject_task_id("luban", task);
+        assert!(
+            injected
+                .description
+                .starts_with(&format!("[FUXI_TASK_ID=task-{}]", task_id.0)),
+            "description 应被注入 task_id 头：{}",
+            injected.description
+        );
+        assert!(
+            injected.description.contains(original),
+            "原 description 应保留：{}",
+            injected.description
+        );
+    }
+
+    /// xuannv / extractor 黑名单——dispatch 给玄女的 user-turn task 不该被污染
+    /// （description 是用户原文，前置 [FUXI_TASK_ID=...] 会让玄女对话上下文混入
+    /// 平台 marker，影响她的 LLM 推理）。
+    #[test]
+    fn skips_blacklisted_roles() {
+        let task = Task::new("user-turn", "你好玄女");
+        let original_desc = task.description.clone();
+        let after = Fuxi::maybe_inject_task_id("xuannv", task);
+        assert_eq!(
+            after.description, original_desc,
+            "xuannv 不应被注入 task_id"
+        );
+
+        let task2 = Task::new("extract", "提取这个对话");
+        let original_desc2 = task2.description.clone();
+        let after2 = Fuxi::maybe_inject_task_id("extractor", task2);
+        assert_eq!(
+            after2.description, original_desc2,
+            "extractor 不应被注入 task_id"
+        );
+    }
+
+    /// 注入是有边界的：只前置一次，不重复（同一 task 二次 dispatch 不该叠两层
+    /// FUXI_TASK_ID）。当前实装是无状态拼接——若已存在则会重复，留 todo。
+    /// 本测试目前只验"一次注入正确"，重复注入的防护留 phase 2。
+    #[test]
+    fn injection_format_single_line_with_blank_separator() {
+        let task = Task::new("t", "body");
+        let after = Fuxi::maybe_inject_task_id("luban", task);
+        // 单独一行（结尾 `\n\n`）——LLM grep 友好
+        assert!(after.description.contains("]\n\nbody"));
     }
 }
