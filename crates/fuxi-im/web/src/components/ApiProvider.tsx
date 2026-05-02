@@ -12,10 +12,11 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
-/** Bottom tab bar 当前 tab：0=玄女 / 1=任务 / 2=节点。
+/** Bottom tab bar 当前 tab：0=玄女 / 1=任务 / 2=项目 / 3=交付 / 4=节点。
  *  设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §A
- *  v2 的 PageIndex 已淘汰（horizontal pager 路线被 supersede）。*/
-export type TabIndex = 0 | 1 | 2;
+ *  v2 的 PageIndex 已淘汰（horizontal pager 路线被 supersede）。
+ *  Decision 21/22 phase 1 加 项目 / 交付 两个 tab。*/
+export type TabIndex = 0 | 1 | 2 | 3 | 4;
 
 /** NavigationStack 顶部的 push 路由。
  *  v3 仅在"任务 tab"下生效（Layer 1 任务列表 → Layer 2 任务 thread）。

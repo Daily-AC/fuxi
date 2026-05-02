@@ -140,3 +140,51 @@ export interface NodeView {
 export interface NodesResponse {
   nodes: NodeView[];
 }
+
+// ---------- Decision 21 phase 1 · 项目注册视图 ----------
+
+export interface ProjectView {
+  /** slug，如 "erp"、"fuxi"。 */
+  id: string;
+  /** 用户真项目目录绝对路径，如 "/Users/e0_7/erp"。 */
+  canonical_path: string;
+  default_branch: string;
+  /** ISO 8601 UTC。 */
+  created_at: string;
+}
+
+export interface ProjectsResponse {
+  projects: ProjectView[];
+}
+
+// ---------- Decision 22 phase 1 · 交付收件箱视图 ----------
+
+/** Decision 13 五类 deliverable_kind。 */
+export type DeliverableKind =
+  | "research_summary"
+  | "code_change"
+  | "test_result"
+  | "decision_request"
+  | "error_block";
+
+/** 单文件元信息——sha256 给前端校验/秒传可能用，size 给 UI 显示。 */
+export interface DeliverableFileMeta {
+  name: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+/** 一次 produce 调用 = 一条 entry。同 task 多次产出多条。 */
+export interface DeliverableEntry {
+  project: string;
+  /** 裸 uuid（不含 task- 前缀）；前端拼下载 URL 时要加 task- 前缀。 */
+  task: string;
+  kind: DeliverableKind;
+  files: DeliverableFileMeta[];
+  /** ISO 8601 UTC。 */
+  produced_at: string;
+}
+
+export interface DeliverablesResponse {
+  deliverables: DeliverableEntry[];
+}

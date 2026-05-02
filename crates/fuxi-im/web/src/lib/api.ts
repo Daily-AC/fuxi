@@ -10,8 +10,10 @@ import type {
 } from "~/types/events";
 import type {
   ConversationHistoryResponse,
+  DeliverablesResponse,
   InterveneRequestV2,
   NodesResponse,
+  ProjectsResponse,
   TasksOverview,
   Upload,
 } from "~/types/api";
@@ -49,6 +51,13 @@ export interface ApiClient {
   fetchTasksOverview(): Promise<TasksOverview>;
   /** v3 #58 dist topology · GET /api/nodes（β #55 实装中，本接口契约由 spec 钉）。 */
   fetchNodes(): Promise<NodesResponse>;
+  /** Decision 21 phase 1 · GET /api/projects · 注册过的项目列表。 */
+  fetchProjects(): Promise<ProjectsResponse>;
+  /** Decision 22 phase 1 · GET /api/deliverables · 跨项目交付收件箱（按 produced_at 倒序）。 */
+  fetchDeliverables(): Promise<DeliverablesResponse>;
+  /** Decision 22 phase 1 · 拼接交付文件直链 URL，给 <a href> / window.open 用。
+   *  注意 task 在 backend wire 是裸 uuid，但路由用的是 `task-<uuid>`——前端拼时加前缀。 */
+  deliverableFileUrl(project: string, task: string, name: string): string;
   /** #N3 私聊页 · 拉门客历史（β #N5 / #27 目标契约）。
    *  filter by meta.agent==agent_id；事件 kind 白名单见 spec §私聊页"事件 filter"。*/
   fetchWorkerEvents(agentId: string, fromCursor?: string): Promise<EventHistoryResponse>;
@@ -121,6 +130,14 @@ export function createHttpClient(): ApiClient {
     },
     fetchTasksOverview: () => jsonFetch<TasksOverview>(`/api/tasks`),
     fetchNodes: () => jsonFetch<NodesResponse>(`/api/nodes`),
+    fetchProjects: () => jsonFetch<ProjectsResponse>(`/api/projects`),
+    fetchDeliverables: () => jsonFetch<DeliverablesResponse>(`/api/deliverables`),
+    deliverableFileUrl: (project, task, name) => {
+      // backend wire 用裸 uuid，路由要 `task-<uuid>` 前缀；统一在前端拼合让调用方
+      // 直接传 task uuid 拼下载 URL 不易出错。
+      const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
+      return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/files/${encodeURIComponent(name)}`;
+    },
     fetchWorkerEvents: (agentId, from) => {
       const q = from ? `?from=${encodeURIComponent(from)}` : "";
       return jsonFetch<EventHistoryResponse>(
