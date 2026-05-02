@@ -57,6 +57,12 @@ export interface ApiContextValue {
   navRoute: Accessor<NavRoute>;
   navPush(route: NonNullable<NavRoute>): void;
   navPop(): void;
+  /** 跨 tab 跳转 helper · Decision 21/22 phase 3 polish。
+   *
+   *  按 route.kind 解析目标 tab（task/worker → 1，project → 2，deliverable → 3）
+   *  然后 setActiveTab + navPush 一步到位。比调用方手写 setActiveTab(3) + navPush
+   *  少一次重渲染，且不会被 setActiveTab 的"切到无 nav tab 时清栈"逻辑误清。*/
+  navTo(route: NonNullable<NavRoute>): void;
 }
 
 const ApiContext = createContext<ApiContextValue>();
@@ -142,6 +148,18 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
           setNavRoute(route);
         },
         navPop: () => setNavRoute(null),
+        // 跨 tab 跳转 · setActiveTab + navPush 原子化。绕过 setActiveTab 的清栈
+        // 逻辑（直接走内部 _setActiveTab）避免 race。
+        navTo: (route) => {
+          const targetTab: TabIndex =
+            route.kind === "task" || route.kind === "worker"
+              ? 1
+              : route.kind === "project"
+                ? 2
+                : 3;
+          _setActiveTab(targetTab);
+          setNavRoute(route);
+        },
       }}
     >
       {props.children}

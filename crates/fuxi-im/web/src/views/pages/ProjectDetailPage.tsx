@@ -216,26 +216,36 @@ const ArchivedRow: Component<{ archived: EphemeralArchivedView }> = (props) => {
 };
 
 const DeliverableSummaryRow: Component<{ entry: DeliverableEntry }> = (props) => {
-  const { navPush } = useApi();
+  const { navTo } = useApi();
   const taskShort = (): string =>
     props.entry.task.length > 8 ? props.entry.task.slice(0, 8) : props.entry.task;
   const fileCount = (): number => props.entry.files.length;
   const open = (): void => {
-    // 项目 tab (2) navPush 只允许 kind=project；切到 deliverable 详情需要切 tab。
-    // v1 简化：直接弹一个 alert 提示用户去交付 tab——避免 cross-tab routing 复杂度。
-    void navPush; // 留个 ref 否则 lint 报未用
+    // 跨 tab 跳到「交付」详情——navTo 原子化 setActiveTab(3) + navPush。
+    navTo({
+      kind: "deliverable",
+      project_id: props.entry.project,
+      task_id: props.entry.task,
+    });
   };
   return (
     <li
       class={styles.row}
       data-testid={`pdetail-deliverable-${props.entry.task}`}
-      onClick={open}
     >
-      <span class={styles.rowLabel}>{props.entry.kind}</span>
-      <span class={`${styles.rowSub} mono`}>task-{taskShort()}</span>
-      <span class={styles.rowSub}>
-        {fileCount()} 文件 · {props.entry.status}
-      </span>
+      <button
+        type="button"
+        class={styles.rowBtn}
+        onClick={open}
+        data-testid={`pdetail-deliverable-open-${props.entry.task}`}
+        aria-label={`查看交付 ${props.entry.kind} task-${taskShort()}`}
+      >
+        <span class={styles.rowLabel}>{props.entry.kind}</span>
+        <span class={`${styles.rowSub} mono`}>task-{taskShort()}</span>
+        <span class={styles.rowSub}>
+          {fileCount()} 文件 · {props.entry.status}
+        </span>
+      </button>
     </li>
   );
 };

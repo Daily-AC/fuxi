@@ -124,6 +124,69 @@ describe("ApiProvider · nav state (v3)", () => {
     unmount();
   });
 
+  it("navTo · 跨 tab 跳转：从 0 跳到 deliverable detail (tab 3)", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { setActiveTab, navTo, activeTab, navRoute } = useApi();
+      onMount(() => {
+        setActiveTab(0); // 玄女 tab
+        navTo({
+          kind: "deliverable",
+          project_id: "erp",
+          task_id: "t-uuid",
+        });
+      });
+      const navTask = (): string => {
+        const r = navRoute();
+        if (r && r.kind === "deliverable") return r.task_id;
+        return "null";
+      };
+      return (
+        <div>
+          <span data-testid="tab-now">{String(activeTab())}</span>
+          <span data-testid="nav-now">{navTask()}</span>
+        </div>
+      );
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("tab-now").textContent).toBe("3");
+    expect(getByTestId("nav-now").textContent).toBe("t-uuid");
+    unmount();
+  });
+
+  it("navTo · project 路由解析到 tab 2", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { navTo, activeTab, navRoute } = useApi();
+      onMount(() => {
+        navTo({ kind: "project", project_id: "erp" });
+      });
+      const navProj = (): string => {
+        const r = navRoute();
+        if (r && r.kind === "project") return r.project_id;
+        return "null";
+      };
+      return (
+        <div>
+          <span data-testid="tab-now">{String(activeTab())}</span>
+          <span data-testid="nav-now">{navProj()}</span>
+        </div>
+      );
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("tab-now").textContent).toBe("2");
+    expect(getByTestId("nav-now").textContent).toBe("erp");
+    unmount();
+  });
+
   it("切 tab 自动清 navRoute（避免跨 tab 残留二层 push）", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
