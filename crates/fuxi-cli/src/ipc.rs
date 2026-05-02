@@ -44,6 +44,13 @@ pub enum Command {
         /// P2 召回：取该 role 最近活动的 session（subject=`role-<role>`,
         /// `query_one` 拿 updated_at DESC 最新一条）。
         recall_role: Option<String>,
+        /// Decision 21 phase 1：项目 slug。指定后走 spawn_worker_in_project_sandbox
+        /// 路径（per-门客 per-project L3 持久 sandbox），跨 task 复用。
+        /// `None` = 走旧 generic agent-id worktree 路径（向后兼容）。
+        /// serde default 让老 daemon 仍能解析新 wire（虽然 fuxi-cli 单进程同版本，
+        /// 但 dist gateway 有跨版本交互）。
+        #[serde(default)]
+        project: Option<String>,
     },
     /// 给指定门客派个任务。
     Dispatch {
@@ -251,6 +258,7 @@ mod tests {
             cli: None,
             recall_task: None,
             recall_role: None,
+            project: None,
         };
         let s = serde_json::to_string(&cmd).unwrap();
         assert!(s.contains(r#""cmd":"spawn""#), "got: {s}");
@@ -258,6 +266,39 @@ mod tests {
 
         let parsed: Command = serde_json::from_str(&s).unwrap();
         matches!(parsed, Command::Spawn { .. });
+    }
+
+    /// Decision 21 phase 1：`project` 字段 roundtrip + serde(default) 兼容性。
+    /// 老 wire（无 project key）反序列化必须不挂，回出来 project=None。
+    #[test]
+    fn spawn_command_serdes_project_flag() {
+        // 1. 带 project 字段
+        let cmd = Command::Spawn {
+            role: "luban".into(),
+            name: None,
+            node: None,
+            cli: None,
+            recall_task: None,
+            recall_role: None,
+            project: Some("erp".into()),
+        };
+        let s = serde_json::to_string(&cmd).unwrap();
+        assert!(s.contains(r#""project":"erp""#), "got: {s}");
+        let back: Command = serde_json::from_str(&s).unwrap();
+        match back {
+            Command::Spawn { project, .. } => assert_eq!(project.as_deref(), Some("erp")),
+            _ => panic!("not Spawn"),
+        }
+
+        // 2. 老 wire 无 project key——serde(default) 兜底回 None
+        let legacy = r#"{"cmd":"spawn","role":"luban","name":null,"node":null,"cli":null,"recall_task":null,"recall_role":null}"#;
+        let back: Command = serde_json::from_str(legacy).unwrap();
+        match back {
+            Command::Spawn { project, .. } => {
+                assert!(project.is_none(), "老 wire 应反序列化 project=None")
+            }
+            _ => panic!("not Spawn"),
+        }
     }
 
     /// P2 召回：`recall_task` / `recall_role` 字段必须能完整 roundtrip——daemon
@@ -271,6 +312,7 @@ mod tests {
             cli: Some("codex".into()),
             recall_task: Some("task-abc".into()),
             recall_role: None,
+            project: None,
         };
         let s = serde_json::to_string(&cmd).unwrap();
         let back: Command = serde_json::from_str(&s).unwrap();

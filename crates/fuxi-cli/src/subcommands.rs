@@ -37,6 +37,13 @@ pub struct SpawnArgs {
     /// P2 召回：续写该 role 最近活动的 session（subject=`role-<role>`）。
     #[arg(long = "recall-role")]
     pub recall_role: Option<String>,
+    /// Decision 21 phase 1：在已注册项目的 L3 持久 sandbox 里 spawn 门客。
+    /// 项目 slug（必须先 `fuxi project add` 注册过）。给定后走
+    /// `Fuxi::spawn_worker_in_project_sandbox` 路径——同 role 跨 task 复用
+    /// `~/.fuxi/projects/<slug>/sandboxes/<role>/`（保留 build cache + WIP）。
+    /// 不传 = 走旧 generic agent-id worktree 路径。
+    #[arg(long)]
+    pub project: Option<String>,
 }
 
 pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
@@ -47,6 +54,7 @@ pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
         cli: args.cli,
         recall_task: args.recall_task,
         recall_role: args.recall_role,
+        project: args.project,
     })
     .await?;
     print_response(resp)
