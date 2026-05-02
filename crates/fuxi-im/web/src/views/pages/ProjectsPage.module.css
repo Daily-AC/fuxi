@@ -130,3 +130,194 @@
   font-size: var(--size-aux);
   color: var(--text-muted);
 }
+
+/* ===== 注册按钮 + 删除按钮 ===== */
+
+.addBtn {
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  font-size: var(--size-aux);
+  font-weight: var(--weight-medium);
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+  transition: background var(--transition-fast);
+}
+
+.addBtn:active,
+.addBtn:focus-visible {
+  background: var(--accent-subtle);
+}
+
+.deleteBtn {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.deleteBtn:hover,
+.deleteBtn:focus-visible {
+  color: var(--danger);
+  text-decoration: underline;
+}
+
+.confirmRow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-aux);
+}
+
+.confirmHint {
+  color: var(--text-muted);
+}
+
+.confirmCancel {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 2px var(--space-2);
+}
+
+.confirmConfirm {
+  font-size: var(--size-aux);
+  color: white;
+  background: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-pill);
+  padding: 2px var(--space-2);
+}
+
+.confirmConfirm:disabled {
+  opacity: 0.5;
+}
+
+/* ===== 注册项目 modal ===== */
+
+.modalScrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3);
+  z-index: 100;
+}
+
+.modalCard {
+  width: 100%;
+  max-width: 420px;
+  max-height: 80vh;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.modalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.modalTitle {
+  margin: 0;
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+}
+
+.modalClose {
+  font-size: var(--size-heading);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  width: var(--touch);
+  height: var(--touch);
+}
+
+.modalBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.fieldLabel {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.fieldInput {
+  min-height: var(--touch);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--size-body);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+}
+
+.fieldInput:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.fieldHint {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.modalFooter {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.btnSecondary,
+.btnPrimary {
+  min-height: var(--touch);
+  padding: 0 var(--space-4);
+  font-size: var(--size-aux);
+  font-weight: var(--weight-medium);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.btnSecondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.btnPrimary {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
+}
+
+.btnPrimary:disabled {
+  opacity: 0.5;
+}

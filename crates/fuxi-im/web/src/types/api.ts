@@ -157,6 +157,16 @@ export interface ProjectsResponse {
   projects: ProjectView[];
 }
 
+/** POST /api/projects 请求体——PWA「+ 注册项目」表单序列化目标。 */
+export interface AddProjectRequest {
+  canonical_path: string;
+  name?: string;
+  default_branch?: string;
+}
+
+/** POST /api/projects 成功响应——同 GET 单条形态（ProjectView）。 */
+export type AddProjectResponse = ProjectView;
+
 // ---------- Decision 22 phase 1 · 交付收件箱视图 ----------
 
 /** Decision 13 五类 deliverable_kind。 */

@@ -44,8 +44,15 @@ pub fn build(state: AppState) -> Router {
         .route("/api/tasks", get(handlers::tasks::list_tasks))
         // β · #55 dist topology——节点 tab + 任务卡 @node 标识共用数据源
         .route("/api/nodes", get(handlers::nodes::list_nodes))
-        // Decision 21 phase 1：Project 注册表读视图——PWA 项目列表
-        .route("/api/projects", get(handlers::projects::list_projects))
+        // Decision 21 phase 1：Project 注册表读 + 写
+        .route(
+            "/api/projects",
+            get(handlers::projects::list_projects).post(handlers::projects::add_project),
+        )
+        .route(
+            "/api/projects/{id}",
+            axum::routing::delete(handlers::projects::remove_project),
+        )
         // Decision 22 phase 1：交付收件箱列表 + 文件下载
         .route(
             "/api/deliverables",
