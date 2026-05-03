@@ -271,6 +271,15 @@ pub enum EventKind {
         /// 老事件 `#[serde(default)]` 回放回 None，向后兼容。
         #[serde(default)]
         pinned_node: Option<String>,
+        /// 用户随消息附带的上传文件 id 列表（PWA 阶段 3 附件管道）。
+        ///
+        /// id 引向 `~/.fuxi/im_uploads` 的 `uploads` 表行，前端取直链
+        /// `GET /api/uploads/:id` 渲染缩略图；玄女这边 handler 也用 id 反查
+        /// 文件名 + 绝对路径并 prepend 到 text，让 cc 能 Read 真图片做 vision。
+        ///
+        /// 老事件 `#[serde(default)]` 回放回空 Vec，向后兼容。
+        #[serde(default)]
+        attachments: Vec<String>,
     },
     /// 门客因介入被打断当前 turn（`control_request/interrupt` 已送达）。
     /// 仅在 `mode=interrupt` 的介入路径上发。
@@ -572,6 +581,7 @@ mod tests {
                 text: "查 ERP-1066".into(),
                 mentions: vec![target, other],
                 pinned_node: None,
+                attachments: Vec::new(),
             },
         };
         let json = serde_json::to_string(&ev).expect("ser");
@@ -631,6 +641,7 @@ mod tests {
                 text: "@mac-local 帮我 ls ~/erp".into(),
                 mentions: vec![target],
                 pinned_node: Some("mac-local".into()),
+                attachments: Vec::new(),
             },
         };
         let json = serde_json::to_string(&ev).expect("ser");

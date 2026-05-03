@@ -194,9 +194,7 @@ fn validate_accept_target(target: &std::path::Path) -> Result<()> {
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from)
             .ok_or_else(|| {
-                Error::Internal(
-                    "FUXI_DELIVERABLE_STRICT 开启但 $HOME 未设——无法做严格校验".into(),
-                )
+                Error::Internal("FUXI_DELIVERABLE_STRICT 开启但 $HOME 未设——无法做严格校验".into())
             })?;
         let canon_home = home.canonicalize().unwrap_or(home);
         // 用 canonicalize 是必须——target 可能是 `~/写作` 经 fuxi-im 解析后的
@@ -1023,10 +1021,7 @@ mod tests {
             std::env::set_var("FUXI_DELIVERABLE_STRICT", "1");
             std::env::set_var("HOME", &home_str);
         }
-        assert!(
-            validate_accept_target(&inside).is_ok(),
-            "$HOME/写作 应通过"
-        );
+        assert!(validate_accept_target(&inside).is_ok(), "$HOME/写作 应通过");
 
         // 3) 开启 + 非 $HOME：拒
         let outside = std::path::PathBuf::from("/tmp/elsewhere");

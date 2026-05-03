@@ -4412,7 +4412,14 @@ async fn drive_tui(
                                     let send_text = app.expand_image_refs_for_submit(&text);
                                     tokio::spawn(async move {
                                         if let Err(e) = fuxi_cl
-                                            .intervene(xuannv_id, false, &send_text, Vec::new(), None)
+                                            .intervene(
+                                                xuannv_id,
+                                                false,
+                                                &send_text,
+                                                Vec::new(),
+                                                None,
+                                                Vec::new(),
+                                            )
                                             .await
                                         {
                                             tracing::warn!(error = %e, "xuannv intervene 失败");
@@ -4431,7 +4438,14 @@ async fn drive_tui(
                                     let send_text = app.expand_image_refs_for_submit(&text);
                                     tokio::spawn(async move {
                                         if let Err(e) = fuxi_cl
-                                            .intervene(id, false, &send_text, Vec::new(), None)
+                                            .intervene(
+                                                id,
+                                                false,
+                                                &send_text,
+                                                Vec::new(),
+                                                None,
+                                                Vec::new(),
+                                            )
                                             .await
                                         {
                                             tracing::warn!(error = %e, "worker intervene 失败");
@@ -6173,6 +6187,7 @@ mod tests {
                 text: "加个单测".into(),
                 mentions: vec![worker],
                 pinned_node: None,
+                attachments: Vec::new(),
             },
         ));
 

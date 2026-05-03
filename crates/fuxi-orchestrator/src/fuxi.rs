@@ -1294,6 +1294,7 @@ impl Fuxi {
         text: &str,
         mentions: Vec<AgentId>,
         pinned_node: Option<String>,
+        attachments: Vec<String>,
     ) -> Result<()> {
         let agent = self
             .shelf
@@ -1322,6 +1323,7 @@ impl Fuxi {
                         text: text.to_string(),
                         mentions: mentions.clone(),
                         pinned_node: pinned_node.clone(),
+                        attachments: attachments.clone(),
                     },
                 });
                 id
@@ -1378,6 +1380,7 @@ impl Fuxi {
                     text: text.to_string(),
                     mentions,
                     pinned_node,
+                    attachments,
                 },
             });
             id

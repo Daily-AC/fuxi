@@ -16,6 +16,7 @@ import {
   mergeMessages,
   type Message,
 } from "~/messages";
+import type { Upload } from "~/types/api";
 import type { ServerEvent } from "~/types/events";
 import { useApi } from "~/components/ApiProvider";
 import { MentionComposer } from "~/components/MentionComposer";
@@ -163,7 +164,18 @@ export const XuannvPage: Component = () => {
 
   const handleSubmit = async (req: SerializedIntervene): Promise<void> => {
     // optimistic user bubble · 用 req.text（chip 占位的零宽字符不影响显示）
-    const m = makeUserMessage(req.text);
+    // 阶段 3：附件 ids 在 composer 里已上传完成，optimistic 直接挂 placeholder Upload[]
+    // 让用户立即看到自己发的图缩略；服务端 ws 事件二次到达会被 mergeMessages 去重。
+    const ups: Upload[] | undefined = req.attachments && req.attachments.length > 0
+      ? req.attachments.map((id) => ({
+          id,
+          name: id,
+          mime: "application/octet-stream",
+          bytes: 0,
+          sha256: "",
+        }))
+      : undefined;
+    const m = makeUserMessage(req.text, ups);
     setMessages((prev) => [...prev, m]);
     await attemptIntervene(req, m.id);
   };

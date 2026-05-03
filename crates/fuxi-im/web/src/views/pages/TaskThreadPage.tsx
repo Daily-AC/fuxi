@@ -231,13 +231,25 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
   };
 
   const handleSubmit = async (req: SerializedIntervene): Promise<void> => {
-    const m = makeUserMessage(req.text);
+    // optimistic 附件：composer 里已上传完成，placeholder Upload[] 让用户立即看图
+    const ups = req.attachments && req.attachments.length > 0
+      ? req.attachments.map((id) => ({
+          id,
+          name: id,
+          mime: "application/octet-stream",
+          bytes: 0,
+          sha256: "",
+        }))
+      : undefined;
+    const m = makeUserMessage(req.text, ups);
     if (req.mentions.length > 0) {
       m.mentions = req.mentions;
     }
     setMessages((prev) => [...prev, m]);
     await sendIntervene(req, m.id);
   };
+
+  const [menuOpen, setMenuOpen] = createSignal(false);
 
   return (
     <div class={styles.page} data-testid="task-thread-page" data-task-id={props.task_id}>
@@ -252,7 +264,13 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
           ‹ 列表
         </button>
         <span class={styles.title}>{task()?.title ?? props.fallback_title ?? "任务"}</span>
-        <button type="button" class={styles.more} aria-label="更多" disabled>
+        <button
+          type="button"
+          class={styles.more}
+          aria-label="门客详情"
+          data-testid="task-thread-more"
+          onClick={() => setMenuOpen(true)}
+        >
           ⋯
         </button>
       </header>
@@ -268,6 +286,95 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
         placeholder="对玄女说... (@ 角色或节点)"
         onSubmit={handleSubmit}
       />
+
+      <Show when={menuOpen() && task()}>
+        <MembersMenu
+          task={task()!}
+          onlineNodeIds={onlineNodeIds()}
+          onClose={() => setMenuOpen(false)}
+        />
+      </Show>
+    </div>
+  );
+};
+
+/** ⋯ 菜单 · 详情页右上角 popover · 显示任务全门客 + last_tool_call + @node。
+ *  实测反馈：旧版门客预览嵌在卡片里被用户误点击；现在卡片不渲门客，详情页这里
+ *  集中呈现。点击遮罩或关闭按钮关。 */
+const MembersMenu: Component<{
+  task: TaskGroupCard;
+  onlineNodeIds: Set<string> | null;
+  onClose(): void;
+}> = (props) => {
+  const offline = (m: TaskGroupCard["members"][number]): boolean =>
+    !!m.node_id
+    && props.onlineNodeIds !== null
+    && !props.onlineNodeIds.has(m.node_id);
+
+  const memberSub = (m: TaskGroupCard["members"][number]): string => {
+    if (m.last_activity) return m.last_activity;
+    const tool = toolCallText(m.last_tool_call);
+    if (tool) return tool;
+    if (m.activity) return m.activity;
+    if (props.task.status !== "running") return "已歇";
+    return memberStatusFallback(m);
+  };
+
+  const statusLabel = (m: TaskGroupCard["members"][number]): string => {
+    if (props.task.status !== "running") return "已歇";
+    if (m.status === "idle") return "待命";
+    if (m.status === "thinking") return "思考中";
+    if (m.status === "dead") return "下线";
+    return "运行中";
+  };
+
+  return (
+    <div
+      class={styles.menuOverlay}
+      data-testid="task-thread-menu"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div class={styles.menuPanel} role="dialog" aria-label="门客详情">
+        <p class={styles.menuTitle}>门客（{props.task.members.length}）</p>
+        <Show
+          when={props.task.members.length > 0}
+          fallback={<p class={styles.menuMemberSub}>暂无门客</p>}
+        >
+          <ul class={styles.menuList}>
+            <For each={props.task.members}>
+              {(m) => (
+                <li class={styles.menuMember} data-testid={`menu-member-${m.agent_id}`}>
+                  <div class={styles.menuMemberHead}>
+                    <span class={styles.menuMemberRole}>{m.role_display}</span>
+                    <span class={styles.menuMemberStatus}>· {statusLabel(m)}</span>
+                  </div>
+                  <span class={styles.menuMemberSub}>{memberSub(m)}</span>
+                  <Show when={m.node_id}>
+                    {(nid) => (
+                      <span
+                        class={`${styles.menuMemberNode} ${offline(m) ? styles.menuMemberNodeOffline ?? "" : ""}`}
+                      >
+                        @{nid()}
+                        {offline(m) ? " · 离线" : ""}
+                      </span>
+                    )}
+                  </Show>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+        <button
+          type="button"
+          class={styles.menuClose}
+          onClick={() => props.onClose()}
+          data-testid="task-thread-menu-close"
+        >
+          关闭
+        </button>
+      </div>
     </div>
   );
 };

@@ -87,7 +87,7 @@ describe("applyWorkerEvent · 私聊页 reducer (#N3)", () => {
     s = applyWorkerEvent(
       s,
       ev(
-        { type: "tool_call", tool: "Bash", input: "grep server/api/v1.go" },
+        { type: "tool_call_started", tool: "Bash", args: "grep server/api/v1.go" },
         { at: "2026-04-26T12:00:00Z", id: "tc-1" },
       ),
       CTX,
@@ -97,7 +97,7 @@ describe("applyWorkerEvent · 私聊页 reducer (#N3)", () => {
     s = applyWorkerEvent(
       s,
       ev(
-        { type: "tool_result", tool: "Bash", ok: true, output: "main.go" },
+        { type: "tool_call_finished", tool: "Bash", ok: true, output_preview: "main.go" },
         { at: "2026-04-26T12:00:00.400Z", id: "tc-2" },
       ),
       CTX,
@@ -113,7 +113,7 @@ describe("applyWorkerEvent · 私聊页 reducer (#N3)", () => {
   it("tool_result 没有对应 started · 单独插一条完结卡", () => {
     const s = applyWorkerEvent(
       [],
-      ev({ type: "tool_result", tool: "Bash", ok: false }, { id: "tc-orphan" }),
+      ev({ type: "tool_call_finished", tool: "Bash", ok: false }, { id: "tc-orphan" }),
       CTX,
     );
     expect(s).toHaveLength(1);
@@ -192,11 +192,11 @@ describe("applyWorkerEvent · 私聊页 reducer (#N3)", () => {
       ev({ type: "thinking_started" }, { at: "2026-04-26T11:00:01Z", id: "h-2" }),
       ev({ type: "thinking_finished" }, { at: "2026-04-26T11:00:03Z", id: "h-3" }),
       ev(
-        { type: "tool_call", tool: "Read", input: "main.go" },
+        { type: "tool_call_started", tool: "Read", args: "main.go" },
         { at: "2026-04-26T11:00:04Z", id: "h-4" },
       ),
       ev(
-        { type: "tool_result", tool: "Read", ok: true, output: "..." },
+        { type: "tool_call_finished", tool: "Read", ok: true, output_preview: "..." },
         { at: "2026-04-26T11:00:04.5Z", id: "h-5" },
       ),
       ev({ type: "agent_responded", text: "找到了" }, { at: "2026-04-26T11:00:05Z", id: "h-6" }),

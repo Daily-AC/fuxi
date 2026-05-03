@@ -139,6 +139,19 @@ function parseTs(iso?: string | null): number {
   return Number.isNaN(t) ? Date.now() : t;
 }
 
+/** id 列表 → Upload[] placeholder。后端事件流仅给 id；name/mime/bytes 缺时让
+ *  AttachmentChip 走 fallback file 渲染（直链 `/api/uploads/:id` 仍能看图）。
+ *  ts: 历史还原 + WS 实时事件统一走该 helper，保证 user bubble 至少能显图缩略。*/
+function uploadsFromIds(ids: string[]): Upload[] {
+  return ids.map((id) => ({
+    id,
+    name: id,
+    mime: "application/octet-stream",
+    bytes: 0,
+    sha256: "",
+  }));
+}
+
 function lastStreamingXuannv(prev: Message[]): XuannvMessage | null {
   const last = prev[prev.length - 1];
   return last && last.kind === "xuannv" && last.streaming ? last : null;
@@ -231,8 +244,38 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
     return [...prev.slice(0, -1), updated];
   }
 
-  // —— 服务端 echo 自己的 user_intervention_sent · optimistic 已渲染 ——
-  if (k.type === "user_intervention_sent") return prev;
+  // —— 服务端 echo 自己的 user_intervention_sent ——
+  // optimistic 已渲染过纯文本部分（pending bubble），attachments 通过 ws 事件
+  // 二次到达时给已存在的 user bubble 补上附件渲染（id 匹配走 mergeMessages 去重）。
+  if (k.type === "user_intervention_sent") {
+    const evId = ev.meta.id;
+    const attachments = (k as { attachments?: string[] }).attachments ?? [];
+    if (!evId || attachments.length === 0) return prev;
+    // 找到 optimistic user 还没附件的同 turn bubble；id 一般用本地生成的 u-xxx，
+    // 不会跟 ev.meta.id 撞——这里走"找最近一条 pending=false / hasn't error 的纯
+    // 文本 user 消息"补 attachments。简化：找 ts 最接近 ev.at 的 user bubble。
+    const evTs = parseTs(ev.meta.at);
+    let bestIdx = -1;
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (let i = prev.length - 1; i >= 0; i -= 1) {
+      const m = prev[i];
+      if (!m || m.kind !== "user") continue;
+      if (m.attachments && m.attachments.length > 0) continue;
+      const diff = Math.abs(m.ts - evTs);
+      if (diff < bestDiff && diff <= 5_000) {
+        bestDiff = diff;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) return prev;
+    const updated: UserMessage = {
+      ...(prev[bestIdx] as UserMessage),
+      attachments: uploadsFromIds(attachments),
+    };
+    const next = prev.slice();
+    next[bestIdx] = updated;
+    return next;
+  }
 
   // —— 阶段 3 才管 ——
   return prev;
@@ -267,16 +310,20 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
   const ts = parseTs(s.ts);
   if (s.kind === "text") {
     const text = textFromContent(s.content);
-    if (text.trim() === "") return null;
+    const attachIds = Array.isArray(s.attachments) ? s.attachments : [];
+    // user text 允许空文本 + 仅附件（用户只发图场景），其它 role 仍按空丢
     if (s.role === "user") {
+      if (text.trim() === "" && attachIds.length === 0) return null;
       return {
         kind: "user",
         id: s.id,
         text,
+        attachments: attachIds.length > 0 ? uploadsFromIds(attachIds) : undefined,
         pending: false,
         ts,
       };
     }
+    if (text.trim() === "") return null;
     return {
       kind: "xuannv",
       id: s.id,
@@ -295,7 +342,7 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
     // attachments 在 history 里要么是 file_id refs 要么是完整 Upload[]；
     // β 给的是 file_id refs；ε 不知 mime/bytes 时显占位（阶段 4 完善）。
     const ups: Upload[] = Array.isArray(s.attachments)
-      ? s.attachments.map((id) => ({ id, name: id, mime: "application/octet-stream", bytes: 0, sha256: "" }))
+      ? uploadsFromIds(s.attachments)
       : [];
     return {
       kind: "file",
@@ -493,12 +540,13 @@ export function applyWorkerEvent(
     return [...prev, next];
   }
 
-  // —— 工具调用配对：tool_call + tool_result 折叠成单卡 ——
-  // 注意：spec 用 ToolStarted/ToolFinished，wire 实际 EventKind 是 tool_call/tool_result
-  // （types/events.ts §28），保持兼容。
-  if (k.type === "tool_call") {
+  // —— 工具调用配对：tool_call_started + tool_call_finished 折叠成单卡 ——
+  // wire 类型名跟后端 EventKind ToolCallStarted/ToolCallFinished snake_case 对齐
+  // （types/events.ts §28），早期实装写成 tool_call/tool_result 是 bug，2026-05-03 改正。
+  // 字段：started 是 `args`（不是 input）、finished 是 `output_preview`（不是 output）。
+  if (k.type === "tool_call_started") {
     const tool = (k as { tool?: string }).tool ?? "tool";
-    const argsRaw = (k as { input?: unknown }).input;
+    const argsRaw = (k as { args?: unknown }).args;
     const args = stringifyArgs(argsRaw);
     const next: ToolCallMessage = {
       kind: "tool_call",
@@ -511,10 +559,10 @@ export function applyWorkerEvent(
     };
     return [...prev, next];
   }
-  if (k.type === "tool_result") {
+  if (k.type === "tool_call_finished") {
     const tool = (k as { tool?: string }).tool ?? "tool";
     const ok = Boolean((k as { ok?: boolean }).ok);
-    const output = stringifyOutput((k as { output?: unknown }).output);
+    const output = stringifyOutput((k as { output_preview?: unknown }).output_preview);
     const idx = findRunningToolIdx(prev, ctx.agent, tool);
     if (idx >= 0) {
       const running = prev[idx] as ToolCallMessage;
@@ -686,10 +734,11 @@ export function applyTaskThreadEvent(
   const ts = parseTs(ev.meta.at);
   const agent = ev.meta.agent ?? "";
 
-  // —— 用户 intervene · 渲染右侧 user bubble + 还原 chip（mentions）——
+  // —— 用户 intervene · 渲染右侧 user bubble + 还原 chip（mentions）+ attachments——
   if (k.type === "user_intervention_sent") {
     const text = (k as { text?: string }).text ?? "";
-    if (text.trim() === "") return prev;
+    const attachments = (k as { attachments?: string[] }).attachments ?? [];
+    if (text.trim() === "" && attachments.length === 0) return prev;
     const id = ev.meta.id || `u-${ts}-${prev.length}`;
     if (prev.some((m) => m.id === id)) return prev;
     const mentions = (k as { mentions?: string[] }).mentions ?? [];
@@ -698,6 +747,7 @@ export function applyTaskThreadEvent(
       id,
       text,
       mentions: mentions.length > 0 ? mentions : undefined,
+      attachments: attachments.length > 0 ? uploadsFromIds(attachments) : undefined,
       pending: false,
       ts,
     };
@@ -790,7 +840,7 @@ export function applyTaskThreadEvent(
   }
 
   // —— 工具调用配对 ——
-  if (k.type === "tool_call") {
+  if (k.type === "tool_call_started") {
     if (!agent) return prev;
     const tool = (k as { tool?: string }).tool ?? "tool";
     const args = stringifyArgs((k as { input?: unknown }).input);
@@ -805,7 +855,7 @@ export function applyTaskThreadEvent(
     };
     return [...prev, next];
   }
-  if (k.type === "tool_result") {
+  if (k.type === "tool_call_finished") {
     if (!agent) return prev;
     const tool = (k as { tool?: string }).tool ?? "tool";
     const ok = Boolean((k as { ok?: boolean }).ok);
