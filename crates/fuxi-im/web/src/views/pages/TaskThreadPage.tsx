@@ -249,6 +249,19 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
     await sendIntervene(req, m.id);
   };
 
+  // P0.E 修：task done 后 thread composer 仍写"对玄女说..."，用户说"你还活着么"
+  // 当主对话 intervene 给玄女；玄女 busy → 4xx → toast "玄女正忙"，但用户在
+  // task 详情页根本没察觉自己在跟玄女说话，文案显得错位。
+  // 改 reactive：task running 时保留默认；非 running（completed/failed/cancelled）
+  // 改"任务已完结 · 跟玄女继续聊"，明示对话对象。
+  const composerPlaceholder = (): string => {
+    const t = task();
+    if (t && t.status !== "running") {
+      return "任务已完结 · 跟玄女继续聊这个任务";
+    }
+    return "对玄女说... (@ 角色或节点)";
+  };
+
   const [menuOpen, setMenuOpen] = createSignal(false);
 
   return (
@@ -283,7 +296,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
 
       <MentionComposer
         candidates={candidates()}
-        placeholder="对玄女说... (@ 角色或节点)"
+        placeholder={composerPlaceholder()}
         onSubmit={handleSubmit}
       />
 
