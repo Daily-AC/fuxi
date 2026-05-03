@@ -8,14 +8,19 @@
 
 use std::path::PathBuf;
 
-/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置默认 `sonnet`。
+/// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置则**不传** `--model`。
 ///
-/// WHY：早期为省钱用 haiku，但实测 haiku 不可靠遵守 system prompt addendum
-/// 教学（决策 13 sentinel JSON 输出 ≪ cc team 实测 ≥95%），导致玄女永远等不到
-/// deliverable nudge——交付链直接断（用户实测 19:49 本地任务复现）。换 sonnet
-/// 提高 instruction-following 可靠性；成本敏感场景仍可用 `FUXI_CC_MODEL=haiku` 覆盖。
+/// WHY：早期为 instruction-following 可靠性硬编 `sonnet`（haiku 不稳）。但
+/// 2026-05-04 用户在 home 实测撞上 1M context 用量门——cc 把 `sonnet` 别名
+/// 解到 `claude-sonnet-4-6-1m`，触发 "API Error: Extra usage is required for
+/// 1M context"，玄女整轮失败。同 codex 已踩过的坑（2026-04-20 `08358fa`）：
+/// 硬编任何具体模型都会在某种 auth 下被拒，最稳是不传 `--model` 让 cc 按
+/// 登录账号默认选（用户主账户 = opus-4-7-1m）。
+///
+/// 成本敏感 / 想锁特定模型：`export FUXI_CC_MODEL=sonnet`（或 haiku / opus）覆盖。
 pub const DEFAULT_MODEL_ENV: &str = "FUXI_CC_MODEL";
-pub const DEFAULT_MODEL_FALLBACK: &str = "sonnet";
+/// 空串 = `resolve_default_model` 返 None ⇒ 不发 `--model` flag。
+pub const DEFAULT_MODEL_FALLBACK: &str = "";
 
 /// `claude` headless 启动参数。任何字段都可以不填——`Default` 给出最
 /// 稳定的一套（见 `reference_cc_stream_json.md`）。
@@ -168,12 +173,16 @@ impl CcLaunchConfig {
     }
 }
 
-/// 读 `FUXI_CC_MODEL`；未设回退到 [`DEFAULT_MODEL_FALLBACK`]（`sonnet`）。
+/// 读 `FUXI_CC_MODEL`；未设 / 空 / fallback 也是空串时返 `None`（不传 `--model`，
+/// 让 cc 按登录账号默认选）。
 pub fn resolve_default_model() -> Option<String> {
     std::env::var(DEFAULT_MODEL_ENV)
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| Some(DEFAULT_MODEL_FALLBACK.to_string()))
+        .or_else(|| {
+            let fb = DEFAULT_MODEL_FALLBACK.trim();
+            if fb.is_empty() { None } else { Some(fb.to_string()) }
+        })
 }
 
 #[cfg(test)]
@@ -421,24 +430,44 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--session-id"));
     }
 
-    /// 未设 FUXI_CC_MODEL 时，默认回落到 haiku 并显式透传 `--model`。
+    /// 未设 FUXI_CC_MODEL 且 fallback 是空串时，**不**应透传 `--model`——让 cc
+    /// 按登录账号默认选（避免 hard-code 模型在某种 auth 下被拒，2026-05-04 用户
+    /// home 实测撞 1M context 用量门即此）。
     #[test]
-    fn default_uses_haiku_when_env_absent() {
-        // 保守清掉 env 避免干扰
+    fn omits_model_flag_when_env_absent_and_fallback_empty() {
         unsafe {
             std::env::remove_var(DEFAULT_MODEL_ENV);
         }
         let cfg = CcLaunchConfig::default();
-        assert_eq!(cfg.model.as_deref(), Some(DEFAULT_MODEL_FALLBACK));
+        // fallback 当前是 ""——若将来改回硬编模型，本断言会立刻提示 review
+        assert!(
+            cfg.model.is_none(),
+            "默认 fallback 应该是空串 → cfg.model = None；实际：{:?}",
+            cfg.model
+        );
+        let args = cfg.build_args();
+        assert!(
+            !args.iter().any(|a| a == "--model"),
+            "无 model 时不应出现 --model flag；实际 args: {args:?}"
+        );
+    }
+
+    /// `FUXI_CC_MODEL=haiku` 显式覆盖时仍正确透传——成本敏感场景用得上。
+    #[test]
+    fn env_overrides_fallback() {
+        unsafe {
+            std::env::set_var(DEFAULT_MODEL_ENV, "haiku");
+        }
+        let cfg = CcLaunchConfig::default();
+        assert_eq!(cfg.model.as_deref(), Some("haiku"));
         let args = cfg.build_args();
         let idx = args
             .iter()
             .position(|a| a == "--model")
-            .expect("expected --model flag");
-        assert!(
-            args.get(idx + 1)
-                .is_some_and(|v| v == DEFAULT_MODEL_FALLBACK),
-            "expected fallback model {DEFAULT_MODEL_FALLBACK}, got: {args:?}"
-        );
+            .expect("env 覆盖时应有 --model flag");
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("haiku"));
+        unsafe {
+            std::env::remove_var(DEFAULT_MODEL_ENV);
+        }
     }
 }

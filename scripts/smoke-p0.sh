@@ -71,6 +71,20 @@ for tool in Edit Write Task Agent Glob Grep; do
   fi
 done
 
+# 反回归：cmdline 不应硬编 --model（fallback 已空，env 未设时不发 flag）。
+# 用户实测撞到 `--model sonnet` 在某种 auth 下被拒（1M context Extra usage 门）。
+# FUXI_CC_MODEL=xxx 显式覆盖也不应是 sonnet（其它模型 OK）。
+MODEL_FIELD="$(echo "$XUANNV_CMDLINE" | grep -oE -- '--model[[:space:]]+[A-Za-z0-9._-]+' || true)"
+if [[ -z "$MODEL_FIELD" ]]; then
+  mark "P0.A:玄女 cmdline 不硬编 --model（让 cc 走账号默认）" 1
+elif echo "$MODEL_FIELD" | grep -qE -- '--model[[:space:]]+sonnet$'; then
+  mark "P0.A:玄女 cmdline 不硬编 --model（让 cc 走账号默认）" 0 \
+    "回归了：$MODEL_FIELD（在某些 auth 下解到 1M 变体被拒）"
+else
+  mark "P0.A:玄女 cmdline 不硬编 --model（让 cc 走账号默认）" 1
+  echo "      （检测到 ${MODEL_FIELD}——FUXI_CC_MODEL 显式覆盖，OK）"
+fi
+
 # system prompt 必含「默认派活」段
 if echo "$XUANNV_CMDLINE" | grep -q "默认派活"; then
   mark "P0.A:system prompt 含「默认派活」" 1
