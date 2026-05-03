@@ -60,7 +60,19 @@ export const DeliverableDetailPage: Component<DeliverableDetailPageProps> = (
     return first ? first.status : null;
   });
 
-  const [acceptedTo, setAcceptedTo] = createSignal("");
+  // P1.4 体验：accept_to 默认值——按 project 分别 sticky（用户多项目时
+  // 每个项目可能有不同的"收件目录"习惯）。`localStorage` 是浏览器局部，重装
+  // PWA 失忆——但简单可靠不依赖后端，第一阶段够用。
+  const acceptedToStorageKey = (): string =>
+    `fuxi:acceptedTo:${props.project_id}`;
+  const initialAcceptedTo = ((): string => {
+    try {
+      return localStorage.getItem(acceptedToStorageKey()) ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  const [acceptedTo, setAcceptedTo] = createSignal(initialAcceptedTo);
   const [reason, setReason] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
@@ -75,6 +87,14 @@ export const DeliverableDetailPage: Component<DeliverableDetailPageProps> = (
         props.task_id,
         target ? { accepted_to: target } : undefined,
       );
+      // 只有真填了路径 + 后端没拒（成功落到 catch 之外）才记忆
+      if (target) {
+        try {
+          localStorage.setItem(acceptedToStorageKey(), target);
+        } catch {
+          // localStorage 可能被禁——静默不挂主流程
+        }
+      }
       void refetch();
     } catch (e) {
       setErr(e instanceof ApiError ? `${e.status}: ${e.message}` : String(e));
