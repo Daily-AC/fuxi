@@ -282,6 +282,25 @@ impl OracleStore {
         })
     }
 
+    /// 把 (subject, predicate) 下所有仍生效的事实标 `valid_until=now` 失效。
+    ///
+    /// 用于"忘掉某事"——比如 `fuxi xuannv refresh` 让玄女下次 fresh spawn
+    /// （清掉 xuannv/session_id record 让 ensure_xuannv 走 fresh session 而非
+    /// `cc --resume`）。返回受影响行数。
+    pub async fn invalidate(&self, subject: &str, predicate: &str) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let res = sqlx::query(
+            "UPDATE oracle_facts SET valid_until = ?1, updated_at = ?1 \
+             WHERE subject = ?2 AND predicate = ?3 AND valid_until IS NULL",
+        )
+        .bind(&now)
+        .bind(subject)
+        .bind(predicate)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     /// 调整置信度——delta 正负均可，结果夹在 [0.0, 1.0]。
     /// 同步更新 `updated_at`，方便 `query` 的排序继续反映最新命中。
     pub async fn update_confidence(&self, id: Uuid, delta: f32) -> Result<OracleFact> {

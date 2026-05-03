@@ -436,7 +436,10 @@ mod tests {
             "attachments": ["upload-1", "upload-2"],
         });
         let body: InterveneBody = serde_json::from_value(raw_full).expect("with attach");
-        assert_eq!(body.attachments, vec!["upload-1".to_string(), "upload-2".to_string()]);
+        assert_eq!(
+            body.attachments,
+            vec!["upload-1".to_string(), "upload-2".to_string()]
+        );
     }
 
     /// 阶段 3 端到端：attachments 列表非空时，handler 查 UploadStore 把 (name, abs_path)
@@ -471,7 +474,7 @@ mod tests {
 
         // 镜像 handler 内拼接逻辑（防漂移）
         let got = upload_store.get(&rec.id).await.expect("get").expect("rec");
-        let lines = vec![format!(
+        let lines = [format!(
             "- {}: {}",
             got.name.as_deref().unwrap_or("(unnamed)"),
             got.path

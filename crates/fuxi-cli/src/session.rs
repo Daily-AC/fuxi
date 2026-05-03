@@ -52,6 +52,18 @@ pub async fn resolve_xuannv_session(
     Ok((None, Some(new_id)))
 }
 
+/// 让玄女**忘掉**当前 session record——下次 `ensure_xuannv` 走 fresh session
+/// 路径，cc 会重读 `--append-system-prompt`（含 dispatch-routing.md 最新教学）。
+///
+/// 用途：dispatch-routing.md 教学更新后，旧玄女 cc 进程走 `--resume` 仍带旧
+/// system prompt（cc 自身行为：resume 时 honor 老 session prompt）。用户跑
+/// `fuxi xuannv refresh` → 调本函数 + 关掉当前玄女进程。
+///
+/// 返回失效的 fact 行数（0 = 之前就没 record；1 = 通常情况；>1 = 历史遗留多条）。
+pub async fn forget_xuannv_session(oracle: &OracleStore) -> Result<u64> {
+    Ok(oracle.invalidate(XUANNV_SUBJECT, SESSION_PREDICATE).await?)
+}
+
 /// spawn 成功后调用——把首次生成的 session_id 锚到策府。
 ///
 /// idempotent：若策府已有相同 (subject, predicate, object) → skip 不重写
@@ -78,6 +90,34 @@ pub async fn record_xuannv_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `forget_xuannv_session` 让下次 resolve 走 fresh path（None resume + Some 新 uuid）。
+    #[tokio::test]
+    async fn forget_then_resolve_yields_fresh_session() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        // 先 record 一个老 session
+        record_xuannv_session(&oracle, "old-session-uuid", "test-bootstrap")
+            .await
+            .unwrap();
+        let (resume, _) = resolve_xuannv_session(&oracle).await.unwrap();
+        assert_eq!(resume.as_deref(), Some("old-session-uuid"));
+
+        // forget 之后 resolve 应该走 fresh 路径
+        let cleared = forget_xuannv_session(&oracle).await.unwrap();
+        assert_eq!(cleared, 1, "应失效 1 条 record");
+
+        let (resume2, fresh) = resolve_xuannv_session(&oracle).await.unwrap();
+        assert!(resume2.is_none(), "forget 后不应再返 resume");
+        assert!(fresh.is_some(), "forget 后应返 fresh uuid");
+    }
+
+    /// `forget_xuannv_session` 在没 record 时 noop（cleared=0），不报错。
+    #[tokio::test]
+    async fn forget_xuannv_session_noop_on_empty() {
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        let cleared = forget_xuannv_session(&oracle).await.unwrap();
+        assert_eq!(cleared, 0);
+    }
 
     /// 空库 → 生成 uuid v4 但**不**落盘（#12 修：先返 id，spawn 成功后再 record）。
     #[tokio::test]
