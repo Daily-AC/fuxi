@@ -91,9 +91,10 @@ pub struct DispatchArgs {
     /// 复用已有任务 id（可选）。同一个 task_id 可派给多个门客。
     #[arg(long = "task")]
     pub task_id: Option<String>,
-    /// 任务标题。
-    #[arg(long, default_value = "ad-hoc")]
-    pub title: String,
+    /// 任务标题。省略时自动从 body 第一行截前 60 字符派生（避免 PWA 任务列表
+    /// 全是「ad-hoc」），玄女应优先显式传 `--title` 给清晰名字。
+    #[arg(long)]
+    pub title: Option<String>,
     /// 任务正文（prompt）。位置参数——剩余参数拼起来。
     #[arg(trailing_var_arg = true, required = true)]
     pub body: Vec<String>,
@@ -113,10 +114,15 @@ pub struct DispatchArgs {
 
 pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
     let body = args.body.join(" ");
+    let title = args
+        .title
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| derive_title_from_body(&body));
     let resp = client::send(Command::Dispatch {
         agent_id: args.agent_id,
         task_id: args.task_id,
-        title: args.title,
+        title,
         body: if body.is_empty() { None } else { Some(body) },
         pinned_node: args.pinned_node,
         required_tags: args.required_tags,
@@ -128,6 +134,26 @@ pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
     let task_id = dispatch_task_id_from_response(resp)?;
     println!("{task_id}");
     Ok(())
+}
+
+/// 从 dispatch body 派生 task title——取首行（trim 后），最多 60 个 Unicode
+/// 字符；超长加省略号。空 body 兜底 `"ad-hoc"`（不应正常发生：clap 已 required）。
+///
+/// 为什么 60：PWA 任务卡片单行宽约 24 中文字符；60 涵盖宽屏 + 切到列表
+/// hover 时仍可读。比"前 N 字"截断比"找句号"复杂度低。
+fn derive_title_from_body(body: &str) -> String {
+    const MAX_TITLE_CHARS: usize = 60;
+    let first_line = body.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return "ad-hoc".to_string();
+    }
+    let chars: Vec<char> = first_line.chars().collect();
+    if chars.len() <= MAX_TITLE_CHARS {
+        first_line.to_string()
+    } else {
+        let head: String = chars[..MAX_TITLE_CHARS].iter().collect();
+        format!("{head}…")
+    }
 }
 
 fn dispatch_task_id_from_response(resp: Response) -> Result<String> {
@@ -915,6 +941,49 @@ mod tests {
         assert_eq!(w.a.agent_id, "agent-123");
         assert!(w.a.print_task_id);
         assert_eq!(w.a.body, vec!["请先跑测试"]);
+        assert_eq!(w.a.title.as_deref(), Some("修 auth bug"));
+    }
+
+    /// 不传 `--title` 时 args.title 是 None，由 run_dispatch 调
+    /// `derive_title_from_body` 派生（PWA 任务列表不再全是 ad-hoc）。
+    #[test]
+    fn dispatch_args_title_is_optional_when_omitted() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            a: DispatchArgs,
+        }
+        let w = W::try_parse_from(["w", "--to", "agent-123", "请先跑测试"]).unwrap();
+        assert!(w.a.title.is_none());
+        assert_eq!(w.a.body, vec!["请先跑测试"]);
+    }
+
+    #[test]
+    fn derive_title_takes_first_line_trimmed() {
+        let body = "  修一下登录页\n详细：xxx";
+        assert_eq!(derive_title_from_body(body), "修一下登录页");
+    }
+
+    #[test]
+    fn derive_title_truncates_at_60_unicode_chars_with_ellipsis() {
+        let body = "中".repeat(80);
+        let got = derive_title_from_body(&body);
+        let chars: Vec<char> = got.chars().collect();
+        assert_eq!(chars.len(), 61, "60 字符 + 省略号: {got}");
+        assert_eq!(chars[60], '…');
+    }
+
+    #[test]
+    fn derive_title_short_body_passes_through() {
+        let body = "short";
+        assert_eq!(derive_title_from_body(body), "short");
+    }
+
+    #[test]
+    fn derive_title_empty_body_falls_back_to_ad_hoc() {
+        assert_eq!(derive_title_from_body(""), "ad-hoc");
+        assert_eq!(derive_title_from_body("   \n  "), "ad-hoc");
     }
 
     /// β · #70 `--pinned-node` flag 解析。
