@@ -357,7 +357,8 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     u2();
   });
 
-  it("v3 #68 (c) · 任务 completed · banner member fallback 显 \"已歇\" 不是 \"待命\"", async () => {
+  it("v3 #N · 已歇消歧 · 任务 completed + worker idle · banner 显 \"已歇 · 待命\"（仍可召回）", async () => {
+    // 旧版 fallback 裸 "已歇" 让用户分不清 worker 死活——现在加副标识。
     const overview: TasksOverview = {
       running: [],
       completed: [
@@ -376,9 +377,63 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     };
     const { findByTestId, unmount } = setup({ overview });
     const members = await findByTestId("task-banner-members");
-    expect(members.textContent).toContain("已歇");
-    expect(members.textContent).not.toContain("待命");
+    expect(members.textContent).toContain("已歇 · 待命");
     unmount();
+  });
+
+  // ---- v3 #N · statusLabel/memberTail 矩阵覆盖 ----------------------
+  // matrix · 行 = (task.status, member.status)，列 = (banner memberTail, popover statusLabel)
+  // running 行 banner 用 fallback 路径（没 last_activity / tool_call / activity） · popover 总走 statusLabel
+  describe("v3 #N · 已歇消歧矩阵", () => {
+    type Row = {
+      taskStatus: "running" | "completed" | "failed";
+      memberStatus: "idle" | "thinking" | "dead" | "busy";
+      label: string;
+    };
+    const rows: Row[] = [
+      { taskStatus: "running", memberStatus: "idle", label: "待命" },
+      { taskStatus: "running", memberStatus: "thinking", label: "思考中" },
+      { taskStatus: "running", memberStatus: "dead", label: "已下线" },
+      { taskStatus: "running", memberStatus: "busy", label: "运行中" },
+      { taskStatus: "completed", memberStatus: "idle", label: "已歇 · 待命" },
+      { taskStatus: "completed", memberStatus: "thinking", label: "已歇 · 收尾中" },
+      { taskStatus: "completed", memberStatus: "dead", label: "已歇 · 已下线" },
+      { taskStatus: "completed", memberStatus: "busy", label: "已歇" },
+    ];
+    for (const row of rows) {
+      it(`task=${row.taskStatus} · worker=${row.memberStatus} → "${row.label}"`, async () => {
+        const member = {
+          agent_id: LUBAN,
+          role: "luban",
+          role_display: "鲁班",
+          status: row.memberStatus,
+          node_id: "home",
+          // 故意不填 last_activity / last_tool_call / activity → 走 fallback 路径
+        };
+        const card = {
+          id: TASK_ID,
+          title: "矩阵测试",
+          status: row.taskStatus,
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 19_000,
+          members: [member],
+        };
+        const overview: TasksOverview = {
+          running: row.taskStatus === "running" ? [card] : [],
+          completed: row.taskStatus !== "running" ? [card] : [],
+        } as TasksOverview;
+        const { findByTestId, getByTestId, unmount } = setup({ overview });
+        // banner memberTail
+        const banner = await findByTestId("task-banner-members");
+        expect(banner.textContent).toContain(row.label);
+        // popover statusLabel · 点击 ⋯ 打开
+        fireEvent.click(getByTestId("task-thread-more"));
+        const menuItem = await findByTestId(`menu-member-${LUBAN}`);
+        expect(menuItem.textContent).toContain(row.label);
+        unmount();
+      });
+    }
   });
 
   it("history fold · pre-load events → thread 已含历史", async () => {

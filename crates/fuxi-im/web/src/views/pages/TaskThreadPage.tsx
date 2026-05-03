@@ -330,17 +330,15 @@ const MembersMenu: Component<{
     const tool = toolCallText(m.last_tool_call);
     if (tool) return tool;
     if (m.activity) return m.activity;
-    if (props.task.status !== "running") return "已歇";
-    return memberStatusFallback(m);
+    return memberStatusComposite(props.task.status, m.status);
   };
 
-  const statusLabel = (m: TaskGroupCard["members"][number]): string => {
-    if (props.task.status !== "running") return "已歇";
-    if (m.status === "idle") return "待命";
-    if (m.status === "thinking") return "思考中";
-    if (m.status === "dead") return "下线";
-    return "运行中";
-  };
+  // v3 #N · 已歇消歧：旧 statusLabel "任务非 running 一律 '已歇'" 让用户分不清 worker
+  // 仍 idle 活着（可召回派新活）vs 已 dead（cc 进程退了，要 recall 重起 session）。
+  // 新规则：member.status 为主，task.status 为辅前缀（"已歇 · "）。
+  // dead 一律明示 "已下线"，idle 一律明示"待命/可派"。
+  const statusLabel = (m: TaskGroupCard["members"][number]): string =>
+    memberStatusComposite(props.task.status, m.status);
 
   return (
     <div
@@ -409,13 +407,13 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
 
   // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）· @node 标识
   // v3 #64 · @node 在线 muted gray / 离线 dim red（区分 stale 节点）
-  // #68 (c) · 任务 completed 时 member 副文 fallback 用 "已歇" 替代 "待命"（避免误导用户以为 worker 还在线等接活）
+  // v3 #N (已歇消歧) · 任务 done 后 fallback 不再裸 "已歇" — 拼成
+  // "已歇 · 待命/已下线/收尾中"，让用户一眼区分 worker idle vs dead。
   const memberTail = (m: TaskGroupCard["members"][number]): string => {
     if (m.last_activity) return m.last_activity;
     const tool = toolCallText(m.last_tool_call);
     if (tool) return tool;
-    if (props.task.status !== "running") return "已歇";
-    return memberStatusFallback(m);
+    return memberStatusComposite(props.task.status, m.status);
   };
   return (
     <div class={styles.banner} data-testid="task-banner">
@@ -570,10 +568,39 @@ function pickTask(ov: TasksOverview | undefined, taskId: string): TaskGroupCard 
   return ov.running.find((t) => t.id === taskId) ?? ov.completed.find((t) => t.id === taskId) ?? null;
 }
 
-function memberStatusFallback(m: { status?: string }): string {
-  if (m.status === "idle") return "待命";
-  if (m.status === "thinking") return "思考中";
-  return "运行中";
+/** v3 #N · 已歇消歧 · 复合状态文案：member.status 为主，task 非 running 加 "已歇 · " 前缀。
+ *
+ *  矩阵（详情见 TaskThreadPage.test.tsx 同名 describe）：
+ *
+ *    | task.status | member.status      | label        |
+ *    |-------------|--------------------|--------------|
+ *    | running     | idle               | 待命          |
+ *    | running     | thinking           | 思考中        |
+ *    | running     | dead               | 已下线        |
+ *    | running     | busy / 其它        | 运行中        |
+ *    | non-running | idle               | 已歇 · 待命   |
+ *    | non-running | thinking           | 已歇 · 收尾中 |
+ *    | non-running | dead               | 已歇 · 已下线 |
+ *    | non-running | busy / 其它 / 未知 | 已歇          |
+ *
+ *  - dead 不管 task 状态都明示 "已下线"（worker 进程退了，要 recall 重起 session）
+ *  - idle 不管 task 状态都表达"待命"（仍可被召回派新活）
+ *  - 任务 done 后 worker 仍 thinking 是收尾路径（写日志/产出 deliverable）
+ */
+export function memberStatusComposite(
+  taskStatus: string,
+  memberStatus?: string,
+): string {
+  const isRunning = taskStatus === "running";
+  const inner = ((): string => {
+    if (memberStatus === "idle") return "待命";
+    if (memberStatus === "dead") return "已下线";
+    if (memberStatus === "thinking") return isRunning ? "思考中" : "收尾中";
+    // busy / 未知 fallback：running 路径有事可做 → "运行中"；非 running 无 inner
+    return isRunning ? "运行中" : "";
+  })();
+  if (isRunning) return inner;
+  return inner ? `已歇 · ${inner}` : "已歇";
 }
 
 function truncate(s: string, n: number): string {
