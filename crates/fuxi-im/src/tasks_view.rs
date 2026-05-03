@@ -296,6 +296,9 @@ fn member_status(shelf: Option<ShelfStatus>, thinking: bool) -> String {
 
 /// role_display 中文映射——v1 hardcode 主要门客 + xuannv；其它 fallback role 原文。
 /// 后续若加 role 走 ROLE.md `display_name` frontmatter 字段。
+///
+/// 特例 `unknown`：dist bash exec / 旧 GC 后历史里 role 拿不到时的兜底，给用户看
+/// 到字面 "unknown" 体验差，回落到中文 `门客` 更友好。
 fn role_display(role: &str) -> String {
     match role {
         "xuannv" => "玄女".into(),
@@ -303,6 +306,7 @@ fn role_display(role: &str) -> String {
         "pusong" => "蒲松".into(),
         "moshu" => "墨术".into(),
         "shennong" => "神农".into(),
+        "unknown" | "" => "门客".into(),
         other => other.to_string(),
     }
 }

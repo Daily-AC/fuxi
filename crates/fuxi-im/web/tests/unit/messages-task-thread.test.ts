@@ -121,13 +121,13 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
     let s: Message[] = [];
     s = applyTaskThreadEvent(
       s,
-      ev({ type: "tool_call", tool: "Bash", input: "grep" }, { agent: LUBAN, id: "tc1", at: "2026-04-26T12:00:00Z" }),
+      ev({ type: "tool_call_started", tool: "Bash", args: "grep" }, { agent: LUBAN, id: "tc1", at: "2026-04-26T12:00:00Z" }),
       CTX,
     );
     s = applyTaskThreadEvent(
       s,
       ev(
-        { type: "tool_result", tool: "Bash", ok: true, output: "result" },
+        { type: "tool_call_finished", tool: "Bash", ok: true, output_preview: "result" },
         { agent: LUBAN, id: "tc2", at: "2026-04-26T12:00:00.5Z" },
       ),
       CTX,
@@ -181,9 +181,9 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
       ev({ type: "agent_responded", text: "好的，派给鲁班" }, { agent: XUANNV, at: "2026-04-26T11:00:01Z", id: "h-2" }),
       ev({ type: "thinking_started" }, { agent: LUBAN, at: "2026-04-26T11:00:02Z", id: "h-3" }),
       ev({ type: "thinking_finished" }, { agent: LUBAN, at: "2026-04-26T11:00:05Z", id: "h-4" }),
-      ev({ type: "tool_call", tool: "Bash", input: "grep" }, { agent: LUBAN, at: "2026-04-26T11:00:06Z", id: "h-5" }),
+      ev({ type: "tool_call_started", tool: "Bash", args: "grep" }, { agent: LUBAN, at: "2026-04-26T11:00:06Z", id: "h-5" }),
       ev(
-        { type: "tool_result", tool: "Bash", ok: true, output: "..." },
+        { type: "tool_call_finished", tool: "Bash", ok: true, output_preview: "..." },
         { agent: LUBAN, at: "2026-04-26T11:00:06.5Z", id: "h-6" },
       ),
       ev({ type: "agent_responded", text: "查到 12 条" }, { agent: LUBAN, at: "2026-04-26T11:00:07Z", id: "h-7" }),

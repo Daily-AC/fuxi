@@ -128,20 +128,20 @@ describe("WorkerPage · 私聊页 modal (#N3)", () => {
     unmount();
   });
 
-  it("tool_call + tool_result 配对 · ToolCallCard 折叠卡显完成", async () => {
+  it("tool_call_started + tool_call_finished 配对 · ToolCallCard 折叠卡显完成", async () => {
     const { api, queryAllByTestId, unmount } = setup();
     await new Promise((r) => setTimeout(r, 30));
     api.pushWorker(
       LUBAN,
       ev(
-        { type: "tool_call", tool: "Bash", input: "grep server" },
+        { type: "tool_call_started", tool: "Bash", args: "grep server" },
         { at: "2026-04-26T12:00:00Z", id: "t1" },
       ),
     );
     api.pushWorker(
       LUBAN,
       ev(
-        { type: "tool_result", tool: "Bash", ok: true, output: "main.go:1" },
+        { type: "tool_call_finished", tool: "Bash", ok: true, output_preview: "main.go:1" },
         { at: "2026-04-26T12:00:00.5Z", id: "t2" },
       ),
     );

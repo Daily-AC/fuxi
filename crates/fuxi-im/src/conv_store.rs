@@ -357,7 +357,25 @@ async fn handle_event(
                 )
                 .await?;
         }
-        EventKind::UserInterventionSent { target, text, .. } if *target == xuannv_id => {
+        EventKind::UserInterventionSent {
+            target,
+            text,
+            attachments,
+            ..
+        } if *target == xuannv_id => {
+            // 阶段 3：附件 id 列表落 messages.attachments JSON 数组，PWA 历史回显时
+            // AttachmentChip 直接拿 id 拼直链 GET /api/uploads/:id 渲缩略。空 = None
+            // （让旧前端 fromStoredMessage 走 `Array.isArray` 兜空稳）。
+            let attach_json = if attachments.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(
+                    attachments
+                        .iter()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .collect(),
+                ))
+            };
             store
                 .append_message(
                     conv_id,
@@ -365,7 +383,7 @@ async fn handle_event(
                     None,
                     "text",
                     &serde_json::json!({ "text": text }),
-                    None,
+                    attach_json.as_ref(),
                     Some(&source_id),
                     ev.meta.at,
                 )
@@ -591,6 +609,7 @@ mod tests {
                 text: text.into(),
                 mentions: vec![target],
                 pinned_node: None,
+                attachments: Vec::new(),
             },
         }
     }

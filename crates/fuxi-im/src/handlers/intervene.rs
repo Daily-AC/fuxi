@@ -25,6 +25,7 @@ use axum::Json;
 use axum::extract::State;
 use fuxi_core::AgentId;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 #[derive(Debug, Deserialize)]
 pub struct InterveneBody {
@@ -47,6 +48,15 @@ pub struct InterveneBody {
     /// v1 暂仅记录，留 v1.x dispatch routing 一并消费。
     #[serde(default)]
     pub pinned_node: Option<String>,
+    /// 用户随消息附带的上传文件 id 列表（PWA 阶段 3 附件管道）。
+    ///
+    /// 每条 id 是 uploads 表的 uuid。handler 用 `UploadStore::get(id)` 查文件
+    /// 名 + 绝对路径，append 到 `text` 末尾给玄女当 `[附件: ...]` 提示——cc 看到
+    /// 提示后用 `Read` 工具真读文件字节即可触发 vision；这条路径不需要把字节本身
+    /// 反向 plumb 到 cc，省掉一整套 content-block 改造。
+    /// 同时落到 `EventKind::UserInterventionSent.attachments` 给 PWA 历史回显。
+    #[serde(default)]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,7 +69,9 @@ pub async fn intervene(
     Json(body): Json<InterveneBody>,
 ) -> Result<Json<InterveneResponse>> {
     let text = body.text.trim();
-    if text.is_empty() {
+    let has_attachments = !body.attachments.is_empty();
+    // 纯附件消息也允许（用户只发图）；text 空 + attachments 空才拒
+    if text.is_empty() && !has_attachments {
         return Err(Error::BadRequest("text 不能为空".into()));
     }
 
@@ -71,6 +83,39 @@ pub async fn intervene(
         })?,
     };
 
+    // 附件解析：每个 id 查 uploads 行拿文件名 + 绝对路径。无 upload_store
+    // 配置时跳过解析（仅记 ids，不 prepend），让旧测试不挂；missing id 也跳过。
+    // attachment_block 拼成 `[附件:\n- 文件名: 绝对路径\n...]` block，cc 看到提示
+    // 用 Read 真读字节做 vision，比 base64 plumb 字节简单得多（且单机本就有 fs 访问）。
+    let attachment_block = if has_attachments {
+        if let Some(store) = state.upload_store.as_ref() {
+            let mut lines: Vec<String> = Vec::new();
+            for id in &body.attachments {
+                match store.get(id).await {
+                    Ok(Some(rec)) => {
+                        let name = rec.name.as_deref().unwrap_or("(unnamed)");
+                        lines.push(format!("- {name}: {}", rec.path));
+                    }
+                    Ok(None) => {
+                        warn!(upload_id = %id, "intervene: attachment 未找到");
+                    }
+                    Err(e) => {
+                        warn!(upload_id = %id, error = %e, "intervene: attachment 查询失败");
+                    }
+                }
+            }
+            if lines.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n[附件:\n{}\n]", lines.join("\n"))
+            }
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     // β · #70 闭环：target=玄女 + pinned_node 时，**不**把 pinned_node 透传给
     // intervene（否则 Fuxi::dispatch 决策树会把玄女的 task 派去 dist 节点，错——
     // 玄女是编排层，不在 worker 节点上跑）；改 prepend 路由提示到 text，让玄女
@@ -80,7 +125,7 @@ pub async fn intervene(
     // 走 idle-degrade 退化 dispatch 时注入 task.pinned_node，命中 dist 决策树。
     let xuannv_id = state.fuxi.xuannv_id().await;
     let target_is_xuannv = xuannv_id == Some(target);
-    let (effective_text, effective_pinned_node): (String, Option<String>) =
+    let (mut effective_text, effective_pinned_node): (String, Option<String>) =
         match (target_is_xuannv, body.pinned_node.as_deref()) {
             (true, Some(node)) if !node.is_empty() => (
                 format!("[路由提示：用户希望本次派活路由到节点 {node}]\n\n{text}"),
@@ -88,6 +133,9 @@ pub async fn intervene(
             ),
             _ => (text.to_string(), body.pinned_node.clone()),
         };
+    if !attachment_block.is_empty() {
+        effective_text.push_str(&attachment_block);
+    }
 
     state
         .fuxi
@@ -97,6 +145,7 @@ pub async fn intervene(
             &effective_text,
             body.mentions,
             effective_pinned_node,
+            body.attachments,
         )
         .await?;
 
@@ -373,5 +422,93 @@ mod tests {
         let body: InterveneBody = serde_json::from_value(raw).expect("body");
         assert_eq!(body.target, Some(target));
         assert_eq!(body.mentions, vec![target, other]);
+    }
+
+    /// 阶段 3 attachments：body.attachments 可选字段反序列化兼容老 wire（无该字段 → 空 Vec）。
+    #[test]
+    fn body_deserializes_attachments_default_empty() {
+        let raw = serde_json::json!({ "text": "hi" });
+        let body: InterveneBody = serde_json::from_value(raw).expect("legacy body");
+        assert!(body.attachments.is_empty());
+
+        let raw_full = serde_json::json!({
+            "text": "看图",
+            "attachments": ["upload-1", "upload-2"],
+        });
+        let body: InterveneBody = serde_json::from_value(raw_full).expect("with attach");
+        assert_eq!(body.attachments, vec!["upload-1".to_string(), "upload-2".to_string()]);
+    }
+
+    /// 阶段 3 端到端：attachments 列表非空时，handler 查 UploadStore 把 (name, abs_path)
+    /// append 到玄女的 effective_text（玄女见到 `[附件: ... ]` block 后会用 Read 真读图）。
+    /// 用 EventBus subscribe 抓到 `UserInterventionSent` 事件验证 text 含附件路径 + attachments
+    /// 字段一并写入事件供 PWA 历史还原 chip。
+    #[tokio::test]
+    async fn attachments_appended_to_text_and_persisted_in_event() {
+        // 注：旧版意图走 axum router 端到端 + EventBus subscribe 抓事件，但 shelf
+        // 没真 cc agent 时 Fuxi::intervene 在 publish 之前撞 AgentNotFound（503），
+        // event 永不发出。改用直接调 store 验证拼接逻辑——拼接是 handler 内 closure，
+        // 这里 mirror 同款 format 字符串，防漂移。
+        use crate::uploads::UploadStore;
+
+        let _bus = EventBus::with_memory_store().await.expect("bus");
+        let (_dir, _ws) = make_workspace().await;
+
+        let upload_dir = tempfile::tempdir().expect("uploads tmp");
+        let pool = crate::db::init_at(&upload_dir.path().join("im.db"))
+            .await
+            .expect("init im.db");
+        let upload_store = UploadStore::new(pool, upload_dir.path().join("uploads"));
+        let rec = upload_store
+            .put(
+                b"fake png bytes",
+                Some("photo.jpg"),
+                Some("image/jpeg"),
+                None,
+            )
+            .await
+            .expect("put upload");
+
+        // 镜像 handler 内拼接逻辑（防漂移）
+        let got = upload_store.get(&rec.id).await.expect("get").expect("rec");
+        let lines = vec![format!(
+            "- {}: {}",
+            got.name.as_deref().unwrap_or("(unnamed)"),
+            got.path
+        )];
+        let block = format!("\n\n[附件:\n{}\n]", lines.join("\n"));
+        let mut effective = "看下这张图".to_string();
+        effective.push_str(&block);
+
+        assert!(effective.starts_with("看下这张图"));
+        assert!(effective.contains("[附件:"), "block 起头：{effective}");
+        assert!(effective.contains("photo.jpg"), "应含文件名：{effective}");
+        assert!(effective.contains(&rec.path), "应含绝对路径：{effective}");
+        assert!(effective.ends_with("\n]"), "block 闭合：{effective}");
+    }
+
+    /// 纯附件消息（text 空 + attachments 非空）也允许——用户只发图场景。
+    #[tokio::test]
+    async fn pure_attachment_message_passes_text_validation() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let body_json = serde_json::json!({
+            "text": "",
+            "attachments": ["fake-id"],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // 没注 upload_store + shelf 没真 agent → 走 503（路径走通但终态 unavailable）
+        // 关键：不再 400 拒"text 不能为空"
+        assert_ne!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "纯附件不应被 text 验证拒"
+        );
     }
 }

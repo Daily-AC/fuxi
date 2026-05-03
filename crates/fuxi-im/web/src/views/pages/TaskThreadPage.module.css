@@ -51,6 +51,113 @@
   min-height: var(--touch);
   font-size: 18px;
   color: var(--text-muted);
+  border-radius: 8px;
+}
+
+.more:active {
+  background: var(--accent-subtle);
+}
+
+/* ⋯ 弹层 — fixed 全屏遮罩 + 右上角抽屉 */
+.menuOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+}
+
+.menuPanel {
+  margin: max(var(--space-4), env(safe-area-inset-top)) var(--space-3) 0 auto;
+  width: min(360px, calc(100vw - var(--space-4) * 2));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: calc(100vh - var(--space-6));
+  overflow-y: auto;
+}
+
+.menuTitle {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+  margin: 0 0 4px 0;
+  font-weight: var(--weight-medium);
+}
+
+.menuList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.menuMember {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.menuMemberHead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.menuMemberRole {
+  font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.menuMemberStatus {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.menuMemberSub {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.menuMemberNode {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.menuMemberNodeOffline {
+  color: #C76A6A;
+  opacity: 0.85;
+}
+
+.menuClose {
+  margin-top: 4px;
+  align-self: flex-end;
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  border-radius: 8px;
+  font-size: var(--size-aux);
+  color: var(--accent);
+}
+
+.menuClose:active {
+  background: var(--accent-subtle);
 }
 
 /* 任务 banner · 顶栏下方紧贴 */

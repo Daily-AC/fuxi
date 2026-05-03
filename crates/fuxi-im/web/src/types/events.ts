@@ -26,7 +26,17 @@ export interface EventMeta {
  *  暂未见到 agent_text_delta（cc haiku 模型不发 delta，只发整段 agent_responded）。
  */
 export type EventKind =
-  | { type: "user_intervention_sent"; text: string }
+  | {
+      type: "user_intervention_sent";
+      target?: string;
+      mode?: string;
+      text: string;
+      mentions?: string[];
+      pinned_node?: string | null;
+      /** 阶段 3 attachments 管道 · 后端 EventKind::UserInterventionSent.attachments
+       *  序列化产出。每条是 uploads 表 id；前端拼直链 `/api/uploads/:id` 渲缩略。 */
+      attachments?: string[];
+    }
   | { type: "task_created"; title?: string; parent?: TaskId | null }
   | { type: "task_dispatched"; agent?: AgentId | null }
   | { type: "task_state_changed"; from?: string; to: string }
@@ -82,6 +92,8 @@ export interface EventHistoryResponse {
 export interface InterveneRequest {
   text: string;
   task_id?: TaskId | null;
+  /** 阶段 3：上传文件 id 列表（uploads 表 uuid）。后端拼到玄女文本里给她 Read。*/
+  attachments?: string[];
 }
 
 export interface DispatchRequest {

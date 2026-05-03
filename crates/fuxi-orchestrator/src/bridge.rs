@@ -158,10 +158,19 @@ pub trait Intervener: Send + Sync {
 #[async_trait]
 impl Intervener for Fuxi {
     async fn intervene(&self, agent_id: AgentId, interrupt_first: bool, text: &str) -> Result<()> {
-        // 内部 bridge / 系统触发器走该 trait——不需要 @ mention / pinned_node 语义，
-        // 传空 Vec 和 None。只有 IM HTTP `POST /api/intervene` 走 Fuxi::intervene
-        // 直拨才会带 mentions / pinned_node。
-        Fuxi::intervene(self, agent_id, interrupt_first, text, Vec::new(), None).await
+        // 内部 bridge / 系统触发器走该 trait——不需要 @ mention / pinned_node /
+        // attachments 语义，传空。只有 IM HTTP `POST /api/intervene` 走
+        // Fuxi::intervene 直拨才会带 mentions / pinned_node / attachments。
+        Fuxi::intervene(
+            self,
+            agent_id,
+            interrupt_first,
+            text,
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .await
     }
 
     async fn role_of(&self, agent_id: AgentId) -> Option<String> {

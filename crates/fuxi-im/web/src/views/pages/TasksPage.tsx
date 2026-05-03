@@ -10,7 +10,7 @@ import {
   formatDuration,
   shortTaskId,
 } from "~/lib/format-task";
-import type { TaskGroupCard, TaskMember, TasksOverview } from "~/types/api";
+import type { TaskGroupCard, TasksOverview } from "~/types/api";
 import styles from "./TasksPage.module.css";
 
 // 任务 tab Layer 1 · 任务列表（v3 #N3' / #38）
@@ -39,15 +39,8 @@ export const TasksPage: Component = () => {
 const RenderTasks: Component = () => {
   const { client } = useApi();
   const [data] = createResource(() => client.fetchTasksOverview());
-  // v3 #64 · 同步拉 nodes topology · 给 MemberRow 区分 @node 在线/离线 dim red
-  // 注意：nodesData 未 ready 时返 null（不是 empty Set），下游按"未知态 = 默认在线 muted"处理
-  // 避免 race（首帧把所有 @node 闪成红色 → 加载完才正确）
-  const [nodesData] = createResource(() => client.fetchNodes());
-  const onlineNodeIds = createMemo<Set<string> | null>(() => {
-    const d = nodesData();
-    if (!d) return null;
-    return new Set(d.nodes.filter((n) => n.online).map((n) => n.node_id));
-  });
+  // v4：卡片不再渲染门客预览，nodes 在线/离线状态搬到详情页 ⋯ 菜单。
+  // TasksPage 这里去掉 fetchNodes 调用，省一个网络往返。
 
   return (
     <Show
@@ -63,12 +56,12 @@ const RenderTasks: Component = () => {
         </Show>
       }
     >
-      <TaskTree overview={data()!} onlineNodeIds={onlineNodeIds()} />
+      <TaskTree overview={data()!} />
     </Show>
   );
 };
 
-const TaskTree: Component<{ overview: TasksOverview; onlineNodeIds: Set<string> | null }> = (props) => {
+const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
   // 进行中段按 last_active_at 降序（最近活动优先）
   const running = createMemo(() => {
     const list = [...props.overview.running];
@@ -97,14 +90,14 @@ const TaskTree: Component<{ overview: TasksOverview; onlineNodeIds: Set<string> 
       <Show when={running().length > 0}>
         <section class={styles.section} data-testid="tasks-running">
           <h3 class={styles.sectionLabel}>进行中</h3>
-          <For each={running()}>{(t) => <TaskCard task={t} onlineNodeIds={props.onlineNodeIds} />}</For>
+          <For each={running()}>{(t) => <TaskCard task={t} />}</For>
         </section>
       </Show>
 
       <Show when={completed().length > 0}>
         <section class={styles.section} data-testid="tasks-completed">
           <h3 class={styles.sectionLabel}>已完成</h3>
-          <For each={completed()}>{(t) => <TaskCard task={t} dim onlineNodeIds={props.onlineNodeIds} />}</For>
+          <For each={completed()}>{(t) => <TaskCard task={t} dim />}</For>
         </section>
       </Show>
     </div>
@@ -116,11 +109,12 @@ function parseTs(iso: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean; onlineNodeIds: Set<string> | null }> = (props) => {
+const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
   const { navPush } = useApi();
   const memberCount = (): number => props.task.members.length;
 
-  // v3：整卡 button，tap → push Layer 2 任务 thread
+  // 卡片整体一个 button — 移除底部门客预览块（用户实测反馈：误点击 +
+  // role 兜底 unknown 体验差）。门客详情移到详情页右上 ⋯ 菜单（TaskThreadPage）。
   const onCardTap = (): void => {
     navPush({
       kind: "task",
@@ -155,81 +149,6 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean; onlineNodeIds: S
           <time class={styles.duration}>{formatDuration(props.task.duration_ms)}</time>
         </span>
       </button>
-      <Show when={memberCount() > 0}>
-        <ul class={styles.members}>
-          <For each={props.task.members}>
-            {(m) => (
-              <MemberRow
-                member={m}
-                onlineNodeIds={props.onlineNodeIds}
-                taskStatus={props.task.status}
-              />
-            )}
-          </For>
-        </ul>
-      </Show>
     </article>
   );
 };
-
-// v3：member 行变 inspection-only（div 不再 button）。
-// 数据：role · last_tool_call/activity 副文本 · @node 标识（v3 #59）。
-// v3 #64：@node 离线时切 dim red className 区分 stale 节点。
-// #68 (c)：taskStatus 非 running 时 fallback 用 "已歇" 替代 "待命"，避免 completed 任务误以为 worker 还接活。
-const MemberRow: Component<{
-  member: TaskMember;
-  onlineNodeIds: Set<string> | null;
-  taskStatus?: string;
-}> = (props) => {
-  const sub = (): string => {
-    if (props.member.last_activity) return props.member.last_activity;
-    const tool = toolCallText(props.member.last_tool_call);
-    if (tool) {
-      return tool;
-    }
-    if (props.member.activity) return props.member.activity;
-    // 任务非 running（completed / failed）时 worker 已无任务，显 "已歇" 比 "待命" 更直观
-    if (props.taskStatus && props.taskStatus !== "running") return "已歇";
-    if (props.member.status === "idle") return "待命";
-    if (props.member.status === "thinking") return "思考中";
-    return "运行中";
-  };
-
-  // 仅在 onlineNodeIds 已 ready 且 node_id 不在内时算 offline；未知态默认在线（避免 race 闪红）
-  const offline = (): boolean =>
-    !!props.member.node_id
-    && props.onlineNodeIds !== null
-    && !props.onlineNodeIds.has(props.member.node_id);
-
-  return (
-    <li
-      class={styles.memberRow}
-      data-testid={`member-${props.member.agent_id}`}
-    >
-      <div class={styles.memberMain}>
-        <span class={styles.memberRole}>{props.member.role_display}</span>
-        <span class={`${styles.memberSub} mono`}>{sub()}</span>
-        <Show when={props.member.node_id}>
-          {(nid) => (
-            <span
-              class={`${styles.memberNode} mono ${offline() ? styles.memberNodeOffline ?? "" : ""}`}
-              data-testid={
-                offline()
-                  ? `member-node-offline-${props.member.agent_id}`
-                  : `member-node-${props.member.agent_id}`
-              }
-            >
-              @{nid()}
-            </span>
-          )}
-        </Show>
-      </div>
-    </li>
-  );
-};
-
-function toolCallText(call: TaskMember["last_tool_call"]): string | null {
-  if (!call) return null;
-  if (typeof call === "string") return call;
-  return call.args_summary ? `${call.tool} ${call.args_summary}` : call.tool;
-}
