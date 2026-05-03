@@ -1095,6 +1095,7 @@ async fn spawn_by_role(
         // 同名 slug，否则 worker pull 后 fail job（明确 error 比 silent fallback 好）。
         cfg.project = project_override.clone();
         cfg.ephemeral_task = ephemeral_task_override.clone();
+        apply_project_tag_to_required_tags(&mut cfg.required_tags, project_override.as_deref());
         if recall.resume_session_id.is_some() || recall.worktree.is_some() {
             tracing::warn!(
                 role = %role,
@@ -1206,6 +1207,25 @@ async fn spawn_by_role(
     fuxi.spawn_worker(profile, kind)
         .await
         .map_err(|e| anyhow!(e.to_string()))
+}
+
+/// Decision 21 phase 3 tag-aware spawn：dist 路径下若指定了 project，
+/// 自动加 `project:<slug>` 到 required_tags——controller 用 tag 子集匹配
+/// 把 job 路由到 advertise 该 tag 的 worker。这让用户在 worker 节点上跑
+/// `fuxi dist worker --node home --tag project:erp` 即可声明"我托管 erp"，
+/// 后续 `fuxi spawn --node home --project erp` 才能命中。pinned_node 优先
+/// 时此 tag 仍写入但被忽略——pinned 已经定死目标，多写一个 tag 无害。
+///
+/// 拆独立 helper 让单测能直接验证"slug 为空 / 已存在 tag / 多次幂等"等边界。
+fn apply_project_tag_to_required_tags(tags: &mut Vec<String>, project_slug: Option<&str>) {
+    let Some(slug) = project_slug.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let project_tag = format!("project:{slug}");
+    if tags.iter().any(|t| t == &project_tag) {
+        return;
+    }
+    tags.push(project_tag);
 }
 
 fn build_dist_gateway_config(
@@ -1785,6 +1805,36 @@ mod tests {
     // "env 测试注意"：std::env::set_var 多线程不安全，和其他 test 并行会脏读，
     // 已经因此挂过一次。语义靠 `build_dist_gateway_config` 的实现审查 + 集成
     // smoke 兜底。
+
+    /// Decision 21 phase 3 tag-aware spawn · 给定 project slug → tag 注入。
+    #[test]
+    fn apply_project_tag_appends_when_slug_present() {
+        let mut tags = vec!["codex".into()];
+        apply_project_tag_to_required_tags(&mut tags, Some("erp"));
+        assert_eq!(tags, vec!["codex".to_string(), "project:erp".to_string()]);
+    }
+
+    /// project=None / 空串 / 全空白 → 不动 tags。
+    #[test]
+    fn apply_project_tag_noop_when_slug_missing_or_blank() {
+        let mut tags = vec!["codex".into()];
+        apply_project_tag_to_required_tags(&mut tags, None);
+        apply_project_tag_to_required_tags(&mut tags, Some(""));
+        apply_project_tag_to_required_tags(&mut tags, Some("   "));
+        assert_eq!(tags, vec!["codex".to_string()]);
+    }
+
+    /// 已有同 tag → 幂等不重复添加。
+    #[test]
+    fn apply_project_tag_is_idempotent() {
+        let mut tags = vec!["project:erp".into(), "codex".into()];
+        apply_project_tag_to_required_tags(&mut tags, Some("erp"));
+        assert_eq!(
+            tags,
+            vec!["project:erp".to_string(), "codex".to_string()],
+            "重复调用应不再添加"
+        );
+    }
 
     #[test]
     fn normalize_cli_rejects_unknown() {
