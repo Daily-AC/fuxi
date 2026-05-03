@@ -9,7 +9,9 @@
 //! 默认 limit=100，硬上限 1000，防止前端误打分页接口当 dump 工具。
 
 use crate::error::{Error, Result};
-use crate::handlers::ws_common::{build_event_stream, parse_cursor, run_ws_loop};
+use crate::handlers::ws_common::{
+    EventHistoryResponse, build_event_stream, parse_cursor, run_ws_loop,
+};
 use crate::state::AppState;
 use crate::tasks_view::{ListTasksResponse, aggregate};
 use axum::Json;
@@ -112,7 +114,7 @@ pub async fn task_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
-) -> Result<Json<Vec<Event>>> {
+) -> Result<Json<EventHistoryResponse>> {
     let task_id = parse_task_id(&id).map_err(Error::BadRequest)?;
     let cursor = parse_cursor(q.from.as_deref())?.unwrap_or(ReplayCursor::Beginning);
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
@@ -131,7 +133,10 @@ pub async fn task_events(
             break;
         }
     }
-    Ok(Json(out))
+    Ok(Json(EventHistoryResponse {
+        events: out,
+        next_cursor: None,
+    }))
 }
 
 /// `?from=<cursor>` WS 流式接续 query。

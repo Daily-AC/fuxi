@@ -21,7 +21,9 @@
 //! 假事件（避免污染事件流真实性）。
 
 use crate::error::{Error, Result};
-use crate::handlers::ws_common::{build_event_stream, parse_cursor, run_ws_loop};
+use crate::handlers::ws_common::{
+    EventHistoryResponse, build_event_stream, parse_cursor, run_ws_loop,
+};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::ws::WebSocketUpgrade;
@@ -96,7 +98,7 @@ pub async fn worker_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<WorkerEventsQuery>,
-) -> Result<Json<Vec<Event>>> {
+) -> Result<Json<EventHistoryResponse>> {
     let agent_id = parse_agent_id(&id).map_err(|e| {
         warn!(raw = %id, error = %e, "agent_id 解析失败");
         Error::BadRequest(e)
@@ -118,7 +120,10 @@ pub async fn worker_events(
             break;
         }
     }
-    Ok(Json(out))
+    Ok(Json(EventHistoryResponse {
+        events: out,
+        next_cursor: None,
+    }))
 }
 
 /// `WS /api/workers/:agent_id/conv` —— 私聊页流式接续。
@@ -470,7 +475,13 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-        let evs: Vec<Event> = serde_json::from_slice(&bytes).unwrap();
+        // P0.D 修后 wire shape = `{events, next_cursor}`（对齐前端 EventHistoryResponse）
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let evs: Vec<Event> = serde_json::from_value(body["events"].clone()).unwrap();
+        assert!(
+            body["next_cursor"].is_null(),
+            "next_cursor 当前应为 null（无服务端分页）"
+        );
         assert_eq!(
             evs.len(),
             3,
