@@ -234,7 +234,7 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
   };
 
   /** 处理输入键 · 输入框 onInput · 我们用受控的"末段 text"模型，输入直接走 setTailText。*/
-  const onInput = (e: InputEvent & { currentTarget: HTMLInputElement }): void => {
+  const onInput = (e: InputEvent & { currentTarget: HTMLTextAreaElement }): void => {
     if (composing) return; // IME 中不更新模型
     const v = e.currentTarget.value;
     setTailText(v);
@@ -257,13 +257,15 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     composing = true;
   };
 
-  const onCompositionEnd = (e: CompositionEvent & { currentTarget: HTMLInputElement }): void => {
+  const onCompositionEnd = (
+    e: CompositionEvent & { currentTarget: HTMLTextAreaElement },
+  ): void => {
     composing = false;
     // 提交后再走一次 onInput 同步 model
-    onInput(e as unknown as InputEvent & { currentTarget: HTMLInputElement });
+    onInput(e as unknown as InputEvent & { currentTarget: HTMLTextAreaElement });
   };
 
-  const onKeyDown = (e: KeyboardEvent & { currentTarget: HTMLInputElement }): void => {
+  const onKeyDown = (e: KeyboardEvent & { currentTarget: HTMLTextAreaElement }): void => {
     // Backspace 在末段 text 为空时删除前面的 chip（chip 不可分割 token 体验）
     if (e.key === "Backspace" && tailText() === "") {
       const segs = segments();
@@ -447,13 +449,24 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
           data-testid="composer-file-input"
           onChange={onFilesPicked}
         />
-        <input
+        <textarea
           class={styles.editor}
-          type="text"
           value={tailText()}
-          placeholder={props.placeholder ?? "对玄女说... (@ 角色或节点)"}
+          placeholder={props.placeholder ?? "对玄女说... (@ 角色或节点 · Enter 发送 · Shift+Enter 换行)"}
           data-testid="mention-editor"
           disabled={busy() || props.disabled}
+          rows={1}
+          // P1.5 多行：Enter=发送，Shift+Enter=换行（textarea 默认行为）。
+          // auto-grow：每次 input 重设 height 让 textarea 跟内容长大；max-height
+          // 由 CSS 控制（5 行后开始内部 scroll）。
+          ref={(el) => {
+            const grow = (): void => {
+              el.style.height = "auto";
+              el.style.height = `${el.scrollHeight}px`;
+            };
+            el.addEventListener("input", grow);
+            queueMicrotask(grow);
+          }}
           onInput={onInput}
           onCompositionStart={onCompositionStart}
           onCompositionEnd={onCompositionEnd}

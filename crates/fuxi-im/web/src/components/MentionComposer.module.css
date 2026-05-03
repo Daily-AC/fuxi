@@ -28,19 +28,28 @@
 .editor {
   flex: 1;
   min-height: var(--touch);
-  max-height: 120px;
+  /* P1.5：textarea 多行——auto-grow JS 设 inline height；CSS 兜个 max 防 5 行
+   * 以上撑爆视口，超出后内部 scroll。原来 120px 单行场景对 textarea 偏紧，
+   * 拉到 ~5 行 (~120px → 160px)。 */
+  max-height: 160px;
   padding: 10px var(--space-4);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
+  /* radius-pill 对单行 input 美但 textarea 多行时上下圆角看着别扭 → radius-md。 */
+  border-radius: var(--radius-md, 12px);
   color: var(--text-primary);
   font-size: var(--size-body);
+  font-family: inherit;
   line-height: 1.45;
   outline: none;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
   cursor: text;
+  /* textarea 默认右下角有 resize 拖把——禁掉，让 auto-grow 全权 */
+  resize: none;
+  /* textarea 跟 input 不一样默认有竖直 align baseline，强制 top */
+  vertical-align: top;
 }
 
 .editor:focus {
