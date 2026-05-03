@@ -175,6 +175,46 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
     unmount();
   });
 
+  it("/api/nodes/stream 推 worker_heartbeat_state_changed → refetch + 实时刷 inflight 数", async () => {
+    // 真因回归 · Bug B：NodesPage 旧版只 fetchNodes 一次无 WS 订阅，inflight 数
+    // 永不动。修后必须订阅 nodes-stream，每条 push refetch /api/nodes 拿最新数。
+    const initial: NodesResponse = {
+      nodes: [{ ...HOME, inflight_jobs: 0 }],
+    };
+    const api = createMockApi({ nodes: initial });
+    setApiOverride(api);
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in" initialTab={2}>
+        <NodesPage />
+      </ApiProvider>
+    ));
+    // 等首屏 fetch
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getByTestId("node-home").textContent).toContain("0/4");
+
+    // controller 端 home.inflight 变了 → 后端 /api/nodes 下次返新数
+    api.state.nodes = { nodes: [{ ...HOME, inflight_jobs: 2 }] };
+    // ws push 一条节点级事件——NodesPage 应触发 refetch
+    api.pushNodesStream({
+      meta: {
+        id: "ev-1",
+        at: "2026-04-27T05:00:01Z",
+        agent: null,
+        task: null,
+      },
+      kind: {
+        type: "worker_heartbeat_state_changed",
+        node_id: "home",
+        inflight_count: 2,
+        status: "alive",
+      },
+    });
+    // 等 refetch 落地
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getByTestId("node-home").textContent).toContain("2/4");
+    unmount();
+  });
+
   it("添加节点按钮 · 弹 modal 显 install command", async () => {
     const { getByTestId, queryByTestId, unmount } = setup({ nodes: [] });
     await new Promise((r) => setTimeout(r, 30));

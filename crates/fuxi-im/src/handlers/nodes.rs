@@ -7,10 +7,16 @@
 //! `fuxi im start` 必注入；不注入 = 装配 bug。
 
 use crate::error::{Error, Result};
+use crate::handlers::ws_common::{build_event_stream, parse_cursor, run_ws_loop};
 use crate::nodes_provider::NodesResponse;
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{Query, State};
+use axum::response::Response;
+use fuxi_core::event::EventKind;
+use serde::Deserialize;
+use tracing::info;
 
 pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<NodesResponse>> {
     let provider = state.nodes_provider.as_ref().ok_or_else(|| {
@@ -18,6 +24,49 @@ pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<NodesRespo
     })?;
     let nodes = provider.list_nodes(&state.fuxi).await;
     Ok(Json(NodesResponse { nodes }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct NodesStreamQuery {
+    /// 回放游标——事件 UUID 或 RFC3339 时间戳。缺省 = live-only。
+    pub from: Option<String>,
+}
+
+/// `WS /api/nodes/stream` —— dist topology 变更事件流。
+///
+/// 用途：PWA 节点 tab 订阅本流，每收到一条就触发 `/api/nodes` refetch，做到
+/// "心跳 / 注册 / 掉线" 实时反映到 UI。**不直接推 NodeView 全量**——节点拓扑
+/// 由 [`list_nodes`] 计算（home shelf + dist topology），把它转 patch 推下来
+/// 会重复一份计算逻辑，前端 refetch 一次成本 < 1KB JSON 远比一致性风险小。
+///
+/// 过滤的三类 EventKind：
+/// - `WorkerRegistered`：新节点首次注册或 worker 重连
+/// - `WorkerHeartbeatStateChanged`：inflight 数变 / 状态翻 stale↔alive（采样发）
+/// - `WorkerStaleSwept`：sweep tick 回收掉某 worker 的 inflight
+///
+/// 不过滤 `meta.agent`/`meta.task`：节点级事件不挂 agent/task。
+#[tracing::instrument(skip(ws, state))]
+pub async fn nodes_stream_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(q): Query<NodesStreamQuery>,
+) -> Result<Response> {
+    let cursor = parse_cursor(q.from.as_deref())?;
+    info!(?cursor, "ws /api/nodes/stream accept");
+    let bus = state.fuxi.bus().clone();
+    let stream = build_event_stream(&bus, cursor);
+    let resp = ws.on_upgrade(move |socket| async move {
+        run_ws_loop(socket, stream, |ev| {
+            matches!(
+                ev.kind,
+                EventKind::WorkerRegistered { .. }
+                    | EventKind::WorkerHeartbeatStateChanged { .. }
+                    | EventKind::WorkerStaleSwept { .. }
+            )
+        })
+        .await;
+    });
+    Ok(resp)
 }
 
 #[cfg(test)]
