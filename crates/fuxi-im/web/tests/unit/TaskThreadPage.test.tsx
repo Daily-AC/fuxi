@@ -325,6 +325,38 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     unmount();
   });
 
+  it("P0.E · 任务 completed · composer placeholder 改成「跟玄女继续聊」（默认是「对玄女说」）", async () => {
+    // 默认场景（task running）— placeholder 是默认文案
+    const { getByTestId: g1, unmount: u1 } = setup();
+    await new Promise((r) => setTimeout(r, 50));
+    const editor1 = g1("mention-editor") as HTMLTextAreaElement;
+    expect(editor1.placeholder).toMatch(/对玄女说/);
+    u1();
+
+    const overview: TasksOverview = {
+      running: [],
+      completed: [
+        {
+          id: TASK_ID,
+          title: "查 ERP API",
+          status: "completed" as const,
+          created_at: "2026-04-26T11:00:00Z",
+          last_active_at: "2026-04-26T11:12:00Z",
+          duration_ms: 19_000,
+          members: [
+            { agent_id: XUANNV, role: "xuannv", role_display: "玄女", status: "idle" as const },
+          ],
+        },
+      ],
+    };
+    const { getByTestId: g2, unmount: u2 } = setup({ overview });
+    await new Promise((r) => setTimeout(r, 50));
+    const editor2 = g2("mention-editor") as HTMLTextAreaElement;
+    expect(editor2.placeholder).toMatch(/任务已完结/);
+    expect(editor2.placeholder).toMatch(/玄女/);
+    u2();
+  });
+
   it("v3 #68 (c) · 任务 completed · banner member fallback 显 \"已歇\" 不是 \"待命\"", async () => {
     const overview: TasksOverview = {
       running: [],
