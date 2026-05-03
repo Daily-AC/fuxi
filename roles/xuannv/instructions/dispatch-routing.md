@@ -72,8 +72,28 @@
   足够
 - 同 (project, role) 重复 spawn → fuxi 自动复用现有 sandbox（idempotent），
   但 agent_id 不同；建议你**记录上次 spawn 的 agent_id**，dispatch 复用
-- 不要给 project sandbox spawn 同时叠 `--node` —— v1 project sandbox 只在本机
-  spawn（CLI / IM 同进程持有 ProjectRegistry），dist 跨节点 sandbox 是 phase 2
+- 不要给 project sandbox spawn 同时叠 `--node`，**除非**该 worker 节点
+  已经 advertise `project:<slug>` tag（见下"跨节点项目 sandbox"段）
+
+### 跨节点项目 sandbox（Decision 21 phase 3）
+
+当目标项目的 git repo 在**远端节点**（如 `~/erp` 在家里 home 服务器，
+但你的 fuxi-im 在 mac 上跑），`fuxi spawn --role luban --project erp --node home`
+会把 cc/codex 起到 home 节点对应的 `~/.fuxi/projects/erp/sandboxes/luban/`。
+
+**前置**：home 节点的 worker 必须先做两件事：
+1. 跑过 `fuxi project add ~/erp`，让本机 ProjectRegistry 有同 slug 注册
+2. dist worker 启动时 advertise `project:erp` tag：
+   ```bash
+   fuxi dist worker --node home --tag project:erp
+   ```
+
+派活时 fuxi 会自动给 `task.required_tags` 加 `project:erp`，controller 路由
+匹配 → 该 job 只能去带 `project:erp` tag 的 worker。worker 端 pull 后用 job
+里的 project + role 反查本机 ProjectRegistry，把 cc 起到对应 sandbox。
+
+如果 worker 没 advertise 该 tag → controller 拿不到 worker → job 卡在 queue
+→ 用户在 PWA 节点 tab 看到"job 排队中"。提示用户去那台 worker 加 tag。
 
 ### L2 vs L3：一次性活 vs 持续活
 
