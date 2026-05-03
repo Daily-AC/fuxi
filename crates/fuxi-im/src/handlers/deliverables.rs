@@ -150,6 +150,11 @@ pub async fn accept_deliverable(
 /// 系统敏感目录列表保守：`/etc /sys /proc /usr /var /boot /bin /sbin /lib /lib64`。
 /// `$HOME / /tmp / /Users / /Volumes` 等 user-friendly 路径全放行。fuxi-im 跑在
 /// 用户 uid 下，OS 权限是兜底，但本端点先做应用层 sanity check 避免误操作。
+///
+/// **严格模式**（`FUXI_DELIVERABLE_STRICT=1`）：只允许写入 `$HOME` 子树。
+/// 用户在生产部署时（systemd 跑 fuxi-im 暴露公网）开启它，限制 deliverable 接收
+/// 范围让 web 端攻击者也只能往用户 home 里写——文件出 home 都拒。
+/// 默认关闭，因为本机用户自用 `~/写作` 之类的 home 内路径不需要这个开关。
 fn validate_accept_target(target: &std::path::Path) -> Result<()> {
     if !target.is_absolute() {
         return Err(Error::BadRequest(format!(
@@ -183,7 +188,50 @@ fn validate_accept_target(target: &std::path::Path) -> Result<()> {
             )));
         }
     }
+    if deliverable_strict_mode_enabled() {
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| {
+                Error::Internal(
+                    "FUXI_DELIVERABLE_STRICT 开启但 $HOME 未设——无法做严格校验".into(),
+                )
+            })?;
+        let canon_home = home.canonicalize().unwrap_or(home);
+        // 用 canonicalize 是必须——target 可能是 `~/写作` 经 fuxi-im 解析后的
+        // 软链或 .. 路径，不归一会被绕过。target 不存在时 canonicalize 失败，
+        // 走父目录逐级试。
+        let canon_target = target.canonicalize().unwrap_or_else(|_| {
+            target
+                .parent()
+                .and_then(|p| p.canonicalize().ok())
+                .map(|p| p.join(target.file_name().unwrap_or_default()))
+                .unwrap_or_else(|| target.to_path_buf())
+        });
+        if !canon_target.starts_with(&canon_home) {
+            return Err(Error::BadRequest(format!(
+                "FUXI_DELIVERABLE_STRICT 模式：accepted_to 必须在 $HOME ({}) 子树内，\
+                 实际 {}",
+                canon_home.display(),
+                canon_target.display()
+            )));
+        }
+    }
     Ok(())
+}
+
+/// 读 `FUXI_DELIVERABLE_STRICT` env，`1` / `true` / `yes` / `on`（不区分大小写）
+/// 视为开启。其他全关闭——默认值即关闭，给本机自用场景免配置。
+fn deliverable_strict_mode_enabled() -> bool {
+    matches!(
+        std::env::var("FUXI_DELIVERABLE_STRICT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// 把 deliverable bucket 里每个 manifest 文件复制到 target_dir。
@@ -934,5 +982,76 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Decision 22 phase 3 strict mode：覆盖 4 个场景（默认关 / 开 + 内 /
+    /// 开 + 外 / 开 + 系统目录 / 开 + $HOME 缺）。
+    ///
+    /// **合并成一个测试函数**——env 是进程全局，cargo test 默认并发跑同 binary
+    /// 测试会撞 set_var/remove_var 串扰。所以本测试不依赖 #[serial] crate，
+    /// 把所有断言塞一个测试里串行跑，外面 strict 模式始终关掉以隔离其他测试。
+    #[test]
+    fn validate_accept_target_strict_mode_covers_all_cases() {
+        // 备份 + finally 还原 env，避免污染其他测试（HOME 一般是真实存在的）。
+        let saved_strict = std::env::var("FUXI_DELIVERABLE_STRICT").ok();
+        let saved_home = std::env::var("HOME").ok();
+        let restore = |strict: Option<String>, home: Option<String>| unsafe {
+            match strict {
+                Some(v) => std::env::set_var("FUXI_DELIVERABLE_STRICT", v),
+                None => std::env::remove_var("FUXI_DELIVERABLE_STRICT"),
+            }
+            match home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        };
+
+        // 1) 默认关闭：/tmp/anywhere 通过
+        unsafe {
+            std::env::remove_var("FUXI_DELIVERABLE_STRICT");
+        }
+        assert!(
+            validate_accept_target(std::path::Path::new("/tmp/anywhere")).is_ok(),
+            "默认关闭：/tmp/anywhere 应通过"
+        );
+
+        // 2) 开启 + $HOME 内：通过
+        let home_dir = tempfile::tempdir().expect("tmp home");
+        let home_str = home_dir.path().to_string_lossy().into_owned();
+        let inside = home_dir.path().join("写作");
+        unsafe {
+            std::env::set_var("FUXI_DELIVERABLE_STRICT", "1");
+            std::env::set_var("HOME", &home_str);
+        }
+        assert!(
+            validate_accept_target(&inside).is_ok(),
+            "$HOME/写作 应通过"
+        );
+
+        // 3) 开启 + 非 $HOME：拒
+        let outside = std::path::PathBuf::from("/tmp/elsewhere");
+        match validate_accept_target(&outside) {
+            Err(Error::BadRequest(msg)) => {
+                assert!(msg.contains("FUXI_DELIVERABLE_STRICT"), "msg: {msg}");
+            }
+            other => {
+                restore(saved_strict.clone(), saved_home.clone());
+                panic!("/tmp/elsewhere 应被拒，实际 {other:?}");
+            }
+        }
+
+        // 4) 开启 + 系统目录：仍走系统黑名单（先于 strict 拒）
+        let r = validate_accept_target(std::path::Path::new("/etc/foo"));
+        assert!(matches!(r, Err(Error::BadRequest(_))), "got {r:?}");
+
+        // 5) 开启 + $HOME 缺：Internal 500
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        let r = validate_accept_target(std::path::Path::new("/anywhere"));
+        assert!(matches!(r, Err(Error::Internal(_))), "got {r:?}");
+
+        // 还原 env，避免污染其他测试。
+        restore(saved_strict, saved_home);
     }
 }
