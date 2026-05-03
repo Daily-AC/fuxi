@@ -14,6 +14,7 @@
 use clap::{Parser, Subcommand};
 use fuxi_cli::{
     banner, demo, dist, memory_cmd, project_cmd, repl, skill, subcommands, theme, up, watch,
+    xuannv_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -76,6 +77,9 @@ enum Command {
     /// L3 持久 sandbox 管理（Decision 21）—— per-门客 per-project 长期工作区。
     #[command(subcommand)]
     Sandbox(SandboxCmd),
+    /// 玄女控制——刷新教学（让她下次 fresh session 加载 dispatch-routing 最新版）。
+    #[command(subcommand)]
+    Xuannv(XuannvCmd),
     /// 【调试】打印启动 banner 后退出——给主人挑样式用。
     #[command(hide = true)]
     Banner,
@@ -111,6 +115,14 @@ enum SandboxCmd {
     /// 扫归档区删过期 L2 ephemeral worktree（Decision 21 phase 2 GC）。
     /// `fuxi sandbox sweep [--project erp] [--threshold-hours 24]`
     Sweep(project_cmd::SandboxSweepArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum XuannvCmd {
+    /// 刷新教学：清 oracle 里 xuannv session record，并通过 daemon 关掉当前
+    /// 玄女进程。下次 `fuxi-im` 走 ensure_xuannv 时 fresh spawn → cc 重读
+    /// `--append-system-prompt`（含 dispatch-routing.md 最新版）。
+    Refresh,
 }
 
 #[derive(Debug, Subcommand)]
@@ -217,6 +229,9 @@ async fn main() -> anyhow::Result<()> {
             SandboxCmd::List(args) => project_cmd::run_sandbox_list(args).await,
             SandboxCmd::Retire(args) => project_cmd::run_sandbox_retire(args).await,
             SandboxCmd::Sweep(args) => project_cmd::run_sandbox_sweep(args).await,
+        },
+        Some(Command::Xuannv(x)) => match x {
+            XuannvCmd::Refresh => xuannv_cmd::run_refresh().await,
         },
     }
 }
