@@ -97,10 +97,20 @@ impl FileSystemProjectRegistry {
         for sub in SUBDIRS {
             fs::create_dir_all(proj_dir.join(sub)).await?;
         }
+        // default_branch：caller 显式传 → 用之；否则探测 repo 的当前 HEAD
+        // 分支（user 实测踩坑：sia 用 master 但我们硬塞 main → spawn 时
+        // `git worktree add -b <role>/<project>-main main` 对找不到 main 报错）。
+        // detect 失败（detached HEAD / git 异常）才 fallback "main"。
+        let default_branch = match default_branch {
+            Some(b) => b,
+            None => detect_default_branch(&canonical)
+                .await
+                .unwrap_or_else(|| "main".to_string()),
+        };
         let project = Project {
             id: id.clone(),
             canonical_path: canonical,
-            default_branch: default_branch.unwrap_or_else(|| "main".to_string()),
+            default_branch,
             created_at: Utc::now(),
         };
         let json = serde_json::to_string_pretty(&project)
@@ -175,6 +185,34 @@ async fn is_git_repo(path: &Path) -> bool {
     fs::metadata(path.join(".git")).await.is_ok()
 }
 
+/// 探测 repo 当前 HEAD 指向的分支名。
+///
+/// 走 `git symbolic-ref --short HEAD`——HEAD 指向 branch 时返 branch 名，
+/// detached HEAD 时该命令返非 0 → 我们返 None 让 caller fallback。
+/// 同 `is_git_repo` 用 tokio::process::Command 避免阻塞 runtime。
+///
+/// **不**用 `git config init.defaultBranch`——那是新建 repo 的默认值，跟当前
+/// repo 实际所在分支可能不一致（例如 sia 是几年前 init 的 master，但用户
+/// 全局 init.defaultBranch 已是 main）。
+async fn detect_default_branch(path: &Path) -> Option<String> {
+    let out = tokio::process::Command::new("git")
+        .current_dir(path)
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(out.stdout).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +253,61 @@ mod tests {
             .expect("git commit");
         assert!(out.status.success());
         (dir, path)
+    }
+
+    /// repo 当前分支是 master 时 add 应该探测出 master 而非硬塞 main。
+    /// （用户实测踩坑：sia 用 master，registry 记 main → spawn worktree 失败）
+    #[tokio::test]
+    async fn add_detects_master_branch_when_repo_is_master() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        for args in [
+            vec!["init", "-q", "-b", "master"], // 关键：master 不是 main
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let out = tokio::process::Command::new("git")
+                .current_dir(&path)
+                .args(&args)
+                .output()
+                .await
+                .expect("git");
+            assert!(out.status.success());
+        }
+        tokio::fs::write(path.join("README.md"), "x").await.unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-q", "-m", "init"]] {
+            tokio::process::Command::new("git")
+                .current_dir(&path)
+                .args(&args)
+                .output()
+                .await
+                .expect("git");
+        }
+
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let project = registry
+            .add(path.clone(), Some("masterproj".into()), None)
+            .await
+            .expect("add");
+        assert_eq!(
+            project.default_branch, "master",
+            "add 应该探测出 master 不应硬塞 main"
+        );
+    }
+
+    /// 显式传 default_branch 时优先级最高——即便 repo 实际是 master，caller
+    /// 传 "develop" 也用 develop（信任 caller 知道自己干啥）。
+    #[tokio::test]
+    async fn add_explicit_default_branch_wins_over_detection() {
+        let (_repo_td, repo) = make_git_repo().await; // make_git_repo 起 main
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let project = registry
+            .add(repo, Some("p".into()), Some("develop".into()))
+            .await
+            .expect("add");
+        assert_eq!(project.default_branch, "develop");
     }
 
     #[tokio::test]
