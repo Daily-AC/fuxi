@@ -736,6 +736,16 @@ struct DistGatewayConfig {
     /// cc 专属参数——role 的 allowed-tools frontmatter，以 `--allowed-tools`
     /// 传给 worker 端的 claude-code adapter。codex 路径忽略。
     allowed_tools: Vec<String>,
+    /// home 端 dispatch 时的目标 role；transparently 透传到 worker 让 worker
+    /// 端能 publish AgentSpawning 拼对 role 标签。**也是** Decision 21 phase 3
+    /// L3 sandbox 的 sandbox 索引——worker 端 `<root>/<project>/sandboxes/<role>/`。
+    role: Option<String>,
+    /// Decision 21 phase 3：跨节点项目 slug。Some 时 worker 端把 cc/codex 起在
+    /// 自己 ProjectRegistry 里同名 project 的 sandbox/L2 worktree 里。
+    project: Option<String>,
+    /// Decision 21 phase 3：L2 一次性 task 显示形（`task-<uuid>`）。
+    /// 配 `project` 一起才有意义；单独给 worker 忽略。
+    ephemeral_task: Option<String>,
 }
 
 /// 远端网关门客：把 dispatch 转成 `/dist/enqueue`，再轮询 `/dist/progress` 拿增量。
@@ -819,7 +829,11 @@ impl Agent for DistGatewayAgent {
                 // （cfg 没 role_hint 字段——daemon 路径用户场景较少，#77 主路径
                 // 在 fuxi-im DistControllerEnqueuer 上）
                 task_id: Some(task.id.to_string()),
-                role: None,
+                role: cfg.role.clone(),
+                // Decision 21 phase 3：跨节点 sandbox 透传——worker 端用 project
+                // 解 ProjectRegistry 拿 sandbox cwd 把 cc/codex 起在那里。
+                project: cfg.project.clone(),
+                ephemeral_task: cfg.ephemeral_task.clone(),
             };
             let enq =
                 crate::dist_auth_client::signed_post(&client, &secret, &enqueue_url, &enqueue_req)
@@ -1074,6 +1088,13 @@ async fn spawn_by_role(
     {
         cfg.cli = cli.clone();
         cfg.allowed_tools = loaded.allowed_tools.clone().unwrap_or_default();
+        cfg.role = Some(role.to_string());
+        // Decision 21 phase 3：跨节点 sandbox——把 CLI / 玄女 dispatch 时给的
+        // project / ephemeral_task 透传到 worker，让 worker 端解 ProjectRegistry
+        // 把 cc/codex 起在对应 sandbox 里。worker 节点必须 pre-`fuxi project add`
+        // 同名 slug，否则 worker pull 后 fail job（明确 error 比 silent fallback 好）。
+        cfg.project = project_override.clone();
+        cfg.ephemeral_task = ephemeral_task_override.clone();
         if recall.resume_session_id.is_some() || recall.worktree.is_some() {
             tracing::warn!(
                 role = %role,
@@ -1242,10 +1263,14 @@ fn build_dist_gateway_config(
         poll_ms,
         required_tags,
         pinned_node,
-        // cli / allowed_tools 调用方（spawn_by_role）会从 loaded 补上——
-        // build_dist_gateway_config 职责纯粹，只看 metadata。
+        // cli / allowed_tools / role / project / ephemeral_task 调用方
+        // （spawn_by_role）会从 loaded + CLI flag 补上——build_dist_gateway_config
+        // 职责纯粹，只看 metadata。
         cli: String::new(),
         allowed_tools: Vec::new(),
+        role: None,
+        project: None,
+        ephemeral_task: None,
     }))
 }
 

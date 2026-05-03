@@ -225,6 +225,7 @@ pub async fn spawn_controller_with_workers_tuned(
             poll_ms,
             tags: vec![],
             max_concurrency: worker_concurrency,
+            projects_root: None,
         };
         let secret = bench_secret();
         let handle = tokio::spawn(async move {
@@ -282,6 +283,7 @@ pub fn spawn_one_worker(
         poll_ms: 30,
         tags,
         max_concurrency,
+        projects_root: None,
     };
     let secret = bench_secret();
     tokio::spawn(async move {
@@ -316,6 +318,7 @@ pub fn spawn_one_worker_shared_active(
         poll_ms: 30,
         tags: vec![],
         max_concurrency: 1,
+        projects_root: None,
     };
     let secret = bench_secret();
     tokio::spawn(async move {
