@@ -64,6 +64,9 @@ pub const HOME_NODE_ID: &str = "home";
 pub const HOME_NODE_TAGS: &[&str] = &["home", "linux"];
 /// home 节点 max_concurrency 默认。后续若用户加 worker 实例可加 env 覆盖。
 pub const HOME_NODE_MAX_CONCURRENCY: u32 = 4;
+/// home 自心跳间隔。比远端 worker 的 10s 略短，确保 30s online 阈值（spec gap c）
+/// 内必有 ≥3 次心跳成功才掉线，给瞬时锁竞争留余量。
+pub const HOME_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 装配 dist controller + HMAC router。返回 `(controller, router)` 给 caller
 /// merge 进 axum app。
@@ -118,6 +121,16 @@ pub async fn build_dist_layer(home_dir: &std::path::Path, bus: EventBus) -> Resu
         "dist controller: home 节点已自注册"
     );
 
+    // 6a. home 自心跳——register 只设一次 last_seen，无人续 → online 阈值
+    //     (30s spec gap c) 一过就被前端误判离线。daemon 同进程没有 dist worker
+    //     loop 给自己发心跳，这里起一个轻量定时任务自调 ctrl.heartbeat。
+    //     选自心跳而非"NodesProvider 给 home 特殊豁免"：
+    //     - 自心跳 = 所有节点同模型（heartbeat-driven liveness），新加节点不破
+    //     - 豁免 = 污染 NodesProvider 抽象，调用方都得知道 home 是个特例
+    //     home 不接 dist job（dispatch 默认本地 spawn 不走 dist enqueue），
+    //     所以传 vec![] 当 inflight 是真相 = controller 端 home.inflight 始终空。
+    spawn_home_heartbeat_task(ctrl.clone());
+
     // 7. router with HMAC layer
     let gate = HmacGate::new(hmac_secret);
     let router = router_with_hmac(ctrl.clone(), gate);
@@ -128,6 +141,30 @@ pub async fn build_dist_layer(home_dir: &std::path::Path, bus: EventBus) -> Resu
         hmac_secret_plain,
         dist_token_plain,
     })
+}
+
+/// home 节点自心跳后台任务——每 [`HOME_HEARTBEAT_INTERVAL`] 调
+/// `ctrl.heartbeat("home", vec![])` 刷 last_seen。
+///
+/// home 是 fuxi-im daemon 同进程注册的"虚"节点，没有外部 worker loop 给它
+/// 发心跳；不自心跳则 30s 后 nodes_snapshot 报 last_seen_ms_ago > 30000
+/// → /api/nodes online=false → 前端节点 tab 把 home 显示成"离线"灰圆点。
+/// inflight 永远空：home dispatch 默认走本地 spawn 不进 dist queue，控制器端
+/// home.inflight 不会被 pull 改写，传 vec![] 是真相。
+///
+/// 任务持续到进程退出——同 spawn_sweep_task，无 graceful shutdown，进程 abort。
+pub fn spawn_home_heartbeat_task(ctrl: Arc<DistController>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(HOME_HEARTBEAT_INTERVAL);
+        // 跳过首次 tick——register 已在同一启动序列里完成，第一次心跳等
+        // HOME_HEARTBEAT_INTERVAL 后再发，避免启动期紧贴的 register+heartbeat
+        // 各发一份 WorkerHeartbeatStateChanged 制造无意义事件 noise。
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            ctrl.heartbeat(HOME_NODE_ID, Vec::new()).await;
+        }
+    });
 }
 
 /// `build_dist_layer` 的产物——分块返便于 caller 各取所需：
@@ -435,6 +472,111 @@ mod tests {
             job.cli, "claude-code",
             "enqueuer cli={:?} 与 dist select_adapter 不匹配——worker 会 fast-fail ok=0",
             job.cli
+        );
+    }
+
+    /// 真因回归 · home 节点自心跳：register 后无 worker loop 给 home 发心跳，
+    /// 30s online 阈值后前端会把 home 显示为离线。spawn_home_heartbeat_task
+    /// 必须把 last_seen 持续刷新——验证两轮心跳后 last_seen_ms_ago 远小于
+    /// online 阈值 (30000ms)。
+    #[tokio::test]
+    async fn home_self_heartbeat_keeps_home_online() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let dir = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::remove_var(FUXI_DIST_HMAC_SECRET_ENV);
+            std::env::remove_var(DIST_TOKEN_ENV);
+        }
+        // build_dist_layer 内部已 spawn home_heartbeat_task。
+        let layer = build_dist_layer(dir.path(), bus).await.expect("build");
+        // 等 2× HOME_HEARTBEAT_INTERVAL 让自心跳跑至少 1 次（首 tick 已 skip）。
+        // 总共 ~10s 偏长，但拿真定时验真行为；CI 偶发慢机器加 2s 余量也仍 < 30s。
+        tokio::time::sleep(HOME_HEARTBEAT_INTERVAL * 2 + std::time::Duration::from_secs(1)).await;
+        let snap = layer.ctrl.nodes_snapshot().await;
+        let home = snap
+            .iter()
+            .find(|n| n.node_id == HOME_NODE_ID)
+            .expect("home 节点应在 snapshot");
+        let last_seen = home
+            .last_seen_ms_ago
+            .expect("home self-heartbeat 必填 last_seen");
+        assert!(
+            last_seen < 30_000,
+            "home last_seen_ms_ago={last_seen} 必须 < 30000，否则 NodesProvider 报 online=false"
+        );
+        // home 不接 dist job → inflight 必空（自心跳 vec![] 是真相）
+        assert_eq!(home.inflight_count, 0);
+    }
+
+    /// dist enqueue → pull 后 controller 端 home.inflight 必 ++ → /api/nodes
+    /// inflight_jobs=1，job 走完 report 后回 0。验证 PWA 节点卡的 "0/4" 数字
+    /// 在真 dist 派活路径上的 lifecycle 是对的。
+    ///
+    /// 注：home 节点用户日常派活默认走本地 spawn（不带 pinned_node /
+    /// required_tags），不贡献 home.inflight。要让 home 数字真动需 dispatch 带
+    /// pinned_node="home"——本测显式 pull("home") 模拟那条路径。
+    #[tokio::test]
+    async fn home_inflight_increments_on_dist_pull_and_decrements_on_report() {
+        use crate::dist::DistReportReq;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let dir = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::remove_var(FUXI_DIST_HMAC_SECRET_ENV);
+            std::env::remove_var(DIST_TOKEN_ENV);
+        }
+        let layer = build_dist_layer(dir.path(), bus).await.expect("build");
+
+        // 派一个 pinned home 的 job
+        let enqueuer = DistControllerEnqueuer::new(layer.ctrl.clone());
+        let task = fuxi_core::task::Task::new("ls", "ls -lh").with_pinned_node(HOME_NODE_ID);
+        enqueuer
+            .enqueue(&task, fuxi_orchestrator::DistEnqueueOptions::default())
+            .await
+            .expect("enqueue");
+
+        // 初始状态 home.inflight 必为 0
+        let snap0 = layer.ctrl.nodes_snapshot().await;
+        let home0 = snap0
+            .iter()
+            .find(|n| n.node_id == HOME_NODE_ID)
+            .expect("home");
+        assert_eq!(home0.inflight_count, 0, "pull 前 home.inflight 应为 0");
+
+        // 模拟 home worker pull 把 job 收走 → controller 端 home.inflight ++
+        let job = layer
+            .ctrl
+            .pull(HOME_NODE_ID)
+            .await
+            .expect("应能 pull 到 job");
+        let snap1 = layer.ctrl.nodes_snapshot().await;
+        let home1 = snap1
+            .iter()
+            .find(|n| n.node_id == HOME_NODE_ID)
+            .expect("home");
+        assert_eq!(
+            home1.inflight_count, 1,
+            "pull 后 home.inflight 应为 1，PWA 卡数字 1/4"
+        );
+
+        // 模拟 worker 上报 done → controller 释放 inflight
+        layer
+            .ctrl
+            .report(DistReportReq {
+                job_id: job.id.clone(),
+                node_id: HOME_NODE_ID.to_string(),
+                ok: true,
+                output: String::new(),
+                duration_ms: 100,
+            })
+            .await;
+        let snap2 = layer.ctrl.nodes_snapshot().await;
+        let home2 = snap2
+            .iter()
+            .find(|n| n.node_id == HOME_NODE_ID)
+            .expect("home");
+        assert_eq!(
+            home2.inflight_count, 0,
+            "report 后 home.inflight 应回 0，PWA 卡数字 0/4"
         );
     }
 
