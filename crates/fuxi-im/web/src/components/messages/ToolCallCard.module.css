@@ -1,4 +1,18 @@
 .card {
+  /* P0.C 修：用户实测连开 N 个工具卡互相 overlap。原版只有 align-self: stretch，
+   * 在 iOS Safari + 部分 Android WebView 的 flex column 父里 cross-axis 收尺寸不
+   * 稳，加上 .head 用 box-sizing 默认 content-box + width: 100% + padding 会撑爆
+   * 父宽度。三件套兜底：
+   *   - display: block + width: 100% + box-sizing: border-box → 卡片宽度可控
+   *   - flex: 0 0 auto → 不被父 flex 误压成 0 高
+   *   - position: relative → 切断任意祖先 absolute positioning 的影响
+   * .head 同时改 box-sizing: border-box 防 padding 突破 100%。 */
+  display: block;
+  width: 100%;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  position: relative;
+  margin: 0;
   align-self: stretch;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -12,6 +26,7 @@
   gap: var(--space-2);
   padding: 10px 12px;
   width: 100%;
+  box-sizing: border-box;
   text-align: left;
   min-height: 44px;
 }
