@@ -370,6 +370,8 @@ mod tests {
             allowed_tools: vec![],
             task_id: None,
             role: None,
+            project: None,
+            ephemeral_task: None,
         }
     }
 

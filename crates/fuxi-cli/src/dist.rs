@@ -22,6 +22,7 @@ use prometheus::{
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -77,6 +78,18 @@ pub struct DistJob {
     /// fallback "unknown"（#77）。老版无此字段 → fallback `"unknown"` 旧行为。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Decision 21 phase 3 跨节点 sandbox · 项目 slug——worker 端会用本字段查
+    /// 自己的 ProjectRegistry 拿到 canonical_path 并把 cc/codex 起在该 sandbox 里。
+    /// `None` = 不绑项目（默认 cwd 跑），保留旧行为。
+    /// `Some("erp")` + ephemeral_task=None → 走 L3 持久 sandbox（`<root>/erp/sandboxes/<role>/`）。
+    /// `Some("erp")` + ephemeral_task=Some(...) → 走 L2 一次性 worktree。
+    /// **要求**：worker 节点必须先 `fuxi project add <path>` 注册同名 slug，否则 fail job。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// 配 `project` 用——L2 一次性活的 task 显示形（`task-<uuid>`）。
+    /// 见 `project` 字段说明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_task: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +113,12 @@ pub struct DistEnqueueReq {
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Decision 21 phase 3 · 项目 slug。见 `DistJob.project`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Decision 21 phase 3 · L2 一次性 task 显示形。见 `DistJob.project`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_task: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -743,6 +762,8 @@ impl DistController {
             .collect()
     }
 
+    /// 旧 wrapper——保留 10 参形参兼容已有大量测试 callsite。
+    /// 新代码请用 `enqueue_with_project` 直接传 project / ephemeral_task。
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue(
         &self,
@@ -756,6 +777,40 @@ impl DistController {
         allowed_tools: Vec<String>,
         task_id: Option<String>,
         role: Option<String>,
+    ) -> String {
+        self.enqueue_with_project(
+            node_id_hint,
+            title,
+            body,
+            system_prompt,
+            required_tags,
+            pinned_node,
+            cli,
+            allowed_tools,
+            task_id,
+            role,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Decision 21 phase 3 全形参 enqueue——支持 project / ephemeral_task 透传。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_with_project(
+        &self,
+        node_id_hint: String,
+        title: String,
+        body: String,
+        system_prompt: Option<String>,
+        required_tags: Vec<String>,
+        pinned_node: Option<String>,
+        cli: String,
+        allowed_tools: Vec<String>,
+        task_id: Option<String>,
+        role: Option<String>,
+        project: Option<String>,
+        ephemeral_task: Option<String>,
     ) -> String {
         let id = format!("job-{}", Uuid::new_v4());
         let job = DistJob {
@@ -771,6 +826,8 @@ impl DistController {
             allowed_tools,
             task_id,
             role,
+            project,
+            ephemeral_task,
         };
         let cli_label = cli_label_of(&job.cli);
         // dual-write：先持久化（SQLite 是真相源）再 push 到 in-memory queue。
@@ -1251,7 +1308,7 @@ async fn enqueue_handler(
         return (StatusCode::BAD_REQUEST, "title empty".to_string()).into_response();
     }
     let job_id = ctrl
-        .enqueue(
+        .enqueue_with_project(
             req.node_id,
             req.title,
             req.body,
@@ -1262,6 +1319,8 @@ async fn enqueue_handler(
             req.allowed_tools,
             req.task_id,
             req.role,
+            req.project,
+            req.ephemeral_task,
         )
         .await;
     Json(DistEnqueueResp { job_id }).into_response()
@@ -1504,6 +1563,12 @@ pub struct DistWorkerArgs {
     /// 本 worker 允许的最大并发 job 数。默认 1。
     #[arg(long, default_value_t = 1)]
     pub max_concurrency: u32,
+    /// Decision 21 phase 3 跨节点 sandbox · ProjectRegistry root 覆盖。
+    /// 不传 → `$HOME/.fuxi/projects/`（与 home 端 fuxi-im / CLI 默认对齐）。
+    /// 用户在 worker 节点须 pre-`fuxi project add <path>` 注册同名 slug，
+    /// 否则 job 带 `project=...` 字段时 worker pull 后 fail job。
+    #[arg(long)]
+    pub projects_root: Option<PathBuf>,
 }
 
 fn resolve_token(token: Option<String>) -> Result<String> {
@@ -1549,6 +1614,10 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
         // 自生成 TaskId / fallback role "unknown"。fuxi-im 走 gateway 时 Some。
         task_id: None,
         role: None,
+        // CLI 入口不绑项目——`fuxi dist enqueue` 是裸派语义，需要项目 sandbox
+        // 时走 gateway 路径（`fuxi spawn --node X --project erp`）。
+        project: None,
+        ephemeral_task: None,
     };
     let resp = crate::dist_auth_client::signed_post(&client, &secret, &url, &req)
         .await
@@ -1746,6 +1815,7 @@ pub(crate) async fn run_worker_with(
         let inflight_c = inflight.clone();
         let factory_c = adapter_factory.clone();
         let args_for_factory = args.clone();
+        let projects_root_c = args.projects_root.clone();
         let started = Instant::now();
 
         let bus_c = bus_client.clone();
@@ -1757,6 +1827,7 @@ pub(crate) async fn run_worker_with(
                 token: &token_c,
                 node_id: &node_c,
                 bus_client: bus_c.as_ref(),
+                projects_root: projects_root_c.as_deref(),
             };
             // adapter 构造一旦 fail 就走失败 final report——和老路径行为一致。
             let run_result = match factory_c(&job.cli, &args_for_factory) {
@@ -1808,6 +1879,77 @@ fn build_codex_prompt_from_job(job: &DistJob) -> String {
     fuxi_agent_codex::compose_prompt(system, &job.title, &job.body)
 }
 
+/// Decision 21 phase 3 跨节点 sandbox · worker 端按 `job.project` 解出
+/// cc/codex 应该 spawn 进哪个目录。
+///
+/// 行为：
+/// - `job.project.is_none()` → `Ok(None)` 不动 cwd（兼容老 job / 跨节点裸派）
+/// - `job.project.is_some()` 但 worker 节点没注册同 slug → `Err(...)`
+///   （明确报错让 home 用户知道要先在 worker 上 `fuxi project add`，
+///   silent fallback 到默认 cwd 会让用户怎么也找不到为什么文件没落对地方）
+/// - `job.ephemeral_task.is_some()` → 走 L2：若 worktree 已存在复用，否则 create
+/// - 否则走 L3：`PersistentSandboxManager::get_or_create(role)` （幂等）
+///
+/// `role` 来自 `job.role`，缺则 fallback `"worker"`——L3 sandbox 索引会落到
+/// `<root>/<project>/sandboxes/worker/`，仍能跑通但跟 home 端 role 不对齐；
+/// 实际生产 home 端 spawn 路径必填 role（gateway 的 cfg.role），不会触发 fallback。
+async fn resolve_project_sandbox_cwd(
+    projects_root: Option<&std::path::Path>,
+    job: &DistJob,
+) -> Result<Option<PathBuf>> {
+    let Some(project_slug) = job.project.as_deref() else {
+        return Ok(None);
+    };
+    let registry = match projects_root {
+        Some(p) => fuxi_workspace::FileSystemProjectRegistry::new(p),
+        None => fuxi_workspace::FileSystemProjectRegistry::with_default_root().with_context(
+            || "worker 解 project sandbox：FileSystemProjectRegistry default root 拿不到（$HOME 缺？）",
+        )?,
+    };
+    let project_id = fuxi_core::ProjectId::new(project_slug.to_string())
+        .with_context(|| format!("worker 解 project sandbox：非法 slug {project_slug:?}"))?;
+    let project = registry
+        .get(&project_id)
+        .await
+        .with_context(|| format!("worker registry 查 {project_slug} 失败"))?
+        .ok_or_else(|| {
+            anyhow!(
+                "worker 节点未注册项目 {project_slug}——home 派的 job 带 project={project_slug}，\
+                 请先在本机跑 `fuxi project add <path>` 注册同名 slug",
+            )
+        })?;
+    if let Some(task_raw) = job.ephemeral_task.as_deref() {
+        let trimmed = task_raw.strip_prefix("task-").unwrap_or(task_raw);
+        let task_uuid = uuid::Uuid::parse_str(trimmed)
+            .with_context(|| format!("worker 解 ephemeral_task：无效 uuid {task_raw}"))?;
+        let task = fuxi_core::TaskId::from(task_uuid);
+        let mgr = fuxi_workspace::EphemeralWorkspaceManager::new(project.clone(), registry.root());
+        // L2 worktree 复用：同 task 重复 job 命中已有 worktree（home 端 spawn 是
+        // per-task 一次，但 worker restart / job 重发 corner 仍可能撞）。先 list_active
+        // 找已有；找不到再 create。
+        let active = mgr.list_active().await.unwrap_or_default();
+        if let Some(handle) = active.into_iter().find(|h| h.task == task) {
+            return Ok(Some(handle.workspace_path));
+        }
+        let handle = mgr
+            .create(task)
+            .await
+            .with_context(|| format!("worker create L2 ephemeral for task {task_raw} 失败"))?;
+        Ok(Some(handle.workspace_path))
+    } else {
+        let role_for_sandbox = job
+            .role
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("worker");
+        let mgr = fuxi_workspace::PersistentSandboxManager::new(project.clone(), registry.root());
+        let handle = mgr.get_or_create(role_for_sandbox).await.with_context(|| {
+            format!("worker get_or_create L3 sandbox role={role_for_sandbox} 失败")
+        })?;
+        Ok(Some(handle.sandbox_path))
+    }
+}
+
 /// worker 运行上下文——push progress 需要的 HTTP 目标 + （γ）跨节点 EventBus
 /// 桥接客户端。
 ///
@@ -1824,6 +1966,10 @@ pub(crate) struct WorkerCtx<'a> {
     token: &'a str,
     node_id: &'a str,
     bus_client: Option<&'a Arc<NetworkBusClient>>,
+    /// Decision 21 phase 3：ProjectRegistry root 覆盖。`None` → 走默认
+    /// `$HOME/.fuxi/projects/`。adapter 接到 `job.project=Some(...)` 时
+    /// 用本字段 + `resolve_project_sandbox_cwd` 解出 cc/codex 应起的 cwd。
+    projects_root: Option<&'a std::path::Path>,
 }
 
 /// 抽象 worker 端的 CLI 执行器——让 codex / claude-code / 未来 gemini 等都能
@@ -2061,14 +2207,25 @@ async fn run_codex_job(
     let mut args = cfg.build_args();
     args.push(prompt);
 
-    let mut child = Command::new(codex_bin)
-        .args(&args)
+    // Decision 21 phase 3：项目 sandbox 解析——按 job.project 找 worker 节点
+    // ProjectRegistry 中同 slug 的 sandbox/L2 worktree，把 codex spawn 进去。
+    // 缺 project / 已注册 → cwd None / 真路径；查不到 / 解析失败 → fail job
+    // 让 home 用户明确知道是 worker 节点配置问题（vs silent fallback 后用户找
+    // 不到为什么文件没落对地方）。
+    let project_cwd = resolve_project_sandbox_cwd(ctx.projects_root, job).await?;
+
+    let mut cmd = Command::new(codex_bin);
+    cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // 与 cc 路径对齐（run_cc_job）：外层 tokio::select! 在心跳 ack cancel
         // 时 drop 整个 future，若不 kill_on_drop，tokio Command 只释放句柄，
         // 子 codex 进程会变僵尸。Decision 12 的 cancel 路径靠这条在 OS 层兜底。
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    if let Some(cwd) = project_cwd.as_ref() {
+        cmd.current_dir(cwd);
+    }
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn codex binary failed: {codex_bin}"))?;
 
@@ -2320,8 +2477,12 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         args.push(job.allowed_tools.join(","));
     }
 
-    let mut child = Command::new(bin)
-        .args(&args)
+    // Decision 21 phase 3：项目 sandbox 解析——同 codex 路径，按 job.project
+    // 解出 cc 应该住哪个目录。详见 resolve_project_sandbox_cwd 的 doc。
+    let project_cwd = resolve_project_sandbox_cwd(ctx.projects_root, job).await?;
+
+    let mut cmd = Command::new(bin);
+    cmd.args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // 两个坑都要避——参照 fuxi_agent_cc::spawn 的做法：
@@ -2335,7 +2496,11 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         .env_remove("CLAUDE_CODE_NO_FLICKER")
         .env_remove("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
         .env_remove("CLAUDE_CODE_EXECPATH")
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    if let Some(cwd) = project_cwd.as_ref() {
+        cmd.current_dir(cwd);
+    }
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn claude binary failed: {bin}"))?;
 
@@ -2617,7 +2782,137 @@ mod tests {
             allowed_tools: vec![],
             task_id: None,
             role: None,
+            project: None,
+            ephemeral_task: None,
         }
+    }
+
+    // ─── Decision 21 phase 3 跨节点 sandbox 解析 ─────────────────
+
+    fn init_repo(path: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "t@t"])
+            .current_dir(path)
+            .status()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "t"])
+            .current_dir(path)
+            .status()
+            .expect("git config name");
+        std::fs::write(path.join("README.md"), "x").expect("write");
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .status()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(path)
+            .status()
+            .expect("git commit");
+    }
+
+    /// `job.project=None` → 不动 cwd，返 Ok(None)。
+    #[tokio::test]
+    async fn resolve_project_sandbox_cwd_none_when_job_has_no_project() {
+        let job = job_for("t", "b", None);
+        let cwd = resolve_project_sandbox_cwd(None, &job).await.expect("ok");
+        assert!(cwd.is_none(), "无 project 时不该返 cwd");
+    }
+
+    /// `job.project=Some("erp")` 但 worker 无注册 → 明确 Err，不 silent fallback。
+    #[tokio::test]
+    async fn resolve_project_sandbox_cwd_errors_when_worker_unregistered() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let registry_root = dir.path().join("registry");
+        std::fs::create_dir_all(&registry_root).expect("mkdir registry");
+
+        let mut job = job_for("t", "b", None);
+        job.project = Some("erp".into());
+
+        let err = resolve_project_sandbox_cwd(Some(&registry_root), &job)
+            .await
+            .expect_err("应报 worker 未注册");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("worker 节点未注册项目 erp") || msg.contains("erp"),
+            "err 应明确提示 erp 未注册：{msg}"
+        );
+    }
+
+    /// `job.project=Some` + role=Some → 走 L3：返 sandbox 路径，物理已 create。
+    #[tokio::test]
+    async fn resolve_project_sandbox_cwd_returns_l3_path_for_role() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let registry_root = dir.path().join("registry");
+        let project_root = dir.path().join("erp-src");
+        std::fs::create_dir_all(&project_root).expect("mkdir project");
+        init_repo(&project_root);
+
+        let registry = fuxi_workspace::FileSystemProjectRegistry::new(&registry_root);
+        registry
+            .add(project_root.clone(), Some("erp".into()), None)
+            .await
+            .expect("add project");
+
+        let mut job = job_for("t", "b", None);
+        job.project = Some("erp".into());
+        job.role = Some("luban".into());
+
+        let cwd = resolve_project_sandbox_cwd(Some(&registry_root), &job)
+            .await
+            .expect("ok");
+        let cwd = cwd.expect("L3 应返 cwd");
+        assert!(cwd.ends_with("sandboxes/luban"), "got {}", cwd.display());
+        assert!(cwd.exists(), "L3 sandbox 物理目录应已 create");
+    }
+
+    /// `job.project=Some` + ephemeral_task=Some → 走 L2：返 ephemeral worktree 路径。
+    #[tokio::test]
+    async fn resolve_project_sandbox_cwd_returns_l2_path_for_ephemeral() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let registry_root = dir.path().join("registry");
+        let project_root = dir.path().join("erp-src");
+        std::fs::create_dir_all(&project_root).expect("mkdir project");
+        init_repo(&project_root);
+
+        let registry = fuxi_workspace::FileSystemProjectRegistry::new(&registry_root);
+        registry
+            .add(project_root.clone(), Some("erp".into()), None)
+            .await
+            .expect("add project");
+
+        let task_id = fuxi_core::TaskId::new();
+        let mut job = job_for("t", "b", None);
+        job.project = Some("erp".into());
+        job.ephemeral_task = Some(task_id.to_string());
+
+        let cwd = resolve_project_sandbox_cwd(Some(&registry_root), &job)
+            .await
+            .expect("ok");
+        let cwd = cwd.expect("L2 应返 cwd");
+        assert!(
+            cwd.to_string_lossy().contains("ephemeral"),
+            "L2 路径应含 ephemeral：{}",
+            cwd.display()
+        );
+        assert!(cwd.exists(), "L2 worktree 物理目录应已 create");
+
+        // 同 task 重复调用应幂等复用（不 AlreadyExists 报错）
+        let cwd2 = resolve_project_sandbox_cwd(Some(&registry_root), &job)
+            .await
+            .expect("re-call should reuse");
+        assert_eq!(
+            cwd2.expect("some"),
+            cwd,
+            "同 task 重复调用应复用同一 worktree"
+        );
     }
 
     #[test]
@@ -2670,6 +2965,8 @@ mod tests {
             allowed_tools: vec![],
             task_id: None,
             role: None,
+            project: None,
+            ephemeral_task: None,
         };
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: DistEnqueueReq = serde_json::from_str(&encoded).unwrap();
@@ -3447,6 +3744,8 @@ mod tests {
             allowed_tools: vec![],
             task_id: None,
             role: None,
+            project: None,
+            ephemeral_task: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: DistEnqueueReq = serde_json::from_str(&s).unwrap();
@@ -3466,6 +3765,7 @@ mod tests {
             poll_ms: 1000,
             tags: vec![],
             max_concurrency: 1,
+            projects_root: None,
         }
     }
 
@@ -3659,6 +3959,8 @@ mod tests {
                 allowed_tools: vec![],
                 task_id: None,
                 role: None,
+                project: None,
+                ephemeral_task: None,
             };
             let job_b = DistJob {
                 id: "B".into(),
@@ -3673,6 +3975,8 @@ mod tests {
                 allowed_tools: vec![],
                 task_id: None,
                 role: None,
+                project: None,
+                ephemeral_task: None,
             };
             g.inflight.insert("A".into(), job_a.clone());
             g.inflight.insert("B".into(), job_b.clone());
@@ -3872,6 +4176,7 @@ mod tests {
             poll_ms: 50,
             tags: vec![],
             max_concurrency: 2,
+            projects_root: None,
         };
         let factory = make_factory(stub);
 
@@ -3960,6 +4265,7 @@ mod tests {
             poll_ms: 50,
             tags: vec![],
             max_concurrency: 1,
+            projects_root: None,
         };
 
         let job_id = enq_simple(&ctrl, "silent").await;
@@ -4123,6 +4429,7 @@ mod tests {
             poll_ms: 50,
             tags: vec![],
             max_concurrency: 1,
+            projects_root: None,
         };
 
         // 心跳 100ms——中断/恢复窗口要按 hb 间隔决议。
@@ -4234,6 +4541,7 @@ mod tests {
             poll_ms: 50,
             tags: vec![],
             max_concurrency: 1,
+            projects_root: None,
         };
 
         let job_id = enq_simple(&ctrl, "orphaned").await;
@@ -4327,6 +4635,7 @@ mod tests {
             poll_ms: 50,
             tags: vec![],
             max_concurrency: 1,
+            projects_root: None,
         };
         let worker_b = tokio::spawn(async move {
             let _ = super::run_worker_with(
@@ -5056,6 +5365,8 @@ mod tests {
             allowed_tools: vec![],
             task_id: None,
             role: None,
+            project: None,
+            ephemeral_task: None,
         };
         let r = signed_post(&client, &secret, &format!("{base}/dist/enqueue"), &enq_req)
             .await
