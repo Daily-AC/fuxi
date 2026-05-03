@@ -30,6 +30,13 @@ pub struct CcLaunchConfig {
     pub append_system_prompt: Option<String>,
     /// `--allowed-tools Tool1,Tool2`。`None` = 不限。
     pub allowed_tools: Option<Vec<String>>,
+    /// `--disallowed-tools Tool1,Tool2`。`None` = 不禁。
+    ///
+    /// 必要性：cc 启用 `bypassPermissions`（`build_args` 默认开）后，`--allowed-tools`
+    /// **不再是硬白名单**——bypass 模式让 allowlist 失语。要硬阻断某个工具
+    /// （如玄女不能用 Edit/Write/Task）只能靠 `--disallowed-tools`，cc 在
+    /// bypass 模式下仍会拒。详见 `roles/xuannv/ROLE.md` 配置。
+    pub disallowed_tools: Option<Vec<String>>,
     /// 额外原样透传的 flag，供罕见场景，不走任何校验。
     pub extra_args: Vec<String>,
     /// 可执行文件路径——默认 `"claude"`（靠 PATH 查找）。
@@ -55,6 +62,7 @@ impl Default for CcLaunchConfig {
             cwd: None,
             append_system_prompt: None,
             allowed_tools: None,
+            disallowed_tools: None,
             extra_args: Vec::new(),
             binary: "claude".to_string(),
             sdk_url: None,
@@ -127,6 +135,13 @@ impl CcLaunchConfig {
             && !tools.is_empty()
         {
             args.push("--allowed-tools".to_string());
+            args.push(tools.join(","));
+        }
+
+        if let Some(tools) = &self.disallowed_tools
+            && !tools.is_empty()
+        {
+            args.push("--disallowed-tools".to_string());
             args.push(tools.join(","));
         }
 
@@ -232,6 +247,32 @@ mod tests {
             .position(|a| a == "--allowed-tools")
             .expect("flag present");
         assert_eq!(args[idx + 1], "Read,Edit");
+    }
+
+    #[test]
+    fn disallowed_tools_joined_with_comma() {
+        let cfg = CcLaunchConfig {
+            model: Some("haiku".to_string()),
+            disallowed_tools: Some(vec!["Edit".into(), "Write".into(), "Task".into()]),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        let idx = args
+            .iter()
+            .position(|a| a == "--disallowed-tools")
+            .expect("flag present");
+        assert_eq!(args[idx + 1], "Edit,Write,Task");
+    }
+
+    #[test]
+    fn empty_disallowed_tools_is_skipped() {
+        let cfg = CcLaunchConfig {
+            model: Some("haiku".to_string()),
+            disallowed_tools: Some(vec![]),
+            ..Default::default()
+        };
+        let args = cfg.build_args();
+        assert!(!args.iter().any(|a| a == "--disallowed-tools"));
     }
 
     #[test]
