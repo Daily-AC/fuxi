@@ -567,6 +567,56 @@ pub async fn run_set_password(args: SetPasswordArgs) -> Result<()> {
     Ok(())
 }
 
+/// `fuxi im issue-token` —— 用本机 `~/.fuxi/im_hmac.key` 签一个 HMAC token。
+///
+/// 给 smoke / 部署后健康检查用：跳过 `/api/auth/login` 流程（不需要主密码 +
+/// 设备配对），直接拿到一份可挂 cookie 走 `/api/*` 鉴权的 token。
+///
+/// 安全：只在能读 `~/.fuxi/im_hmac.key` 的本机用户能签——和 `set-password`
+/// 同信任级别（密钥文件权限 0600）。**不要**把签出的 token 写入持久 cookie 文件
+/// 或推给其它机器。
+///
+/// stdout 一行裸 token；用法：
+///   `curl -H "Cookie: fuxi_im_token=$(fuxi im issue-token)" https://localhost:9100/api/tasks`
+#[derive(Debug, ClapArgs)]
+pub struct IssueTokenArgs {
+    /// HMAC key 文件路径。默认 `~/.fuxi/im_hmac.key`。
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+    /// token TTL（秒）。默认 3600 = 1 小时；smoke 用足够。
+    #[arg(long, default_value_t = 3600)]
+    pub ttl_secs: i64,
+    /// 写入 claims 的设备名，方便 server 日志辨认。
+    #[arg(long, default_value = "smoke-test")]
+    pub name: String,
+    /// 写入 claims 的 device_id；不给时随机 uuid。verify 不查 device_tokens 表，
+    /// 任意值都验得过——给个稳定值便于 grep 日志。
+    #[arg(long = "device-id")]
+    pub device_id: Option<String>,
+}
+
+pub async fn run_issue_token(args: IssueTokenArgs) -> Result<()> {
+    use fuxi_im::auth::{TokenClaims, sign_token};
+
+    let secret = match args.key {
+        Some(p) => HmacSecret::load_or_create(&p)
+            .with_context(|| format!("加载 HMAC key {}", p.display()))?,
+        None => HmacSecret::load_or_create_default().context("加载默认 ~/.fuxi/im_hmac.key")?,
+    };
+
+    let device_id = args
+        .device_id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let claims = TokenClaims {
+        device_id,
+        name: args.name,
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(args.ttl_secs),
+    };
+    let token = sign_token(&secret, &claims).context("HMAC 签名失败")?;
+    println!("{token}");
+    Ok(())
+}
+
 /// 生产路径：rpassword 直接读 tty 关 echo，不经过任何 fd / pipe，**不可在测试单测**。
 /// 单测覆盖 [`set_password_from_reader`]——同样的"读两次 + 比对 + 校验长度"逻辑，
 /// 接 BufRead 让 `Cursor::new(b"pwd\npwd\n")` 喂得进去。

@@ -830,6 +830,12 @@ pub async fn run_im_set_password(args: ImSetPasswordArgs) -> Result<()> {
     crate::im::run_set_password(args).await
 }
 
+pub use crate::im::IssueTokenArgs as ImIssueTokenArgs;
+
+pub async fn run_im_issue_token(args: ImIssueTokenArgs) -> Result<()> {
+    crate::im::run_issue_token(args).await
+}
+
 // ── 共用渲染 ──
 
 /// 把 Response 打印到 stdout；Err 转成 anyhow 让 exit code 非零。
