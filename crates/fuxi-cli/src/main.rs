@@ -132,6 +132,9 @@ enum ImCmd {
     /// 设置 PWA 登入主密码（交互式 + bcrypt + ~/.fuxi/im_password.bcrypt）。
     #[command(name = "set-password")]
     SetPassword(subcommands::ImSetPasswordArgs),
+    /// 用本机 HMAC key 签一个 ad-hoc token——给 smoke / curl 健康检查用。
+    #[command(name = "issue-token")]
+    IssueToken(subcommands::ImIssueTokenArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -215,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Im(i)) => match i {
             ImCmd::Start(args) => subcommands::run_im_start(args).await,
             ImCmd::SetPassword(args) => subcommands::run_im_set_password(args).await,
+            ImCmd::IssueToken(args) => subcommands::run_im_issue_token(args).await,
         },
         Some(Command::Project(p)) => match p {
             ProjectCmd::Add(args) => project_cmd::run_add(args).await,
