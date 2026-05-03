@@ -143,6 +143,22 @@ fn agent_event(agent: AgentId, text: &str) -> Event {
     }
 }
 
+/// P0.D #45 修后 `/api/{tasks,workers}/{id}/events` HTTP 响应 wire shape =
+/// `{events, next_cursor}`（对齐前端 `EventHistoryResponse`）。e2e 测都
+/// 走该 helper 抽 `events` 字段、顺带断言 `next_cursor` 当前为 null。
+async fn read_events_resp(resp: reqwest::Response) -> Vec<Event> {
+    let body: serde_json::Value = resp.json().await.expect("json");
+    assert!(
+        body.get("next_cursor").is_some_and(|v| v.is_null()),
+        "EventHistoryResponse.next_cursor 当前应为 null（无服务端分页），实际: {body}"
+    );
+    let evs_val = body
+        .get("events")
+        .cloned()
+        .expect("EventHistoryResponse 应有 .events 数组字段");
+    serde_json::from_value::<Vec<Event>>(evs_val).expect("events 反序列化")
+}
+
 /// 单任务白名单事件——用 `AgentResponded` 携带 label 文本，既满足 #N6'
 /// `task_thread_visible` 白名单（`/api/tasks/:id/{events,conv}` 走该 filter），也
 /// 让旧 `/api/tasks/:id/stream`（裸 task_id 过滤，无白名单）继续兼容。
@@ -436,7 +452,7 @@ async fn http_task_events_returns_history_with_pagination() {
         .await
         .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let evs: Vec<Event> = resp.json().await.expect("json");
+    let evs = read_events_resp(resp).await;
     assert_eq!(evs.len(), 3, "limit=3 应只返 3 条");
     for e in &evs {
         assert_eq!(e.meta.task, Some(task), "必须是该 task 事件");
@@ -475,7 +491,7 @@ async fn http_task_events_with_cursor_returns_strictly_after() {
         .await
         .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let evs: Vec<Event> = resp.json().await.expect("json");
+    let evs = read_events_resp(resp).await;
     assert_eq!(evs.len(), 2, "anchor 之后 2 条");
     let labels: Vec<String> = evs
         .iter()
@@ -564,7 +580,7 @@ async fn http_task_events_drops_non_whitelisted_kinds() {
         .await
         .expect("get");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let evs: Vec<Event> = resp.json().await.expect("json");
+    let evs = read_events_resp(resp).await;
     assert_eq!(evs.len(), 1, "白名单外 2 条应被过滤，只剩 AgentResponded");
     match &evs[0].kind {
         EventKind::AgentResponded { text } => assert_eq!(text, "say"),

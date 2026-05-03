@@ -20,10 +20,26 @@ use chrono::{DateTime, Utc};
 use futures_util::stream::{Stream, StreamExt};
 use fuxi_core::Event;
 use fuxi_events::{EventBus, ReplayCursor};
+use serde::Serialize;
 use std::pin::Pin;
 use std::time::Duration;
 use tracing::{debug, warn};
 use uuid::Uuid;
+
+/// 历史事件 HTTP 响应包装——`task_events` / `worker_events` 共用。
+///
+/// **wire 形契约对齐**（P0.D #45 修）：前端 `EventHistoryResponse`（`web/src/types/events.ts:87`）
+/// 期望 `{events, next_cursor}`，e2e/mock fixture 也按此 shape 写。
+/// 早期 backend 直接返 `Vec<Event>` 裸数组 → 前端 `r.events` undefined → reduce
+/// throw → catch 静默 → 历史回放永远空。task done 后 WS 也不再来事件，
+/// 用户感知"门客原本输出全没了"。
+///
+/// `next_cursor` 当前永远 `None`（无服务端分页），保留字段为后续 limit/cursor 翻页留口。
+#[derive(Debug, Serialize)]
+pub(crate) struct EventHistoryResponse {
+    pub events: Vec<Event>,
+    pub next_cursor: Option<String>,
+}
 
 /// WebSocket 心跳间隔。和 firehose 保持一致，nginx idle timeout 留余量。
 pub(crate) const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
