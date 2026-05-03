@@ -4,10 +4,16 @@ import {
   createMemo,
   createResource,
   createSignal,
+  onCleanup,
+  onMount,
   type Component,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
 import { colorForTaskRole } from "~/lib/format-task";
+import {
+  startReconnectingSocket,
+  type ReconnectController,
+} from "~/lib/reconnect";
 import type { NodeView, NodeWorker } from "~/types/api";
 import styles from "./NodesPage.module.css";
 
@@ -107,7 +113,30 @@ const AddNodeModal: Component<{ onClose: () => void }> = (props) => {
 
 const RenderNodes: Component = () => {
   const { client } = useApi();
-  const [data] = createResource(() => client.fetchNodes());
+  // 用 createResource 的 refetch 让 WS 推送到来时重拉 /api/nodes——后端
+  // /api/nodes/stream 只发"节点拓扑变化"信号（WorkerRegistered /
+  // WorkerHeartbeatStateChanged / WorkerStaleSwept），不传完整 NodeView，
+  // 避免前后端各算一遍 home shelf + dist topology 算法走偏。
+  const [data, { refetch }] = createResource(() => client.fetchNodes());
+  let controller: ReconnectController | null = null;
+
+  onMount(() => {
+    controller = startReconnectingSocket(
+      () => client.openNodesStreamSocket(),
+      {
+        // 收到任何节点级事件就 refetch——后端 ws_common::run_ws_loop 已对
+        // 三类 EventKind 做白名单过滤；前端拿到即视作"该刷"。
+        onMessage: () => {
+          void refetch();
+        },
+      },
+    );
+  });
+  onCleanup(() => {
+    controller?.dispose();
+    controller = null;
+  });
+
   const nodes = createMemo<NodeView[]>(() => {
     const list = data()?.nodes ?? [];
     // online 在前，online 内部按 inflight 降序（最忙优先）

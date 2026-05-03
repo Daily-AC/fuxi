@@ -103,6 +103,9 @@ export interface ApiClient {
   openTaskSocket(taskId: string): WebSocket;
   /** #N3 私聊页 · 接门客流式事件（β #N5 / #27 目标契约）。*/
   openWorkerSocket(agentId: string): WebSocket;
+  /** dist topology 实时变更流——节点 tab 订阅，每条 push 触发 fetchNodes refetch。
+   *  filter：WorkerRegistered / WorkerHeartbeatStateChanged / WorkerStaleSwept 三类。 */
+  openNodesStreamSocket(): WebSocket;
 }
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -237,6 +240,7 @@ export function createHttpClient(): ApiClient {
       new WebSocket(wsUrl(`/api/tasks/${encodeURIComponent(taskId)}/conv`)),
     openWorkerSocket: (agentId) =>
       new WebSocket(wsUrl(`/api/workers/${encodeURIComponent(agentId)}/conv`)),
+    openNodesStreamSocket: () => new WebSocket(wsUrl("/api/nodes/stream")),
   };
 }
 

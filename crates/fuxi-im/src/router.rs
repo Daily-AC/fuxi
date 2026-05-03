@@ -44,6 +44,9 @@ pub fn build(state: AppState) -> Router {
         .route("/api/tasks", get(handlers::tasks::list_tasks))
         // β · #55 dist topology——节点 tab + 任务卡 @node 标识共用数据源
         .route("/api/nodes", get(handlers::nodes::list_nodes))
+        // dist topology 实时变更流——前端节点 tab 订阅，每条 push 触发 refetch
+        // /api/nodes，反应式刷 home/远端 worker 心跳和 inflight 数。
+        .route("/api/nodes/stream", get(handlers::nodes::nodes_stream_ws))
         // Decision 21 phase 1：Project 注册表读 + 写
         .route(
             "/api/projects",

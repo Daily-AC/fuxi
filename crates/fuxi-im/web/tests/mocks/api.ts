@@ -122,6 +122,8 @@ export interface MockApi extends ApiClient {
   pushTask(taskId: string, ev: ServerEvent): void;
   /** 主动推一条事件给指定 worker socket（#N3 / #30 私聊页用） */
   pushWorker(agentId: string, ev: ServerEvent): void;
+  /** 主动推一条事件给最近打开的 nodes-stream socket（NodesPage 实时刷用） */
+  pushNodesStream(ev: ServerEvent): void;
 }
 
 export function createMockApi(initial?: Partial<MockState>): MockApi {
@@ -161,6 +163,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
   let convSocket: FakeSocket | null = null;
   const taskSockets = new Map<string, FakeSocket>();
   const workerSockets = new Map<string, FakeSocket>();
+  let nodesStreamSocket: FakeSocket | null = null;
 
   return {
     state,
@@ -172,6 +175,9 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     },
     pushWorker(agentId, ev) {
       workerSockets.get(agentId)?.push(ev);
+    },
+    pushNodesStream(ev) {
+      nodesStreamSocket?.push(ev);
     },
     fetchTasks: async () => ({ tasks: state.tasks }),
     fetchTaskEvents: async (taskId): Promise<EventHistoryResponse> => ({
@@ -313,6 +319,12 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     openWorkerSocket: (agentId) => {
       const s = new FakeSocket();
       workerSockets.set(agentId, s);
+      queueMicrotask(() => s.open());
+      return s as unknown as WebSocket;
+    },
+    openNodesStreamSocket: () => {
+      const s = new FakeSocket();
+      nodesStreamSocket = s;
       queueMicrotask(() => s.open());
       return s as unknown as WebSocket;
     },

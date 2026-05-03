@@ -603,6 +603,45 @@ async fn http_task_events_rejects_bad_cursor() {
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
+/// `/api/nodes/stream` 实时推 WorkerHeartbeatStateChanged 给前端 NodesPage——
+/// 验过滤白名单：节点级三类事件下发，agent 级事件不下发。
+#[tokio::test]
+async fn ws_nodes_stream_pushes_worker_heartbeat_events() {
+    use fuxi_core::WorkerStatus;
+    let (base, bus, _xuannv, cookie, _dir, _srv) = spawn_im().await;
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/nodes/stream")).expect("parse");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
+    let (_w, mut r) = ws.split();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // 噪音：玄女发言事件——非节点级，应被 filter 掉
+    bus.publish(agent_event(AgentId::new(), "应被过滤"))
+        .expect("publish noise");
+    // 真信号：worker 心跳状态变化
+    bus.publish(Event {
+        meta: EventMeta::now(),
+        kind: EventKind::WorkerHeartbeatStateChanged {
+            node_id: "home".into(),
+            inflight_count: 1,
+            status: WorkerStatus::Alive,
+        },
+    })
+    .expect("publish hb");
+
+    let got = next_event(&mut r, "nodes-stream").await;
+    match got.kind {
+        EventKind::WorkerHeartbeatStateChanged {
+            node_id,
+            inflight_count,
+            ..
+        } => {
+            assert_eq!(node_id, "home");
+            assert_eq!(inflight_count, 1);
+        }
+        other => panic!("expect WorkerHeartbeatStateChanged, got {other:?}"),
+    }
+}
+
 /// 路由级冒烟：α 留的 `/api/tasks` 不动；γ 不该破坏它。
 #[tokio::test]
 async fn list_tasks_root_still_returns_array() {
