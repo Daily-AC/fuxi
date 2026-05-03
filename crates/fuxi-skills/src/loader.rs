@@ -36,6 +36,13 @@ pub struct SkillFrontmatter {
     /// CC `--allowed-tools` 的空格分隔字符串——保留原字符串，用 `allowed_tools()` 切。
     #[serde(rename = "allowed-tools", default)]
     pub allowed_tools: Option<String>,
+    /// CC `--disallowed-tools` 的空格分隔字符串。
+    ///
+    /// 必要性：`allowed-tools` 在 cc bypassPermissions 模式（fuxi 默认）下不是
+    /// 硬白名单——agent 仍能 invoke 不在 list 里的工具。要硬阻断（如玄女不能
+    /// 自己 Edit/Write/Task）必须用 disallowed-tools，bypass 模式下仍生效。
+    #[serde(rename = "disallowed-tools", default)]
+    pub disallowed_tools: Option<String>,
 }
 
 /// 加载 Skill 后的结果。
@@ -44,6 +51,7 @@ pub struct LoadedSkill {
     pub profile: AgentProfile,
     pub append_system_prompt: String,
     pub allowed_tools: Option<Vec<String>>,
+    pub disallowed_tools: Option<Vec<String>>,
     pub frontmatter: SkillFrontmatter,
 }
 
@@ -143,6 +151,11 @@ pub fn load_from_file(path: &Path, role_hint: &str) -> Result<LoadedSkill> {
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
     });
+    let disallowed_tools = fm.disallowed_tools.as_ref().map(|s| {
+        s.split_whitespace()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+    });
 
     let mut extra = BTreeMap::new();
     if !fm.description.is_empty() {
@@ -175,6 +188,7 @@ pub fn load_from_file(path: &Path, role_hint: &str) -> Result<LoadedSkill> {
         profile,
         append_system_prompt: body.trim().to_string(),
         allowed_tools,
+        disallowed_tools,
         frontmatter: fm,
     })
 }
@@ -239,6 +253,44 @@ mod tests {
         .unwrap();
         let loaded = load_from_file(&path, "luban-codex").expect("load");
         assert_eq!(loaded.profile.cli, "codex");
+    }
+
+    /// `disallowed-tools` frontmatter 字段被 split-whitespace 切碎；
+    /// 缺省时 `LoadedSkill.disallowed_tools` 为 None（不禁任何工具）。
+    #[test]
+    fn loader_parses_disallowed_tools_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let role_dir = dir.path().join("xuannv-test");
+        std::fs::create_dir_all(&role_dir).unwrap();
+        let path = role_dir.join("ROLE.md");
+        std::fs::write(
+            &path,
+            "---\nname: xuannv-test\ndescription: d\nallowed-tools: Bash(fuxi:*) Read\ndisallowed-tools: Edit Write Task Agent\n---\nbody\n",
+        )
+        .unwrap();
+        let loaded = load_from_file(&path, "xuannv-test").expect("load");
+        let got = loaded.disallowed_tools.expect("应解析出 disallowed_tools");
+        assert_eq!(
+            got,
+            vec![
+                "Edit".to_string(),
+                "Write".to_string(),
+                "Task".to_string(),
+                "Agent".to_string()
+            ],
+            "disallowed-tools 应按空白切成 4 项"
+        );
+    }
+
+    #[test]
+    fn loader_disallowed_tools_none_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let role_dir = dir.path().join("luban-test");
+        std::fs::create_dir_all(&role_dir).unwrap();
+        let path = role_dir.join("ROLE.md");
+        std::fs::write(&path, "---\nname: luban-test\ndescription: d\n---\nbody\n").unwrap();
+        let loaded = load_from_file(&path, "luban-test").expect("load");
+        assert!(loaded.disallowed_tools.is_none());
     }
 
     /// M3.2 · 优先 ROLE.md；若同目录**只有** SKILL.md（旧名），也能 load 且 warn。

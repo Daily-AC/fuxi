@@ -408,14 +408,7 @@ async fn dispatch_command(
                 // daemon CLI 入口（fuxi-cli 子命令）—— v3 #N7' mentions 仅 PWA 用，
                 // CLI 不带 @；attachments 也仅 PWA 用，传空 Vec 维持现有 wire 语义。
                 match fuxi
-                    .intervene(
-                        id,
-                        interrupt_first,
-                        &text,
-                        Vec::new(),
-                        None,
-                        Vec::new(),
-                    )
+                    .intervene(id, interrupt_first, &text, Vec::new(), None, Vec::new())
                     .await
                 {
                     Ok(()) => Response::ok(serde_json::json!({"delivered": true})),
@@ -1141,6 +1134,7 @@ async fn spawn_by_role(
                     Some(loaded.append_system_prompt)
                 },
                 allowed_tools: loaded.allowed_tools,
+                disallowed_tools: loaded.disallowed_tools,
                 resume_session_id,
                 session_id,
                 ..Default::default()

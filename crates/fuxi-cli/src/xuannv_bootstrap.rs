@@ -62,6 +62,7 @@ pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Res
             Some(loaded.append_system_prompt)
         },
         allowed_tools: loaded.allowed_tools,
+        disallowed_tools: loaded.disallowed_tools,
         resume_session_id,
         session_id,
         ..Default::default()
