@@ -239,10 +239,14 @@ impl Agent for CcAgent {
     async fn dispatch(&self, task: Task) -> Result<mpsc::Receiver<Event>> {
         let (tx, rx) = mpsc::channel::<Event>(EVENT_CHANNEL_BUFFER);
 
+        // bug #77：之前 prepend `{title}\n\n{description}` 把内部 task.title（如
+        // "user-turn"）灌进 cc prompt → cc 模型 echo 该字面到 reply，用户看见
+        // 玄女回复："Human: user-turn\n\n[REVIEW_REQUEST]..."。title 是 dashboard
+        // 元数据不该污染 prompt；空 description 时再 fallback title 防空消息。
         let body = if task.description.is_empty() {
             task.title.clone()
         } else {
-            format!("{}\n\n{}", task.title, task.description)
+            task.description.clone()
         };
 
         // 拿 cli_session_id（可能 None——用空串，cc 会在 init 后关联起来）
