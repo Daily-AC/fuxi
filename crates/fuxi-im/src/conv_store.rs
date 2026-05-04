@@ -610,6 +610,7 @@ mod tests {
                 mentions: vec![target],
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         }
     }

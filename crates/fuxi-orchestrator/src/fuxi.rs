@@ -1296,6 +1296,58 @@ impl Fuxi {
         pinned_node: Option<String>,
         attachments: Vec<String>,
     ) -> Result<()> {
+        // 用户主动 intervene 路径——不带 system_origin（None）。
+        // bug #76：bridge / sentinel 系统注入走 [`intervene_system_origin`]。
+        self.intervene_inner(
+            agent_id,
+            interrupt_first,
+            text,
+            mentions,
+            pinned_node,
+            attachments,
+            None,
+        )
+        .await
+    }
+
+    /// bug #76 · 系统注入入口（bridge / sentinel addendum 用）。
+    ///
+    /// 与 [`Self::intervene`] 唯一差别：在 `UserInterventionSent` 上挂
+    /// `system_origin: Some(<标记>)`，告诉前端这条不是用户敲的，应渲染成
+    /// 玄女侧的「系统消息」气泡（不是右侧 user bubble）。
+    ///
+    /// 标记取值（snake_case，跟前端 reducer 对齐）：
+    /// `"agent_dead"` / `"trigger_fired"` / `"review_request"` / `"review_timeout"` 等。
+    pub async fn intervene_system_origin(
+        &self,
+        agent_id: AgentId,
+        interrupt_first: bool,
+        text: &str,
+        system_origin: String,
+    ) -> Result<()> {
+        self.intervene_inner(
+            agent_id,
+            interrupt_first,
+            text,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Some(system_origin),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn intervene_inner(
+        &self,
+        agent_id: AgentId,
+        interrupt_first: bool,
+        text: &str,
+        mentions: Vec<AgentId>,
+        pinned_node: Option<String>,
+        attachments: Vec<String>,
+        system_origin: Option<String>,
+    ) -> Result<()> {
         let agent = self
             .shelf
             .get_agent(agent_id)
@@ -1324,6 +1376,7 @@ impl Fuxi {
                         mentions: mentions.clone(),
                         pinned_node: pinned_node.clone(),
                         attachments: attachments.clone(),
+                        system_origin: system_origin.clone(),
                     },
                 });
                 id
@@ -1381,6 +1434,7 @@ impl Fuxi {
                     mentions,
                     pinned_node,
                     attachments,
+                    system_origin,
                 },
             });
             id

@@ -247,6 +247,7 @@ mod tests {
                 mentions: vec![luban],
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         );
         assert!(
@@ -265,6 +266,7 @@ mod tests {
                 mentions: vec![mo],
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         );
         assert!(!worker_event_visible(&other, luban));
@@ -447,6 +449,7 @@ mod tests {
                 mentions: vec![me],
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         ))
         .unwrap();

@@ -31,6 +31,7 @@ import { WorkerBubble } from "~/components/messages/WorkerBubble";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
+import { SystemMessageRow } from "~/components/messages/SystemMessageRow";
 import { formatDuration } from "~/lib/format-task";
 import styles from "./WorkerPage.module.css";
 
@@ -308,6 +309,8 @@ const Thread: Component<ThreadProps> = (props) => {
             if (msg.kind === "tool_call") return <ToolCallCard msg={msg} />;
             if (msg.kind === "thinking") return <ThinkingRow msg={msg} />;
             if (msg.kind === "marker") return <StatusMarkerRow msg={msg} />;
+            // bug #76：bridge 抄送（用户直接对该 worker 说话时）
+            if (msg.kind === "system") return <SystemMessageRow msg={msg} />;
             return null;
           }}
         </For>

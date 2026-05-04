@@ -1,6 +1,7 @@
-//! `GET /api/deliverables` + `GET /api/deliverables/<project>/<task>/files/<name>`
-//! + `GET /api/deliverables/<project>/<task>/preview/<name>` —— PWA 收件箱
-//! 数据源（Decision 22 phase 1 + phase 3 预览扩展）。
+//! 三个端点（Decision 22 phase 1 + phase 3 预览扩展）：
+//! - `GET /api/deliverables` —— 列表
+//! - `GET /api/deliverables/<project>/<task>/files/<name>` —— 下载
+//! - `GET /api/deliverables/<project>/<task>/preview/<name>` —— 内联预览
 //!
 //! 数据源：扫 `project_registry` 列出的全部 project，每个 project 走
 //! `<projects_root>/<project>/deliverables/` 下所有 task 的 manifest.json。

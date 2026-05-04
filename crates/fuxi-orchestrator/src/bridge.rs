@@ -128,6 +128,21 @@ fn bridge_delivery_lag_ms(at: DateTime<Utc>) -> u64 {
 pub trait Intervener: Send + Sync {
     async fn intervene(&self, agent_id: AgentId, interrupt_first: bool, text: &str) -> Result<()>;
 
+    /// bug #76：bridge 注入系统消息时调这个，带 `system_origin` 标记
+    /// （`"agent_dead"` / `"trigger_fired"` / `"review_request"` 等）让前端
+    /// 渲染成玄女侧的「系统消息」气泡而不是右侧用户气泡。
+    ///
+    /// 默认实现退化到无标记的 `intervene`（单测 mock 不强求实现）；生产 Fuxi 覆盖。
+    async fn intervene_system(
+        &self,
+        agent_id: AgentId,
+        interrupt_first: bool,
+        text: &str,
+        _system_origin: &str,
+    ) -> Result<()> {
+        self.intervene(agent_id, interrupt_first, text).await
+    }
+
     /// 查门客当前登记的 role 标签——主要拿来给玄女读（"codex 门客下线"比裸 id 可读）。
     /// 未找到返回 None；调用方自行 fallback。
     async fn role_of(&self, agent_id: AgentId) -> Option<String>;
@@ -169,6 +184,25 @@ impl Intervener for Fuxi {
             Vec::new(),
             None,
             Vec::new(),
+        )
+        .await
+    }
+
+    async fn intervene_system(
+        &self,
+        agent_id: AgentId,
+        interrupt_first: bool,
+        text: &str,
+        system_origin: &str,
+    ) -> Result<()> {
+        // bug #76：bridge 注入路径走这个，挂上 system_origin tag 让前端
+        // 渲染玄女侧系统消息气泡。
+        Fuxi::intervene_system_origin(
+            self,
+            agent_id,
+            interrupt_first,
+            text,
+            system_origin.to_string(),
         )
         .await
     }
@@ -317,15 +351,23 @@ pub(crate) async fn try_intervene_with_retry(
     target: AgentId,
     prompt: &str,
     backoff_ms: &[u64],
+    system_origin: &str,
 ) -> Result<()> {
-    // 首发——若成功直接返回，不进 retry。
-    let mut last_err = match intervener.intervene(target, true, prompt).await {
+    // 首发——若成功直接返回，不进 retry。bug #76：sentinel 注入走 intervene_system
+    // 让 PWA 渲染玄女侧系统消息气泡。
+    let mut last_err = match intervener
+        .intervene_system(target, true, prompt, system_origin)
+        .await
+    {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
     for (idx, &ms) in backoff_ms.iter().enumerate() {
         tokio::time::sleep(Duration::from_millis(ms)).await;
-        match intervener.intervene(target, true, prompt).await {
+        match intervener
+            .intervene_system(target, true, prompt, system_origin)
+            .await
+        {
             Ok(()) => {
                 debug!(retry = idx + 1, "review intervene retry succeeded");
                 return Ok(());
@@ -437,7 +479,10 @@ async fn handle_event(
                 return;
             };
             let prompt = build_trigger_prompt(&id, fired_at, &cause, &intent);
-            if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
+            if let Err(e) = intervener
+                .intervene_system(xuannv_id, false, &prompt, "trigger_fired")
+                .await
+            {
                 warn!(error = %e, "bridge: intervene(TriggerFired) 失败——玄女可能已下线");
             }
         }
@@ -472,7 +517,7 @@ async fn handle_event(
             );
             let prompt = build_death_prompt(agent_id, &role, &cause);
             if let Err(e) = intervener
-                .intervene(xuannv_id, interrupt_first, &prompt)
+                .intervene_system(xuannv_id, interrupt_first, &prompt, "agent_dead")
                 .await
             {
                 warn!(error = %e, "bridge: intervene(AgentDead) 失败");
@@ -558,8 +603,14 @@ async fn handle_event(
             // AgentRequestReview 永远 interrupt——门客主动找玄女 = 高优先级
             // attention 信号，不让中间 turn 把它挤晚。
             let started = std::time::Instant::now();
-            if let Err(e) =
-                try_intervene_with_retry(intervener, xuannv_id, &prompt, backoff_ms).await
+            if let Err(e) = try_intervene_with_retry(
+                intervener,
+                xuannv_id,
+                &prompt,
+                backoff_ms,
+                "review_request",
+            )
+            .await
             {
                 let waited_for_ms = started.elapsed().as_millis() as u64;
                 warn!(error = %e, %agent, waited_for_ms, "bridge: AgentRequestReview retry 全失败，发 ReviewRequestTimeout 兜底");
@@ -603,7 +654,7 @@ async fn handle_event(
             );
             let prompt = build_review_timeout_prompt(agent, &role, task, waited_for_ms);
             if let Err(e) = intervener
-                .intervene(xuannv_id, interrupt_first, &prompt)
+                .intervene_system(xuannv_id, interrupt_first, &prompt, "review_timeout")
                 .await
             {
                 warn!(error = %e, "bridge: intervene(ReviewRequestTimeout) 失败");
@@ -630,7 +681,10 @@ async fn handle_event(
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
             let prompt = build_cc_prompt(from_user_to, &role, &text);
-            if let Err(e) = intervener.intervene(xuannv_id, false, &prompt).await {
+            if let Err(e) = intervener
+                .intervene_system(xuannv_id, false, &prompt, "carbon_copy")
+                .await
+            {
                 warn!(error = %e, "bridge: intervene(OrchestratorCcReceived) 失败");
             }
         }
@@ -1345,7 +1399,8 @@ mod tests {
         mock.set_fail_first_n(1).await;
 
         // 极短 backoff（1+2ms）让测试不拖慢 CI——生产用 REVIEW_RETRY_BACKOFF_MS。
-        let result = try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4]).await;
+        let result =
+            try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4], "review_request").await;
         assert!(result.is_ok(), "第二次应成功: {result:?}");
         let calls = mock.snapshot().await;
         assert_eq!(calls.len(), 2, "共两次调用：第一次 fail + 第二次 ok");
@@ -1359,7 +1414,8 @@ mod tests {
         let mock = MockIntervener::new();
         mock.set_fail_always().await;
 
-        let result = try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4]).await;
+        let result =
+            try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4], "review_request").await;
         assert!(result.is_err(), "全失败应返 Err");
         let calls = mock.snapshot().await;
         // backoff len = 3 → 共 1 (首发) + 3 (retry) = 4 次调用。
