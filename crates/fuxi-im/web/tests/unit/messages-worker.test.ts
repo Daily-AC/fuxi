@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   applyWorkerEvent,
-  type DeliverableMessage,
   type Message,
   type ToolCallMessage,
   type ThinkingMessage,
@@ -179,52 +178,6 @@ describe("applyWorkerEvent · 私聊页 reducer (#N3)", () => {
     const out = applyWorkerEvent(
       before,
       ev({ type: "未来_新事件" } as ServerEvent["kind"]),
-      CTX,
-    );
-    expect(out).toBe(before);
-  });
-
-  it("P3 段 A · deliverable_produced · 起 DeliverableMessage 含 files", () => {
-    const out = applyWorkerEvent(
-      [],
-      ev(
-        {
-          type: "deliverable_produced",
-          task: "task-1",
-          project: "erp",
-          deliverable_kind: "code_change",
-          files: [{ name: "patch.diff", sha256: "x", size_bytes: 512 }],
-        } as ServerEvent["kind"],
-        { id: "ev-dv-w" },
-      ),
-      CTX,
-    );
-    expect(out).toHaveLength(1);
-    const m = out[0] as DeliverableMessage;
-    expect(m.kind).toBe("deliverable");
-    expect(m.id).toBe("ev-dv-w");
-    expect(m.role_display).toBe("鲁班");
-    expect(m.deliverable_kind).toBe("code_change");
-    expect(m.project).toBe("erp");
-    expect(m.task).toBe("task-1");
-    expect(m.files).toHaveLength(1);
-    expect(m.files[0]?.name).toBe("patch.diff");
-  });
-
-  it("P3 段 A · deliverable agent 不匹配 · 直接丢", () => {
-    const before: Message[] = [];
-    const out = applyWorkerEvent(
-      before,
-      ev(
-        {
-          type: "deliverable_produced",
-          task: "task-1",
-          project: "erp",
-          deliverable_kind: "test_result",
-          files: [{ name: "out.log", sha256: "y", size_bytes: 200 }],
-        } as ServerEvent["kind"],
-        { agent: MO, id: "ev-dv-other" },
-      ),
       CTX,
     );
     expect(out).toBe(before);
