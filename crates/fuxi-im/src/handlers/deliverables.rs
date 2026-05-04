@@ -1,5 +1,6 @@
 //! `GET /api/deliverables` + `GET /api/deliverables/<project>/<task>/files/<name>`
-//! —— PWA 收件箱数据源（Decision 22 phase 1）。
+//! + `GET /api/deliverables/<project>/<task>/preview/<name>` —— PWA 收件箱
+//! 数据源（Decision 22 phase 1 + phase 3 预览扩展）。
 //!
 //! 数据源：扫 `project_registry` 列出的全部 project，每个 project 走
 //! `<projects_root>/<project>/deliverables/` 下所有 task 的 manifest.json。
@@ -8,6 +9,16 @@
 //! 加索引 / pagination。
 //!
 //! 503 路径：registry 未注入 → 返 unavailable，PWA 应跳过收件箱标签。
+//!
+//! ## 文件读取的两个端点
+//!
+//! - `/files/<name>` —— 设 `Content-Disposition: attachment`，浏览器**触发下载**。
+//! - `/preview/<name>` —— 不设 attachment，**inline 返回**让浏览器/前端
+//!   `<img>` `<pre>` 直接渲染。md 类用 `text/markdown` 让前端拉文本后自渲染。
+//!
+//! 两端点共享 `read_bucket_file()` 路径校验 + 读文件逻辑，仅响应头差异。
+//! **不**用 `?inline=1` query 切换——分两条路径让 URL 自带语义，命中网关
+//! 缓存策略时也方便区分（attachment 一般不缓存，inline 可短期缓存）。
 
 use crate::error::{Error, Result};
 use crate::state::AppState;
@@ -377,13 +388,64 @@ pub async fn download_file(
     State(state): State<AppState>,
     AxumPath((project_raw, task_raw, name)): AxumPath<(String, String, String)>,
 ) -> std::result::Result<Response, Error> {
+    let (bytes, ct) = read_bucket_file(&state, &project_raw, &task_raw, &name).await?;
+    let resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, ct)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| Error::Internal(format!("构造 response 失败: {e}")))?;
+    Ok(resp)
+}
+
+/// `GET /api/deliverables/:project/:task/preview/:name` —— **inline** 返交付
+/// 文件内容，给前端预览用（`<img src=...>` / `fetch().text()` → markdown 渲染 /
+/// `<pre>` 文本显示）。
+///
+/// 与 `download_file` 共享路径 + 内容读取；唯一差异在响应头：
+/// - **不**设 `Content-Disposition: attachment`，让浏览器 inline 处理
+/// - 文本类（md/txt/csv/json）显式带 `charset=utf-8`，由 `guess_content_type` 处理
+///
+/// 安全：复用同一 bucket-bound 校验，无额外攻击面。
+pub async fn preview_file(
+    State(state): State<AppState>,
+    AxumPath((project_raw, task_raw, name)): AxumPath<(String, String, String)>,
+) -> std::result::Result<Response, Error> {
+    let (bytes, ct) = read_bucket_file(&state, &project_raw, &task_raw, &name).await?;
+    // inline disposition 显式声明——某些浏览器（旧 Safari）默认行为不一致，显式
+    // `inline; filename=...` 让"另存为"对话框带文件名而不是变 attachment。
+    let resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, ct)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{name}\""),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| Error::Internal(format!("构造 response 失败: {e}")))?;
+    Ok(resp)
+}
+
+/// 共享 helper：路径校验 + 读 bucket 文件，返 `(bytes, content_type)`。
+///
+/// 校验链同原 `download_file`：project 注册 + task 段合法 + 文件名安全 + bucket 内。
+/// 把这三步抽出来避免 `download_file` / `preview_file` 复制粘贴时漏掉某条防御。
+async fn read_bucket_file(
+    state: &AppState,
+    project_raw: &str,
+    task_raw: &str,
+    name: &str,
+) -> std::result::Result<(Vec<u8>, &'static str), Error> {
     let registry = state
         .project_registry
         .as_ref()
         .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
 
     // 1. project 校验 + lookup
-    let project_id = ProjectId::new(project_raw.clone())
+    let project_id = ProjectId::new(project_raw.to_string())
         .map_err(|_| Error::NotFound(format!("project {project_raw}")))?;
     let project = registry
         .get(&project_id)
@@ -408,8 +470,8 @@ pub async fn download_file(
         .root()
         .join(project.id.as_str())
         .join("deliverables")
-        .join(&task_raw);
-    let file_path = bucket.join(&name);
+        .join(task_raw);
+    let file_path = bucket.join(name);
 
     // 4. 文件必须存在 + 必须在 bucket 内（再防 traversal）
     let canon_bucket = match bucket.canonicalize() {
@@ -426,7 +488,7 @@ pub async fn download_file(
         return Err(Error::NotFound(format!("file {name}")));
     }
 
-    // 5. 读文件返
+    // 5. 读文件
     let mut file = fs::File::open(&canon_file)
         .await
         .map_err(|e| Error::Internal(format!("打开文件失败: {e}")))?;
@@ -435,18 +497,8 @@ pub async fn download_file(
         .await
         .map_err(|e| Error::Internal(format!("读文件失败: {e}")))?;
 
-    // content-type：粗略按扩展名；前端预览主要看 md / csv / txt / png 等
-    let ct = guess_content_type(&name);
-    let resp = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, ct)
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{name}\""),
-        )
-        .body(Body::from(bytes))
-        .map_err(|e| Error::Internal(format!("构造 response 失败: {e}")))?;
-    Ok(resp)
+    let ct = guess_content_type(name);
+    Ok((bytes, ct))
 }
 
 fn guess_content_type(name: &str) -> &'static str {
@@ -603,6 +655,10 @@ mod tests {
                 "/api/deliverables/{project}/{task}/files/{name}",
                 axum_get(download_file),
             )
+            .route(
+                "/api/deliverables/{project}/{task}/preview/{name}",
+                axum_get(preview_file),
+            )
             .with_state(state);
         (registry_root, app, registry, project.id, task)
     }
@@ -665,6 +721,38 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let body = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(body.contains("# 报告"));
+    }
+
+    /// bug #76 · preview 端点 = 同 download 内容但响应头是 `inline` 不是 `attachment`，
+    /// 让浏览器内联渲染（md / 文本类）/ 直显（图片）。前端 DeliverableDetailPage
+    /// FilePreview 走这个 URL 拉文本 + 触 Markdown 组件。
+    #[tokio::test]
+    async fn preview_returns_inline_content_disposition() {
+        let (_root, app, _r, project, task) = make_app_with_data().await;
+        let req = Request::builder()
+            .uri(format!(
+                "/api/deliverables/{project}/{task}/preview/report.md"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cd = resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        assert!(
+            cd.starts_with("inline"),
+            "preview 端点必须设 inline disposition，实际：{cd}"
+        );
+        assert!(
+            !cd.contains("attachment"),
+            "preview 端点不应含 attachment（那是 /files/ 的事）"
+        );
+        let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let s = String::from_utf8(body.to_vec()).unwrap();
+        assert!(s.contains("# 报告"));
     }
 
     #[tokio::test]

@@ -177,6 +177,7 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
               file={f}
               project={props.entry.project}
               task={props.entry.task}
+              onOpen={openDetail}
             />
           )}
         </For>
@@ -224,23 +225,24 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
   );
 };
 
+// bug #76：list 卡片内 FileRow 不再 `<a download>` 直接下载（用户期望"下载手动
+// 触发"）。点行进 detail page 看预览 + 显式下载。
 const FileRow: Component<{
   file: DeliverableFileMeta;
   project: string;
   task: string;
+  onOpen(): void;
 }> = (props) => {
-  const { client } = useApi();
-  const url = (): string =>
-    client.deliverableFileUrl(props.project, props.task, props.file.name);
   const sizeStr = (): string => formatBytes(props.file.size_bytes);
   const shaShort = (): string => props.file.sha256.slice(0, 12);
   return (
     <li class={styles.fileRow}>
-      <a
+      <button
+        type="button"
         class={styles.fileLink}
-        href={url()}
-        download={props.file.name}
+        onClick={props.onOpen}
         data-testid={`deliverable-file-${props.task}-${props.file.name}`}
+        aria-label={`查看 ${props.file.name} 预览`}
       >
         <span class={styles.fileName}>{props.file.name}</span>
         <span class={styles.fileMeta}>
@@ -250,7 +252,7 @@ const FileRow: Component<{
             {shaShort()}
           </span>
         </span>
-      </a>
+      </button>
     </li>
   );
 };

@@ -8,6 +8,7 @@ import {
 } from "solid-js";
 import { ApiError } from "~/lib/api";
 import { useApi } from "~/components/ApiProvider";
+import { Markdown } from "~/components/Markdown";
 import type {
   DeliverableEntry,
   DeliverableFileMeta,
@@ -15,6 +16,12 @@ import type {
   DeliverableStatus,
 } from "~/types/api";
 import styles from "./DeliverableDetailPage.module.css";
+
+// bug #76：预览扩展名分类
+const TEXT_EXTS = ["md", "markdown", "txt", "log", "json", "csv", "tsv", "xml", "yaml", "yml", "rs", "ts", "tsx", "js", "jsx", "py", "sh", "html", "css"];
+const MD_EXTS = ["md", "markdown"];
+const IMG_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"];
+const PREVIEW_BYTE_LIMIT = 512 * 1024; // 512 KB 文本上限——避免拉超大 log 卡浏览器
 
 // 交付详情 Layer 2 · Decision 22 phase 3
 //
@@ -275,7 +282,12 @@ const EntrySection: Component<{ entry: DeliverableEntry }> = (props) => {
               file={f}
               project={props.entry.project}
               task={props.entry.task}
-              url={client.deliverableFileUrl(
+              downloadUrl={client.deliverableFileUrl(
+                props.entry.project,
+                props.entry.task,
+                f.name,
+              )}
+              previewUrl={client.deliverableFilePreviewUrl(
                 props.entry.project,
                 props.entry.task,
                 f.name,
@@ -292,23 +304,116 @@ const FileRow: Component<{
   file: DeliverableFileMeta;
   project: string;
   task: string;
-  url: string;
+  downloadUrl: string;
+  previewUrl: string;
 }> = (props) => {
+  const ext = (): string =>
+    props.file.name.toLowerCase().split(".").pop() ?? "";
+  const isText = (): boolean => TEXT_EXTS.includes(ext());
+  const isMd = (): boolean => MD_EXTS.includes(ext());
+  const isImg = (): boolean => IMG_EXTS.includes(ext());
+  const tooLargeForText = (): boolean =>
+    isText() && props.file.size_bytes > PREVIEW_BYTE_LIMIT;
+  const previewable = (): boolean => isImg() || (isText() && !tooLargeForText());
+
   return (
     <li
       class={styles.fileRow}
       data-testid={`deliverable-detail-file-${props.task}-${props.file.name}`}
     >
-      <a class={styles.fileLink} href={props.url} download={props.file.name}>
+      <header class={styles.fileHeader}>
         <span class={styles.fileName}>{props.file.name}</span>
-      </a>
-      <span class={`${styles.fileSize} mono`}>
-        {formatBytes(props.file.size_bytes)}
-      </span>
-      <span class={`${styles.fileSha} mono`} title={`sha256: ${props.file.sha256}`}>
-        {props.file.sha256.slice(0, 16)}…
-      </span>
+        <span class={`${styles.fileSize} mono`}>
+          {formatBytes(props.file.size_bytes)}
+        </span>
+        <span class={`${styles.fileSha} mono`} title={`sha256: ${props.file.sha256}`}>
+          {props.file.sha256.slice(0, 16)}…
+        </span>
+        <a
+          class={styles.fileDownloadBtn}
+          href={props.downloadUrl}
+          download={props.file.name}
+          data-testid={`deliverable-detail-download-${props.task}-${props.file.name}`}
+          aria-label={`下载 ${props.file.name}`}
+        >
+          ⬇ 下载
+        </a>
+      </header>
+      <Show when={previewable()}>
+        <FilePreview
+          name={props.file.name}
+          url={props.previewUrl}
+          isMd={isMd()}
+          isImg={isImg()}
+          testid={`deliverable-detail-preview-${props.task}-${props.file.name}`}
+        />
+      </Show>
+      <Show when={!previewable()}>
+        <p
+          class={styles.fileUnsupported}
+          data-testid={`deliverable-detail-no-preview-${props.task}-${props.file.name}`}
+        >
+          {tooLargeForText()
+            ? `文件 > ${Math.round(PREVIEW_BYTE_LIMIT / 1024)}KB，请下载查看`
+            : "该格式暂不支持预览，请下载"}
+        </p>
+      </Show>
     </li>
+  );
+};
+
+/** bug #76 内联预览：md → Markdown 渲染；其它文本 → <pre>；图片 → <img>。
+ *  text 类走 fetch 拉文本，加载中 / 失败都不阻塞父组件其它部分的下载按钮。 */
+const FilePreview: Component<{
+  name: string;
+  url: string;
+  isMd: boolean;
+  isImg: boolean;
+  testid: string;
+}> = (props) => {
+  if (props.isImg) {
+    return (
+      <img
+        class={styles.imgPreview}
+        src={props.url}
+        alt={props.name}
+        data-testid={props.testid}
+        loading="lazy"
+      />
+    );
+  }
+  // text/md：fetch 拉文本（credentials 必带——cookie 鉴权）。
+  // jsdom test env 下 relative URL 会炸 → URL 标准化（test/production 双安全）。
+  const [text] = createResource(async () => {
+    const base =
+      typeof location !== "undefined" && location.origin && location.origin !== "null"
+        ? location.origin
+        : "http://localhost";
+    const abs = new URL(props.url, base).toString();
+    const resp = await fetch(abs, { credentials: "include" });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.text();
+  });
+  return (
+    <Show
+      when={text()}
+      fallback={
+        <p class={styles.previewLoading} data-testid={`${props.testid}-loading`}>
+          {text.error ? `预览失败：${String(text.error)}` : "加载中…"}
+        </p>
+      }
+    >
+      <Show
+        when={props.isMd}
+        fallback={
+          <pre class={styles.textPreview} data-testid={props.testid}>
+            {text()}
+          </pre>
+        }
+      >
+        <Markdown class={styles.mdPreview} source={text() ?? ""} />
+      </Show>
+    </Show>
   );
 };
 

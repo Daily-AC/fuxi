@@ -57,7 +57,7 @@ describe("DeliverablesPage", () => {
     expect(card.textContent).toContain("1.0KB");
   });
 
-  it("file link points to deliverableFileUrl with task- prefix", async () => {
+  it("bug #76 · file row 是 button（不是 a download），点击 navTo detail 不直接触发下载", async () => {
     const { findByTestId } = setup({
       deliverables: [
         {
@@ -70,11 +70,15 @@ describe("DeliverablesPage", () => {
         },
       ],
     });
-    const link = (await findByTestId(
+    const btn = (await findByTestId(
       `deliverable-file-${TASK_UUID}-patch.diff`,
-    )) as HTMLAnchorElement;
-    expect(link.href).toContain(`/api/deliverables/erp/task-${TASK_UUID}/files/patch.diff`);
-    expect(link.getAttribute("download")).toBe("patch.diff");
+    )) as HTMLElement;
+    // 改革后 file row 是 <button>——不能再带 href / download
+    expect(btn.tagName).toBe("BUTTON");
+    expect(btn.getAttribute("href")).toBeNull();
+    expect(btn.getAttribute("download")).toBeNull();
+    // 显示文件名 + 大小 + sha 不变
+    expect(btn.textContent).toContain("patch.diff");
   });
 
   it("accept button publishes accept and refetches → status changes to accepted", async () => {

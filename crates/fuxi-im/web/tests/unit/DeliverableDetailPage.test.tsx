@@ -76,7 +76,7 @@ describe("DeliverableDetailPage", () => {
     expect(queryByTestId("deliverable-detail-reject")).toBeNull();
   });
 
-  it("文件下载链接拼了 task- 前缀", async () => {
+  it("文件显式 ⬇ 下载按钮拼了 task- 前缀（用户主动触发下载）", async () => {
     const { findByTestId } = setup({
       deliverables: [
         {
@@ -89,10 +89,73 @@ describe("DeliverableDetailPage", () => {
         },
       ],
     });
-    const fileRow = await findByTestId(
-      `deliverable-detail-file-${TASK_UUID}-patch.diff`,
+    const dl = (await findByTestId(
+      `deliverable-detail-download-${TASK_UUID}-patch.diff`,
+    )) as HTMLAnchorElement;
+    expect(dl.href).toContain(`/api/deliverables/erp/task-${TASK_UUID}/files/patch.diff`);
+    expect(dl.getAttribute("download")).toBe("patch.diff");
+    expect(dl.textContent).toContain("下载");
+  });
+
+  // bug #76：图片格式应显示 <img> 内联预览
+  it("bug #76 · 图片文件 → <img> 内联预览（不需 fetch）", async () => {
+    const { findByTestId } = setup({
+      deliverables: [
+        {
+          project: "erp",
+          task: TASK_UUID,
+          kind: "research_summary",
+          files: [{ name: "diagram.png", sha256: "ff", size_bytes: 8192 }],
+          produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
+        },
+      ],
+    });
+    const img = (await findByTestId(
+      `deliverable-detail-preview-${TASK_UUID}-diagram.png`,
+    )) as HTMLImageElement;
+    expect(img.tagName).toBe("IMG");
+    expect(img.src).toContain(`/api/deliverables/erp/task-${TASK_UUID}/preview/diagram.png`);
+    expect(img.alt).toBe("diagram.png");
+  });
+
+  // bug #76：未知格式（如 .bin）不预览，落 fallback
+  it("bug #76 · 未支持格式 → 「请下载」fallback 文案", async () => {
+    const { findByTestId } = setup({
+      deliverables: [
+        {
+          project: "erp",
+          task: TASK_UUID,
+          kind: "code_change",
+          files: [{ name: "blob.bin", sha256: "ff", size_bytes: 1024 }],
+          produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
+        },
+      ],
+    });
+    const fb = await findByTestId(
+      `deliverable-detail-no-preview-${TASK_UUID}-blob.bin`,
     );
-    const link = fileRow.querySelector("a") as HTMLAnchorElement;
-    expect(link.href).toContain(`/api/deliverables/erp/task-${TASK_UUID}/files/patch.diff`);
+    expect(fb.textContent).toContain("请下载");
+  });
+
+  // bug #76 · 大文本文件超 512KB 不内联预览（避免拉爆浏览器）
+  it("bug #76 · 大文本文件 > 512KB → 不预览，提示下载", async () => {
+    const { findByTestId } = setup({
+      deliverables: [
+        {
+          project: "erp",
+          task: TASK_UUID,
+          kind: "code_change",
+          files: [{ name: "big.log", sha256: "ff", size_bytes: 1024 * 1024 }],
+          produced_at: "2026-05-02T10:00:00Z",
+          status: "pending",
+        },
+      ],
+    });
+    const fb = await findByTestId(
+      `deliverable-detail-no-preview-${TASK_UUID}-big.log`,
+    );
+    expect(fb.textContent).toMatch(/文件 > .+KB/);
   });
 });
