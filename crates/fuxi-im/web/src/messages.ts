@@ -131,6 +131,37 @@ export interface InlineFileMessage {
   ts: number;
 }
 
+/** P3 段 A · 门客 deliverable 镜像到对话流 · 走 EventKind::DeliverableProduced。
+ *  渲染：左侧（worker 侧）附件卡片，每个文件一行：[icon] filename · size · [下载]。
+ *  与 InlineFileMessage 的产品分工：
+ *  - inline_file：直接 md 渲染贴对话流（不可下载）
+ *  - deliverable：可下载的工件附件，v1 段 A 仅"chat 里出现 + 下载"，
+ *    段 B 加点击预览（按 mime 分 viewer：md / image / pdf / json）
+ *  下载 URL：`/api/deliverables/{project}/{task}/files/{name}` */
+export interface DeliverableFileEntry {
+  name: string;
+  sha256: string;
+  size_bytes: number;
+}
+export interface DeliverableMessage {
+  kind: "deliverable";
+  id: string;
+  agent: string;
+  /** role key（"luban" / ...）—— 用于 colorForRole 着色 who 标签。*/
+  role?: string;
+  /** UI 显示用角色名（"鲁班" ...）。*/
+  role_display?: string;
+  /** EventKind::DeliverableProduced.deliverable_kind serde 值（snake_case）：
+   *  research_summary / code_change / test_result / decision_request / error_block。*/
+  deliverable_kind: string;
+  /** ProjectId 是 transparent String → wire 是裸字符串如 "erp"。下载 URL 拼接用。*/
+  project: string;
+  /** TaskId 是 transparent Uuid → wire 是裸 uuid 字符串。下载 URL 拼接用。*/
+  task: string;
+  files: DeliverableFileEntry[];
+  ts: number;
+}
+
 /** bug #76 · 系统注入消息（bridge / sentinel addendum 转发到玄女的非用户消息）。
  *  渲染在玄女侧（左）+ 「系统」角标，区别于右侧 user bubble。
  *
@@ -156,6 +187,7 @@ export type Message =
   | ToolCallMessage
   | SystemMessage
   | InlineFileMessage
+  | DeliverableMessage
   | ThinkingMessage
   | StatusMarker;
 
@@ -793,6 +825,30 @@ export function applyWorkerEvent(
     return [...prev, next];
   }
 
+  // P3 段 A · 门客 deliverable 镜像到对话流（私聊页：worker 在 task 上 produce 工件 → 出附件卡）
+  if (k.type === "deliverable_produced") {
+    const project = (k as { project?: string }).project ?? "";
+    const task = (k as { task?: string }).task ?? "";
+    const deliverable_kind = (k as { deliverable_kind?: string }).deliverable_kind ?? "";
+    const files = (k as { files?: DeliverableFileEntry[] }).files ?? [];
+    if (!project || !task || files.length === 0) return prev;
+    const id = ev.meta.id || `dv-${ts}-${prev.length}`;
+    if (prev.some((m) => m.id === id)) return prev;
+    const next: DeliverableMessage = {
+      kind: "deliverable",
+      id,
+      agent: ctx.agent,
+      role: ctx.role,
+      role_display: ctx.role_display ?? "门客",
+      deliverable_kind,
+      project,
+      task,
+      files,
+      ts,
+    };
+    return [...prev, next];
+  }
+
   return prev;
 }
 
@@ -1144,6 +1200,32 @@ export function applyTaskThreadEvent(
       filename,
       mime,
       body,
+      ts,
+    };
+    return [...prev, next];
+  }
+
+  // P3 段 A · 门客 deliverable 镜像到对话流（多 worker 任务页 + 单 worker 私聊页）
+  if (k.type === "deliverable_produced") {
+    if (!agent) return prev;
+    const project = (k as { project?: string }).project ?? "";
+    const task = (k as { task?: string }).task ?? "";
+    const deliverable_kind = (k as { deliverable_kind?: string }).deliverable_kind ?? "";
+    const files = (k as { files?: DeliverableFileEntry[] }).files ?? [];
+    if (!project || !task || files.length === 0) return prev;
+    const id = ev.meta.id || `dv-${ts}-${prev.length}`;
+    if (prev.some((m) => m.id === id)) return prev;
+    const member = lookupMember(ctx, agent);
+    const next: DeliverableMessage = {
+      kind: "deliverable",
+      id,
+      agent,
+      role: member?.role,
+      role_display: member?.role_display ?? "门客",
+      deliverable_kind,
+      project,
+      task,
+      files,
       ts,
     };
     return [...prev, next];
