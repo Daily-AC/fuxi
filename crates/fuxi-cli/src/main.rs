@@ -13,8 +13,8 @@
 
 use clap::{Parser, Subcommand};
 use fuxi_cli::{
-    banner, demo, dist, memory_cmd, project_cmd, repl, skill, subcommands, theme, up, watch,
-    xuannv_cmd,
+    banner, demo, dist, memory_cmd, note_cmd, project_cmd, repl, skill, subcommands, theme, up,
+    watch, xuannv_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -74,6 +74,9 @@ enum Command {
     /// 文件级交付产物（Decision 22）—— 手动 produce 用。
     #[command(subcommand)]
     Deliverable(DeliverableCmd),
+    /// 【门客工具】轻量文件推送 —— 把一段小 markdown/纯文本直接贴进任务对话流。
+    /// `fuxi note --task <id> [--from <agent-uuid>] <file>`。≤ 256KB；超限走 deliverable。
+    Note(note_cmd::NoteArgs),
     /// L3 持久 sandbox 管理（Decision 21）—— per-门客 per-project 长期工作区。
     #[command(subcommand)]
     Sandbox(SandboxCmd),
@@ -229,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Deliverable(d)) => match d {
             DeliverableCmd::Produce(args) => project_cmd::run_deliverable_produce(args).await,
         },
+        Some(Command::Note(args)) => note_cmd::run_note(args).await,
         Some(Command::Sandbox(s)) => match s {
             SandboxCmd::List(args) => project_cmd::run_sandbox_list(args).await,
             SandboxCmd::Retire(args) => project_cmd::run_sandbox_retire(args).await,

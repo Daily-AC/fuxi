@@ -28,6 +28,7 @@ import { useApi } from "~/components/ApiProvider";
 import { Composer } from "~/components/Composer";
 import { UserBubble } from "~/components/messages/UserBubble";
 import { WorkerBubble } from "~/components/messages/WorkerBubble";
+import { InlineFileCard } from "~/components/messages/InlineFileCard";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
@@ -311,6 +312,14 @@ const Thread: Component<ThreadProps> = (props) => {
             if (msg.kind === "marker") return <StatusMarkerRow msg={msg} />;
             // bug #76：bridge 抄送（用户直接对该 worker 说话时）
             if (msg.kind === "system") return <SystemMessageRow msg={msg} />;
+            // P2.7 · 门客 inline 文件推送
+            if (msg.kind === "inline_file") {
+              return (
+                <div class={styles.rowLeft}>
+                  <InlineFileCard msg={msg} />
+                </div>
+              );
+            }
             return null;
           }}
         </For>

@@ -363,6 +363,7 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         DeliverableAccepted { .. } => "deliverable_accepted",
         DeliverableRejected { .. } => "deliverable_rejected",
         DeliverableExpired { .. } => "deliverable_expired",
+        AgentInlineMessagePushed { .. } => "agent_inline_message_pushed",
         Custom { .. } => "custom",
     }
 }

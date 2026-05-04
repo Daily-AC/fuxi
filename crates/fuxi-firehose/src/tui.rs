@@ -556,6 +556,19 @@ fn summarize(k: &EventKind) -> String {
         DeliverableExpired { task } => {
             format!("deliv⌛ {}", short_id(&task.to_string()))
         }
+        AgentInlineMessagePushed {
+            task,
+            from,
+            filename,
+            body,
+            ..
+        } => format!(
+            "note {} ← {} {} ({}B)",
+            short_id(&task.to_string()),
+            short_id(&from.to_string()),
+            filename,
+            body.len()
+        ),
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -646,6 +659,11 @@ fn color_for(k: &EventKind) -> Color {
         // 因都是"门客主动呈给玄女/用户"的同语义；rejected/expired 走 LightRed。
         DeliverableProduced { .. } | DeliverableAccepted { .. } => Color::LightYellow,
         DeliverableRejected { .. } | DeliverableExpired { .. } => Color::LightRed,
+
+        // P2.7 inline 文件推送 —— 与 deliverable 同语义"门客主动呈"，
+        // 但更轻（无文件落地、不进收件箱），用 LightCyan 与 deliverable
+        // 家族（LightYellow）区分。
+        AgentInlineMessagePushed { .. } => Color::LightCyan,
 
         Custom { .. } => Color::DarkGray,
     }

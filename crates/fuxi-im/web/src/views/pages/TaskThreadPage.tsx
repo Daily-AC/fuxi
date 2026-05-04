@@ -29,6 +29,7 @@ import { MentionComposer } from "~/components/MentionComposer";
 import { UserBubble } from "~/components/messages/UserBubble";
 import { WorkerBubble } from "~/components/messages/WorkerBubble";
 import { XuannvBubble } from "~/components/messages/XuannvBubble";
+import { InlineFileCard } from "~/components/messages/InlineFileCard";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
@@ -564,6 +565,14 @@ const Thread: Component<ThreadProps> = (props) => {
             if (msg.kind === "marker") return <StatusMarkerRow msg={msg} />;
             // bug #76：bridge / sentinel 注入的系统消息走玄女侧灰底气泡
             if (msg.kind === "system") return <SystemMessageRow msg={msg} />;
+            // P2.7 · 门客 inline 文件推送（左对齐 worker 侧）
+            if (msg.kind === "inline_file") {
+              return (
+                <div class={styles.rowLeft}>
+                  <InlineFileCard msg={msg} />
+                </div>
+              );
+            }
             return null;
           }}
         </For>

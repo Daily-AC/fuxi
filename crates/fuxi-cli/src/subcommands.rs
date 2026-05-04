@@ -676,6 +676,13 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
                 .unwrap_or_default()
         ),
         DeliverableExpired { task } => format!("{task} expired"),
+        AgentInlineMessagePushed {
+            task,
+            from,
+            filename,
+            mime,
+            body,
+        } => format!("{task} ← {from} {filename} ({mime}, {} bytes)", body.len()),
     }
 }
 

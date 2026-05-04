@@ -1,0 +1,75 @@
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  /* 比 WorkerBubble 宽一些（90% vs 78%）—— inline file 一般是技术内容
+   * (md 列表/代码块/表格)，给更大可读区。 */
+  max-width: 92%;
+  width: 100%;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: var(--size-aux);
+}
+
+.name {
+  font-weight: var(--weight-semibold);
+  color: var(--accent);
+  letter-spacing: 0.2px;
+}
+
+.sep {
+  color: var(--text-muted);
+}
+
+.filename {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+  word-break: break-all;
+}
+
+.meta {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  font-feature-settings: "tnum";
+}
+
+.time {
+  margin-left: auto;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  font-feature-settings: "tnum";
+}
+
+.card {
+  width: 100%;
+  padding: 12px 14px;
+  background: #2A241E;
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-bubble);
+  border-top-left-radius: 6px;
+  font-size: var(--size-body);
+  line-height: 1.45;
+  /* WorkerBubble 同款溢出防御 —— md 长 token 不撑爆 row 边界 */
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--size-aux);
+  line-height: 1.5;
+  color: var(--text-primary);
+}
