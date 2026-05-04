@@ -1096,7 +1096,10 @@ mod tests {
         let (target, interrupt_first, text) = &calls[0];
         assert_eq!(*target, xuannv);
         assert!(!*interrupt_first, "抄送是追加式，不打断当前 turn");
-        assert!(text.contains("[CC]"), "prompt 应含 [CC] 标识: {text}");
+        assert!(
+            text.contains("[CC · 仅知情]"),
+            "prompt 应含 [CC · 仅知情] 标识: {text}"
+        );
         assert!(text.contains("luban"), "prompt 应含 role: {text}");
         assert!(text.contains("你好门客"), "prompt 应含原文: {text}");
     }
