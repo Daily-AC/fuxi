@@ -1,20 +1,79 @@
 name: release
 
-# tag `v*` 触发，cross-build fuxi-cli for linux/macos，推 GitHub Release。
-# 一键安装入口（install-local-worker.sh）走 latest release 拉对应 platform asset。
+# 自动版本号 + 跨平台 build + GitHub Release。
+#
+# 触发：
+#   - push tag v* → 用该 tag 直接 build + release（手动打的 tag 走这条）
+#   - push to main → 自动 patch +1（latest v* → v{maj}.{min}.{pat+1}）→ 同流程
+#   - workflow_dispatch → 不打 tag 只 dry-run build（开发期）
+#
+# install-local-worker.sh 走 GitHub `latest release` 拉 asset，所以只要每次
+# push 都自动出新 release，远程 worker 永远装到最新 fuxi-cli。
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
-  # 手动触发也行（workflow_dispatch 给开发期 dry-run 用）
   workflow_dispatch:
 
 permissions:
-  contents: write # 创建 release + upload assets 必需
+  contents: write # 创建 release + upload assets + push tag 必需
 
 jobs:
+  # —— 决定本次 release 的 tag 名 ——
+  # tag push  → 直接用该 tag 名（不 bump，避免冲突）
+  # main push → 读 latest v* tag → patch +1，git push 新 tag
+  # dispatch  → 同 main push 路径
+  resolve-tag:
+    name: resolve / bump tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+      created: ${{ steps.r.outputs.created }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # 用 PAT 推 tag 才能再触发后续 workflow（GITHUB_TOKEN 推不会触发）。
+          # 但本 workflow 里 build job 直接 needs resolve-tag，不依赖 tag 触发，
+          # 所以默认 token 够用。
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: r
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF}"
+          if [[ "${ref}" == refs/tags/v* ]]; then
+            tag="${ref#refs/tags/}"
+            echo "已带 tag push，复用：${tag}"
+            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # main / dispatch：读 latest v* → patch+1
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)
+          if [[ -z "${latest}" ]]; then
+            new="v0.1.0"
+          else
+            ver="${latest#v}"
+            IFS='.' read -r maj min pat <<<"${ver}"
+            new="v${maj}.${min}.$((pat+1))"
+          fi
+          echo "latest=${latest:-<none>} → new=${new}"
+
+          # 推 tag 到 remote 让 install-local-worker.sh 拉得到
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${new}" -m "auto-tag ${new}"
+          git push origin "${new}"
+          echo "tag=${new}" >> "$GITHUB_OUTPUT"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
   build:
     name: build ${{ matrix.target }}
+    needs: resolve-tag
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +87,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # checkout 到 resolve-tag 决定的 ref——保证 build 出的 binary 和
+          # 后面 release 的 tag 严格对应（避免 main 边推 commit 边 build 的 race）
+          ref: ${{ needs.resolve-tag.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -62,9 +125,10 @@ jobs:
 
   publish:
     name: publish release
-    needs: build
+    needs: [resolve-tag, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # workflow_dispatch dry-run 不发 release——只验 build
+    if: github.event_name != 'workflow_dispatch'
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -76,6 +140,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
           files: |
             dist/fuxi-linux-x86_64.tar.gz
             dist/fuxi-linux-x86_64.tar.gz.sha256
