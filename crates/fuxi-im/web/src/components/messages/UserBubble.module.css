@@ -7,10 +7,13 @@
 
 .bubble {
   max-width: 78%;
-  /* #68 fix · width: fit-content 让 bubble 跟内容尺寸贴合，而不是被父级 .row(flex column align-end)
-   * 压到 min-content 让单字符 break 成竖排（"hi" → "h\ni"）。fit-content 在内容窄时贴内容，
-   * 内容超 max-width 时贴 max-width，正好达到"短文本不竖排 + 长文本仍折行"的效果。 */
+  /* #68 fix · width: fit-content 让 bubble 跟内容尺寸贴合，"hi" → "hi" 不竖排。
+   * bug #77：mention chip 加进 bubble 后 fit-content 算 chip 一行 + text 一行
+   * 取 max(min-content)——chip 短 ~80px → bubble 窄到 80px → text "还活着么"
+   * 被强制 wrap 成「还/活/着/么」竖。修：min-width 加 7em 兜底，让短文本至少
+   * 一行能装下；fit-content 仍处理超长 → max-width 78% 折行。 */
   width: fit-content;
+  min-width: min(7em, 100%);
   padding: 12px 14px;
   background: var(--user-bubble);
   color: var(--user-bubble-text);

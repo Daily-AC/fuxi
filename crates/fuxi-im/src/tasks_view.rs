@@ -432,11 +432,18 @@ pub async fn aggregate(fuxi: &Fuxi, bus: &EventBus) -> crate::Result<ListTasksRe
                 .or_else(|| acc.agent_last_text.get(agent_id))
                 .cloned();
             let last_tool_call = acc.agent_last_tool_call.get(agent_id).cloned();
-            // #51 修：task 已终结时强制 idle——前端 banner / member 卡显"已完成"
-            // 不再误把 worker 后续派活的 busy 状态算到本 task 头上。task 仍 running
-            // 时正常读 live shelf。
+            // #51 修：task 已终结时不读 worker live status（避免把 worker 后续派活的 busy
+            // 误算本 task）。但 bug #77 实测：原版强返 "idle" 让所有已 GC 的 worker 也显
+            // "已歇 · 待命"，用户根本分不清门客死活。改：task done 后仅区分 dead vs alive
+            //   - shelf None / Dead → "dead" (GC 走 / 异常退出 → 已下线，需重 spawn)
+            //   - shelf Idle / Busy → "idle" (worker 活着，可召回，不区分是否在新 task busy)
+            // 与 W5 前端文案矩阵配合：banner 显「已歇 · 待命」/「已歇 · 已下线」。
             let status = if task_terminated {
-                "idle".into()
+                let shelf_status = fuxi.status_of(*agent_id).await;
+                match shelf_status {
+                    Some(ShelfStatus::Dead) | None => "dead".into(),
+                    _ => "idle".into(),
+                }
             } else {
                 let shelf_status = fuxi.status_of(*agent_id).await;
                 member_status(shelf_status, thinking)

@@ -361,6 +361,7 @@ async fn handle_event(
             target,
             text,
             attachments,
+            system_origin,
             ..
         } if *target == xuannv_id => {
             // 阶段 3：附件 id 列表落 messages.attachments JSON 数组，PWA 历史回显时
@@ -376,13 +377,24 @@ async fn handle_event(
                         .collect(),
                 ))
             };
+            // bug #77：系统注入（bridge / sentinel）的 user_intervention_sent
+            // 持久化时 role 写 "system" + content 含 origin，让 fromStoredMessage
+            // 历史回放时还原 SystemMessage（玄女侧灰底气泡），不被错误显示成右侧
+            // user bubble。普通用户敲键盘的 intervene system_origin=None 仍走 "user"。
+            let (role, content) = match system_origin.as_deref() {
+                Some(origin) => (
+                    "system",
+                    serde_json::json!({ "text": text, "origin": origin }),
+                ),
+                None => ("user", serde_json::json!({ "text": text })),
+            };
             store
                 .append_message(
                     conv_id,
-                    "user",
+                    role,
                     None,
                     "text",
-                    &serde_json::json!({ "text": text }),
+                    &content,
                     attach_json.as_ref(),
                     Some(&source_id),
                     ev.meta.at,
