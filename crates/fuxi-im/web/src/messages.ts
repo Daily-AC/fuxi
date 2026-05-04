@@ -399,6 +399,23 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
   if (s.kind === "text") {
     const text = textFromContent(s.content);
     const attachIds = Array.isArray(s.attachments) ? s.attachments : [];
+    // bug #77：conv_store 把系统注入（review_request/carbon_copy 等）role 写
+    // "system" + content {text, origin}，回放时还原 SystemMessage（玄女侧
+    // 灰底气泡），不被错显成右侧 user bubble。
+    if (s.role === "system") {
+      if (text.trim() === "") return null;
+      const origin =
+        s.content && typeof s.content === "object" && "origin" in s.content
+          ? String((s.content as { origin?: string }).origin ?? "")
+          : "";
+      return {
+        kind: "system",
+        id: s.id,
+        origin: origin || "carbon_copy",
+        text,
+        ts,
+      };
+    }
     // user text 允许空文本 + 仅附件（用户只发图场景），其它 role 仍按空丢
     if (s.role === "user") {
       if (text.trim() === "" && attachIds.length === 0) return null;

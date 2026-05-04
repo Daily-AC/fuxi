@@ -58,6 +58,16 @@
   padding: 1px 6px;
   border-radius: 4px;
   color: inherit;
+  /* bug #77：长 inline code（如 `crates/fuxi-im/web/src/...` 路径串）默认 nowrap 会撑出
+   * bubble max-width，用户被迫横向滑。允许在任意字符断行。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* bug #77：md 根容器约束 max-width 100% 防 child 撑爆父 bubble */
+.md {
+  max-width: 100%;
+  min-width: 0;
 }
 
 /* code block · surface 底 + padding 12 + radius card */
