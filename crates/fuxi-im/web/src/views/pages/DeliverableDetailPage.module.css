@@ -167,11 +167,12 @@
   gap: var(--space-1);
 }
 
+/* bug #77 用户："你看红框这么空那个红框和正文不要左右布局要不然正文都很挤
+ * 不好阅读" → 老 phase 1 用 `display: grid 1fr auto auto` 三列，把 fileHeader
+ * 挤左侧 1fr、preview 卡进右侧 grid cell 双区域，预览正文非常窄。改 block：
+ * header（filename + size + sha + ⬇ icon）一整行在上，preview 区下面占满宽。 */
 .fileRow {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  align-items: center;
-  gap: var(--space-3);
+  display: block;
   padding: var(--space-2);
   border-radius: 6px;
 }

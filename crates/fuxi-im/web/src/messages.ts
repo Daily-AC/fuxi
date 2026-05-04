@@ -495,6 +495,16 @@ function lastStreamingWorker(prev: Message[]): WorkerMessage | null {
   return last && last.kind === "worker" && last.streaming ? last : null;
 }
 
+/** bug #77 · agent id normalize：wire 上 target/meta.agent 序列化是裸 uuid
+ *  (`AgentId` serde transparent)，但前端 ctx.agent 来自 backend Display
+ *  (`agent-<uuid>`)。三 reducer 直接 `===` 比较永远 false → 用户消息全丢。
+ *  比较前两侧都 strip 前缀。 */
+export function eqAgent(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return a === b;
+  const norm = (s: string): string => (s.startsWith("agent-") ? s.slice("agent-".length) : s);
+  return norm(a) === norm(b);
+}
+
 function lastStreamingThinking(prev: Message[]): ThinkingMessage | null {
   const last = prev[prev.length - 1];
   return last && last.kind === "thinking" && last.streaming ? last : null;
@@ -527,7 +537,7 @@ function findRunningToolIdx(prev: Message[], agent: string, tool: string): numbe
     if (
       m &&
       m.kind === "tool_call" &&
-      m.agent === agent &&
+      eqAgent(m.agent, agent) &&
       m.tool === tool &&
       m.status === "running"
     ) {
@@ -551,7 +561,8 @@ export function applyWorkerEvent(
   // 私聊页只接 target == ctx.agent 的；server-side 应已 filter，这里再防一次。
   if (k.type === "user_intervention_sent") {
     const target = (k as { target?: string }).target;
-    if (target !== ctx.agent) return prev;
+    // bug #77：wire target 是裸 uuid，ctx.agent 含 `agent-` 前缀 → eqAgent 兼容
+    if (!eqAgent(target, ctx.agent)) return prev;
     const text = (k as { text?: string }).text ?? "";
     if (text.trim() === "") return prev;
     // bug #76 · 系统注入（非用户敲键盘）走 SystemMessage，不展现成 UserBubble
@@ -577,7 +588,8 @@ export function applyWorkerEvent(
   }
 
   // 下面所有事件都要求 meta.agent == ctx.agent；不匹配丢
-  if (evAgent !== ctx.agent) return prev;
+  // bug #77 wire normalize（同 target 处理）
+  if (!eqAgent(evAgent, ctx.agent)) return prev;
 
   // —— 流式 thinking（折叠条 + 完结时填 duration） ——
   if (k.type === "thinking_started") {
@@ -762,12 +774,18 @@ function lookupMember(ctx: TaskThreadCtx, agent: string | null | undefined):
   | { role: string; role_display: string }
   | null {
   if (!agent) return null;
-  return ctx.members[agent] ?? null;
+  // bug #77：直接 key 命中（旧路径）or eqAgent 兼容前缀差异
+  const direct = ctx.members[agent];
+  if (direct) return direct;
+  for (const [k, v] of Object.entries(ctx.members)) {
+    if (eqAgent(k, agent)) return v;
+  }
+  return null;
 }
 
 function isXuannvAgent(ctx: TaskThreadCtx, agent: string | null | undefined): boolean {
   if (!agent) return false;
-  if (agent === ctx.xuannv_id) return true;
+  if (eqAgent(agent, ctx.xuannv_id ?? null)) return true;
   const m = lookupMember(ctx, agent);
   return m?.role === "xuannv";
 }
@@ -776,8 +794,9 @@ function lastStreamingFrom(prev: Message[], agent: string): WorkerMessage | Xuan
   for (let i = prev.length - 1; i >= 0; i -= 1) {
     const m = prev[i];
     if (!m) continue;
-    if (m.kind === "worker" && m.agent === agent && m.streaming) return m;
-    if (m.kind === "xuannv" && m.agent === agent && m.streaming) return m;
+    // bug #77 eqAgent · 兼容 wire 裸 uuid vs ctx 含 agent- 前缀
+    if (m.kind === "worker" && eqAgent(m.agent, agent) && m.streaming) return m;
+    if (m.kind === "xuannv" && eqAgent(m.agent, agent) && m.streaming) return m;
     // 一旦遇到非 streaming 的同 agent 或不同 agent 终态，就停止往前找
     if (m.kind === "worker" || m.kind === "xuannv") return null;
   }
@@ -788,7 +807,7 @@ function lastStreamingThinkingFrom(prev: Message[], agent: string): ThinkingMess
   for (let i = prev.length - 1; i >= 0; i -= 1) {
     const m = prev[i];
     if (!m) continue;
-    if (m.kind === "thinking" && m.agent === agent && m.streaming) return m;
+    if (m.kind === "thinking" && eqAgent(m.agent, agent) && m.streaming) return m;
   }
   return null;
 }
