@@ -111,12 +111,30 @@ export interface StatusMarker {
   ts: number;
 }
 
+/** bug #76 · 系统注入消息（bridge / sentinel addendum 转发到玄女的非用户消息）。
+ *  渲染在玄女侧（左）+ 「系统」角标，区别于右侧 user bubble。
+ *
+ *  来源标记 origin（同后端 EventKind.system_origin）：
+ *  - `agent_dead` — 门客下线通知
+ *  - `trigger_fired` — 更漏触发
+ *  - `review_request` — 门客交付呈递待审
+ *  - `review_timeout` — 呈递重试超时兜底
+ *  - `carbon_copy` — 用户对门客说话的抄送 */
+export interface SystemMessage {
+  kind: "system";
+  id: string;
+  origin: string;
+  text: string;
+  ts: number;
+}
+
 export type Message =
   | UserMessage
   | XuannvMessage
   | FileMessage
   | WorkerMessage
   | ToolCallMessage
+  | SystemMessage
   | ThinkingMessage
   | StatusMarker;
 
@@ -248,6 +266,23 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
   // optimistic 已渲染过纯文本部分（pending bubble），attachments 通过 ws 事件
   // 二次到达时给已存在的 user bubble 补上附件渲染（id 匹配走 mergeMessages 去重）。
   if (k.type === "user_intervention_sent") {
+    const origin = (k as { system_origin?: string | null }).system_origin;
+    // bug #76 · 系统注入（bridge / sentinel）→ 玄女侧 SystemMessage，不走 user bubble
+    if (origin) {
+      const evTs = parseTs(ev.meta.at);
+      const id = ev.meta.id || `sys-${evTs}-${prev.length}`;
+      if (prev.some((m) => m.id === id)) return prev;
+      const text = (k as { text?: string }).text ?? "";
+      if (text.trim() === "") return prev;
+      const next: SystemMessage = {
+        kind: "system",
+        id,
+        origin,
+        text,
+        ts: evTs,
+      };
+      return [...prev, next];
+    }
     const evId = ev.meta.id;
     const attachments = (k as { attachments?: string[] }).attachments ?? [];
     if (!evId || attachments.length === 0) return prev;
@@ -519,6 +554,14 @@ export function applyWorkerEvent(
     if (target !== ctx.agent) return prev;
     const text = (k as { text?: string }).text ?? "";
     if (text.trim() === "") return prev;
+    // bug #76 · 系统注入（非用户敲键盘）走 SystemMessage，不展现成 UserBubble
+    const origin = (k as { system_origin?: string | null }).system_origin;
+    if (origin) {
+      const id = ev.meta.id || `sys-${ts}-${prev.length}`;
+      if (prev.some((m) => m.id === id)) return prev;
+      const next: SystemMessage = { kind: "system", id, origin, text, ts };
+      return [...prev, next];
+    }
     // optimistic 已渲染过的不重复（id 重复时 mergeMessages 会去重；这里直接 push 让 dedupe 处理）
     const id = ev.meta.id || `u-${ts}-${prev.length}`;
     const already = prev.some((m) => m.id === id);
@@ -801,6 +844,13 @@ export function applyTaskThreadEvent(
     if (text.trim() === "" && attachments.length === 0) return prev;
     const id = ev.meta.id || `u-${ts}-${prev.length}`;
     if (prev.some((m) => m.id === id)) return prev;
+    // bug #76：系统注入（bridge 转发的 [REVIEW_REQUEST] / [TRIGGER_FIRED] 等）
+    // 走 SystemMessage 渲染玄女侧灰底气泡，不走右侧 user bubble。
+    const origin = (k as { system_origin?: string | null }).system_origin;
+    if (origin) {
+      const next: SystemMessage = { kind: "system", id, origin, text, ts };
+      return [...prev, next];
+    }
     const mentions = (k as { mentions?: string[] }).mentions ?? [];
     const next: UserMessage = {
       kind: "user",

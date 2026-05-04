@@ -6189,6 +6189,7 @@ mod tests {
                 mentions: vec![worker],
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         ));
 

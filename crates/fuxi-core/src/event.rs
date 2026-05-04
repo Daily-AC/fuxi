@@ -280,6 +280,24 @@ pub enum EventKind {
         /// 老事件 `#[serde(default)]` 回放回空 Vec，向后兼容。
         #[serde(default)]
         attachments: Vec<String>,
+        /// 系统注入来源标记 —— 非 None 时表示该 intervene 不是用户敲键盘发的，
+        /// 而是 bridge / sentinel addendum 等内部路径转发的系统消息。
+        ///
+        /// 取值（snake_case，跟 wire 一致）：
+        /// - `"review_request"` — bridge 把 `AgentRequestReview` 翻成 `[REVIEW_REQUEST]`
+        ///   注入玄女
+        /// - `"review_timeout"` — bridge 把 `ReviewRequestTimeout` 翻成 `[REVIEW_TIMEOUT]`
+        ///   兜底注入
+        /// - `"agent_dead"` — bridge 把门客 `AgentDead` 转「门客 X 已下线」
+        /// - `"trigger_fired"` — bridge 把 `TriggerFired` 拼三段式 `[TRIGGER_FIRED ...]`
+        /// - `"carbon_copy"` — bridge 把 `OrchestratorCcReceived` 翻成 `[CC]` 抄送
+        ///
+        /// PWA reducer 看到此字段非 None → 渲染成玄女侧的「系统消息」气泡（左侧灰底
+        /// 加角标），而不是右侧 user bubble，避免把系统注入误展示成用户语录。
+        ///
+        /// 老事件（pre-2026-05-03）`#[serde(default)]` 回放回 None，向后兼容。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_origin: Option<String>,
     },
     /// 门客因介入被打断当前 turn（`control_request/interrupt` 已送达）。
     /// 仅在 `mode=interrupt` 的介入路径上发。
@@ -582,6 +600,7 @@ mod tests {
                 mentions: vec![target, other],
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         };
         let json = serde_json::to_string(&ev).expect("ser");
@@ -642,6 +661,7 @@ mod tests {
                 mentions: vec![target],
                 pinned_node: Some("mac-local".into()),
                 attachments: Vec::new(),
+                system_origin: None,
             },
         };
         let json = serde_json::to_string(&ev).expect("ser");

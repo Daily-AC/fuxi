@@ -32,6 +32,7 @@ import { XuannvBubble } from "~/components/messages/XuannvBubble";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
+import { SystemMessageRow } from "~/components/messages/SystemMessageRow";
 import {
   candidatesFromMembers,
   candidatesFromNodes,
@@ -554,6 +555,8 @@ const Thread: Component<ThreadProps> = (props) => {
             if (msg.kind === "tool_call") return <ToolCallCard msg={msg} />;
             if (msg.kind === "thinking") return <ThinkingRow msg={msg} />;
             if (msg.kind === "marker") return <StatusMarkerRow msg={msg} />;
+            // bug #76：bridge / sentinel 注入的系统消息走玄女侧灰底气泡
+            if (msg.kind === "system") return <SystemMessageRow msg={msg} />;
             return null;
           }}
         </For>

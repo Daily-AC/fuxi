@@ -1,0 +1,70 @@
+/* bug #76 · 系统注入消息（玄女侧 + 角标），区别右侧 user bubble */
+.row {
+  display: block;
+  width: 100%;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  align-self: stretch;
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-left: 3px solid var(--text-muted);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0;
+  /* 视觉信号：低饱和 + 轻虚线边——明确告诉用户"这不是普通对话气泡" */
+}
+
+.row[data-origin="agent_dead"],
+.row[data-origin="review_timeout"] {
+  border-left-color: var(--danger, #C76A6A);
+}
+
+.row[data-origin="review_request"],
+.row[data-origin="trigger_fired"] {
+  border-left-color: var(--accent);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+  font-size: var(--size-aux);
+}
+
+.tag {
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.kind {
+  color: var(--text-muted);
+  font-size: var(--size-meta);
+  letter-spacing: 0.2px;
+}
+
+.body {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.toggle {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  margin-top: 6px;
+  padding: 4px 0;
+  font-size: var(--size-aux);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.toggle:hover {
+  text-decoration: underline;
+}

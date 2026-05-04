@@ -260,6 +260,7 @@ mod filter_tests {
                 mentions: Vec::new(),
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         );
         assert!(task_thread_visible(&intervene, t));
@@ -273,6 +274,7 @@ mod filter_tests {
                 mentions: Vec::new(),
                 pinned_node: None,
                 attachments: Vec::new(),
+                system_origin: None,
             },
         );
         assert!(!task_thread_visible(&other, t));

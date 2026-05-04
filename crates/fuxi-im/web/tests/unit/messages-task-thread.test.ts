@@ -162,6 +162,29 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
     expect((out[0] as { text: string }).text).toContain("找到 12 条");
   });
 
+  it("bug #76 system_origin · UserInterventionSent 带 origin → SystemMessage 玄女侧而非 user bubble", () => {
+    const out = applyTaskThreadEvent(
+      [],
+      ev(
+        {
+          type: "user_intervention_sent",
+          target: "worker-x",
+          mode: "interrupt",
+          text: "[REVIEW_REQUEST] 鲁班 待审...",
+          mentions: [],
+          system_origin: "review_request",
+        } as ServerEvent["kind"],
+        { agent: XUANNV, id: "sys-1" },
+      ),
+      CTX,
+    );
+    expect(out).toHaveLength(1);
+    const m = out[0] as { kind: string; origin?: string; text: string };
+    expect(m.kind).toBe("system");
+    expect(m.origin).toBe("review_request");
+    expect(m.text).toContain("REVIEW_REQUEST");
+  });
+
   it("bug #76 marker dedup · 紧邻同 text marker 折叠（防止 cc 多 turn agent_idle 灰横线泛滥）", () => {
     let s: Message[] = [];
     // 模拟 cc 多 turn 连发 agent_idle
