@@ -111,6 +111,26 @@ export interface StatusMarker {
   ts: number;
 }
 
+/** P2.7 · 门客 inline 文件推送 · 走 EventKind::AgentInlineMessagePushed。
+ *  渲染：左侧（worker 侧）卡片，header = 文件名 + role 角标，body =
+ *  text/markdown 走 <Markdown />，text/plain 走 <pre>。
+ *  与 deliverable 收件箱区别：inline_file 不可 accept_to 落地、不在五分类，
+ *  仅"贴在对话里供瞄一眼"。 */
+export interface InlineFileMessage {
+  kind: "inline_file";
+  id: string;
+  agent: string;
+  /** role key（"luban" / ...）—— 用于 colorForRole 着 who 标签。*/
+  role?: string;
+  /** UI 显示用角色名（"鲁班" ...）。*/
+  role_display?: string;
+  filename: string;
+  /** "text/markdown" / "text/plain" —— 决定 body 渲染策略。*/
+  mime: string;
+  body: string;
+  ts: number;
+}
+
 /** bug #76 · 系统注入消息（bridge / sentinel addendum 转发到玄女的非用户消息）。
  *  渲染在玄女侧（左）+ 「系统」角标，区别于右侧 user bubble。
  *
@@ -135,6 +155,7 @@ export type Message =
   | WorkerMessage
   | ToolCallMessage
   | SystemMessage
+  | InlineFileMessage
   | ThinkingMessage
   | StatusMarker;
 
@@ -524,6 +545,8 @@ export function markUserMessage(
 export interface WorkerReducerCtx {
   /** 该私聊页绑定的 worker agent uuid。 */
   agent: string;
+  /** role key（"luban" 等），用于 colorForRole 着色。可选。 */
+  role?: string;
   /** UI 显示名（"鲁班" 等），用于 WorkerMessage.role_display。可选。 */
   role_display?: string;
 }
@@ -747,6 +770,27 @@ export function applyWorkerEvent(
     const summary = (k as { summary?: string }).summary;
     const text = summary ? `任务完成 · ${summary}` : "任务完成";
     return appendMarker(prev, ev, text, ts);
+  }
+
+  // P2.7 · 门客 inline 文件推送（私聊页：worker 把小报告/草稿直贴对话流）
+  if (k.type === "agent_inline_message_pushed") {
+    const filename = (k as { filename?: string }).filename ?? "untitled";
+    const mime = (k as { mime?: string }).mime ?? "text/plain";
+    const body = (k as { body?: string }).body ?? "";
+    const id = ev.meta.id || `if-${ts}-${prev.length}`;
+    if (prev.some((m) => m.id === id)) return prev;
+    const next: InlineFileMessage = {
+      kind: "inline_file",
+      id,
+      agent: ctx.agent,
+      role: ctx.role,
+      role_display: ctx.role_display ?? "门客",
+      filename,
+      mime,
+      body,
+      ts,
+    };
+    return [...prev, next];
   }
 
   return prev;
@@ -1080,6 +1124,29 @@ export function applyTaskThreadEvent(
     if (to === "Cancelled" || to === "cancelled") return appendMarker(prev, ev, "已取消", ts);
     if (to === "Failed" || to === "failed") return appendMarker(prev, ev, "任务失败", ts);
     return prev;
+  }
+
+  // P2.7 · 门客 inline 文件推送
+  if (k.type === "agent_inline_message_pushed") {
+    if (!agent) return prev;
+    const filename = (k as { filename?: string }).filename ?? "untitled";
+    const mime = (k as { mime?: string }).mime ?? "text/plain";
+    const body = (k as { body?: string }).body ?? "";
+    const id = ev.meta.id || `if-${ts}-${prev.length}`;
+    if (prev.some((m) => m.id === id)) return prev;
+    const member = lookupMember(ctx, agent);
+    const next: InlineFileMessage = {
+      kind: "inline_file",
+      id,
+      agent,
+      role: member?.role,
+      role_display: member?.role_display ?? "门客",
+      filename,
+      mime,
+      body,
+      ts,
+    };
+    return [...prev, next];
   }
 
   return prev;

@@ -545,6 +545,28 @@ pub enum EventKind {
         task: TaskId,
     },
 
+    // ── lightweight inline file push（P2.7）─────────────────
+    /// 门客把一段文字（通常是 markdown）直推到任务对话流——不进 deliverables
+    /// 收件箱、不做物理文件落地。用户在 PWA 任务私聊页里看到一个 worker bubble
+    /// 嵌入 md 预览的卡片。
+    ///
+    /// 与 `DeliverableProduced` 的产品分工：
+    /// - `DeliverableProduced` = 产物 / 工件级，进收件箱、可 accept_to 落地、走五分类
+    /// - `AgentInlineMessagePushed` = 通知/小报告，"我跑出来这个 markdown 你瞄一眼"
+    ///
+    /// `body` 上限 256KB（在 CLI 入口处校验），超限请走 deliverable。
+    /// `mime` 当前只承认 `text/markdown` / `text/plain`——前端按 mime 决定是否渲染 md。
+    AgentInlineMessagePushed {
+        task: TaskId,
+        from: AgentId,
+        /// 用户可见的文件名（basename，前端展示用）
+        filename: String,
+        /// `text/markdown` / `text/plain`
+        mime: String,
+        /// 文件正文，UTF-8。CLI 校验 ≤ 256KB。
+        body: String,
+    },
+
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
     /// minimum—prefer adding a typed variant.
@@ -1025,6 +1047,42 @@ mod tests {
             let back: EventKind = serde_json::from_value(v).expect("de");
             let again = serde_json::to_value(&back).expect("re-ser");
             assert_eq!(again.get("type").and_then(|x| x.as_str()), Some(expect));
+        }
+    }
+
+    /// P2.7 inline 文件推送：tag 一致 + body 完整往返。
+    #[test]
+    fn agent_inline_message_pushed_tag_and_roundtrip() {
+        let task = TaskId::new();
+        let from = AgentId::new();
+        let kind = EventKind::AgentInlineMessagePushed {
+            task,
+            from,
+            filename: "report.md".into(),
+            mime: "text/markdown".into(),
+            body: "# 报告\n\n你好世界".into(),
+        };
+        let v = serde_json::to_value(&kind).expect("ser");
+        assert_eq!(
+            v.get("type").and_then(|x| x.as_str()),
+            Some("agent_inline_message_pushed")
+        );
+        let back: EventKind = serde_json::from_value(v).expect("de");
+        match back {
+            EventKind::AgentInlineMessagePushed {
+                task: t,
+                from: f,
+                filename,
+                mime,
+                body,
+            } => {
+                assert_eq!(t, task);
+                assert_eq!(f, from);
+                assert_eq!(filename, "report.md");
+                assert_eq!(mime, "text/markdown");
+                assert_eq!(body, "# 报告\n\n你好世界");
+            }
+            other => panic!("expect AgentInlineMessagePushed, got {other:?}"),
         }
     }
 

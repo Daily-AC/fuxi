@@ -55,6 +55,7 @@ pub(crate) fn task_thread_visible(ev: &Event, task_id: TaskId) -> bool {
             | EventKind::ToolCallFinished { .. }
             | EventKind::ThinkingStarted
             | EventKind::ThinkingFinished
+            | EventKind::AgentInlineMessagePushed { .. }
             | EventKind::TaskStateChanged {
                 to: TaskState::Done | TaskState::Cancelled | TaskState::Delivering,
                 ..

@@ -36,6 +36,7 @@ pub mod ipc;
 pub mod l2_gc;
 pub mod markdown;
 pub mod memory_cmd;
+pub mod note_cmd;
 pub mod project_cmd;
 pub mod prompt_history;
 pub mod recall_sink;

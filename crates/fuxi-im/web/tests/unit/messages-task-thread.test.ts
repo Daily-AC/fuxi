@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTaskThreadEvent,
+  type InlineFileMessage,
   type Message,
   type TaskThreadCtx,
   type ToolCallMessage,
@@ -264,6 +265,69 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
       CTX,
     );
     expect(out).toBe(before);
+  });
+
+  it("P2.7 · agent_inline_message_pushed · 起 InlineFileMessage 含 mime/body/filename", () => {
+    const out = applyTaskThreadEvent(
+      [],
+      ev(
+        {
+          type: "agent_inline_message_pushed",
+          task: "task-1",
+          from: LUBAN,
+          filename: "report.md",
+          mime: "text/markdown",
+          body: "# 报告\n\n查到 12 条",
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-inline-1" },
+      ),
+      CTX,
+    );
+    expect(out).toHaveLength(1);
+    const m = out[0] as InlineFileMessage;
+    expect(m.kind).toBe("inline_file");
+    expect(m.id).toBe("ev-inline-1");
+    expect(m.agent).toBe(LUBAN);
+    expect(m.role).toBe("luban");
+    expect(m.role_display).toBe("鲁班");
+    expect(m.filename).toBe("report.md");
+    expect(m.mime).toBe("text/markdown");
+    expect(m.body).toBe("# 报告\n\n查到 12 条");
+  });
+
+  it("P2.7 · 同 id 不重复 push（防 ws + history 双注同一 inline_file）", () => {
+    const fst = applyTaskThreadEvent(
+      [],
+      ev(
+        {
+          type: "agent_inline_message_pushed",
+          task: "task-1",
+          from: LUBAN,
+          filename: "a.md",
+          mime: "text/markdown",
+          body: "x",
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dup" },
+      ),
+      CTX,
+    );
+    const snd = applyTaskThreadEvent(
+      fst,
+      ev(
+        {
+          type: "agent_inline_message_pushed",
+          task: "task-1",
+          from: LUBAN,
+          filename: "a.md",
+          mime: "text/markdown",
+          body: "x",
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dup" },
+      ),
+      CTX,
+    );
+    expect(snd).toHaveLength(1);
+    expect(snd).toBe(fst);
   });
 
   it("空 text 玄女 turn · 丢空 bubble（Bug #24 同款）", () => {
