@@ -12,6 +12,7 @@ import type { Message } from "~/messages";
 import { UserBubble } from "~/components/messages/UserBubble";
 import { XuannvBubble } from "~/components/messages/XuannvBubble";
 import { FileMessage } from "~/components/messages/FileMessage";
+import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import styles from "./Conversation.module.css";
 
 // 主屏 chat scroll · padding 16/20，gap 14。空态居中淡字。
@@ -84,6 +85,9 @@ export const Conversation: Component<ConversationProps> = (props) => {
               if (msg.kind === "user") return <UserBubble msg={msg} />;
               if (msg.kind === "xuannv") return <XuannvBubble msg={msg} />;
               if (msg.kind === "file") return <FileMessage msg={msg} />;
+              // bug #76：玄女自己跑工具（Bash fuxi:* / Read 等）以前在主对话页
+              // 不显示——applyEvent reducer 已补 tool_call 处理，这里加渲染分支。
+              if (msg.kind === "tool_call") return <ToolCallCard msg={msg} />;
               return null;
             }}
           </For>
