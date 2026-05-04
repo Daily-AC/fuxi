@@ -181,7 +181,11 @@ pub fn resolve_default_model() -> Option<String> {
         .filter(|s| !s.is_empty())
         .or_else(|| {
             let fb = DEFAULT_MODEL_FALLBACK.trim();
-            if fb.is_empty() { None } else { Some(fb.to_string()) }
+            if fb.is_empty() {
+                None
+            } else {
+                Some(fb.to_string())
+            }
         })
 }
 

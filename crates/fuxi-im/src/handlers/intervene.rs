@@ -35,9 +35,9 @@ use uuid::Uuid;
 /// 422 Unprocessable Entity → 用户撞「玄女正忙」误导文案。
 fn parse_agent_id_lenient(s: &str) -> std::result::Result<AgentId, String> {
     let trimmed = s.strip_prefix("agent-").unwrap_or(s);
-    Uuid::parse_str(trimmed)
-        .map(AgentId::from)
-        .map_err(|e| format!("agent id 不是合法 uuid（接受 `<uuid>` 或 `agent-<uuid>`）: {s} ({e})"))
+    Uuid::parse_str(trimmed).map(AgentId::from).map_err(|e| {
+        format!("agent id 不是合法 uuid（接受 `<uuid>` 或 `agent-<uuid>`）: {s} ({e})")
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,7 +95,12 @@ pub async fn intervene(
 
     // target 解析：body 显式 → 用之；否则 fallback 玄女。
     // bug #77：接受 `agent-<uuid>` 前缀（前端 AgentId Display 形式）+ 裸 uuid。
-    let target = match body.target.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let target = match body
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(t) => parse_agent_id_lenient(t)
             .map_err(|e| Error::BadRequest(format!("target 解析失败: {e}")))?,
         None => state.fuxi.xuannv_id().await.ok_or_else(|| {

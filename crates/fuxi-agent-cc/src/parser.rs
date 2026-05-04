@@ -400,9 +400,7 @@ pub fn translate(
             // bug #77：记 tool_use_id → tool_name 让下面的 UserToolResult 反查。
             // tool_id 空（极端情况）时 fallback 不入 map——finished 走 fallback 分支。
             if !tool_id.is_empty() {
-                state
-                    .tool_use_id_to_name
-                    .insert(tool_id, tool_name.clone());
+                state.tool_use_id_to_name.insert(tool_id, tool_name.clone());
             }
             out.push(mk_event(
                 agent_id,
@@ -844,7 +842,11 @@ mod tests {
             None,
         );
         match &out_finished[0].kind {
-            EventKind::ToolCallFinished { tool, ok, output_preview } => {
+            EventKind::ToolCallFinished {
+                tool,
+                ok,
+                output_preview,
+            } => {
                 assert_eq!(tool, "Bash", "应反查 tool_name 不是 tool_use_id");
                 assert!(*ok);
                 assert!(output_preview.contains("erp"));
