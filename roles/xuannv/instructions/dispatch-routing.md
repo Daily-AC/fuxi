@@ -16,26 +16,40 @@
 
 ## 派活规则（5 条决策树）
 
-按下面顺序判定：
+按下面顺序判定，**路由职责永远在 `dispatch` 上，不在 `spawn` 上**：
 
 1. **用户在 PWA 显式说"用 mac-local"** / `@mac-local` 等带节点名的指令
-   → 解析为 `task.pinned_node = "mac-local"`；**不要再叠 tag**。
+   → `fuxi dispatch --to <id> --pinned-node mac-local '...'`；**不要再叠 tag**。
 2. **涉及本地文件系统操作**（`~/erp` 等用户 macOS 项目）
-   → `task.required_tags = ["local"]`。
+   → `fuxi dispatch --to <id> --required-tags local '...'`。
 3. **涉及 ERP 项目**（用户的 ERP 业务代码、~/erp 路径下任何东西）
-   → `task.required_tags = ["erp"]`（蕴含 local；dist controller 按 tag 匹配
-   节点能力，erp 节点会自带 local 标签）。
+   → `--required-tags erp`（蕴含 local；erp 节点自带 local 标签）。
 4. **服务器维护**（nginx、systemd、docker、ssh、家里部署机相关）
-   → `task.required_tags = ["home"]`。
+   → `--required-tags home`。
 5. **不确定 / 纯调研 / 文字思考类**
-   → **不加 tag**（默认走 home 节点本地 spawn——dispatch 决策树 fallback）。
+   → **不加 tag / 不加 pinned-node**（默认 home 本地 spawn）。
 
-## 反模式
+### 完整范本（用户 @mac-local 跑命令）
 
-- 不要给"普通调研写代码"加 `["local"]` —— 默认 fallback 已经在 home 节点跑，
-  加 tag 反而绕一圈走 dist enqueue
-- 不要 pinned_node + required_tags 同时设——pinned_node 优先级更高，tag 会被忽略
-- 不要把不确定的活硬钉某节点——出错时调度可观测性会变差，让默认路径自己选
+```bash
+ID=$(fuxi spawn --role luban | tail -n1)            # spawn 不带 --node！
+fuxi dispatch --to "$ID" --pinned-node mac-local --title 'ls home' 'ls ~ 然后报告前 10 项'
+```
+
+**spawn 是本地起门客**（在我玄女的 home 节点上，不动）。**路由是 dispatch 的事**——
+`--pinned-node` / `--required-tags` 让编排层走 dist enqueue，远端 worker pull 后
+真在那台机器起 cc 跑。事件流回共享 EventBus，我和 PWA 都看得到。
+
+## 反模式（**强制**）
+
+- ❌ **绝不用 `fuxi spawn --node X`**——它走 gateway 路径，要求本机配
+  `$FUXI_DIST_CONTROLLER` env；当前部署**没配**，用了直接报"缺 dist controller"。
+  路由用 `dispatch --pinned-node` 即可（已实装通的那条）。
+- ❌ 不要给"普通调研写代码"加 `--required-tags local` —— 默认本地 spawn 已经
+  在 home 节点跑，加 tag 反而绕一圈走 dist enqueue。
+- ❌ 不要 `--pinned-node` 和 `--required-tags` 同时设——pinned-node 优先级更高，
+  tag 会被忽略。
+- ❌ 不要把不确定的活硬钉某节点——出错时调度可观测性会变差。
 
 ## 编排层会怎么处理
 
@@ -72,28 +86,20 @@
   足够
 - 同 (project, role) 重复 spawn → fuxi 自动复用现有 sandbox（idempotent），
   但 agent_id 不同；建议你**记录上次 spawn 的 agent_id**，dispatch 复用
-- 不要给 project sandbox spawn 同时叠 `--node`，**除非**该 worker 节点
-  已经 advertise `project:<slug>` tag（见下"跨节点项目 sandbox"段）
+- ❌ **永远不要给 spawn 加 `--node X`**——见上面"反模式（强制）"。路由用
+  `dispatch --pinned-node`
 
-### 跨节点项目 sandbox（Decision 21 phase 3）
+### 跨节点项目 sandbox（v2 待实装，**当前不可用**）
 
-当目标项目的 git repo 在**远端节点**（如 `~/erp` 在家里 home 服务器，
-但你的 fuxi-im 在 mac 上跑），`fuxi spawn --role luban --project erp --node home`
-会把 cc/codex 起到 home 节点对应的 `~/.fuxi/projects/erp/sandboxes/luban/`。
-
-**前置**：home 节点的 worker 必须先做两件事：
-1. 跑过 `fuxi project add ~/erp`，让本机 ProjectRegistry 有同 slug 注册
-2. dist worker 启动时 advertise `project:erp` tag：
-   ```bash
-   fuxi dist worker --node home --tag project:erp
-   ```
-
-派活时 fuxi 会自动给 `task.required_tags` 加 `project:erp`，controller 路由
-匹配 → 该 job 只能去带 `project:erp` tag 的 worker。worker 端 pull 后用 job
-里的 project + role 反查本机 ProjectRegistry，把 cc 起到对应 sandbox。
-
-如果 worker 没 advertise 该 tag → controller 拿不到 worker → job 卡在 queue
-→ 用户在 PWA 节点 tab 看到"job 排队中"。提示用户去那台 worker 加 tag。
+> 设计目标：当目标项目的 git repo 在远端节点时，让 cc/codex 起到该节点的
+> 对应 sandbox。设计文档见 Decision 21 phase 3。
+>
+> **当前部署不可用**——v1 的 home 既是 controller 又是 worker，没配
+> `$FUXI_DIST_CONTROLLER` env 让 fuxi-cli 走 gateway 路径。所以**不要**用
+> `fuxi spawn --node X --project Y` 这种语法，会直接报"缺 dist controller"。
+>
+> 用户当前要"远端节点跑活"用 `dispatch --pinned-node` 即可（见上面"派活
+> 规则"），项目 sandbox 还在 home 本机走。
 
 ### L2 vs L3：一次性活 vs 持续活
 
@@ -118,7 +124,7 @@ Project sandbox 有两层：
 ```bash
 # L2 一次性活：先 dispatch 创出 task-id，再用它起 ephemeral
 TASK_ID=$(fuxi dispatch --to <existing-agent> --print-task-id "调研..." )
-# 或者起 placeholder 任务先生成 task id：
+# 或者起 placeholder 任务先生成 task id（spawn 仍**不带 --node**）：
 fuxi spawn --role luban --project erp --ephemeral --task <task-id>
 # task 跑完 AgentDead 后 fuxi 自动归档 worktree（无需手动）
 

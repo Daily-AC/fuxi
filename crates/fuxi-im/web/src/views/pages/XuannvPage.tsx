@@ -175,7 +175,10 @@ export const XuannvPage: Component = () => {
           sha256: "",
         }))
       : undefined;
-    const m = makeUserMessage(req.text, ups);
+    const m = makeUserMessage(req.text, ups, {
+      mentions: req.mentions,
+      pinned_node: req.pinned_node,
+    });
     setMessages((prev) => [...prev, m]);
     await attemptIntervene(req, m.id);
   };
