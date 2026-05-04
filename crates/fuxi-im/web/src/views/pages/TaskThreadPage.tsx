@@ -191,17 +191,25 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
       setMessages((prev) => markUserMessage(prev, msgId, { pending: false, error: null }));
       return;
     } catch (err) {
+      // bug #77 文案三分：
+      //   task done + target=worker → "门客已下线" (worker 死了无法续聊)
+      //   task running + target=worker → "门客正忙" (worker 活着但 busy)
+      //   无 target / target=玄女 → "玄女正忙"
+      const hasWorkerTarget = Boolean(req.target);
+      const workerOffline = hasWorkerTarget && !isRunning;
+      const labelFor = (kind: "toast" | "inline"): string => {
+        if (workerOffline) {
+          return kind === "toast" ? "门客已下线，回去跟玄女继续聊" : "门客已下线";
+        }
+        if (hasWorkerTarget) {
+          return kind === "toast" ? "门客正忙，等这轮跑完再发" : "门客正忙";
+        }
+        return kind === "toast" ? "玄女正忙，稍后再试" : "玄女正忙";
+      };
       if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
-        // #68 fix · task 已完成（或无 worker target）时 4xx 是玄女 busy，不是门客 busy。
-        // 文案要区分：targetIsWorker = 任务 running 且 req.target 是 worker；否则是玄女路径。
-        const targetIsWorker = isRunning && Boolean(req.target);
-        const toastMsg = targetIsWorker
-          ? "门客正忙，等这轮跑完再发"
-          : "玄女正忙，稍后再试";
-        const inlineErr = targetIsWorker ? "门客正忙" : "玄女正忙";
-        pushToast(toastMsg, "error");
+        pushToast(labelFor("toast"), "error");
         setMessages((prev) =>
-          markUserMessage(prev, msgId, { pending: false, error: inlineErr }),
+          markUserMessage(prev, msgId, { pending: false, error: labelFor("inline") }),
         );
         return;
       }
@@ -214,9 +222,10 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
           );
           return;
         } catch (err2) {
+          // bug #77 · 503 二次失败常因 worker dead（task done）—— 走 labelFor 复用文案
           const msg =
             err2 instanceof ApiError && err2.status === 503
-              ? "服务暂忙，稍后再试"
+              ? labelFor("toast")
               : err2 instanceof Error
                 ? err2.message
                 : "发送失败";
