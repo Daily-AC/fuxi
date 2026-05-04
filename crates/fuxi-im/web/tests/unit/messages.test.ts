@@ -177,4 +177,32 @@ describe("messages.applyEvent · ServerEvent 嵌套", () => {
     expect(out).toHaveLength(1);
     expect((out[0] as { text: string }).text).toBe("你好。什么需要帮忙？");
   });
+
+  // bug #76：玄女主对话页之前不显示工具卡 + 思考。reducer 补 tool_call_started/finished
+  // 处理后 + Conversation 加 tool_call 分支，玄女自己跑 Bash fuxi:* / Read 也能 inline
+  // 看到。锁住字段映射（args + output_preview wire 名）防 #75 同款回归。
+  it("bug #76 · tool_call_started + tool_call_finished 配对成 ToolCallMessage", () => {
+    let s: Message[] = [];
+    s = applyEvent(
+      s,
+      ev(
+        { type: "tool_call_started", tool: "Bash", args: "fuxi spawn --role luban" },
+        { id: "tc-s", at: "2026-05-04T01:00:00Z" },
+      ),
+    );
+    s = applyEvent(
+      s,
+      ev(
+        { type: "tool_call_finished", tool: "Bash", ok: true, output_preview: "agent-xxx" },
+        { id: "tc-f", at: "2026-05-04T01:00:00.4Z" },
+      ),
+    );
+    expect(s).toHaveLength(1);
+    const t = s[0] as { kind: string; tool: string; status: string; args_summary: string; output: string };
+    expect(t.kind).toBe("tool_call");
+    expect(t.tool).toBe("Bash");
+    expect(t.status).toBe("ok");
+    expect(t.args_summary).toBe("fuxi spawn --role luban");
+    expect(t.output).toBe("agent-xxx");
+  });
 });

@@ -277,6 +277,59 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
     return next;
   }
 
+  // —— 工具调用配对（玄女主对话同款）·· bug #76 ——
+  // 用户实测玄女主对话页不显示工具卡。原因：applyEvent reducer 此前完全忽略
+  // tool_call_started/finished。门客私聊页 + task thread 都已支持，对齐补上。
+  // agent 字段直接来自 ev.meta.agent（玄女自己），不需 ctx 查询。
+  if (k.type === "tool_call_started") {
+    const agent = ev.meta.agent ?? "";
+    const ts = parseTs(ev.meta.at);
+    const tool = (k as { tool?: string }).tool ?? "tool";
+    const args = stringifyArgs((k as { args?: unknown }).args);
+    const next: ToolCallMessage = {
+      kind: "tool_call",
+      id: ev.meta.id || `tc-${ts}-${prev.length}`,
+      agent,
+      tool,
+      args_summary: args,
+      status: "running",
+      ts,
+    };
+    return [...prev, next];
+  }
+  if (k.type === "tool_call_finished") {
+    const agent = ev.meta.agent ?? "";
+    const ts = parseTs(ev.meta.at);
+    const tool = (k as { tool?: string }).tool ?? "tool";
+    const ok = Boolean((k as { ok?: boolean }).ok);
+    const output = stringifyOutput((k as { output_preview?: unknown }).output_preview);
+    const idx = findRunningToolIdx(prev, agent, tool);
+    if (idx >= 0) {
+      const running = prev[idx] as ToolCallMessage;
+      const updated: ToolCallMessage = {
+        ...running,
+        status: ok ? "ok" : "err",
+        duration_ms: ts - running.ts,
+        output,
+      };
+      const next = prev.slice();
+      next[idx] = updated;
+      return next;
+    }
+    // 未配上 started → 直接插完结态卡
+    const next: ToolCallMessage = {
+      kind: "tool_call",
+      id: ev.meta.id || `tc-${ts}-${prev.length}`,
+      agent,
+      tool,
+      status: ok ? "ok" : "err",
+      duration_ms: 0,
+      output,
+      ts,
+    };
+    return [...prev, next];
+  }
+
   // —— 阶段 3 才管 ——
   return prev;
 }
