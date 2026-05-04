@@ -291,24 +291,39 @@
   gap: var(--space-2);
 }
 
+/* bug #77 fileName 占据主行，sha + 下载 icon 跟在后面 */
+.fileHeader .fileName {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* bug #77 用户："下载占这么大空间不妥，布局重新做。下载按钮放在一个角落
+ * 就行，可以用icon表示" → icon-only 32×32 圆形角落按钮，预览主区域占满。 */
 .fileDownloadBtn {
   margin-left: auto;
   appearance: none;
   background: var(--surface-elevated, var(--surface));
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: var(--size-aux);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
   color: var(--accent);
   text-decoration: none;
-  min-height: 32px;
   display: inline-flex;
   align-items: center;
-  white-space: nowrap;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
 }
 
-.fileDownloadBtn:hover {
+.fileDownloadBtn:hover,
+.fileDownloadBtn:focus-visible {
   background: var(--accent-subtle, rgba(255, 138, 76, 0.1));
+  outline: none;
 }
 
 .imgPreview {
