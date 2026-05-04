@@ -335,8 +335,9 @@ const FileRow: Component<{
           download={props.file.name}
           data-testid={`deliverable-detail-download-${props.task}-${props.file.name}`}
           aria-label={`下载 ${props.file.name}`}
+          title="下载"
         >
-          ⬇ 下载
+          ⬇
         </a>
       </header>
       <Show when={previewable()}>

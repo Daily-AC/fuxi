@@ -94,7 +94,9 @@ describe("DeliverableDetailPage", () => {
     )) as HTMLAnchorElement;
     expect(dl.href).toContain(`/api/deliverables/erp/task-${TASK_UUID}/files/patch.diff`);
     expect(dl.getAttribute("download")).toBe("patch.diff");
-    expect(dl.textContent).toContain("下载");
+    // bug #77 改 icon-only：textContent 是 "⬇" 不再是 "下载"。aria-label/title 兜底语义。
+    expect(dl.getAttribute("aria-label")).toContain("下载");
+    expect(dl.getAttribute("title")).toBe("下载");
   });
 
   // bug #76：图片格式应显示 <img> 内联预览
