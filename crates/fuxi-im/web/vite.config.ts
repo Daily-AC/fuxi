@@ -22,10 +22,16 @@ export default defineConfig({
       registerType: "autoUpdate",
       injectRegister: "auto",
       // sw 仅缓静态资源；事件历史走 IndexedDB，不走 sw cache。
+      // bug #77：用户报修复后界面没生效——SW 缓存了旧 bundle 不更新。
+      // skipWaiting + clientsClaim 让新 SW 立刻接管不等老 client 退出，
+      // autoUpdate 触发自动 reload。代价：新部署后老页面短暂闪一下；用户痛感优先。
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,woff2}"],
         navigateFallback: "/index.html",
         navigateFallbackDenylist: [/^\/api\//],
+        skipWaiting: true,
+        clientsClaim: true,
+        cleanupOutdatedCaches: true,
       },
       manifest: {
         name: "伏羲 IM",
