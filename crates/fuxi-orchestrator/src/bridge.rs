@@ -1406,7 +1406,8 @@ mod tests {
 
         // 极短 backoff（1+2ms）让测试不拖慢 CI——生产用 REVIEW_RETRY_BACKOFF_MS。
         let result =
-            try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4], "review_request").await;
+            try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4], "review_request")
+                .await;
         assert!(result.is_ok(), "第二次应成功: {result:?}");
         let calls = mock.snapshot().await;
         assert_eq!(calls.len(), 2, "共两次调用：第一次 fail + 第二次 ok");
@@ -1421,7 +1422,8 @@ mod tests {
         mock.set_fail_always().await;
 
         let result =
-            try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4], "review_request").await;
+            try_intervene_with_retry(&*mock, xuannv, "test prompt", &[1, 2, 4], "review_request")
+                .await;
         assert!(result.is_err(), "全失败应返 Err");
         let calls = mock.snapshot().await;
         // backoff len = 3 → 共 1 (首发) + 3 (retry) = 4 次调用。
