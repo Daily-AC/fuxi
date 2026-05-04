@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyTaskThreadEvent,
+  type DeliverableMessage,
   type InlineFileMessage,
   type Message,
   type TaskThreadCtx,
@@ -293,6 +294,106 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
     expect(m.filename).toBe("report.md");
     expect(m.mime).toBe("text/markdown");
     expect(m.body).toBe("# 报告\n\n查到 12 条");
+  });
+
+  it("P3 段 A · deliverable_produced · 起 DeliverableMessage 含 project/task/files", () => {
+    const out = applyTaskThreadEvent(
+      [],
+      ev(
+        {
+          type: "deliverable_produced",
+          task: "task-1",
+          project: "erp",
+          deliverable_kind: "research_summary",
+          files: [
+            { name: "report.md", sha256: "aaa", size_bytes: 1234 },
+            { name: "data.csv", sha256: "bbb", size_bytes: 45678 },
+          ],
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dv-1" },
+      ),
+      CTX,
+    );
+    expect(out).toHaveLength(1);
+    const m = out[0] as DeliverableMessage;
+    expect(m.kind).toBe("deliverable");
+    expect(m.id).toBe("ev-dv-1");
+    expect(m.agent).toBe(LUBAN);
+    expect(m.role).toBe("luban");
+    expect(m.role_display).toBe("鲁班");
+    expect(m.deliverable_kind).toBe("research_summary");
+    expect(m.project).toBe("erp");
+    expect(m.task).toBe("task-1");
+    expect(m.files).toHaveLength(2);
+    expect(m.files[0]?.name).toBe("report.md");
+    expect(m.files[1]?.size_bytes).toBe(45678);
+  });
+
+  it("P3 段 A · deliverable 缺 files / project 时 noop（防御）", () => {
+    const before: Message[] = [];
+    const noFiles = applyTaskThreadEvent(
+      before,
+      ev(
+        {
+          type: "deliverable_produced",
+          task: "task-1",
+          project: "erp",
+          deliverable_kind: "code_change",
+          files: [],
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dv-empty" },
+      ),
+      CTX,
+    );
+    expect(noFiles).toBe(before);
+    const noProject = applyTaskThreadEvent(
+      before,
+      ev(
+        {
+          type: "deliverable_produced",
+          task: "task-1",
+          project: "",
+          deliverable_kind: "code_change",
+          files: [{ name: "x.md", sha256: "z", size_bytes: 1 }],
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dv-noproj" },
+      ),
+      CTX,
+    );
+    expect(noProject).toBe(before);
+  });
+
+  it("P3 段 A · 同 id 不重复 push（防 ws + history 双注同一 deliverable）", () => {
+    const fst = applyTaskThreadEvent(
+      [],
+      ev(
+        {
+          type: "deliverable_produced",
+          task: "task-1",
+          project: "erp",
+          deliverable_kind: "research_summary",
+          files: [{ name: "x.md", sha256: "z", size_bytes: 1 }],
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dv-dup" },
+      ),
+      CTX,
+    );
+    const snd = applyTaskThreadEvent(
+      fst,
+      ev(
+        {
+          type: "deliverable_produced",
+          task: "task-1",
+          project: "erp",
+          deliverable_kind: "research_summary",
+          files: [{ name: "x.md", sha256: "z", size_bytes: 1 }],
+        } as ServerEvent["kind"],
+        { agent: LUBAN, id: "ev-dv-dup" },
+      ),
+      CTX,
+    );
+    expect(snd).toHaveLength(1);
+    expect(snd).toBe(fst);
   });
 
   it("P2.7 · 同 id 不重复 push（防 ws + history 双注同一 inline_file）", () => {

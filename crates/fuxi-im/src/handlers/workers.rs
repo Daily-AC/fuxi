@@ -70,6 +70,7 @@ pub(crate) fn worker_event_visible(ev: &Event, agent_id: AgentId) -> bool {
             | EventKind::ThinkingFinished
             | EventKind::UserPrompted { .. }
             | EventKind::AgentInlineMessagePushed { .. }
+            | EventKind::DeliverableProduced { .. }
             | EventKind::TaskStateChanged {
                 to: TaskState::Done | TaskState::Cancelled | TaskState::Delivering,
                 ..

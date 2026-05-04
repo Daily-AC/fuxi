@@ -29,6 +29,7 @@ import { Composer } from "~/components/Composer";
 import { UserBubble } from "~/components/messages/UserBubble";
 import { WorkerBubble } from "~/components/messages/WorkerBubble";
 import { InlineFileCard } from "~/components/messages/InlineFileCard";
+import { DeliverableCard } from "~/components/messages/DeliverableCard";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
@@ -317,6 +318,14 @@ const Thread: Component<ThreadProps> = (props) => {
               return (
                 <div class={styles.rowLeft}>
                   <InlineFileCard msg={msg} />
+                </div>
+              );
+            }
+            // P3 段 A · 门客 deliverable 镜像
+            if (msg.kind === "deliverable") {
+              return (
+                <div class={styles.rowLeft}>
+                  <DeliverableCard msg={msg} />
                 </div>
               );
             }
