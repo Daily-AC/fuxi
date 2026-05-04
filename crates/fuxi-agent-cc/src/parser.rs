@@ -100,6 +100,17 @@ pub enum CcEvent {
 pub struct TranslateState {
     /// 当前处于 thinking 累积中。进入时推 `ThinkingStarted`；离开时推 `Finished`。
     in_thinking: bool,
+    /// bug #77 · `tool_use_id → tool_name` 映射，用 join `UserToolResult` 反查回
+    /// 真实 tool 名（"Bash"/"Read" 等），让 ToolCallFinished 能跟 ToolCallStarted
+    /// 配对（前端 reducer 按 tool 名匹配）。
+    ///
+    /// 之前 `tool_use_id` 直接当 tool 字段塞进 finished 事件 → started("Bash")
+    /// 跟 finished("toolu_01XXX") 永远配不上 → 用户看到："Bash 永远运行中" +
+    /// 「toolu_01XXX 完成」单独成卡（PWA 实测 2026-05-04）。
+    ///
+    /// 容量：cc 单 turn 工具调用通常 < 20 次，turn 完整结束（`finish()`）时清空，
+    /// 跨 turn 不污染。
+    tool_use_id_to_name: std::collections::HashMap<String, String>,
     /// 本 turn 是否已发过 `AgentResponded`（走 `AssistantText` 路径）——
     /// 2026-04-20 修双发 bug：`ResultSuccess` 的 `text` 和最后一条
     /// `AssistantText` 内容一致，再发一次 `AgentResponded` 让 TUI 看到相同文本
@@ -120,6 +131,9 @@ impl TranslateState {
         let was = self.in_thinking;
         self.in_thinking = false;
         self.responded_this_turn = false;
+        // bug #77：tool_use_id 跨 turn 不复用（cc 每轮重生成 id），turn 完整结束
+        // 时清空 map 防止内存无界增长。
+        self.tool_use_id_to_name.clear();
         was
     }
 }
@@ -379,8 +393,17 @@ pub fn translate(
             ));
         }
         CcEvent::AssistantToolUse {
-            tool_name, input, ..
+            tool_id,
+            tool_name,
+            input,
         } => {
+            // bug #77：记 tool_use_id → tool_name 让下面的 UserToolResult 反查。
+            // tool_id 空（极端情况）时 fallback 不入 map——finished 走 fallback 分支。
+            if !tool_id.is_empty() {
+                state
+                    .tool_use_id_to_name
+                    .insert(tool_id, tool_name.clone());
+            }
             out.push(mk_event(
                 agent_id,
                 task_id,
@@ -395,13 +418,19 @@ pub fn translate(
             content_preview,
             tool_use_id,
         } => {
-            // 我们没有从 tool_result 反查 tool 名——上游 ToolCallStarted 已写过，
-            // 这里把 tool_use_id 放进 tool 字段便于配对。Firehose 层可 join。
+            // bug #77：从 state 反查真实 tool 名。Stream-json 里 tool_use 在前
+            // tool_result 在后，state 已经记下了。极端边界（pump 重启 / 流前段
+            // 丢失）→ fallback 用 tool_use_id 兜底（前端会显示 toolu_xxx，但至少
+            // 不卡 started 配对）。
+            let tool_name = state
+                .tool_use_id_to_name
+                .remove(&tool_use_id)
+                .unwrap_or_else(|| tool_use_id.clone());
             out.push(mk_event(
                 agent_id,
                 task_id,
                 EventKind::ToolCallFinished {
-                    tool: tool_use_id,
+                    tool: tool_name,
                     ok: !is_error,
                     output_preview: content_preview,
                 },
@@ -780,6 +809,106 @@ mod tests {
                 assert_eq!(output_preview, "ok");
             }
             other => panic!("got {other:?}"),
+        }
+    }
+
+    /// bug #77 · started + finished 配对：finished.tool 应反查回 "Bash"，不是 "tu-1"
+    #[test]
+    fn translate_pairs_started_finished_via_tool_use_id_map() {
+        let mut st = TranslateState::new();
+        let out_started = translate(
+            CcEvent::AssistantToolUse {
+                tool_id: "tu-77".into(),
+                tool_name: "Bash".into(),
+                input: serde_json::json!({"command":"fuxi project list"}),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        match &out_started[0].kind {
+            EventKind::ToolCallStarted { tool, .. } => assert_eq!(tool, "Bash"),
+            o => panic!("started: {o:?}"),
+        }
+        // 同 turn finished 用同 tool_use_id —— 应反查回 "Bash" 不是 "tu-77"
+        let out_finished = translate(
+            CcEvent::UserToolResult {
+                tool_use_id: "tu-77".into(),
+                is_error: false,
+                content_preview: "fuxi-test\nerp".into(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        match &out_finished[0].kind {
+            EventKind::ToolCallFinished { tool, ok, output_preview } => {
+                assert_eq!(tool, "Bash", "应反查 tool_name 不是 tool_use_id");
+                assert!(*ok);
+                assert!(output_preview.contains("erp"));
+            }
+            o => panic!("finished: {o:?}"),
+        }
+    }
+
+    /// bug #77 · 边界：tool_use_id 在 map 里找不到时（极端流前段丢）→ fallback 兜底 id
+    #[test]
+    fn translate_finished_falls_back_to_id_when_map_missing() {
+        let mut st = TranslateState::new();
+        let out = translate(
+            CcEvent::UserToolResult {
+                tool_use_id: "tu-orphan".into(),
+                is_error: true,
+                content_preview: "err".into(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        match &out[0].kind {
+            EventKind::ToolCallFinished { tool, .. } => {
+                assert_eq!(tool, "tu-orphan", "无 started 时 fallback");
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
+    /// bug #77 · finish() reset 后 map 清空，下 turn 同 id 不会污染
+    #[test]
+    fn translate_finish_clears_tool_use_id_map() {
+        let mut st = TranslateState::new();
+        translate(
+            CcEvent::AssistantToolUse {
+                tool_id: "tu-cross-turn".into(),
+                tool_name: "Bash".into(),
+                input: serde_json::json!({}),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        st.finish();
+        // 模拟下 turn 重用相同 id
+        let out = translate(
+            CcEvent::UserToolResult {
+                tool_use_id: "tu-cross-turn".into(),
+                is_error: false,
+                content_preview: "x".into(),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        match &out[0].kind {
+            EventKind::ToolCallFinished { tool, .. } => {
+                assert_eq!(tool, "tu-cross-turn", "跨 turn 不污染——map 清了走 fallback");
+            }
+            o => panic!("{o:?}"),
         }
     }
 
