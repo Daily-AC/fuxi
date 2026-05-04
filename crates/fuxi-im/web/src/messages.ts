@@ -608,6 +608,13 @@ function appendMarker(prev: Message[], ev: ServerEvent, text: string, ts: number
   const id = ev.meta.id || `mk-${ts}-${prev.length}`;
   // 防重：相同 id 不再 push
   if (prev.some((m) => m.id === id)) return prev;
+  // bug #76（用户实测"工具卡 overlap"真因之一）：cc 每一 turn 完都发 agent_idle，
+  // 鲁班连干 3-5 turn → 出 3-5 条「门客 idle」marker → 视觉一堆灰色 ─ ─ 横线接连
+  // 出现，被用户解读成"卡片叠加"。dedupe 紧邻同 text marker：上一条已经在了就跳过。
+  const tail = prev[prev.length - 1];
+  if (tail && tail.kind === "marker" && (tail as StatusMarker).text === text) {
+    return prev;
+  }
   const next: StatusMarker = { kind: "marker", id, text, ts };
   return [...prev, next];
 }
@@ -840,10 +847,15 @@ export function applyTaskThreadEvent(
   }
 
   // —— 工具调用配对 ——
+  // 字段名跟后端 EventKind ToolCallStarted/ToolCallFinished snake_case 对齐
+  // （types/events.ts §28）：started 是 `args`（不是 input），finished 是 `output_preview`
+  // （不是 output）。a430b92 修过 applyWorkerEvent 但**漏修这里 task thread 路径**——
+  // 导致任务详情页的工具卡 args_summary + output 永远 null → ToolCallCard.hasOutput()
+  // 假 → button disabled 点不开（用户实测 bug #76）。
   if (k.type === "tool_call_started") {
     if (!agent) return prev;
     const tool = (k as { tool?: string }).tool ?? "tool";
-    const args = stringifyArgs((k as { input?: unknown }).input);
+    const args = stringifyArgs((k as { args?: unknown }).args);
     const next: ToolCallMessage = {
       kind: "tool_call",
       id: ev.meta.id || `tc-${ts}-${prev.length}`,
@@ -859,7 +871,7 @@ export function applyTaskThreadEvent(
     if (!agent) return prev;
     const tool = (k as { tool?: string }).tool ?? "tool";
     const ok = Boolean((k as { ok?: boolean }).ok);
-    const output = stringifyOutput((k as { output?: unknown }).output);
+    const output = stringifyOutput((k as { output_preview?: unknown }).output_preview);
     const idx = findRunningToolIdx(prev, agent, tool);
     if (idx >= 0) {
       const running = prev[idx] as ToolCallMessage;
