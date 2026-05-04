@@ -170,16 +170,25 @@ pub fn spawn_home_heartbeat_task(
             // bug #77：fuxi=Some 时取本地 shelf 全部 worker，过滤掉玄女（编排层
             // 不算 worker 槽位）+ 仅 idle 不算（idle = 待命可派活，槽位空）。
             // 其它状态都视为占用 home 槽。fuxi=None 是测试 / 早启动路径退化。
+            //
+            // 二次修：card.status (AgentCard.status, AgentStatus) 是 spawn 时的
+            // 静态值不会随 turn 跟新；真实运行时态在 shelf.status_of(id) 返回
+            // ShelfStatus。home_workers_from_shelf 走的就是 status_of。统一用它。
             let inflight: Vec<String> = match fuxi.as_ref() {
                 Some(f) => {
                     let xuannv = f.xuannv_id().await;
-                    f.list_workers()
-                        .await
-                        .into_iter()
-                        .filter(|c| Some(c.id) != xuannv)
-                        .filter(|c| !matches!(c.status, fuxi_core::agent::AgentStatus::Idle))
-                        .map(|c| c.id.0.to_string())
-                        .collect()
+                    let cards = f.list_workers().await;
+                    let mut ids = Vec::new();
+                    for card in cards {
+                        if Some(card.id) == xuannv {
+                            continue;
+                        }
+                        match f.status_of(card.id).await {
+                            Some(fuxi_orchestrator::ShelfStatus::Idle) | None => {}
+                            _ => ids.push(card.id.0.to_string()),
+                        }
+                    }
+                    ids
                 }
                 None => Vec::new(),
             };

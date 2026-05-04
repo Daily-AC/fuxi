@@ -293,8 +293,14 @@ fn build_death_prompt(agent_id: AgentId, role: &str, cause: &str) -> String {
 }
 
 fn build_cc_prompt(to_worker: AgentId, role: &str, text: &str) -> String {
+    // bug #77：之前文案末「无需主动回话，除非判断需介入」给玄女留口子，cc 经常
+    // 误判"需介入"主动反问用户「鲁班应答 ... 等你下一指令」。改硬规：抄送
+    // **绝不**回话，仅记忆——除非用户后续明确追问"鲁班怎么样了"等。
     format!(
-        "[CC] 用户直接对门客 {to_worker}（role={role}）说：「{text}」。\n\n你未被点名，仅为抄送留痕（公理 #2：你永远有知情权）。无需主动回话，除非判断需介入。"
+        "[CC · 仅知情] 用户直接对门客 {to_worker}（role={role}）说：「{text}」。\n\n\
+         这是抄送你**只为留痕**——公理 #2 你有知情权但不可越权。**严禁**对此条主动回话或反问；\
+         你的下一 turn 应直接 `idle`（不调任何工具、不发任何文字）。\n\
+         只有用户后续显式追问鲁班状况时，再据此 CC 上下文回答。"
     )
 }
 
