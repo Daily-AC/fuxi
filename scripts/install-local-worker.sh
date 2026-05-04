@@ -57,13 +57,54 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 2
 fi
 
-# fuxi binary：spec 提示用户先 cargo install --path /Users/e0_7/fuxi
+# fuxi binary：优先 PATH；缺则从 GitHub Release 自动下载（P2.8 一键安装）
 FUXI_BIN="$(command -v fuxi || true)"
 if [[ -z "${FUXI_BIN}" ]]; then
-    echo "  !! 找不到 fuxi binary（PATH 里没有）" >&2
-    echo "     先跑：cargo install --path /Users/e0_7/fuxi" >&2
-    echo "     （或确保 ~/.cargo/bin 在 PATH 里）" >&2
-    exit 2
+    echo "  !! PATH 里没 fuxi binary，从 GitHub Release 自动下载…"
+    case "$(uname -s)-$(uname -m)" in
+        Darwin-arm64)  ASSET="fuxi-macos-aarch64" ;;
+        Linux-x86_64)  ASSET="fuxi-linux-x86_64" ;;
+        *)
+            echo "  !! 不支持的平台 $(uname -s)-$(uname -m)" >&2
+            echo "     已支持：Darwin-arm64 / Linux-x86_64" >&2
+            echo "     需要其它平台请 cargo install --path /Users/e0_7/fuxi 自 build" >&2
+            exit 2
+            ;;
+    esac
+    URL="https://github.com/Daily-AC/fuxi/releases/latest/download/${ASSET}.tar.gz"
+    SHA_URL="${URL}.sha256"
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+    echo "     下载 ${URL}"
+    if ! curl -fsSL "$URL" -o "$TMP/fuxi.tar.gz"; then
+        echo "  !! 下载失败（无 release 或网络问题）" >&2
+        echo "     fallback：cargo install --path /Users/e0_7/fuxi" >&2
+        exit 2
+    fi
+    # 校验 sha256（best-effort，sha 文件 404 时跳过）
+    if curl -fsSL "$SHA_URL" -o "$TMP/sha" 2>/dev/null; then
+        EXPECTED="$(cat "$TMP/sha" | tr -d '[:space:]')"
+        if command -v sha256sum >/dev/null; then
+            ACTUAL="$(sha256sum "$TMP/fuxi.tar.gz" | awk '{print $1}')"
+        else
+            ACTUAL="$(shasum -a 256 "$TMP/fuxi.tar.gz" | awk '{print $1}')"
+        fi
+        if [[ "$EXPECTED" != "$ACTUAL" ]]; then
+            echo "  !! sha256 校验不过：expected=$EXPECTED actual=$ACTUAL" >&2
+            exit 2
+        fi
+        echo "     sha256 校验通过：${ACTUAL:0:12}…"
+    fi
+    tar -xzf "$TMP/fuxi.tar.gz" -C "$TMP"
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$TMP/fuxi" "$HOME/.local/bin/fuxi"
+    FUXI_BIN="$HOME/.local/bin/fuxi"
+    echo "     已装到 $FUXI_BIN"
+    # 自动 prepend PATH（不动 shell rc，本进程内能用）
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) export PATH="$HOME/.local/bin:$PATH" ;;
+    esac
 fi
 echo "  fuxi     : ${FUXI_BIN}"
 

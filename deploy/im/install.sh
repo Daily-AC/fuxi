@@ -69,17 +69,25 @@ trap cleanup_ssh_master EXIT
 MODE=""
 REBUILD_WEB="0"
 WEB_ONLY="0"
+AUTO_TAKEOVER="0"
 
 usage() {
     cat <<USAGE >&2
-用法：$0 (--dry-run|--apply) [--rebuild-web] [--web-only]
+用法：$0 (--dry-run|--apply) [--rebuild-web] [--web-only] [--auto-takeover]
 
-  --dry-run      打印每步将执行的命令但不执行
-  --apply        真实执行
-  --rebuild-web  即使 dist/ 已存在也强制 vite build
-  --web-only     仅 PWA 快速部署（rust 不动 / systemd 不重启 / nginx 不改 vhost）。
-                 路径：vite build → rsync dist → nginx reload；适合 ε 阶段性
-                 PWA 迭代。预期 ~30s。隐含 --rebuild-web。
+  --dry-run        打印每步将执行的命令但不执行
+  --apply          真实执行
+  --rebuild-web    即使 dist/ 已存在也强制 vite build
+  --web-only       仅 PWA 快速部署（rust 不动 / systemd 不重启 / nginx 不改 vhost）。
+                   路径：vite build → rsync dist → nginx reload；适合 ε 阶段性
+                   PWA 迭代。预期 ~30s。隐含 --rebuild-web。
+  --auto-takeover  preflight 失败时自动接管而非 abort：
+                     a) 残留 fuxi 进程 → systemctl stop fuxi-im
+                     c) 已有 sites-enabled/im → cp .bak.<ts> 后覆盖
+                     d) 仅当占用 server_name 的是我们自己的 sites-enabled/im 时通过
+                   首次部署到全新机器、或被自己半截部署残留卡住时用。
+                   对"非我们的"端口占用 / 第三方 server_name 冲突仍然 abort——
+                   那是真冲突，得人工。
 USAGE
     exit 2
 }
@@ -90,6 +98,7 @@ while [[ $# -gt 0 ]]; do
         --apply)   MODE="apply"; shift ;;
         --rebuild-web) REBUILD_WEB="1"; shift ;;
         --web-only) WEB_ONLY="1"; REBUILD_WEB="1"; shift ;;
+        --auto-takeover) AUTO_TAKEOVER="1"; shift ;;
         -h|--help) usage ;;
         *) echo "未知参数: $1" >&2; usage ;;
     esac
@@ -158,16 +167,31 @@ elif [[ "${MODE}" == "apply" ]]; then
     pgrep_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" "pgrep -fa fuxi | grep -Ev 'pgrep|grep ' || true" 2>&1)
     if [[ -n "${pgrep_out}" ]]; then
         echo "    ${pgrep_out}"
-        echo "  !! 远端有 fuxi 进程在跑——先 ssh home 'pkill fuxi' 或确认是否能停" >&2
-        exit 1
+        if [[ "${AUTO_TAKEOVER}" == "1" ]]; then
+            echo "  (--auto-takeover) 自动 systemctl stop fuxi-im 并 pkill 残留"
+            ssh ${SSH_OPTS} "${REMOTE_HOST}" 'sudo systemctl stop fuxi-im 2>/dev/null || true; pkill -f "fuxi " 2>/dev/null || true; sleep 1' || true
+            # 复检
+            pgrep_out2=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" "pgrep -fa fuxi | grep -Ev 'pgrep|grep ' || true" 2>&1)
+            if [[ -n "${pgrep_out2}" ]]; then
+                echo "    ${pgrep_out2}"
+                echo "  !! takeover 后仍有 fuxi 进程残留——人工排查" >&2
+                exit 1
+            fi
+            echo "    takeover ok, no fuxi running"
+        else
+            echo "  !! 远端有 fuxi 进程在跑——先 ssh home 'pkill fuxi' 或加 --auto-takeover" >&2
+            exit 1
+        fi
+    else
+        echo "    no fuxi running"
     fi
-    echo "    no fuxi running"
 
     echo "  preflight b) 9100 端口空闲："
     port_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'ss -tln 2>/dev/null | grep :9100 || echo "9100 free"' 2>&1)
     echo "    ${port_out}"
     if [[ "${port_out}" != "9100 free" ]]; then
-        echo "  !! 9100 已被占用——查谁在用：ssh home 'ss -tlnp | grep :9100'" >&2
+        # takeover 不接管 9100：如果 a 已 stop 了 fuxi-im 还有人在 9100，那是别人占的，必须人工
+        echo "  !! 9100 已被占用（auto-takeover 不接管端口冲突，可能是别人）——查：ssh home 'ss -tlnp | grep :9100'" >&2
         exit 1
     fi
 
@@ -175,8 +199,15 @@ elif [[ "${MODE}" == "apply" ]]; then
     nginx_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'test -e /etc/nginx/sites-enabled/im && echo CONFLICT || echo OK' 2>&1)
     echo "    ${nginx_out}"
     if [[ "${nginx_out}" != "OK" ]]; then
-        echo "  !! /etc/nginx/sites-enabled/im 已存在——人工确认是否覆盖再继续" >&2
-        exit 1
+        if [[ "${AUTO_TAKEOVER}" == "1" ]]; then
+            ts=$(date +%Y%m%d-%H%M%S)
+            echo "  (--auto-takeover) 备份现有 vhost 到 /etc/nginx/sites-enabled/im.bak.${ts}"
+            ssh ${SSH_OPTS} "${REMOTE_HOST}" "sudo cp /etc/nginx/sites-enabled/im /etc/nginx/sites-enabled/im.bak.${ts}" || {
+                echo "  !! 备份失败" >&2; exit 1; }
+        else
+            echo "  !! /etc/nginx/sites-enabled/im 已存在——人工确认或加 --auto-takeover" >&2
+            exit 1
+        fi
     fi
 
     # team-lead 加的 preflight d——上次踩过的盲点：仅查 sites-enabled 不够，
@@ -186,11 +217,23 @@ elif [[ "${MODE}" == "apply" ]]; then
     echo "  preflight d) 全 nginx 配置无人占 im.qmledmq.cn："
     grep_out=$(ssh ${SSH_OPTS} "${REMOTE_HOST}" 'sudo grep -rln "im.qmledmq.cn" /etc/nginx/ 2>/dev/null || true' 2>&1)
     if [[ -n "${grep_out}" ]]; then
-        echo "    ${grep_out}"
-        echo "  !! 上述文件已占 im.qmledmq.cn——清掉再继续" >&2
-        exit 1
+        if [[ "${AUTO_TAKEOVER}" == "1" ]]; then
+            # takeover 模式：仅当命中的全是 sites-enabled/im* 自家文件才放行（c 已备份）
+            unexpected=$(echo "${grep_out}" | grep -Ev '/etc/nginx/sites-enabled/im(\.bak\..*)?$' || true)
+            if [[ -n "${unexpected}" ]]; then
+                echo "    ${grep_out}"
+                echo "  !! 除自家 sites-enabled/im* 外还有人占 im.qmledmq.cn——auto-takeover 不接管第三方，清掉再继续" >&2
+                exit 1
+            fi
+            echo "    (--auto-takeover) 占用全是自家 sites-enabled/im*，放行"
+        else
+            echo "    ${grep_out}"
+            echo "  !! 上述文件已占 im.qmledmq.cn——清掉再继续或加 --auto-takeover" >&2
+            exit 1
+        fi
+    else
+        echo "    (无)"
     fi
-    echo "    (无)"
 else
     echo
     echo "  (dry-run 模式) 实跑前会做四条 preflight："
@@ -198,6 +241,11 @@ else
     echo "    $ ssh ${REMOTE_HOST} 'ss -tln 2>/dev/null | grep :9100 || echo \"9100 free\"'"
     echo "    $ ssh ${REMOTE_HOST} 'test -e /etc/nginx/sites-enabled/im && echo CONFLICT || echo OK'"
     echo "    $ ssh ${REMOTE_HOST} 'sudo grep -rln \"im.qmledmq.cn\" /etc/nginx/'"
+    if [[ "${AUTO_TAKEOVER}" == "1" ]]; then
+        echo
+        echo "  (--auto-takeover) 命中 a/c/d 时会自动接管：stop fuxi-im、备份 vhost、放行自家 server_name；"
+        echo "                   端口冲突 (b) + 第三方 server_name 占用 仍 abort。"
+    fi
 fi
 
 # ── 1. 远端 cargo build release ─────────────────────────────────────
