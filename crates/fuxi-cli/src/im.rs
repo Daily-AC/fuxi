@@ -33,7 +33,10 @@ use fuxi_im::devices::DeviceStore;
 use fuxi_im::push::notify::HyperPushSender;
 use fuxi_im::state::{AppState, ImAuth, ImPush};
 use fuxi_memory::OracleStore;
-use fuxi_orchestrator::{Fuxi, FuxiConfig, SystemEventBridge};
+use fuxi_orchestrator::{
+    DEFAULT_TICK_INTERVAL_SECS, Fuxi, FuxiConfig, IdleGcTask, IdleShutdowner, SystemEventBridge,
+    ttl_from_env,
+};
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::watcher::{FsWatcherConfig, FsWatcherRig};
 use fuxi_scheduler::webhook::WebhookState;
@@ -115,6 +118,24 @@ pub async fn run(args: StartArgs) -> Result<()> {
         ..Default::default()
     };
     let fuxi = Arc::new(Fuxi::with_config(bus.clone(), ws, fuxi_cfg));
+
+    // bug #77：im start 之前**没启** IdleGcTask（只 repl.rs 有），导致 home 上
+    // 用户感知"过了好久 worker 还显示待命"。每 30s 扫一次 shelf，超 TTL idle
+    // 门客自动回收 → AgentDead 事件 → 前端 status 走 dead 文案。
+    let gc_shutdowner: Arc<dyn IdleShutdowner> = fuxi.clone();
+    let _gc_task = IdleGcTask::new(
+        fuxi.clone_shelf(),
+        gc_shutdowner,
+        bus.clone(),
+        ttl_from_env(),
+        std::time::Duration::from_secs(DEFAULT_TICK_INTERVAL_SECS),
+    )
+    .spawn();
+    tracing::info!(
+        ttl_secs = ttl_from_env().as_secs(),
+        tick_secs = DEFAULT_TICK_INTERVAL_SECS,
+        "IdleGcTask 已启动（同 repl.rs 路径——bug #77 修：im start 此前漏启，worker 永不回收）"
+    );
 
     // 3. Scheduler（更漏）—— 与 up.rs 一致
     let sched_store = match args.sched_db.as_ref().or(Some(&events_db_path)) {
