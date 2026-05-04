@@ -41,6 +41,8 @@ pub fn build(state: AppState) -> Router {
     let auth_gate = AuthGate::new(state.im_auth.secret.clone());
     Router::new()
         .route("/healthz", get(handlers::health::healthz))
+        // bug #77 · build-time 版本号给前端做 cache busting
+        .route("/api/version", get(handlers::health::version))
         .route("/api/tasks", get(handlers::tasks::list_tasks))
         // β · #55 dist topology——节点 tab + 任务卡 @node 标识共用数据源
         .route("/api/nodes", get(handlers::nodes::list_nodes))

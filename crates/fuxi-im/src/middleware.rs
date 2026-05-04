@@ -39,7 +39,12 @@ impl AuthGate {
 fn is_exempt(path: &str) -> bool {
     matches!(
         path,
-        "/api/auth/login" | "/api/auth/pair" | "/api/dist/setup-worker" | "/healthz"
+        "/api/auth/login"
+            | "/api/auth/pair"
+            | "/api/dist/setup-worker"
+            // bug #77 · /api/version 给 PWA 启动时 cache bust 用，未登入也能拉
+            | "/api/version"
+            | "/healthz"
     )
 }
 

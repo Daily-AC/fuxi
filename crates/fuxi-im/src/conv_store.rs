@@ -381,6 +381,14 @@ async fn handle_event(
             // 持久化时 role 写 "system" + content 含 origin，让 fromStoredMessage
             // 历史回放时还原 SystemMessage（玄女侧灰底气泡），不被错误显示成右侧
             // user bubble。普通用户敲键盘的 intervene system_origin=None 仍走 "user"。
+            //
+            // bug #77 二次修：carbon_copy 跳过——同一次抄送 bridge 已 publish
+            // OrchestratorCcReceived（下面有专门 handler 落"system" stored），
+            // 这条 user_intervention_sent 是 bridge 把 [CC] 长 prompt 注入玄女
+            // cc stdin 的副产物，不能再写库否则历史回放显示两条抄送 bubble。
+            if system_origin.as_deref() == Some("carbon_copy") {
+                return Ok(());
+            }
             let (role, content) = match system_origin.as_deref() {
                 Some(origin) => (
                     "system",
