@@ -123,13 +123,10 @@ pub async fn build_dist_layer(home_dir: &std::path::Path, bus: EventBus) -> Resu
 
     // 6a. home 自心跳——register 只设一次 last_seen，无人续 → online 阈值
     //     (30s spec gap c) 一过就被前端误判离线。daemon 同进程没有 dist worker
-    //     loop 给自己发心跳，这里起一个轻量定时任务自调 ctrl.heartbeat。
-    //     选自心跳而非"NodesProvider 给 home 特殊豁免"：
-    //     - 自心跳 = 所有节点同模型（heartbeat-driven liveness），新加节点不破
-    //     - 豁免 = 污染 NodesProvider 抽象，调用方都得知道 home 是个特例
-    //     home 不接 dist job（dispatch 默认本地 spawn 不走 dist enqueue），
-    //     所以传 vec![] 当 inflight 是真相 = controller 端 home.inflight 始终空。
-    spawn_home_heartbeat_task(ctrl.clone());
+    //     loop 给自己发心跳，由 caller (im.rs) 起 `spawn_home_heartbeat_task`
+    //     传 Arc<Fuxi> 进来——bug #77：心跳 inflight 取本地非 idle worker 数，
+    //     让 home 节点 0/4 反映真实占用而不是固定 0。
+    //     此处不再起，避免 build_dist_layer 跟 Fuxi 强耦合（测试零依赖）。
 
     // 7. router with HMAC layer
     let gate = HmacGate::new(hmac_secret);
@@ -153,7 +150,15 @@ pub async fn build_dist_layer(home_dir: &std::path::Path, bus: EventBus) -> Resu
 /// home.inflight 不会被 pull 改写，传 vec![] 是真相。
 ///
 /// 任务持续到进程退出——同 spawn_sweep_task，无 graceful shutdown，进程 abort。
-pub fn spawn_home_heartbeat_task(ctrl: Arc<DistController>) {
+///
+/// bug #77：之前传 `Vec::new()` 当 inflight，所以节点页 home 永远 0/4
+/// （用户实测「这个有显示了，但是还是0/4」）。改：从 fuxi.list_workers() 取
+/// 非 idle 的 worker（除玄女自身）作 inflight ids。语义上 home 上每个跑着的
+/// 鲁班 / 玄女子任务都算占了一槽，跟 max_concurrency=4 形成真实并发上限信号。
+pub fn spawn_home_heartbeat_task(
+    ctrl: Arc<DistController>,
+    fuxi: Option<Arc<fuxi_orchestrator::Fuxi>>,
+) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(HOME_HEARTBEAT_INTERVAL);
         // 跳过首次 tick——register 已在同一启动序列里完成，第一次心跳等
@@ -162,7 +167,23 @@ pub fn spawn_home_heartbeat_task(ctrl: Arc<DistController>) {
         tick.tick().await;
         loop {
             tick.tick().await;
-            ctrl.heartbeat(HOME_NODE_ID, Vec::new()).await;
+            // bug #77：fuxi=Some 时取本地 shelf 全部 worker，过滤掉玄女（编排层
+            // 不算 worker 槽位）+ 仅 idle 不算（idle = 待命可派活，槽位空）。
+            // 其它状态都视为占用 home 槽。fuxi=None 是测试 / 早启动路径退化。
+            let inflight: Vec<String> = match fuxi.as_ref() {
+                Some(f) => {
+                    let xuannv = f.xuannv_id().await;
+                    f.list_workers()
+                        .await
+                        .into_iter()
+                        .filter(|c| Some(c.id) != xuannv)
+                        .filter(|c| !matches!(c.status, fuxi_core::agent::AgentStatus::Idle))
+                        .map(|c| c.id.0.to_string())
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            ctrl.heartbeat(HOME_NODE_ID, inflight).await;
         }
     });
 }
@@ -479,6 +500,9 @@ mod tests {
     /// 30s online 阈值后前端会把 home 显示为离线。spawn_home_heartbeat_task
     /// 必须把 last_seen 持续刷新——验证两轮心跳后 last_seen_ms_ago 远小于
     /// online 阈值 (30000ms)。
+    ///
+    /// bug #77：spawn 移出 build_dist_layer 由 caller (im.rs) 起，避免 fuxi 强耦合。
+    /// 测试自己起，传 None 走退化空 inflight 路径。
     #[tokio::test]
     async fn home_self_heartbeat_keeps_home_online() {
         let bus = EventBus::with_memory_store().await.expect("bus");
@@ -487,8 +511,9 @@ mod tests {
             std::env::remove_var(FUXI_DIST_HMAC_SECRET_ENV);
             std::env::remove_var(DIST_TOKEN_ENV);
         }
-        // build_dist_layer 内部已 spawn home_heartbeat_task。
         let layer = build_dist_layer(dir.path(), bus).await.expect("build");
+        // 模拟 im.rs caller 起心跳——传 None 是退化分支（旧测试兼容）
+        spawn_home_heartbeat_task(layer.ctrl.clone(), None);
         // 等 2× HOME_HEARTBEAT_INTERVAL 让自心跳跑至少 1 次（首 tick 已 skip）。
         // 总共 ~10s 偏长，但拿真定时验真行为；CI 偶发慢机器加 2s 余量也仍 < 30s。
         tokio::time::sleep(HOME_HEARTBEAT_INTERVAL * 2 + std::time::Duration::from_secs(1)).await;
