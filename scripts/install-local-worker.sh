@@ -67,7 +67,7 @@ if [[ -z "${FUXI_BIN}" ]]; then
         *)
             echo "  !! 不支持的平台 $(uname -s)-$(uname -m)" >&2
             echo "     已支持：Darwin-arm64 / Linux-x86_64" >&2
-            echo "     需要其它平台请 cargo install --path /Users/e0_7/fuxi 自 build" >&2
+            echo "     需要其它平台请：cargo install --git https://github.com/Daily-AC/fuxi --bin fuxi" >&2
             exit 2
             ;;
     esac
@@ -78,7 +78,7 @@ if [[ -z "${FUXI_BIN}" ]]; then
     echo "     下载 ${URL}"
     if ! curl -fsSL "$URL" -o "$TMP/fuxi.tar.gz"; then
         echo "  !! 下载失败（无 release 或网络问题）" >&2
-        echo "     fallback：cargo install --path /Users/e0_7/fuxi" >&2
+        echo "     fallback：cargo install --git https://github.com/Daily-AC/fuxi --bin fuxi" >&2
         exit 2
     fi
     # 校验 sha256（best-effort，sha 文件 404 时跳过）

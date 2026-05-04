@@ -108,6 +108,28 @@ deliverable 集中在一个 bucket，便于 PWA 按 task 聚合）；不确定�
 
 **纯代码 commit 不要走 produce**——commit 已是 git artifact，PWA 后续会接 PR 视图。
 **纯 summary 文字不需要 produce**——sentinel summary 已够玄女决策。
+
+## 轻量 inline 推送（fuxi note）
+
+产出**不是文件级工件**、是一段稍长的 markdown 或纯文本（小报告 / 摘要 / 调研片段，≤ 256KB），
+既不必让用户落地下载，也比 sentinel summary 一两句长——用 `fuxi note` 直贴到任务对话流：
+
+```bash
+fuxi note --task <task-uuid> [--from <agent-uuid>] [--mime text/markdown|text/plain] <file>
+```
+
+PWA 任务私聊页渲染为左侧 worker 卡片（`text/markdown` 走 md 渲染，`text/plain` 走 `<pre>`）。
+`<task-uuid>` 同 deliverable produce 用法（派活 prompt 里有标注）；`--from` 不传走 events.db
+反查 `TaskDispatched.to`（单门客单 task 场景准；fan-out / re-dispatch 场景须显式传）。
+
+**三档心智模型**（按工件大小 + 是否落地）：
+- 一两句 → sentinel `summary` 字段（不调 note，也不调 produce）
+- 中段 markdown / 摘要、不要用户下载 → `fuxi note`（贴对话流）
+- 用户要下载的工件、二进制、> 256KB → `fuxi deliverable produce`（落收件箱）
+
+**note 不替代 sentinel**——note 只贴内容到对话流，玄女注意力仍靠 sentinel JSON 拍醒。
+完整流程：先 `fuxi note` 把 markdown 贴上去 → 再发 sentinel 让玄女知道有东西可看
+（sentinel 的 `artifact_ref` 可填 `note:<filename>` 提示她去对话流看）。
 "#;
 
 /// 是否给该 role 注入 sentinel 教学。
@@ -215,6 +237,19 @@ mod tests {
         assert!(txt.contains("test_result"));
         assert!(txt.contains("decision_request"));
         assert!(txt.contains("error_block"));
+    }
+
+    #[test]
+    fn addendum_text_contains_fuxi_note_teaching() {
+        // P2.7 新增 inline 推送章节防漂移
+        let txt = SENTINEL_ADDENDUM_TEXT;
+        assert!(txt.contains("fuxi note"), "应教 fuxi note 用法");
+        assert!(txt.contains("256KB"), "应说明 size 上限");
+        assert!(txt.contains("text/markdown"), "应说明 mime 选项");
+        assert!(
+            txt.contains("不替代 sentinel"),
+            "应强调 note 不替代 sentinel"
+        );
     }
 
     #[test]
