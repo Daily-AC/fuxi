@@ -39,6 +39,9 @@ done
 
 echo "== 1. rsync src → home =="
 if [[ "$DO_RSYNC" == "1" ]]; then
+  # bug #77 · 把 git sha 写到 .fuxi-build-sha 一起 rsync，让 home 端 build.rs
+  # 拿到 deploy 时刻的 sha（home 不是 git repo，build.rs 否则 fallback "unknown"）
+  git -C "$LOCAL_ROOT" rev-parse --short HEAD > "$LOCAL_ROOT/.fuxi-build-sha"
   rsync -az --delete \
     --exclude=target --exclude=node_modules --exclude=.git \
     --exclude=.playwright-mcp --exclude=.claude \

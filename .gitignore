@@ -21,3 +21,4 @@ data/
 
 # brainstorm visual companion mockups
 .superpowers/
+.fuxi-build-sha
