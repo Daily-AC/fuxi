@@ -35,4 +35,13 @@
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  /* bug #77：bubble 默认 align-items: flex-start 让 width=max-content；md 内
+   * 长 token (路径串、JSON code) 撑爆 .row 78% 边界。三件套约束：
+   * - max-width: 100% (相对 .row max-w 78%)
+   * - min-width: 0 (允许 flex shrink 到 fit)
+   * - overflow: hidden 让 child overflow-x 不撑外（fenced pre 自带 overflow-x:auto） */
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
 }

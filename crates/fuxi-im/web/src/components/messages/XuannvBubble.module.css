@@ -35,4 +35,9 @@
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  /* bug #77 同 WorkerBubble 防溢出三件套 */
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow: hidden;
 }
