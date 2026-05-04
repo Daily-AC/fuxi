@@ -141,8 +141,9 @@ impl EphemeralWorkspaceManager {
             } else {
                 return Err(combined.err().unwrap());
             }
-        } else if let Err(e) = combined {
-            return Err(e);
+        } else {
+            // bug #77 CI rust 1.95 clippy::question_mark：单 if-let-Err 早返写 `?` 更 idiomatic
+            combined?;
         }
 
         Ok(EphemeralWorkspaceHandle {
