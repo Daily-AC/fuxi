@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "伏羲 IM 后端：axum 服务暴露任务/对话/intervene 给 PWA 移动端"
+build = "build.rs"
+
+[build-dependencies]
+chrono = { workspace = true }
 
 [dependencies]
 fuxi-core.workspace = true

@@ -267,7 +267,11 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
   // 二次到达时给已存在的 user bubble 补上附件渲染（id 匹配走 mergeMessages 去重）。
   if (k.type === "user_intervention_sent") {
     const origin = (k as { system_origin?: string | null }).system_origin;
-    // bug #76 · 系统注入（bridge / sentinel）→ 玄女侧 SystemMessage，不走 user bubble
+    // bug #77 · carbon_copy 跳过：同一抄送 bridge 已 publish OrchestratorCcReceived
+    // 走专门渲染分支（短版"hi"），这条 user_intervention_sent 是注入玄女 cc 的
+    // 副产物（含完整 [CC] prompt），渲染会成两个 bubble。
+    if (origin === "carbon_copy") return prev;
+    // bug #76 · 其它系统注入（review_request/agent_dead/trigger_fired/...）→ SystemMessage
     if (origin) {
       const evTs = parseTs(ev.meta.at);
       const id = ev.meta.id || `sys-${evTs}-${prev.length}`;
@@ -361,6 +365,23 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
       duration_ms: 0,
       output,
       ts,
+    };
+    return [...prev, next];
+  }
+
+  // bug #77 · OrchestratorCcReceived → 玄女侧 SystemMessage（短抄送视图，含原话）
+  if (k.type === "orchestrator_cc_received") {
+    const evTs = parseTs(ev.meta.at);
+    const id = ev.meta.id || `cc-${evTs}-${prev.length}`;
+    if (prev.some((m) => m.id === id)) return prev;
+    const text = (k as { text?: string }).text ?? "";
+    if (text.trim() === "") return prev;
+    const next: SystemMessage = {
+      kind: "system",
+      id,
+      origin: "carbon_copy",
+      text,
+      ts: evTs,
     };
     return [...prev, next];
   }
@@ -584,6 +605,8 @@ export function applyWorkerEvent(
     if (text.trim() === "") return prev;
     // bug #76 · 系统注入（非用户敲键盘）走 SystemMessage，不展现成 UserBubble
     const origin = (k as { system_origin?: string | null }).system_origin;
+    // bug #77 · carbon_copy 跳过（worker page 一般不会收到，防御）
+    if (origin === "carbon_copy") return prev;
     if (origin) {
       const id = ev.meta.id || `sys-${ts}-${prev.length}`;
       if (prev.some((m) => m.id === id)) return prev;
@@ -880,9 +903,11 @@ export function applyTaskThreadEvent(
     if (text.trim() === "" && attachments.length === 0) return prev;
     const id = ev.meta.id || `u-${ts}-${prev.length}`;
     if (prev.some((m) => m.id === id)) return prev;
+    // bug #77 · carbon_copy 跳过（同 applyEvent，去重 OrchestratorCcReceived 已覆盖）
+    const origin = (k as { system_origin?: string | null }).system_origin;
+    if (origin === "carbon_copy") return prev;
     // bug #76：系统注入（bridge 转发的 [REVIEW_REQUEST] / [TRIGGER_FIRED] 等）
     // 走 SystemMessage 渲染玄女侧灰底气泡，不走右侧 user bubble。
-    const origin = (k as { system_origin?: string | null }).system_origin;
     if (origin) {
       const next: SystemMessage = { kind: "system", id, origin, text, ts };
       return [...prev, next];
