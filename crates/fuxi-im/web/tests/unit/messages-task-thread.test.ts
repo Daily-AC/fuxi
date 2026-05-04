@@ -137,6 +137,11 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
     expect(t.agent).toBe(LUBAN);
     expect(t.status).toBe("ok");
     expect(t.duration_ms).toBe(500);
+    // bug #76：reducer 之前用 input/output 字段读，但 wire 是 args/output_preview，
+    // 字段名漂移导致 args_summary + output 永远 null → ToolCallCard 点不开。
+    // 锁住映射防止回归。
+    expect(t.args_summary).toBe("grep");
+    expect(t.output).toBe("result");
   });
 
   it("agent_idle · marker 文案带 role_display", () => {
@@ -155,6 +160,34 @@ describe("applyTaskThreadEvent · 任务 thread reducer (#39 / #N4')", () => {
     );
     expect(out).toHaveLength(1);
     expect((out[0] as { text: string }).text).toContain("找到 12 条");
+  });
+
+  it("bug #76 marker dedup · 紧邻同 text marker 折叠（防止 cc 多 turn agent_idle 灰横线泛滥）", () => {
+    let s: Message[] = [];
+    // 模拟 cc 多 turn 连发 agent_idle
+    for (let i = 0; i < 5; i += 1) {
+      s = applyTaskThreadEvent(
+        s,
+        ev({ type: "agent_idle" }, { agent: LUBAN, id: `mk-${i}` }),
+        CTX,
+      );
+    }
+    // 5 条全同 text → 只留首条
+    const markers = s.filter((m) => m.kind === "marker");
+    expect(markers).toHaveLength(1);
+    // 中间夹一条不同的（worker bubble）→ 后续同 text marker 应该再次起新条
+    s = applyTaskThreadEvent(
+      s,
+      ev({ type: "agent_responded", text: "回复" }, { agent: LUBAN, id: "ar-1" }),
+      CTX,
+    );
+    s = applyTaskThreadEvent(
+      s,
+      ev({ type: "agent_idle" }, { agent: LUBAN, id: "mk-after" }),
+      CTX,
+    );
+    const markers2 = s.filter((m) => m.kind === "marker");
+    expect(markers2).toHaveLength(2);
   });
 
   it("task_state_changed Done · marker 任务完成", () => {
