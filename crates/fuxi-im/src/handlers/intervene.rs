@@ -26,6 +26,19 @@ use axum::extract::State;
 use fuxi_core::AgentId;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use uuid::Uuid;
+
+/// bug #77 · 宽松解析 agent id：接 `agent-<uuid>` 或裸 `<uuid>`。
+///
+/// 前端 `task.members[].agent_id` 来自后端 `AgentId::Display`（含 `agent-` 前缀），
+/// PWA composer @ 门客时原样发回 → AgentId 的 `serde(transparent)` 仅接裸 uuid →
+/// 422 Unprocessable Entity → 用户撞「玄女正忙」误导文案。
+fn parse_agent_id_lenient(s: &str) -> std::result::Result<AgentId, String> {
+    let trimmed = s.strip_prefix("agent-").unwrap_or(s);
+    Uuid::parse_str(trimmed)
+        .map(AgentId::from)
+        .map_err(|e| format!("agent id 不是合法 uuid（接受 `<uuid>` 或 `agent-<uuid>`）: {s} ({e})"))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct InterveneBody {
@@ -35,12 +48,17 @@ pub struct InterveneBody {
     #[serde(default)]
     pub interrupt: bool,
     /// 路由目标 agent_id；缺省 → 玄女。v3 #N7'：前端任务 thread 里 @ 门客时填。
+    ///
+    /// bug #77：前端拿到的 id 来自 backend AgentId Display（`agent-<uuid>`）
+    /// 原样发回，AgentId 的 serde 实现是 `transparent` 仅接裸 uuid → 422。
+    /// 改 String 自接，handler 内部 strip `agent-` 前缀解析。
     #[serde(default)]
-    pub target: Option<AgentId>,
+    pub target: Option<String>,
     /// 所有被 @ 的 agent_id（含 target 自身）。仅写入事件供前端历史还原 chip 视觉，
     /// **后端 v1 不据此 fan-out 通知**——只 `target` 有路由效果。
+    /// 同 target：接 String、handler 解析（兼容 `agent-` 前缀）。
     #[serde(default)]
-    pub mentions: Vec<AgentId>,
+    pub mentions: Vec<String>,
     /// 用户在 PWA composer 用 `@<node_id>` 显式 pin 到的 dist 节点（如
     /// `mac-local`）。β · #57：写入 `EventKind::UserInterventionSent.pinned_node`
     /// 供历史回放还原节点 chip 视觉；真路由要等 task 维度的 dispatch routing 决策树
@@ -75,13 +93,28 @@ pub async fn intervene(
         return Err(Error::BadRequest("text 不能为空".into()));
     }
 
-    // target 解析：body 显式 → 用之；否则 fallback 玄女
-    let target = match body.target {
-        Some(t) => t,
+    // target 解析：body 显式 → 用之；否则 fallback 玄女。
+    // bug #77：接受 `agent-<uuid>` 前缀（前端 AgentId Display 形式）+ 裸 uuid。
+    let target = match body.target.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(t) => parse_agent_id_lenient(t)
+            .map_err(|e| Error::BadRequest(format!("target 解析失败: {e}")))?,
         None => state.fuxi.xuannv_id().await.ok_or_else(|| {
             Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
         })?,
     };
+    // mentions 同样兼容前缀
+    let mentions = body
+        .mentions
+        .iter()
+        .filter_map(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                parse_agent_id_lenient(t).ok()
+            }
+        })
+        .collect::<Vec<_>>();
 
     // 附件解析：每个 id 查 uploads 行拿文件名 + 绝对路径。无 upload_store
     // 配置时跳过解析（仅记 ids，不 prepend），让旧测试不挂；missing id 也跳过。
@@ -143,7 +176,7 @@ pub async fn intervene(
             target,
             body.interrupt,
             &effective_text,
-            body.mentions,
+            mentions,
             effective_pinned_node,
             body.attachments,
         )
@@ -295,6 +328,57 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// bug #77：前端拿到的 agent_id 来自 `AgentId::Display`（含 `agent-` 前缀），
+    /// 原样发回 → 之前 `Option<AgentId>` 反序列化炸 422 → 用户撞「玄女正忙」误导。
+    /// 改 String 自接 + handler `parse_agent_id_lenient` 解析，两种形式都过。
+    #[tokio::test]
+    async fn body_target_with_agent_prefix_routes_correctly() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let target = AgentId::new();
+        let prefixed = format!("agent-{}", target.0);
+
+        let body = serde_json::json!({
+            "text": "你还在么",
+            "interrupt": false,
+            "target": prefixed,
+            "mentions": [prefixed.clone()],
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // 不再 422——target 应解析成功。shelf 里没该 agent 走 503 AgentNotFound（路由对了）。
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "agent- 前缀的 target 应该被宽松解析，不该 422"
+        );
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// bug #77 · 解析无效 id（不是 uuid）→ 400 BadRequest 含明确文案。
+    #[tokio::test]
+    async fn body_target_with_invalid_id_returns_400() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let body = serde_json::json!({
+            "text": "x",
+            "target": "not-a-uuid-at-all",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     /// 老 PWA / TUI 客户端发的 body 不带 `target` `mentions`——两字段 `#[serde(default)]`，
     /// 应当反序列化成 `target=None` `mentions=vec![]`，行为同现状。
     #[test]
@@ -420,8 +504,13 @@ mod tests {
             "mentions": [target, other],
         });
         let body: InterveneBody = serde_json::from_value(raw).expect("body");
-        assert_eq!(body.target, Some(target));
-        assert_eq!(body.mentions, vec![target, other]);
+        // bug #77：target/mentions 改 String 接（兼容 `agent-` 前缀），
+        // 这里 AgentId Serialize 是 transparent uuid，反序列化成 uuid 字符串。
+        assert_eq!(body.target.as_deref(), Some(target.0.to_string().as_str()));
+        assert_eq!(
+            body.mentions,
+            vec![target.0.to_string(), other.0.to_string()]
+        );
     }
 
     /// 阶段 3 attachments：body.attachments 可选字段反序列化兼容老 wire（无该字段 → 空 Vec）。
