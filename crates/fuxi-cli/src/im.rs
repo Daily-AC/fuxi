@@ -207,6 +207,9 @@ pub async fn run(args: StartArgs) -> Result<()> {
     tracing::info!("dist controller 已内嵌——/dist/* 走 HMAC，home 节点已自注册");
     let dist_ctrl = dist_layer.ctrl.clone();
     let dist_router = dist_layer.router;
+    // bug #77 home 0/4 修：自心跳从这里起（拿到 fuxi handle 后），inflight 反映
+    // 本地非 idle worker 数。每 5s tick。
+    crate::im_dist::spawn_home_heartbeat_task(dist_ctrl.clone(), Some(fuxi.clone()));
     let hmac_secret_plain = dist_layer.hmac_secret_plain.clone();
     let dist_token_plain = dist_layer.dist_token_plain.clone();
     // β · #55 NodesProvider 包 Arc<DistController>，注入 AppState 让
