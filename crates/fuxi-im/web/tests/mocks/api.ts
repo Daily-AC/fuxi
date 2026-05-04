@@ -254,6 +254,10 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
       return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/files/${encodeURIComponent(name)}`;
     },
+    deliverableFilePreviewUrl: (project: string, task: string, name: string): string => {
+      const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
+      return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/preview/${encodeURIComponent(name)}`;
+    },
     acceptDeliverable: async (_project, task) => {
       // mock：把对应 task 的 entries status 都翻 "accepted"
       const list = state.deliverables?.deliverables ?? [];

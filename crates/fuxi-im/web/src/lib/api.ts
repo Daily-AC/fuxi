@@ -74,6 +74,9 @@ export interface ApiClient {
   /** Decision 22 phase 1 · 拼接交付文件直链 URL，给 <a href> / window.open 用。
    *  注意 task 在 backend wire 是裸 uuid，但路由用的是 `task-<uuid>`——前端拼时加前缀。 */
   deliverableFileUrl(project: string, task: string, name: string): string;
+  /** Decision 22 phase 3 · inline preview URL（不设 Content-Disposition: attachment）。
+   *  bug #76：用户期望卡片打开后内联预览（md 渲染、img 直显），下载按钮显式触发。 */
+  deliverableFilePreviewUrl(project: string, task: string, name: string): string;
   /** Decision 22 phase 2 · 接收交付（POST → 后端 publish DeliverableAccepted 事件）。 */
   acceptDeliverable(
     project: string,
@@ -188,6 +191,10 @@ export function createHttpClient(): ApiClient {
       // 直接传 task uuid 拼下载 URL 不易出错。
       const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
       return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/files/${encodeURIComponent(name)}`;
+    },
+    deliverableFilePreviewUrl: (project, task, name) => {
+      const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;
+      return `/api/deliverables/${encodeURIComponent(project)}/${encodeURIComponent(taskWithPrefix)}/preview/${encodeURIComponent(name)}`;
     },
     acceptDeliverable: async (project, task, req) => {
       const taskWithPrefix = task.startsWith("task-") ? task : `task-${task}`;

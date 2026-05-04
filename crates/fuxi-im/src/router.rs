@@ -71,6 +71,12 @@ pub fn build(state: AppState) -> Router {
             "/api/deliverables/{project}/{task}/files/{name}",
             get(handlers::deliverables::download_file),
         )
+        // Decision 22 phase 3 ext：inline 预览端点（不设 attachment）。
+        // 与 /files/ 二选一——前端预览走 /preview/，用户主动下载走 /files/。
+        .route(
+            "/api/deliverables/{project}/{task}/preview/{name}",
+            get(handlers::deliverables::preview_file),
+        )
         // Decision 22 phase 2：用户接收 / 拒绝（POST publish 事件，phase 3 加文件 copy）
         .route(
             "/api/deliverables/{project}/{task}/accept",

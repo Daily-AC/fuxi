@@ -177,6 +177,13 @@
   text-decoration: none;
   color: var(--text-primary);
   gap: var(--space-3);
+  /* bug #76 · 原 <a> 改 <button> 后必显式 reset UA 默认（bg/border/text-align/font） */
+  width: 100%;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
 }
 
 .fileLink:active,
