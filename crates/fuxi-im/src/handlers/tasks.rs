@@ -985,10 +985,12 @@ mod tests {
         assert_eq!(m["role_display"], "鲁班", "role_display 不应是 'unknown'");
     }
 
-    /// #51 修：task 已 Done 时 member.status 强制 "idle"——不读 live shelf
-    /// （worker 可能已被派下一个 task 显 busy，但本 task 已经收尾）。
+    /// #51（旧）+ user 实测（2026-05-04）超越：task 已 Done 时 member.status
+    /// 反映 live shelf——shelf None/Dead → "dead"（worker 已 GC/挂掉），
+    /// shelf Idle/Busy → "idle"（worker 还活着，可召回）。
+    /// 用户视角："鲁班还在我能再派活吗" 的答案就是这个字段。
     #[tokio::test]
-    async fn member_status_forces_idle_when_task_done() {
+    async fn member_status_after_task_done_reflects_shelf_liveness() {
         let (_dir, app, bus, fuxi, _xn) = build_app().await;
         let task = TaskId::new();
         let agent = AgentId::new();
@@ -1011,7 +1013,6 @@ mod tests {
             EventKind::TaskDispatched { to: agent },
         ))
         .unwrap();
-        // task 终态：Done
         bus.publish(make_event(
             task,
             None,
@@ -1024,14 +1025,14 @@ mod tests {
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(220)).await;
 
-        // 即使 shelf 不存在该 agent（live "dead"），task done 强制 idle
-        let _ = fuxi; // 不 insert agent，模拟 GC 后场景
-        let v = fetch(app).await;
+        // 子用例 a) shelf 不存在该 agent（GC 走）→ "dead"
+        let _ = fuxi.clone(); // 不 insert agent
+        let v = fetch(app.clone()).await;
         let card = &v["completed"][0];
         assert_eq!(card["status"], "completed", "task 应入 completed 桶");
         assert_eq!(
-            card["members"][0]["status"], "idle",
-            "task done 后 member.status 应强制 idle，不读 live shelf"
+            card["members"][0]["status"], "dead",
+            "task done + worker 不在 shelf → dead（GC 后状态）"
         );
     }
 
