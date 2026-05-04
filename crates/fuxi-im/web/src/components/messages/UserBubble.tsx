@@ -20,6 +20,7 @@ export const UserBubble: Component<{ msg: UserMessage }> = (props) => {
     Array.isArray(props.msg.attachments) && props.msg.attachments.length > 0;
   const hasMentions = (): boolean =>
     Array.isArray(props.msg.mentions) && props.msg.mentions.length > 0;
+  const hasNode = (): boolean => Boolean(props.msg.pinned_node);
 
   return (
     <div class={styles.row} data-testid="msg-user" data-msg-id={props.msg.id}>
@@ -27,11 +28,20 @@ export const UserBubble: Component<{ msg: UserMessage }> = (props) => {
         class={styles.bubble}
         classList={{ [styles.pending ?? ""]: Boolean(props.msg.pending) }}
       >
-        <Show when={hasMentions()}>
+        <Show when={hasMentions() || hasNode()}>
           <div class={styles.mentions} data-testid="msg-user-mentions">
             <For each={props.msg.mentions}>
               {(id) => <span class={styles.mentionChip}>{shortMentionLabel(id)}</span>}
             </For>
+            <Show when={hasNode()}>
+              <span
+                class={styles.nodeChip}
+                data-testid="msg-user-node-chip"
+                data-node-id={props.msg.pinned_node}
+              >
+                {`@${props.msg.pinned_node}`}
+              </span>
+            </Show>
           </div>
         </Show>
         <Show when={hasText()}>

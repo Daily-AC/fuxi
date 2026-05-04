@@ -63,3 +63,18 @@
   color: var(--accent);
   letter-spacing: 0.2px;
 }
+
+/* node chip（@<node-id>）· 蓝边框区分 worker chip。
+ * 跟 MentionComposer 内 node chip 视觉对齐（dim 蓝调）。*/
+.nodeChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: rgba(99, 165, 207, 0.12);
+  border: 1px solid rgba(99, 165, 207, 0.45);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: rgba(180, 215, 240, 0.95);
+  letter-spacing: 0.2px;
+}

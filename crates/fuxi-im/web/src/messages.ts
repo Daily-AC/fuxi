@@ -30,6 +30,10 @@ export interface UserMessage {
   /** v3 任务 thread · 该 turn @ 提及的所有 agent_ids（含 target 自身）。
    *  历史回放时用于还原 chip 视觉。本地 optimistic 也带（display 一致）。*/
   mentions?: string[];
+  /** v3 节点路由 chip · @<node-id> 序列化进 SerializedIntervene.pinned_node，
+   *  user bubble 历史还原时一起带回来——单 node chip（蓝边框）和 worker chip
+   *  并排显示。后端字段：UserInterventionSent.pinned_node（β #57 已加）。*/
+  pinned_node?: string;
   /** 503 重试 / 重试失败时挂 inline 错误。*/
   error?: string | null;
   /** 仍在等服务端回执（虚态）。*/
@@ -411,13 +415,22 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
   return prev;
 }
 
-/** optimistic user message factory。*/
-export function makeUserMessage(text: string, attachments?: Upload[]): UserMessage {
+/** optimistic user message factory。
+ *  v3 加 opts 让 task thread / 玄女主对话 caller 传 mentions（worker chips）+
+ *  pinned_node（node chip）一起进 bubble，让 optimistic 渲染时 @ 标签即时可见
+ *  （不用等服务端 echo）。*/
+export function makeUserMessage(
+  text: string,
+  attachments?: Upload[],
+  opts?: { mentions?: string[]; pinned_node?: string },
+): UserMessage {
   return {
     kind: "user",
     id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     text,
     attachments,
+    mentions: opts?.mentions && opts.mentions.length > 0 ? opts.mentions : undefined,
+    pinned_node: opts?.pinned_node || undefined,
     pending: true,
     ts: Date.now(),
   };
@@ -640,10 +653,14 @@ export function applyWorkerEvent(
     const id = ev.meta.id || `u-${ts}-${prev.length}`;
     const already = prev.some((m) => m.id === id);
     if (already) return prev;
+    const mentions = (k as { mentions?: string[] }).mentions ?? [];
+    const pinned_node = (k as { pinned_node?: string | null }).pinned_node ?? undefined;
     const next: UserMessage = {
       kind: "user",
       id,
       text,
+      mentions: mentions.length > 0 ? mentions : undefined,
+      pinned_node: pinned_node || undefined,
       pending: false,
       ts,
     };
@@ -957,11 +974,13 @@ export function applyTaskThreadEvent(
       return [...prev, next];
     }
     const mentions = (k as { mentions?: string[] }).mentions ?? [];
+    const pinned_node = (k as { pinned_node?: string | null }).pinned_node ?? undefined;
     const next: UserMessage = {
       kind: "user",
       id,
       text,
       mentions: mentions.length > 0 ? mentions : undefined,
+      pinned_node: pinned_node || undefined,
       attachments: attachments.length > 0 ? uploadsFromIds(attachments) : undefined,
       pending: false,
       ts,
