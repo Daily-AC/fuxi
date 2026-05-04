@@ -108,7 +108,7 @@ pub async fn list_deliverables(
         }
     }
     // 倒序：新的在前
-    all.sort_by(|a, b| b.produced_at.cmp(&a.produced_at));
+    all.sort_by_key(|x| std::cmp::Reverse(x.produced_at));
     Ok(Json(DeliverablesResponse { deliverables: all }))
 }
 
