@@ -43,3 +43,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
+
+  pwa:
+    name: pwa typecheck + lint + test + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/fuxi-im/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: enable corepack pnpm
+        run: corepack enable
+      - name: pnpm install
+        run: corepack pnpm install --frozen-lockfile
+      - name: typecheck
+        run: corepack pnpm typecheck
+      - name: lint
+        run: corepack pnpm lint
+      - name: test
+        run: corepack pnpm test --run
+      - name: build
+        run: corepack pnpm build

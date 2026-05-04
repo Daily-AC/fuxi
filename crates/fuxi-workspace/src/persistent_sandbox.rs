@@ -156,8 +156,9 @@ impl PersistentSandboxManager {
             } else {
                 return Err(combined.err().unwrap());
             }
-        } else if let Err(e) = combined {
-            return Err(e);
+        } else {
+            // bug #77 CI rust 1.95 clippy::question_mark
+            combined?;
         }
 
         Ok(PersistentSandboxHandle {
@@ -254,8 +255,9 @@ impl PersistentSandboxManager {
             }
             // 兜底 prune
             let _ = run_git(&["worktree", "prune"], &self.project.canonical_path).await;
-        } else if let Err(e) = remove {
-            return Err(e);
+        } else {
+            // bug #77 CI rust 1.95 clippy::question_mark
+            remove?;
         }
 
         // 删 branch（失败不致命——branch 可能从未建成）
