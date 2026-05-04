@@ -167,3 +167,49 @@ fuxi deliverable produce \
   围栏里的 JSON 平台**不**会触发，所以可以放心给玄女展示"我下次会发这条"
 - **自然语言的"我要 nudge"** 平台也**不**会响应——只看 sentinel JSON 行
 - 一个 turn 里可以发多条 sentinel（每个 deliverable 一条），但每条单独一行
+
+## 轻量 inline 推送（fuxi note · P2.7）
+
+`fuxi note` 是介于 sentinel summary 和 deliverable produce 之间的"中段"出口：
+我产出一段**稍长的 markdown 或纯文本**（小报告 / 摘要 / 调研片段，≤ 256KB），
+既不该让用户下载落地（→ deliverable produce 太重），也比 sentinel summary
+"一两句" 更长——用 `fuxi note` 直贴到任务对话流：
+
+```bash
+fuxi note --task <task-uuid> [--from <agent-uuid>] [--mime text/markdown|text/plain] <file>
+```
+
+PWA 任务私聊页渲染成左侧 worker 卡片（`text/markdown` 走 md 渲染，`text/plain` 走 `<pre>`）。
+
+### 三档心智模型（按"我交付什么 + 是否要用户下载"）
+
+| 形态 | 出口 |
+|------|------|
+| 一两句结论 / 决策 | sentinel `summary` 字段（既不 note 也不 produce） |
+| 中段 markdown 摘要、不必让用户下载 | `fuxi note` |
+| 用户要下载的工件 / 二进制 / > 256KB | `fuxi deliverable produce` |
+
+### 字段说明
+
+- `--task <uuid>` ——派活 prompt 里告诉我的 `task-<uuid>`，必传
+- `--from <uuid>` ——不传时 fuxi 反查 events.db 里 `TaskDispatched.to`；
+  fan-out / re-dispatch 场景下必须显式传我自己的 agent id
+- `--mime` ——默认按扩展猜（`.md`/`.markdown` → `text/markdown`，余 `text/plain`）；
+  v1 仅这两种
+- `<file>` ——cwd 相对或绝对路径，UTF-8 文本
+
+### note 不替代 sentinel
+
+`fuxi note` 只把内容贴到对话流，**不**自动 nudge 玄女。我仍要在最后一条
+assistant message 里发 sentinel JSON 拍醒她，`artifact_ref` 可填 `note:<filename>`
+提示她去对话流看：
+
+```
+{"_fuxi":"request_review","kind":"research_summary","summary":"调研完，详情见 inline","artifact_ref":"note:research.md"}
+```
+
+### 何时省略 note
+
+- 内容真的就一两句 → sentinel summary 字段直接装下
+- 用户要下载工件 → 走 `deliverable produce`，PWA 「交付」tab 是落地入口
+- 大于 256KB / 二进制 → note 拒收，必须 `deliverable produce`

@@ -162,6 +162,11 @@ fn default_events_db_path() -> Option<PathBuf> {
 
 /// events.db 反查：找 task 的 `TaskDispatched.to`。倒序查最新一条
 /// （re-dispatch 场景下取最近赋的 agent）。
+///
+/// **边界**：task 被 re-dispatch（luban → epsilon）后，老的 agent 想 note
+/// 这个 task 时反查会拿到 epsilon——note 出来 "from=epsilon" 误导。
+/// 这种场景下用户须显式 `--from <luban-uuid>`。CLI 兜底反查只对"单门客
+/// 就是这个 task 的归属人"的常见场景准。
 async fn find_assigned_agent(store: &EventStore, task: TaskId) -> Result<Option<AgentId>> {
     let events = store
         .history_for_task(task)
