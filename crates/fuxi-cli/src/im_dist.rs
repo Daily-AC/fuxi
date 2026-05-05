@@ -357,9 +357,14 @@ impl DistEnqueuer for DistControllerEnqueuer {
         // 自补。task_id/role 是 #76/#77 修：worker 用 home 真相 task_id 让
         // events.meta.task 跨节点一致；publish AgentSpawning 让 home aggregate
         // 拿到 role 不 fallback "unknown"。
+        // v2 跨节点 sandbox：把 task.project_id 透传到 DistJob.project，让 worker 端
+        // resolve_project_sandbox_cwd 找到对应 sandbox 把 cc/codex 起在那里。
+        // ephemeral_task=None：v2 当前默认 L3 持久 sandbox（同 role）；后续若加
+        // L2 一次性也由 caller 在 task 层面声明（暂未需要）。
+        let project_slug = task.project_id.as_ref().map(|p| p.to_string());
         let job_id = self
             .ctrl
-            .enqueue(
+            .enqueue_with_project(
                 node_hint,
                 task.title.clone(),
                 body,
@@ -370,6 +375,8 @@ impl DistEnqueuer for DistControllerEnqueuer {
                 Vec::new(),
                 opts.task_id,
                 opts.role,
+                project_slug.clone(),
+                None,
             )
             .await;
         tracing::info!(
@@ -377,9 +384,48 @@ impl DistEnqueuer for DistControllerEnqueuer {
             task_id = %task.id,
             pinned_node = ?task.pinned_node,
             required_tags = ?task.required_tags,
+            project = ?project_slug,
             "dist enqueue 成功"
         );
         Ok(job_id)
+    }
+}
+
+/// v2 跨节点 sandbox · production `NodeLoadProvider` 包装 `Arc<DistController>`——
+/// 复用 `DistController::nodes_snapshot` 的 inflight/max_concurrency/heartbeat 数据。
+///
+/// 反向依赖 pattern：trait 在 fuxi-orchestrator，impl 放 fuxi-cli。
+pub struct DistNodeLoadProvider {
+    pub ctrl: Arc<DistController>,
+}
+
+impl DistNodeLoadProvider {
+    pub fn new(ctrl: Arc<DistController>) -> Self {
+        Self { ctrl }
+    }
+}
+
+#[async_trait]
+impl fuxi_orchestrator::NodeLoadProvider for DistNodeLoadProvider {
+    async fn snapshot(&self) -> Vec<fuxi_orchestrator::NodeLoadSnapshot> {
+        // 跟 fuxi-im nodes_provider 对齐：用 30s 阈值算 online。dist controller
+        // 内部 stale 阈值是 60s（用于 sweep），auto-pin 选节点更严更安全。
+        let snaps = self.ctrl.nodes_snapshot().await;
+        snaps
+            .into_iter()
+            .map(|n| {
+                let online = n
+                    .last_seen_ms_ago
+                    .map(|ms| ms < ONLINE_HEARTBEAT_THRESHOLD_MS)
+                    .unwrap_or(false);
+                fuxi_orchestrator::NodeLoadSnapshot {
+                    node_id: n.node_id,
+                    inflight: n.inflight_count,
+                    max_concurrency: n.max_concurrency,
+                    online,
+                }
+            })
+            .collect()
     }
 }
 

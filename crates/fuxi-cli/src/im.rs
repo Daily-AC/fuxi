@@ -262,10 +262,18 @@ pub async fn run(args: StartArgs) -> Result<()> {
     // 决策树命中 dist 路径时把 task 派到 dist。`set_dist_enqueuer` async setter，
     // 必须 await。
     fuxi.set_dist_enqueuer(Arc::new(crate::im_dist::DistControllerEnqueuer::new(
-        dist_ctrl,
+        dist_ctrl.clone(),
     )))
     .await;
     tracing::info!("Fuxi.dist_enqueuer 已注入——dispatch routing 决策树启用");
+
+    // v2 跨节点 sandbox：NodeLoadProvider 包 Arc<DistController>，注入 Fuxi 让
+    // dispatch 在 task 关联到 project 但未显式 pin 时按 inflight/concurrency 选最闲。
+    fuxi.set_node_load_provider(Arc::new(crate::im_dist::DistNodeLoadProvider::new(
+        dist_ctrl,
+    )))
+    .await;
+    tracing::info!("Fuxi.node_load_provider 已注入——v2 跨节点 sandbox auto-pin 启用");
 
     // β · #56 dist_secrets 给 /api/dist/setup-worker 派发用。
     // controller_url：用 FUXI_DIST_CONTROLLER_URL env（部署侧 nginx 反代时
