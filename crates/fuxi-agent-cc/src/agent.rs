@@ -117,6 +117,10 @@ impl CcAgent {
         profile: AgentProfile,
         mut cfg: CcLaunchConfig,
     ) -> Result<Self> {
+        // role 先 clone 一份给 TranslateState——profile 后面会被 move 进 AgentCard。
+        // parser sentinel 路径要按 role 决定是否参与（cangjie/extractor 不参与，
+        // 防 cangjie 复读 trajectory 里的 sentinel 样本触发死循环）。
+        let role_for_parser = profile.role.clone();
         // 1. WS server 先起来拿到 port
         let sid = uuid::Uuid::new_v4().to_string();
         let channel = Arc::new(WsChannel::bind(&sid).await.map_err(CcError::from)?);
@@ -187,7 +191,7 @@ impl CcAgent {
             status: AgentStatus::Idle,
             active_tx: None,
             current_task: None,
-            translate_state: TranslateState::new(),
+            translate_state: TranslateState::with_role(role_for_parser.clone()),
             death_tx: Some(death_tx),
             pending: PendingOutbox::new(),
         }));
@@ -266,7 +270,7 @@ impl Agent for CcAgent {
             inner.status = AgentStatus::Busy;
             inner.active_tx = Some(tx);
             inner.current_task = Some(task.id);
-            inner.translate_state = TranslateState::new();
+            inner.translate_state = TranslateState::with_role(self.card.profile.role.clone());
             // 发送必须在锁外——channel.send 本身不会 block，但保守点
             inner.channel.send(msg).map_err(CcError::from)?;
         }

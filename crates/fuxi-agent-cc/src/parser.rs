@@ -98,6 +98,18 @@ pub enum CcEvent {
 /// 非-thinking 事件到来」——这个判断必须由调用方（agent 事件循环）驱动。
 #[derive(Debug, Default)]
 pub struct TranslateState {
+    /// 当前 worker 的 role 名（"luban" / "cangjie" / "extractor" / ...）。决定
+    /// `_fuxi:request_review` sentinel 是否参与翻译——只有"门客交付"模型的
+    /// role 走 sentinel；幕后 role（cangjie/extractor）输出含 sentinel JSON 时
+    /// 不该 emit AgentRequestReview，否则 cangjie 复读 trajectory 里的 sentinel
+    /// 样本会触发 bridge → 玄女 → 死循环（**2026-05-05 home 实测撞过**，单靠
+    /// `sentinel_addendum::should_inject_for_role` 黑名单不够，因为 cc 模型即使
+    /// 没读教学也会自己学着输出 sentinel 格式）。
+    ///
+    /// `None` 时按"普通门客"处理（发 sentinel 翻 AgentRequestReview）——保留向后
+    /// 兼容；测试老路径继续用 `TranslateState::new()`，新生产路径走
+    /// [`Self::with_role`]。
+    role: Option<String>,
     /// 当前处于 thinking 累积中。进入时推 `ThinkingStarted`；离开时推 `Finished`。
     in_thinking: bool,
     /// bug #77 · `tool_use_id → tool_name` 映射，用 join `UserToolResult` 反查回
@@ -123,6 +135,24 @@ pub struct TranslateState {
 impl TranslateState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 带 role 构造——production CcAgent spawn 时用，让 parser 能按 role 决定
+    /// 是否参与 sentinel 协议。
+    pub fn with_role(role: impl Into<String>) -> Self {
+        Self {
+            role: Some(role.into()),
+            ..Self::default()
+        }
+    }
+
+    /// `_fuxi:request_review` sentinel 是否对当前 role 生效。
+    /// 黑名单跟 `fuxi_orchestrator::sentinel_addendum::should_inject_for_role`
+    /// 概念一致——cangjie / extractor 是平台幕后角色，不属"门客交付"模型，
+    /// 输出含 sentinel JSON 必是复读 trajectory 噪声，不该 emit
+    /// AgentRequestReview。
+    fn sentinel_enabled(&self) -> bool {
+        !matches!(self.role.as_deref(), Some("cangjie") | Some("extractor"))
     }
 
     /// 标记当前事件流已收尾（result 到达）——如果还挂在 thinking 里，
@@ -369,7 +399,8 @@ pub fn translate(
             // task_id 为 None 不该发 sentinel（无 task 关联无意义）；按 caller
             // 契约 dispatch 后必有 current_task。这里仍守护一下：无 task 时降级
             // AgentResponded 透传。
-            if let Some(sentinel) = try_parse_request_review_sentinel(&text)
+            if state.sentinel_enabled()
+                && let Some(sentinel) = try_parse_request_review_sentinel(&text)
                 && let Some(t) = task_id
             {
                 out.push(mk_event(
@@ -1155,6 +1186,57 @@ mod tests {
             !st.responded_this_turn,
             "sentinel 行不属于 LLM 回复，不该置 responded_this_turn"
         );
+    }
+
+    /// 2026-05-05 home 实测：cangjie cc 即使 prompt 不教 sentinel 也会从 trajectory
+    /// 复读 luban 的 sentinel JSON 样本 → cc parser 误翻 → bridge → 玄女 →
+    /// 死循环。修：parser TranslateState 持 role，cangjie/extractor 时 sentinel
+    /// 路径**禁用**（含 sentinel JSON 输出走 AgentResponded 透传，不 emit
+    /// AgentRequestReview）。
+    #[test]
+    fn translate_sentinel_disabled_for_cangjie_role() {
+        let mut st = TranslateState::with_role("cangjie");
+        let task = TaskId::new();
+        let out = translate(
+            CcEvent::AssistantText {
+                text: r#"{"_fuxi":"request_review","kind":"research_summary","summary":"复读 trajectory 噪声"}"#
+                    .to_string(),
+            },
+            fresh_agent(),
+            Some(task),
+            &mut st,
+            None,
+        );
+        assert_eq!(out.len(), 1, "cangjie 只发一条事件");
+        match &out[0].kind {
+            EventKind::AgentResponded { text } => {
+                assert!(text.contains("_fuxi"), "cangjie 输出当作普通文本透传");
+            }
+            other => panic!("cangjie 不该 emit AgentRequestReview, got {other:?}"),
+        }
+        assert!(
+            st.responded_this_turn,
+            "走 AgentResponded 路径应置 responded_this_turn"
+        );
+    }
+
+    #[test]
+    fn translate_sentinel_disabled_for_extractor_role() {
+        let mut st = TranslateState::with_role("extractor");
+        let out = translate(
+            CcEvent::AssistantText {
+                text: r#"{"_fuxi":"request_review","kind":"research_summary","summary":"x"}"#
+                    .to_string(),
+            },
+            fresh_agent(),
+            Some(TaskId::new()),
+            &mut st,
+            None,
+        );
+        assert!(matches!(
+            out[0].kind,
+            EventKind::AgentResponded { .. }
+        ));
     }
 
     /// `summary` 必填 + `kind` 必为枚举值之一；缺字段或 kind 非法 → 退化普通 AgentResponded。
