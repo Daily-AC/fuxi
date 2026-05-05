@@ -112,6 +112,7 @@ impl FileSystemProjectRegistry {
             canonical_path: canonical,
             default_branch,
             created_at: Utc::now(),
+            host_nodes: Vec::new(),
         };
         let json = serde_json::to_string_pretty(&project)
             .map_err(|e| WorkspaceError::Other(format!("meta.json 序列化失败: {e}")))?;
@@ -158,6 +159,48 @@ impl FileSystemProjectRegistry {
         Ok(Some(load_meta(&meta_path).await?))
     }
 
+    /// v2 跨节点 sandbox：把 node_id 登记进 project.host_nodes（幂等）。
+    ///
+    /// 每次调都重新读 meta + dedup + 写回，简单粗暴但 phase 1 不会瓶颈
+    /// （`fuxi project add --shared` 是用户级动作，不在热路径）。
+    pub async fn add_host_node(
+        &self,
+        id: &ProjectId,
+        node_id: impl Into<String>,
+    ) -> Result<Project, WorkspaceError> {
+        let node_id = node_id.into();
+        let meta_path = self.root.join(id.as_str()).join(META_FILENAME);
+        if !meta_path.exists() {
+            return Err(WorkspaceError::Other(format!(
+                "project {id} 不存在——请先 add"
+            )));
+        }
+        let mut project = load_meta(&meta_path).await?;
+        if !project.host_nodes.iter().any(|n| n == &node_id) {
+            project.host_nodes.push(node_id);
+        }
+        write_meta(&meta_path, &project).await?;
+        Ok(project)
+    }
+
+    /// 同 add_host_node，反向操作。删除不在的节点幂等返当前状态。
+    pub async fn remove_host_node(
+        &self,
+        id: &ProjectId,
+        node_id: &str,
+    ) -> Result<Project, WorkspaceError> {
+        let meta_path = self.root.join(id.as_str()).join(META_FILENAME);
+        if !meta_path.exists() {
+            return Err(WorkspaceError::Other(format!(
+                "project {id} 不存在——无 host_node 可删"
+            )));
+        }
+        let mut project = load_meta(&meta_path).await?;
+        project.host_nodes.retain(|n| n != node_id);
+        write_meta(&meta_path, &project).await?;
+        Ok(project)
+    }
+
     /// 删 project：递归删 `<root>/<id>/`。
     ///
     /// **注意**：会一起删掉 sandboxes / ephemeral / archive / deliverables——
@@ -178,6 +221,13 @@ async fn load_meta(path: &Path) -> Result<Project, WorkspaceError> {
     let project: Project = serde_json::from_slice(&bytes)
         .map_err(|e| WorkspaceError::Other(format!("meta.json 解析失败: {e}")))?;
     Ok(project)
+}
+
+async fn write_meta(path: &Path, project: &Project) -> Result<(), WorkspaceError> {
+    let json = serde_json::to_string_pretty(project)
+        .map_err(|e| WorkspaceError::Other(format!("meta.json 序列化失败: {e}")))?;
+    fs::write(path, json).await?;
+    Ok(())
 }
 
 /// 一个目录是不是 git repo：含 `.git`（不管是 dir 还是 worktree marker file）。
@@ -510,5 +560,92 @@ mod tests {
         let id = ProjectId::new("ghost").unwrap();
         // 不该 fail
         registry.remove(&id).await.unwrap();
+    }
+
+    /// v2 跨节点：登记 host_node 应持久化到 meta.json，重复登记不重复入。
+    #[tokio::test]
+    async fn add_host_node_persists_and_dedups() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_td, repo) = make_git_repo().await;
+        let added = registry.add(repo, Some("erp".into()), None).await.unwrap();
+        assert!(
+            added.host_nodes.is_empty(),
+            "新建 project 默认无 host_nodes"
+        );
+
+        let p1 = registry
+            .add_host_node(&added.id, "home-node")
+            .await
+            .unwrap();
+        assert_eq!(p1.host_nodes, vec!["home-node".to_string()]);
+
+        // 重复登记同节点应幂等
+        let p2 = registry
+            .add_host_node(&added.id, "home-node")
+            .await
+            .unwrap();
+        assert_eq!(p2.host_nodes, vec!["home-node".to_string()]);
+
+        // 第二个节点
+        let p3 = registry
+            .add_host_node(&added.id, "mac-local")
+            .await
+            .unwrap();
+        assert_eq!(
+            p3.host_nodes,
+            vec!["home-node".to_string(), "mac-local".to_string()]
+        );
+
+        // 持久化：再读 meta 应保留
+        let reloaded = registry.get(&added.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.host_nodes,
+            vec!["home-node".to_string(), "mac-local".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_host_node_persists_and_idempotent() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_td, repo) = make_git_repo().await;
+        let added = registry.add(repo, Some("erp".into()), None).await.unwrap();
+        registry
+            .add_host_node(&added.id, "home-node")
+            .await
+            .unwrap();
+        registry
+            .add_host_node(&added.id, "mac-local")
+            .await
+            .unwrap();
+
+        let p1 = registry
+            .remove_host_node(&added.id, "home-node")
+            .await
+            .unwrap();
+        assert_eq!(p1.host_nodes, vec!["mac-local".to_string()]);
+
+        // 删除已不在的节点应幂等
+        let p2 = registry
+            .remove_host_node(&added.id, "home-node")
+            .await
+            .unwrap();
+        assert_eq!(p2.host_nodes, vec!["mac-local".to_string()]);
+
+        let reloaded = registry.get(&added.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.host_nodes, vec!["mac-local".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn add_host_node_errors_when_project_missing() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let id = ProjectId::new("ghost").unwrap();
+        let err = registry
+            .add_host_node(&id, "home-node")
+            .await
+            .expect_err("不存在的 project 应 fail");
+        assert!(matches!(err, WorkspaceError::Other(_)), "got {err:?}");
     }
 }

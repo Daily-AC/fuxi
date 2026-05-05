@@ -55,6 +55,31 @@ pub struct Project {
     /// 默认基线 branch，一般是 `main`。L3 sandbox 创建时从这条 branch fork。
     pub default_branch: String,
     pub created_at: DateTime<Utc>,
+    /// v2 跨节点 sandbox：本项目登记可用的 dist 节点列表。空 = 仅本机
+    /// （单节点项目，老行为）。多于一个时 `Fuxi::dispatch` 按 NodesProvider
+    /// 的 inflight/concurrency 比值挑最闲那个 auto-pin 路由。
+    /// `#[serde(default)]` 让老 meta.json（v2 之前）反序列化得空 Vec。
+    #[serde(default)]
+    pub host_nodes: Vec<String>,
+}
+
+impl Project {
+    /// 用任意可迭代节点名构造一份新副本，保持插入顺序去重。
+    pub fn with_host_nodes<I, S>(mut self, nodes: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut seen = Vec::<String>::new();
+        for n in nodes {
+            let s = n.into();
+            if !seen.contains(&s) {
+                seen.push(s);
+            }
+        }
+        self.host_nodes = seen;
+        self
+    }
 }
 
 /// 从 canonical 路径推断默认 slug：取末段 basename + 转小写 + 替换非法字符为 `-`。
@@ -168,6 +193,7 @@ mod tests {
             canonical_path: PathBuf::from("/Users/e0_7/erp"),
             default_branch: "main".into(),
             created_at: Utc::now(),
+            host_nodes: vec!["home-node".into(), "mac-local".into()],
         };
         let json = serde_json::to_string(&p).unwrap();
         let p2: Project = serde_json::from_str(&json).unwrap();
@@ -179,5 +205,38 @@ mod tests {
         let id = ProjectId::new("erp").unwrap();
         assert_eq!(id.to_string(), "erp");
         assert_eq!(format!("{id}"), "erp");
+    }
+
+    /// 老版 meta.json（v2 之前持久化的）没有 host_nodes 字段。reader 必须能反序
+    /// 列化得到空 Vec，否则升级 fuxi 后所有已注册项目变成不可读。
+    #[test]
+    fn project_meta_deserializes_legacy_without_host_nodes() {
+        let legacy = r#"{
+            "id": "erp",
+            "canonical_path": "/Users/e0_7/erp",
+            "default_branch": "main",
+            "created_at": "2026-04-01T00:00:00Z"
+        }"#;
+        let p: Project = serde_json::from_str(legacy).expect("legacy meta 应能反序列化");
+        assert_eq!(p.id.as_str(), "erp");
+        assert!(
+            p.host_nodes.is_empty(),
+            "缺字段应得空 Vec, got {:?}",
+            p.host_nodes
+        );
+    }
+
+    #[test]
+    fn project_with_host_nodes_dedups() {
+        // ctor 应 dedup 输入，避免不小心同节点登记两次造成调度计算偏差。
+        let p = Project {
+            id: ProjectId::new("erp").unwrap(),
+            canonical_path: PathBuf::from("/x"),
+            default_branch: "main".into(),
+            created_at: Utc::now(),
+            host_nodes: vec![],
+        }
+        .with_host_nodes(["home", "mac", "home"]);
+        assert_eq!(p.host_nodes, vec!["home".to_string(), "mac".to_string()]);
     }
 }
