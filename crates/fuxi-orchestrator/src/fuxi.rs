@@ -1310,6 +1310,32 @@ impl Fuxi {
                     "always-nudge fallback：cc 未输出 sentinel，pump 兜底发 AgentRequestReview"
                 );
             }
+            // Bug 修：pump 无终态退出 → 兜底 emit TaskCancelled 防 task 永远显
+            // "running"。常见触发：cc 进程崩溃 / GC 走门客时 rx 端关闭 / agent
+            // adapter 出错。事件库实证 task-fb7437a8 cangjie-extract 撞过——
+            // agent 29dafabc 后期无任何事件，PWA 永远卡 running。
+            //
+            // 不发送 AgentDead——pump 不掌握"死因"语义，AgentDead 由 shutdown
+            // 路径或 worker 心跳超时机制自管。这里只补 TaskStateChanged 让任务
+            // 视图收敛。下游 archive_l2_for_task / always-nudge 已对 Cancelled
+            // 做过路径处理（archive 幂等，nudge 已 gate 在 task_done_ok）。
+            if !saw_terminal {
+                let mut meta = EventMeta::now();
+                meta.agent = Some(agent_id);
+                meta.task = Some(task_id);
+                let _ = bus.publish(Event {
+                    meta,
+                    kind: EventKind::TaskStateChanged {
+                        from: fuxi_core::task::TaskState::InProgress,
+                        to: fuxi_core::task::TaskState::Cancelled,
+                    },
+                });
+                warn!(
+                    %agent_id,
+                    %task_id,
+                    "dispatch pump 无终态退出 → 兜底 emit TaskCancelled (orphan recovery)"
+                );
+            }
             // pump 退出默认摊回 Idle，但若已被 death_watcher 标 Dead（AgentDead），
             // 不能回写成 Idle——否则会出现"门客死亡后又可用"的状态回退。
             // #19 增 info 级日志：用户复现"门客 Idle 但 task 无收尾"时，journal 可以
@@ -2079,5 +2105,195 @@ mod task_id_injection_tests {
         let after = Fuxi::maybe_inject_task_id("luban", task);
         // 单独一行（结尾 `\n\n`）——LLM grep 友好
         assert!(after.description.contains("]\n\nbody"));
+    }
+}
+
+#[cfg(test)]
+mod pump_orphan_recovery_tests {
+    //! Bug 修测试：dispatch pump 无终态退出时兜底 emit TaskCancelled。
+
+    use super::*;
+    use async_trait::async_trait;
+    use futures_util::StreamExt;
+    use fuxi_core::Result as CoreResult;
+    use fuxi_core::agent::{AgentCard, AgentProfile, AgentStatus};
+    use fuxi_events::EventBus;
+    use fuxi_workspace::GitWorktreeWorkspace;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tokio::sync::mpsc;
+
+    /// 受控 agent：dispatch() 返回测试持有的 rx；test 端 drop sender 即触发 pump 退出。
+    /// agent 本身不持 sender——避免 rx 永远不关闭。
+    struct ControllableAgent {
+        card: AgentCard,
+        rx_holder: Mutex<Option<mpsc::Receiver<Event>>>,
+    }
+    impl ControllableAgent {
+        fn new(role: &str) -> (Arc<Self>, mpsc::Sender<Event>) {
+            let (tx, rx) = mpsc::channel(64);
+            let agent = Arc::new(Self {
+                card: AgentCard {
+                    id: AgentId::new(),
+                    profile: AgentProfile {
+                        name: format!("ctrl-{role}"),
+                        role: role.to_string(),
+                        cli: "stub".to_string(),
+                        system_prompt: String::new(),
+                        tags: vec![],
+                        extra: Default::default(),
+                    },
+                    endpoint: "stub://".into(),
+                    status: AgentStatus::Idle,
+                },
+                rx_holder: Mutex::new(Some(rx)),
+            });
+            (agent, tx)
+        }
+    }
+    #[async_trait]
+    impl Agent for ControllableAgent {
+        fn card(&self) -> &AgentCard {
+            &self.card
+        }
+        async fn dispatch(&self, _task: Task) -> CoreResult<mpsc::Receiver<Event>> {
+            let rx = self
+                .rx_holder
+                .lock()
+                .await
+                .take()
+                .expect("dispatch: rx 已被取走");
+            Ok(rx)
+        }
+        async fn send_message(&self, _t: TaskId, _text: &str) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _t: TaskId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn make_fuxi() -> Arc<Fuxi> {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let bus = EventBus::with_memory_store().await.unwrap();
+        // dir 作 workspace 占位；测试不申请 worktree
+        std::mem::forget(dir);
+        Arc::new(Fuxi::new(bus, ws))
+    }
+
+    /// pump 无终态退出（rx 直接被关闭无终态事件） → 兜底 emit TaskCancelled。
+    #[tokio::test]
+    async fn pump_orphan_emits_task_cancelled_on_no_terminal() {
+        let fuxi = make_fuxi().await;
+        let bus = fuxi.bus();
+        let mut sub = bus.subscribe();
+
+        let (agent, tx) = ControllableAgent::new("luban");
+        let _agent_id = fuxi.insert_agent(agent.clone(), None).await;
+
+        let task = Task::new("test-task", "noop");
+        let task_id = task.id;
+        fuxi.dispatch(agent.card().id, task)
+            .await
+            .expect("dispatch");
+
+        // 给 pump 一点时间 spawn 起来 + 完成 dispatch 内的事件
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // 关 sender → rx None → pump break 退出（无终态事件）
+        drop(tx);
+
+        // 等 TaskCancelled 兜底事件
+        let mut found = false;
+        for _ in 0..50 {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), sub.next()).await {
+                Ok(Some(Ok(ev))) => {
+                    if matches!(
+                        &ev.kind,
+                        EventKind::TaskStateChanged {
+                            to: fuxi_core::task::TaskState::Cancelled,
+                            ..
+                        }
+                    ) && ev.meta.task == Some(task_id)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(
+            found,
+            "pump 无终态退出时应兜底发 TaskStateChanged{{Cancelled}}"
+        );
+    }
+
+    /// pump 见到正常 Done 终态 → 不应额外 emit TaskCancelled（避免事件污染）。
+    #[tokio::test]
+    async fn pump_does_not_double_emit_when_terminal_seen() {
+        let fuxi = make_fuxi().await;
+        let bus = fuxi.bus();
+        let mut sub = bus.subscribe();
+
+        let (agent, tx) = ControllableAgent::new("luban");
+        let _agent_id = fuxi.insert_agent(agent.clone(), None).await;
+        let task = Task::new("test-task-done", "noop");
+        let task_id = task.id;
+        fuxi.dispatch(agent.card().id, task)
+            .await
+            .expect("dispatch");
+
+        // 给 pump 起来时间
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // pump 内部已发 TaskCreated/TaskDispatched；这里 push 一条真终态 Done
+        let mut meta = EventMeta::now();
+        meta.agent = Some(agent.card().id);
+        meta.task = Some(task_id);
+        tx.send(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .await
+        .expect("push done");
+
+        // 等 grace timeout 让 pump 退出（默认 500ms）
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        drop(tx);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 数 Cancelled 事件——应当 0 条（task 已 Done）
+        let mut cancelled_count = 0;
+        for _ in 0..30 {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await {
+                Ok(Some(Ok(ev))) => {
+                    if matches!(
+                        &ev.kind,
+                        EventKind::TaskStateChanged {
+                            to: fuxi_core::task::TaskState::Cancelled,
+                            ..
+                        }
+                    ) && ev.meta.task == Some(task_id)
+                    {
+                        cancelled_count += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(
+            cancelled_count, 0,
+            "saw_terminal=true 时不应再补 TaskCancelled（避免重复终态）"
+        );
     }
 }
