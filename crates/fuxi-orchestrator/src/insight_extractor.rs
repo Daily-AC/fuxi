@@ -99,6 +99,12 @@ pub struct InsightExtractorConfig {
     pub extract_template: String,
     /// judge prompt 模板——`<<role>>` / `<<task_type>>` / `<<pattern>>` 会被替换。
     pub judge_template: String,
+    /// batch judge 模板（v2.1）——把 N 条候选拼一个 prompt，一次 cc call 出 N 个分数。
+    /// `<<batch_block>>` 会被换成「#0 ... \n#1 ...」形式的多块文本。`<<count>>` 总数。
+    pub judge_batch_template: String,
+    /// 是否开启 batch judge（默认 true，env `FUXI_INSIGHT_BATCH_JUDGE=0` 关）。
+    /// 关闭时回退老的逐条 spawn 路径——保留为兜底，不删除。
+    pub batch_judge: bool,
 }
 
 impl Default for InsightExtractorConfig {
@@ -110,6 +116,8 @@ impl Default for InsightExtractorConfig {
             judge_threshold: 0.6,
             extract_template: DEFAULT_EXTRACT_TEMPLATE.to_string(),
             judge_template: DEFAULT_JUDGE_TEMPLATE.to_string(),
+            judge_batch_template: DEFAULT_JUDGE_BATCH_TEMPLATE.to_string(),
+            batch_judge: true,
         }
     }
 }
@@ -122,13 +130,23 @@ pub const DEFAULT_EXTRACT_TEMPLATE: &str = "[INSIGHT_EXTRACT] role=<<role>> task
 /// 默认 judge prompt——细节去 `roles/cangjie/instructions/judge.md`。
 pub const DEFAULT_JUDGE_TEMPLATE: &str = "[INSIGHT_JUDGE] 候选 insight：role=<<role>> task_type=<<task_type>>\npattern=<<pattern>>\n\n按你 instructions/judge.md 的五档尺度（1.0/0.7/0.4/0.1/0.0）评分，阈值 0.6。\n输出**严格 JSON**：{\"score\": 0.X, \"reason\": \"≤40字判语\"}\n单行 JSON 不加任何文字、不要 markdown 围栏。";
 
-/// 从 env 读 `FUXI_INSIGHT_EXTRACTOR_ENABLED`——v2 default **true**（v1 extractor 是 false）。
+/// 默认 batch judge prompt（v2.1）——把 N 条候选合一次 cc call。降本是论文要求的
+/// "判官精简度"：单条 spawn 起一只 cangjie cc 太贵；batch 后整 task 的 N+1 调用降到 1+1。
+/// 严格度损失最小——cangjie 被强制按 idx 顺序产 N 个 verdict，不让模型跳条。
+pub const DEFAULT_JUDGE_BATCH_TEMPLATE: &str = "[INSIGHT_JUDGE_BATCH] 共 <<count>> 条候选 insight，逐条按你 instructions/judge.md 的五档尺度（1.0/0.7/0.4/0.1/0.0）打分，阈值 0.6。\n\n<<batch_block>>\n\n输出**严格 JSON 数组**，**条数 + 顺序必须跟上面候选完全一致**：[{\"score\":0.X,\"reason\":\"≤40字\"}, {\"score\":0.X,\"reason\":\"...\"}, ...]\n单行 JSON 不加任何文字、不要 markdown 围栏。不写 idx——位置即 idx。";
+
+/// 从 env 读 `FUXI_INSIGHT_EXTRACTOR_ENABLED` + `FUXI_INSIGHT_BATCH_JUDGE`。
+/// 两个均 default **true**（前者论文支持开，后者降本默认开）。
 pub fn config_from_env() -> InsightExtractorConfig {
     let mut cfg = InsightExtractorConfig::default();
     match std::env::var("FUXI_INSIGHT_EXTRACTOR_ENABLED").as_deref() {
         // 显式 0/false/off/no 才关
         Ok("0") | Ok("false") | Ok("off") | Ok("no") | Ok("FALSE") => cfg.enabled = false,
         _ => {} // 其他全保持 true（含 unset）
+    }
+    match std::env::var("FUXI_INSIGHT_BATCH_JUDGE").as_deref() {
+        Ok("0") | Ok("false") | Ok("off") | Ok("no") | Ok("FALSE") => cfg.batch_judge = false,
+        _ => {}
     }
     cfg
 }
@@ -305,6 +323,17 @@ async fn process_task(
         None => "unknown".to_string(),
     };
     let task_title = task_title_from_history(&hist).unwrap_or_else(|| "unknown".to_string());
+    // task_type review 豁免：审阅/校验类 task 本质是"读 + 判断"，几乎无可迁移
+    // insight。继续抽 = 浪费 cc 调用 + 易抽出"应当检查 X"这种空话。trajectory 里
+    // 出现 review/validation/审/验证 等关键词即跳过。env override 让用户调清单。
+    if should_skip_review(&task_title, &trajectory_text) {
+        debug!(
+            %task_id,
+            title = %task_title,
+            "insight_extractor: review/validation 类 task，跳过"
+        );
+        return Ok(());
+    }
     let task_type_hint = ""; // 仓颉自己分类——这里给空字符串，不强加先验。
 
     // 4) 跑 extraction。
@@ -348,44 +377,52 @@ async fn process_task(
         &candidates[..]
     };
 
-    // 6) 逐条 judge → 过阈值 record。
-    let mut accepted = 0usize;
+    // 6) 字段空 → 前置剔除（不浪费 judge spawn 钱），保留 valid 列表。
     let mut rejected = 0usize;
-    for cand in capped {
-        // 字段空 → 直接拒（judge 也会拒，但前置省一次 spawn 钱）。
-        if cand.role.trim().is_empty() || cand.pattern.trim().is_empty() {
-            warn!(
-                %task_id,
-                "insight_extractor: 候选字段空（role 或 pattern），跳过 judge"
-            );
-            rejected += 1;
-            continue;
-        }
-        let judge_prompt = cfg
-            .judge_template
-            .replace("<<role>>", &cand.role)
-            .replace("<<task_type>>", &cand.task_type)
-            .replace("<<pattern>>", &cand.pattern);
-        let judge_text = match spawner.spawn_and_run(judge_prompt, cfg.timeout).await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!(%task_id, error = %e, "insight_extractor: judge spawn 失败，跳过该条");
+    let valid: Vec<&InsightCandidate> = capped
+        .iter()
+        .filter(|c| {
+            if c.role.trim().is_empty() || c.pattern.trim().is_empty() {
+                warn!(
+                    %task_id,
+                    "insight_extractor: 候选字段空（role 或 pattern），跳过 judge"
+                );
                 rejected += 1;
-                continue;
+                false
+            } else {
+                true
             }
-        };
-        let verdict = match parse_verdict(&judge_text) {
+        })
+        .collect();
+
+    if valid.is_empty() {
+        info!(%task_id, accepted = 0, rejected, "insight_extractor: 无有效候选，跳过 judge");
+        return Ok(());
+    }
+
+    // 7) judge：batch 走单 cc call，失败 / 关闭 batch 退化逐条。
+    let verdicts: Vec<Option<JudgeVerdict>> = if cfg.batch_judge {
+        match run_batch_judge(spawner.as_ref(), cfg, &valid).await {
             Ok(v) => v,
             Err(e) => {
                 warn!(
                     %task_id,
                     error = %e,
-                    preview = judge_text.chars().take(80).collect::<String>(),
-                    "insight_extractor: judge JSON 解析失败，跳过该条"
+                    "insight_extractor: batch judge 失败，回退逐条"
                 );
-                rejected += 1;
-                continue;
+                run_per_call_judge(spawner.as_ref(), cfg, &valid, task_id).await
             }
+        }
+    } else {
+        run_per_call_judge(spawner.as_ref(), cfg, &valid, task_id).await
+    };
+
+    // 8) 应用 verdict → record。
+    let mut accepted = 0usize;
+    for (cand, verdict_opt) in valid.iter().zip(verdicts.into_iter()) {
+        let Some(verdict) = verdict_opt else {
+            rejected += 1;
+            continue;
         };
         if verdict.score < cfg.judge_threshold {
             debug!(
@@ -422,6 +459,80 @@ async fn process_task(
         "insight_extractor: 本轮抽取完成"
     );
     Ok(())
+}
+
+/// 单 cc call 给 N 个候选打分。条数 + 顺序必须跟入参一致；不一致 → Err 让 caller
+/// 退化逐条。verdicts 长度 = candidates 长度，position-by-position 对齐。
+async fn run_batch_judge(
+    spawner: &dyn CangjieSpawner,
+    cfg: &InsightExtractorConfig,
+    candidates: &[&InsightCandidate],
+) -> std::result::Result<Vec<Option<JudgeVerdict>>, String> {
+    let mut block = String::new();
+    for (i, c) in candidates.iter().enumerate() {
+        block.push_str(&format!(
+            "#{i} role={} task_type={}\npattern={}\n\n",
+            c.role,
+            c.task_type,
+            c.pattern.trim()
+        ));
+    }
+    let prompt = cfg
+        .judge_batch_template
+        .replace("<<count>>", &candidates.len().to_string())
+        .replace("<<batch_block>>", block.trim_end());
+    let text = spawner
+        .spawn_and_run(prompt, cfg.timeout)
+        .await
+        .map_err(|e| format!("batch judge spawn: {e}"))?;
+    let parsed: Vec<JudgeVerdict> =
+        parse_batch_verdicts(&text).map_err(|e| format!("batch judge parse: {e}"))?;
+    if parsed.len() != candidates.len() {
+        return Err(format!(
+            "batch judge 条数不符：cangjie 出 {}, 期望 {}",
+            parsed.len(),
+            candidates.len()
+        ));
+    }
+    Ok(parsed.into_iter().map(Some).collect())
+}
+
+/// 老路径：逐条 spawn judge cc。batch 失败兜底 + env 显式关闭时走这个。
+async fn run_per_call_judge(
+    spawner: &dyn CangjieSpawner,
+    cfg: &InsightExtractorConfig,
+    candidates: &[&InsightCandidate],
+    task_id: TaskId,
+) -> Vec<Option<JudgeVerdict>> {
+    let mut out = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let judge_prompt = cfg
+            .judge_template
+            .replace("<<role>>", &cand.role)
+            .replace("<<task_type>>", &cand.task_type)
+            .replace("<<pattern>>", &cand.pattern);
+        let judge_text = match spawner.spawn_and_run(judge_prompt, cfg.timeout).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(%task_id, error = %e, "insight_extractor: judge spawn 失败，跳过该条");
+                out.push(None);
+                continue;
+            }
+        };
+        match parse_verdict(&judge_text) {
+            Ok(v) => out.push(Some(v)),
+            Err(e) => {
+                warn!(
+                    %task_id,
+                    error = %e,
+                    preview = judge_text.chars().take(80).collect::<String>(),
+                    "insight_extractor: judge JSON 解析失败，跳过该条"
+                );
+                out.push(None);
+            }
+        }
+    }
+    out
 }
 
 /// 把 task 历史里的 UserPrompted / AgentResponded / ToolCallStarted / ToolCallFinished
@@ -474,9 +585,53 @@ fn parse_candidates(text: &str) -> std::result::Result<Vec<InsightCandidate>, se
     serde_json::from_str::<Vec<InsightCandidate>>(trimmed)
 }
 
+/// review / validation 类 task 关键词。env `FUXI_INSIGHT_REVIEW_KEYWORDS`（CSV）
+/// 可覆盖；空 / 未设走默认。检查时 title 优先，未命中再扫 trajectory 头部。
+const DEFAULT_REVIEW_KEYWORDS: &[&str] = &[
+    "review",
+    "validation",
+    "validate",
+    "approve",
+    "approval",
+    "审阅",
+    "审过",
+    "审核",
+    "审查",
+    "审一下",
+    "校验",
+    "验证",
+    "把关",
+];
+
+fn should_skip_review(title: &str, trajectory: &str) -> bool {
+    let custom = std::env::var("FUXI_INSIGHT_REVIEW_KEYWORDS").ok();
+    let keywords: Vec<String> = match custom.as_deref() {
+        Some(s) if !s.trim().is_empty() => s.split(',').map(|k| k.trim().to_lowercase()).collect(),
+        _ => DEFAULT_REVIEW_KEYWORDS
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect(),
+    };
+    let title_lc = title.to_lowercase();
+    if keywords.iter().any(|k| title_lc.contains(k)) {
+        return true;
+    }
+    // trajectory 头部 200 字也扫一下——title 可能简略（如"检查一下..."）但
+    // trajectory 里用户一句话明确写"review xxx"。只看头部限制误命中。
+    let head: String = trajectory.chars().take(200).collect();
+    let head_lc = head.to_lowercase();
+    keywords.iter().any(|k| head_lc.contains(k))
+}
+
 fn parse_verdict(text: &str) -> std::result::Result<JudgeVerdict, serde_json::Error> {
     let trimmed = strip_code_fence(text.trim());
     serde_json::from_str::<JudgeVerdict>(trimmed)
+}
+
+/// batch judge 出 JSON 数组——位置对齐 verdict。容忍 ```围栏 / 尾随空格。
+fn parse_batch_verdicts(text: &str) -> std::result::Result<Vec<JudgeVerdict>, serde_json::Error> {
+    let trimmed = strip_code_fence(text.trim());
+    serde_json::from_str::<Vec<JudgeVerdict>>(trimmed)
 }
 
 /// 容忍 ```json ... ``` 围栏——尽管 prompt 明文禁止，仓颉偶尔仍会带，宽松解析。
@@ -644,31 +799,29 @@ mod tests {
 
     // ─── tests ────────────────────────────────────────────
 
-    /// extraction 返 3 条 + judge 全过 → 3 条入库，source/score/derived_from_task 齐。
+    /// extraction 返 3 条 + batch judge 全过 → 3 条入库；只 spawn 2 次 cc（1+1 而非 1+N）。
     #[tokio::test]
     async fn extracts_three_insights_all_pass_judge() {
         let (bus, hetu) = make_setup().await;
         let agent = AgentId::new();
         let task = TaskId::new();
 
-        // 第 1 次 spawn = extraction（3 条）；之后每 candidate 一次 judge（共 3 次 0.85 通过）。
         let extraction = r#"[
             {"role":"luban","task_type":"bugfix","pattern":"Cargo.lock 撞冲突直接 rm 重生比手工解快"},
             {"role":"luban","task_type":"bugfix","pattern":"reproduce 不出来的 bug 先怀疑环境差异"},
             {"role":"luban","task_type":"bugfix","pattern":"测试加 println debug 完毕必须删干净再 commit"}
         ]"#;
-        let pass = r#"{"score": 0.85, "reason": "通用守则"}"#;
-        let spawner = MockSpawner::new(vec![
-            extraction.to_string(),
-            pass.to_string(),
-            pass.to_string(),
-            pass.to_string(),
-        ]);
+        // batch judge 出 JSON array，3 条全过
+        let batch_pass = r#"[
+            {"score": 0.85, "reason": "通用守则"},
+            {"score": 0.85, "reason": "通用守则"},
+            {"score": 0.85, "reason": "通用守则"}
+        ]"#;
+        let spawner = MockSpawner::new(vec![extraction.to_string(), batch_pass.to_string()]);
         spawner.set_role(agent, "luban");
 
         let cfg = InsightExtractorConfig::default();
         let _h = InsightExtractorTask::new(bus.clone(), hetu.clone(), spawner.clone(), cfg).spawn();
-        // 让订阅就位再 publish。
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         publish_trajectory(&bus, agent, task).await;
@@ -686,8 +839,78 @@ mod tests {
             );
             assert_eq!(p.task_type, "bugfix");
         }
-        // 4 次 spawn：1 extraction + 3 judge。
+        // batch judge 默认开 → 1 extraction + 1 batch judge = 2 次 spawn（旧 1+N 降到 1+1）
+        assert_eq!(
+            spawner.prompts().len(),
+            2,
+            "v2.1 batch judge 应只 spawn 2 次（1 extract + 1 batch）"
+        );
+    }
+
+    /// batch judge 条数与候选不符 → 兜底回退逐条 spawn。
+    #[tokio::test]
+    async fn batch_judge_count_mismatch_falls_back_per_call() {
+        let (bus, hetu) = make_setup().await;
+        let agent = AgentId::new();
+        let task = TaskId::new();
+
+        let extraction = r#"[
+            {"role":"luban","task_type":"bugfix","pattern":"原则 1"},
+            {"role":"luban","task_type":"bugfix","pattern":"原则 2"}
+        ]"#;
+        // batch 出只 1 条，期望 2 → 解析后条数不符 → 回退
+        let batch_short = r#"[{"score": 0.85, "reason": "ok"}]"#;
+        let pass = r#"{"score": 0.85, "reason": "通用守则"}"#;
+        let spawner = MockSpawner::new(vec![
+            extraction.to_string(),
+            batch_short.to_string(),
+            pass.to_string(),
+            pass.to_string(),
+        ]);
+        spawner.set_role(agent, "luban");
+
+        let cfg = InsightExtractorConfig::default();
+        let _h = InsightExtractorTask::new(bus.clone(), hetu.clone(), spawner.clone(), cfg).spawn();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        publish_trajectory(&bus, agent, task).await;
+        wait_records(&hetu, 2).await;
+
+        // 1 extract + 1 batch（fail）+ 2 per-call = 4
         assert_eq!(spawner.prompts().len(), 4);
+    }
+
+    /// FUXI_INSIGHT_BATCH_JUDGE=0 → 关闭 batch，走老 1+N 路径。
+    #[tokio::test]
+    async fn batch_judge_disabled_via_config_uses_per_call() {
+        let (bus, hetu) = make_setup().await;
+        let agent = AgentId::new();
+        let task = TaskId::new();
+
+        let extraction = r#"[
+            {"role":"luban","task_type":"bugfix","pattern":"原则 A"},
+            {"role":"luban","task_type":"bugfix","pattern":"原则 B"}
+        ]"#;
+        let pass = r#"{"score": 0.85, "reason": "通用守则"}"#;
+        let spawner = MockSpawner::new(vec![
+            extraction.to_string(),
+            pass.to_string(),
+            pass.to_string(),
+        ]);
+        spawner.set_role(agent, "luban");
+
+        let cfg = InsightExtractorConfig {
+            batch_judge: false,
+            ..InsightExtractorConfig::default()
+        };
+        let _h = InsightExtractorTask::new(bus.clone(), hetu.clone(), spawner.clone(), cfg).spawn();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        publish_trajectory(&bus, agent, task).await;
+        wait_records(&hetu, 2).await;
+
+        // 1 extract + 2 per-call judge = 3（无 batch 调用）
+        assert_eq!(spawner.prompts().len(), 3);
     }
 
     /// judge 给 0.4（< 0.6 阈值）→ 全拒收，hetu 0 条。
@@ -880,12 +1103,16 @@ mod tests {
             ));
         }
         arr.push(']');
-        let pass = r#"{"score": 0.8, "reason": "ok"}"#;
-        let mut responses = vec![arr];
-        for _ in 0..7 {
-            responses.push(pass.to_string());
+        // batch judge 7 元素 array（截断后剩 7）
+        let mut batch = String::from("[");
+        for i in 0..7 {
+            if i > 0 {
+                batch.push(',');
+            }
+            batch.push_str(r#"{"score": 0.8, "reason": "ok"}"#);
         }
-        let spawner = MockSpawner::new(responses);
+        batch.push(']');
+        let spawner = MockSpawner::new(vec![arr, batch]);
         spawner.set_role(agent, "luban");
 
         let cfg = InsightExtractorConfig::default();
@@ -898,11 +1125,12 @@ mod tests {
         // 给一点窗口防迟到的第 8 条。
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(hetu.list_active(20).await.unwrap().len(), 7);
-        // 1 extraction + 7 judge = 8 次 spawn（截断后只 judge 7 条）。
-        assert_eq!(spawner.prompts().len(), 8);
+        // batch path：1 extraction + 1 batch judge = 2 spawn（v2.1 降本）
+        assert_eq!(spawner.prompts().len(), 2);
     }
 
-    /// judge 返坏 JSON → 该条拒，其他正常的仍接受（不让一条烂判把整批废了）。
+    /// per-call 路径：单条 judge 返坏 JSON → 该条拒，其他正常的仍接受。
+    /// 测 batch_judge=false 时保持「1 烂判不毁全批」语义。
     #[tokio::test]
     async fn malformed_judge_rejects_only_that_one() {
         let (bus, hetu) = make_setup().await;
@@ -921,7 +1149,10 @@ mod tests {
         ]);
         spawner.set_role(agent, "luban");
 
-        let cfg = InsightExtractorConfig::default();
+        let cfg = InsightExtractorConfig {
+            batch_judge: false,
+            ..InsightExtractorConfig::default()
+        };
         let _h = InsightExtractorTask::new(bus.clone(), hetu.clone(), spawner.clone(), cfg).spawn();
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -966,7 +1197,8 @@ mod tests {
 
         let wrapped =
             "```json\n[{\"role\":\"luban\",\"task_type\":\"bugfix\",\"pattern\":\"x\"}]\n```";
-        let pass = r#"{"score": 0.8, "reason": "ok"}"#;
+        // batch judge 出 1 元素 array
+        let pass = r#"[{"score": 0.8, "reason": "ok"}]"#;
         let spawner = MockSpawner::new(vec![wrapped.to_string(), pass.to_string()]);
         spawner.set_role(agent, "luban");
 
@@ -986,7 +1218,7 @@ mod tests {
         let task = TaskId::new();
 
         let extraction = r#"[{"role":"luban","task_type":"","pattern":"通用守则"}]"#;
-        let pass = r#"{"score": 0.9, "reason": "ok"}"#;
+        let pass = r#"[{"score": 0.9, "reason": "ok"}]"#;
         let spawner = MockSpawner::new(vec![extraction.to_string(), pass.to_string()]);
         spawner.set_role(agent, "luban");
 
@@ -1022,6 +1254,42 @@ mod tests {
         assert!(cfg.enabled);
 
         unsafe { std::env::remove_var("FUXI_INSIGHT_EXTRACTOR_ENABLED") };
+    }
+
+    /// should_skip_review 单测：title 含 review 类关键词 → 跳过。
+    #[test]
+    fn should_skip_review_matches_title_keywords() {
+        // SAFETY: 测试单线程，env 无并发
+        unsafe { std::env::remove_var("FUXI_INSIGHT_REVIEW_KEYWORDS") };
+        assert!(should_skip_review("review feat-X 改动", ""));
+        assert!(should_skip_review("Review the auth fix", ""));
+        assert!(should_skip_review("审一下 luban 交付", ""));
+        assert!(should_skip_review("校验补丁正确性", ""));
+        assert!(should_skip_review("validate the migration", ""));
+        // 反例
+        assert!(!should_skip_review("修 ERP-1066", ""));
+        assert!(!should_skip_review("调研 sia 项目", ""));
+    }
+
+    /// trajectory 头部含关键词也算 review 类。
+    #[test]
+    fn should_skip_review_matches_trajectory_head() {
+        unsafe { std::env::remove_var("FUXI_INSIGHT_REVIEW_KEYWORDS") };
+        let traj = "用户：帮我 review 一下昨天 luban 改的那段\n门客：好的";
+        assert!(should_skip_review("用户提问", traj));
+        // 关键词在 200 字外不算（防误命中）
+        let pad: String = "x".repeat(300);
+        let late = format!("{pad} review 这个");
+        assert!(!should_skip_review("中性标题", &late));
+    }
+
+    /// env override 关键词清单。
+    #[test]
+    fn should_skip_review_env_override() {
+        unsafe { std::env::set_var("FUXI_INSIGHT_REVIEW_KEYWORDS", "approve_only") };
+        assert!(should_skip_review("Please approve_only this", ""));
+        assert!(!should_skip_review("review changes", "")); // review 已不在清单
+        unsafe { std::env::remove_var("FUXI_INSIGHT_REVIEW_KEYWORDS") };
     }
 
     /// strip_code_fence 单测——确保中间内容/无围栏/纯 JSON 三种都不破。
