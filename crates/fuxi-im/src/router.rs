@@ -56,7 +56,16 @@ pub fn build(state: AppState) -> Router {
         )
         .route(
             "/api/projects/{id}",
-            axum::routing::delete(handlers::projects::remove_project),
+            get(handlers::projects::get_project).delete(handlers::projects::remove_project),
+        )
+        // v2 跨节点 sandbox：mac 节点登记自己 / 下线自己
+        .route(
+            "/api/projects/{id}/host_nodes",
+            post(handlers::projects::add_host_node_endpoint),
+        )
+        .route(
+            "/api/projects/{id}/host_nodes/{node_id}",
+            axum::routing::delete(handlers::projects::remove_host_node_endpoint),
         )
         .route(
             "/api/projects/{id}/sandboxes",

@@ -30,6 +30,23 @@ pub struct ProjectView {
     pub canonical_path: PathBuf,
     pub default_branch: String,
     pub created_at: DateTime<Utc>,
+    /// v2 跨节点 sandbox：本项目登记可用的 dist 节点列表。`Fuxi::dispatch`
+    /// 看 `host_nodes.len() > 1` 时按 NodesProvider 选最闲节点 auto-pin。
+    /// 兼容 v1 客户端的旧字段顺序——加在末尾即可。
+    #[serde(default)]
+    pub host_nodes: Vec<String>,
+}
+
+impl From<fuxi_core::Project> for ProjectView {
+    fn from(p: fuxi_core::Project) -> Self {
+        Self {
+            id: p.id,
+            canonical_path: p.canonical_path,
+            default_branch: p.default_branch,
+            created_at: p.created_at,
+            host_nodes: p.host_nodes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,15 +95,93 @@ pub async fn add_project(
             }
             other => Error::BadRequest(format!("注册失败: {other}")),
         })?;
-    Ok((
-        StatusCode::CREATED,
-        Json(ProjectView {
-            id: project.id,
-            canonical_path: project.canonical_path,
-            default_branch: project.default_branch,
-            created_at: project.created_at,
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(ProjectView::from(project))))
+}
+
+/// `POST /api/projects/{id}/host_nodes` 请求体。
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddHostNodeRequest {
+    /// dist 节点 id（同 worker register 用的 node_id，比如 `mac-local`）。
+    pub node_id: String,
+}
+
+/// `GET /api/projects/{id}` —— 单项目读视图。mac fuxi-cli `project add --shared`
+/// 通过此查 home 端的 canonical_path / default_branch / host_nodes，决定 git
+/// clone 来源 + 是否需要追加自己。
+pub async fn get_project(
+    State(state): State<AppState>,
+    AxumPath(id_raw): AxumPath<String>,
+) -> Result<Json<ProjectView>> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let id = ProjectId::new(id_raw.clone())
+        .map_err(|e| Error::BadRequest(format!("非法 project id {id_raw:?}: {e}")))?;
+    let project = registry
+        .get(&id)
+        .await
+        .map_err(|e| Error::Internal(format!("project lookup 失败: {e}")))?
+        .ok_or_else(|| Error::NotFound(format!("project {id}")))?;
+    Ok(Json(ProjectView::from(project)))
+}
+
+/// `POST /api/projects/{id}/host_nodes` —— 把请求方节点登记到项目的
+/// host_nodes 列表。幂等：重复登记返当前状态。
+pub async fn add_host_node_endpoint(
+    State(state): State<AppState>,
+    AxumPath(id_raw): AxumPath<String>,
+    Json(req): Json<AddHostNodeRequest>,
+) -> Result<Json<ProjectView>> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let id = ProjectId::new(id_raw.clone())
+        .map_err(|e| Error::BadRequest(format!("非法 project id {id_raw:?}: {e}")))?;
+
+    // 显式 NotFound 检查 → registry::add_host_node 不存在时只 Other(...)
+    if registry
+        .get(&id)
+        .await
+        .map_err(|e| Error::Internal(format!("project lookup 失败: {e}")))?
+        .is_none()
+    {
+        return Err(Error::NotFound(format!("project {id}")));
+    }
+
+    let project = registry
+        .add_host_node(&id, req.node_id)
+        .await
+        .map_err(|e| Error::Internal(format!("登记 host_node 失败: {e}")))?;
+    Ok(Json(ProjectView::from(project)))
+}
+
+/// `DELETE /api/projects/{id}/host_nodes/{node_id}` —— 移除某节点登记。
+/// 不存在的节点幂等返 204（registry::remove_host_node 已幂等）。
+pub async fn remove_host_node_endpoint(
+    State(state): State<AppState>,
+    AxumPath((id_raw, node_id)): AxumPath<(String, String)>,
+) -> Result<StatusCode> {
+    let registry = state
+        .project_registry
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("project_registry 未注入".into()))?;
+    let id = ProjectId::new(id_raw.clone())
+        .map_err(|e| Error::BadRequest(format!("非法 project id {id_raw:?}: {e}")))?;
+    if registry
+        .get(&id)
+        .await
+        .map_err(|e| Error::Internal(format!("project lookup 失败: {e}")))?
+        .is_none()
+    {
+        return Err(Error::NotFound(format!("project {id}")));
+    }
+    registry
+        .remove_host_node(&id, &node_id)
+        .await
+        .map_err(|e| Error::Internal(format!("移除 host_node 失败: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `DELETE /api/projects/{id}` —— 删项目。
@@ -264,15 +359,7 @@ pub async fn list_projects(State(state): State<AppState>) -> Result<Json<Project
         .list()
         .await
         .map_err(|e| Error::Internal(format!("project list 失败: {e}")))?;
-    let projects: Vec<ProjectView> = raw
-        .into_iter()
-        .map(|p| ProjectView {
-            id: p.id,
-            canonical_path: p.canonical_path,
-            default_branch: p.default_branch,
-            created_at: p.created_at,
-        })
-        .collect();
+    let projects: Vec<ProjectView> = raw.into_iter().map(ProjectView::from).collect();
     Ok(Json(ProjectsResponse { projects }))
 }
 
@@ -614,6 +701,219 @@ mod tests {
         assert_eq!(projects[0]["id"], "erp");
         assert_eq!(projects[1]["id"], "fuxi-test");
         assert_eq!(projects[0]["default_branch"], "main");
+    }
+
+    /// v2 跨节点：注册的 project 应该带 host_nodes 字段（默认空数组）。
+    #[tokio::test]
+    async fn list_projects_includes_host_nodes_field() {
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo, repo_path) = make_workspace_repo().await;
+        registry
+            .add(repo_path, Some("p".into()), None)
+            .await
+            .unwrap();
+        registry
+            .add_host_node(&ProjectId::new("p").unwrap(), "home-node")
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects", axum_get(list_projects))
+            .with_state(state);
+
+        let req = Request::builder()
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let host_nodes = v["projects"][0]["host_nodes"].as_array().unwrap();
+        assert_eq!(host_nodes.len(), 1);
+        assert_eq!(host_nodes[0], "home-node");
+    }
+
+    /// `GET /api/projects/{id}` —— 单项目读视图，给 mac fuxi-cli `project add
+    /// --shared` 查 home 端 canonical_path 用。
+    #[tokio::test]
+    async fn get_single_project_returns_full_view() {
+        use axum::routing::get as axum_get;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo, repo_path) = make_workspace_repo().await;
+        registry
+            .add(repo_path.clone(), Some("erp".into()), None)
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects/{id}", axum_get(get_project))
+            .with_state(state);
+
+        let req = Request::builder()
+            .uri("/api/projects/erp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], "erp");
+        assert!(v["canonical_path"].is_string());
+        assert_eq!(v["default_branch"], "main");
+        assert!(v["host_nodes"].is_array());
+    }
+
+    #[tokio::test]
+    async fn get_single_project_404_when_missing() {
+        use axum::routing::get as axum_get;
+        let registry_root = tempfile::tempdir().unwrap();
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route("/api/projects/{id}", axum_get(get_project))
+            .with_state(state);
+
+        let req = Request::builder()
+            .uri("/api/projects/nope")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `POST /api/projects/{id}/host_nodes` —— 第二节点登记自己。
+    #[tokio::test]
+    async fn add_host_node_endpoint_persists_node() {
+        use axum::routing::post as axum_post;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo, repo_path) = make_workspace_repo().await;
+        registry
+            .add(repo_path, Some("erp".into()), None)
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/projects/{id}/host_nodes",
+                axum_post(add_host_node_endpoint),
+            )
+            .with_state(state);
+
+        let body = serde_json::json!({"node_id": "mac-local"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/erp/host_nodes")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let host_nodes = v["host_nodes"].as_array().unwrap();
+        assert!(host_nodes.iter().any(|n| n == "mac-local"));
+
+        // 持久化验证
+        let reloaded = FileSystemProjectRegistry::new(registry_root.path())
+            .get(&ProjectId::new("erp").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.host_nodes, vec!["mac-local".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn add_host_node_endpoint_404_when_project_missing() {
+        use axum::routing::post as axum_post;
+        let registry_root = tempfile::tempdir().unwrap();
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/projects/{id}/host_nodes",
+                axum_post(add_host_node_endpoint),
+            )
+            .with_state(state);
+
+        let body = serde_json::json!({"node_id": "mac-local"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/nope/host_nodes")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `DELETE /api/projects/{id}/host_nodes/{node_id}` —— 节点下线时清登记。
+    #[tokio::test]
+    async fn remove_host_node_endpoint_persists() {
+        use axum::routing::delete as axum_delete;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = FileSystemProjectRegistry::new(registry_root.path());
+        let (_repo, repo_path) = make_workspace_repo().await;
+        registry
+            .add(repo_path, Some("erp".into()), None)
+            .await
+            .unwrap();
+        registry
+            .add_host_node(&ProjectId::new("erp").unwrap(), "mac-local")
+            .await
+            .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_project_registry(FileSystemProjectRegistry::new(registry_root.path()));
+        let app = Router::new()
+            .route(
+                "/api/projects/{id}/host_nodes/{node_id}",
+                axum_delete(remove_host_node_endpoint),
+            )
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/projects/erp/host_nodes/mac-local")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // 持久化验证
+        let reloaded = FileSystemProjectRegistry::new(registry_root.path())
+            .get(&ProjectId::new("erp").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reloaded.host_nodes.is_empty());
     }
 
     /// 给 returns_registered_projects 测试用——单独建一个 git repo 而非复用
