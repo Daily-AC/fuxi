@@ -123,6 +123,11 @@ pub struct Fuxi {
     /// `Option`：未注入 = 完全跳过 memory 注入（向后兼容；测试时也方便不带 store 跑）。
     /// 由 fuxi-cli `fuxi im start` 在启动期注入同一份 SQLite pool 的 store。
     memory_stores: Arc<RwLock<Option<MemoryStores>>>,
+    /// v2 跨节点 sandbox · 节点负载数据源——dispatch 在 task 关联到 project 但
+    /// 未显式 pin 时，调本 provider 拿当前各节点 inflight/max_concurrency 选最闲。
+    /// `Option`：未注入 = auto-pin 路径 short-circuit 返 None（fallback 本地路径）。
+    /// 同 DistEnqueuer pattern：production impl 由 fuxi-cli 包 `Arc<DistController>` 提供。
+    node_load_provider: Arc<RwLock<Option<Arc<dyn crate::NodeLoadProvider>>>>,
 }
 
 /// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
@@ -160,6 +165,7 @@ impl Fuxi {
             project_registry: Arc::new(RwLock::new(None)),
             disk_quota_cache: Arc::new(RwLock::new(HashMap::new())),
             memory_stores: Arc::new(RwLock::new(None)),
+            node_load_provider: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -239,6 +245,40 @@ impl Fuxi {
     /// 幂等；未注入时所有 spawn 跳过 memory 注入（向后兼容）。
     pub async fn set_memory_stores(&self, stores: MemoryStores) {
         *self.memory_stores.write().await = Some(stores);
+    }
+
+    /// v2 跨节点 sandbox：注入节点负载数据源。dispatch 在 task 关联到 project
+    /// 但未显式 pin 时，调本 provider 拿快照按 saturation 选最闲节点。
+    /// 幂等；未注入 = auto-pin short-circuit（保留 v1 行为）。
+    pub async fn set_node_load_provider(&self, provider: Arc<dyn crate::NodeLoadProvider>) {
+        *self.node_load_provider.write().await = Some(provider);
+    }
+
+    /// v2 跨节点 sandbox：根据 task.project_id 决定 auto-pin 节点。
+    ///
+    /// 行为：
+    /// - task.pinned_node 已 Some → 返 None（用户意图优先，不覆盖）
+    /// - task.project_id None → 返 None
+    /// - registry/load_provider 任一未注入 → 返 None
+    /// - project.host_nodes 空 → 返 None（v1 单节点项目，保留旧行为）
+    /// - 候选全离线 → 返 None
+    /// - 否则取候选中 saturation 最低的 node_id
+    pub async fn auto_pin_from_project(&self, task: &Task) -> Option<String> {
+        if task.pinned_node.is_some() {
+            return None;
+        }
+        let project_id = task.project_id.as_ref()?;
+
+        let registry = self.project_registry.read().await.clone()?;
+        let project = registry.get(project_id).await.ok().flatten()?;
+        if project.host_nodes.is_empty() {
+            return None;
+        }
+
+        let provider = self.node_load_provider.read().await.clone()?;
+        let snapshots = provider.snapshot().await;
+        crate::node_load::pick_least_loaded(&snapshots, &project.host_nodes)
+            .map(|s| s.node_id.clone())
     }
 
     /// 读某门客分配的 worktree 路径——纯转发 shelf，供 TUI/CLI 用。
@@ -1012,6 +1052,22 @@ impl Fuxi {
             .get_agent(agent_id)
             .await
             .map(|a| a.card().profile.role.clone());
+
+        // v2 跨节点 sandbox：task 关联到 project 但用户没显式 pin → 按
+        // project.host_nodes 选最闲节点 auto-pin。这一步必须在 needs_dist
+        // 决策**之前**——auto_pin 改写后，task.pinned_node 也将是 Some(...)，
+        // 自然进 dist 路径。registry / provider 未注入 / host_nodes 空 / 候选全离线
+        // 时 auto_pin 返 None，dispatch 走原来的本地 spawn 路径（向后兼容）。
+        let mut task = task;
+        if let Some(picked) = self.auto_pin_from_project(&task).await {
+            info!(
+                task_id = %task.id,
+                project_id = ?task.project_id,
+                picked_node = %picked,
+                "dispatch v2: auto-pin from project.host_nodes（最闲节点）"
+            );
+            task.pinned_node = Some(picked);
+        }
 
         // β · #57 routing 决策树（spec gap e）——pinned_node / required_tags 非空 →
         // 走 dist enqueue（远端 worker 跑），否则继续本地 spawn / 已有 agent 路径。
@@ -2232,6 +2288,196 @@ mod pump_orphan_recovery_tests {
         assert!(
             found,
             "pump 无终态退出时应兜底发 TaskStateChanged{{Cancelled}}"
+        );
+    }
+
+    // ── v2 跨节点：auto-pin from project.host_nodes ─────────────────────
+
+    use crate::node_load::{NodeLoadProvider, NodeLoadSnapshot};
+    use fuxi_workspace::FileSystemProjectRegistry;
+
+    struct StubLoadProvider {
+        snaps: Vec<NodeLoadSnapshot>,
+    }
+    #[async_trait]
+    impl NodeLoadProvider for StubLoadProvider {
+        async fn snapshot(&self) -> Vec<NodeLoadSnapshot> {
+            self.snaps.clone()
+        }
+    }
+
+    /// 在 tempdir 起一个最小 git repo 给 registry.add 通过 NotAGitRepo 校验。
+    async fn make_seed_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&path)
+                .args(&args)
+                .output()
+                .await;
+        }
+        tokio::fs::write(path.join("README.md"), "x").await.unwrap();
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&path)
+            .args(["add", "-A"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&path)
+            .args(["commit", "-qm", "x"])
+            .output()
+            .await;
+        (dir, path)
+    }
+
+    /// 仅 1 个 host_node + 任 task 无 pinned_node → auto-pin 必命中那个唯一节点。
+    #[tokio::test]
+    async fn auto_pin_picks_only_host_node_when_single() {
+        let fuxi = make_fuxi().await;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(FileSystemProjectRegistry::new(registry_root.path()));
+        let (_repo_td, repo) = make_seed_repo().await;
+        registry.add(repo, Some("erp".into()), None).await.unwrap();
+        registry
+            .add_host_node(&fuxi_core::ProjectId::new("erp").unwrap(), "home")
+            .await
+            .unwrap();
+        fuxi.set_project_registry(registry).await;
+
+        // home 在线
+        fuxi.set_node_load_provider(Arc::new(StubLoadProvider {
+            snaps: vec![NodeLoadSnapshot {
+                node_id: "home".into(),
+                inflight: 0,
+                max_concurrency: 4,
+                online: true,
+            }],
+        }))
+        .await;
+
+        let task = Task::new("t", "").with_project_id(fuxi_core::ProjectId::new("erp").unwrap());
+        let pinned = fuxi.auto_pin_from_project(&task).await;
+        assert_eq!(pinned, Some("home".to_string()));
+    }
+
+    /// 多 host_node + saturation 不同 → 选最闲。
+    #[tokio::test]
+    async fn auto_pin_picks_least_loaded() {
+        let fuxi = make_fuxi().await;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(FileSystemProjectRegistry::new(registry_root.path()));
+        let (_repo_td, repo) = make_seed_repo().await;
+        registry.add(repo, Some("erp".into()), None).await.unwrap();
+        let pid = fuxi_core::ProjectId::new("erp").unwrap();
+        registry.add_host_node(&pid, "home").await.unwrap();
+        registry.add_host_node(&pid, "mac").await.unwrap();
+        fuxi.set_project_registry(registry).await;
+
+        // home 满 / mac 空闲 → 选 mac
+        fuxi.set_node_load_provider(Arc::new(StubLoadProvider {
+            snaps: vec![
+                NodeLoadSnapshot {
+                    node_id: "home".into(),
+                    inflight: 4,
+                    max_concurrency: 4,
+                    online: true,
+                },
+                NodeLoadSnapshot {
+                    node_id: "mac".into(),
+                    inflight: 0,
+                    max_concurrency: 4,
+                    online: true,
+                },
+            ],
+        }))
+        .await;
+
+        let task = Task::new("t", "").with_project_id(pid);
+        let pinned = fuxi.auto_pin_from_project(&task).await;
+        assert_eq!(pinned, Some("mac".to_string()));
+    }
+
+    /// 候选全离线 → 返 None（caller 决定 fallback 策略）。
+    #[tokio::test]
+    async fn auto_pin_none_when_all_candidates_offline() {
+        let fuxi = make_fuxi().await;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(FileSystemProjectRegistry::new(registry_root.path()));
+        let (_repo_td, repo) = make_seed_repo().await;
+        registry.add(repo, Some("erp".into()), None).await.unwrap();
+        let pid = fuxi_core::ProjectId::new("erp").unwrap();
+        registry.add_host_node(&pid, "mac").await.unwrap();
+        fuxi.set_project_registry(registry).await;
+
+        fuxi.set_node_load_provider(Arc::new(StubLoadProvider {
+            snaps: vec![NodeLoadSnapshot {
+                node_id: "mac".into(),
+                inflight: 0,
+                max_concurrency: 4,
+                online: false,
+            }],
+        }))
+        .await;
+
+        let task = Task::new("t", "").with_project_id(pid);
+        let pinned = fuxi.auto_pin_from_project(&task).await;
+        assert!(pinned.is_none());
+    }
+
+    /// host_nodes 空（v1 单节点项目）→ 不 auto-pin（保留旧行为）。
+    #[tokio::test]
+    async fn auto_pin_none_when_host_nodes_empty() {
+        let fuxi = make_fuxi().await;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(FileSystemProjectRegistry::new(registry_root.path()));
+        let (_repo_td, repo) = make_seed_repo().await;
+        registry.add(repo, Some("erp".into()), None).await.unwrap();
+        let pid = fuxi_core::ProjectId::new("erp").unwrap();
+        // 不调 add_host_node
+        fuxi.set_project_registry(registry).await;
+        fuxi.set_node_load_provider(Arc::new(StubLoadProvider { snaps: vec![] }))
+            .await;
+
+        let task = Task::new("t", "").with_project_id(pid);
+        let pinned = fuxi.auto_pin_from_project(&task).await;
+        assert!(pinned.is_none());
+    }
+
+    /// 用户已显式 pin → auto_pin 不该覆盖（caller 端用 task.pinned_node.is_none() 守卫；
+    /// 但单测对 auto_pin 接口本身——传入 task.pinned_node = Some(...) 时也应返 None
+    /// 让 caller 不至于二次写）。
+    #[tokio::test]
+    async fn auto_pin_respects_existing_pinned_node() {
+        let fuxi = make_fuxi().await;
+        let registry_root = tempfile::tempdir().unwrap();
+        let registry = Arc::new(FileSystemProjectRegistry::new(registry_root.path()));
+        let (_repo_td, repo) = make_seed_repo().await;
+        registry.add(repo, Some("erp".into()), None).await.unwrap();
+        let pid = fuxi_core::ProjectId::new("erp").unwrap();
+        registry.add_host_node(&pid, "home").await.unwrap();
+        fuxi.set_project_registry(registry).await;
+        fuxi.set_node_load_provider(Arc::new(StubLoadProvider {
+            snaps: vec![NodeLoadSnapshot {
+                node_id: "home".into(),
+                inflight: 0,
+                max_concurrency: 4,
+                online: true,
+            }],
+        }))
+        .await;
+
+        let task = Task::new("t", "")
+            .with_project_id(pid)
+            .with_pinned_node("explicit-mac");
+        let pinned = fuxi.auto_pin_from_project(&task).await;
+        assert!(
+            pinned.is_none(),
+            "已 pin 的 task 不应 auto-pin（避免覆盖用户意图）"
         );
     }
 

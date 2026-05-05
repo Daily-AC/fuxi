@@ -25,6 +25,7 @@ pub mod fuxi;
 pub mod idle_gc;
 pub mod insight_extractor;
 pub mod mailbox;
+pub mod node_load;
 pub mod recall;
 pub mod registry;
 pub mod sentinel_addendum;
@@ -46,5 +47,6 @@ pub use mailbox::{
     mark_agent_message_delivered, mark_agent_message_failed, mark_agent_message_read,
     queue_agent_message,
 };
+pub use node_load::{NodeLoadProvider, NodeLoadSnapshot, pick_least_loaded};
 pub use recall::{RecallContext, RecallSink};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};
