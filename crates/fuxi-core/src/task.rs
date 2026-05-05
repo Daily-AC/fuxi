@@ -4,6 +4,7 @@
 //! 门客 (who execute). Illegal transitions panic in debug, error in release.
 
 use crate::id::{AgentId, TaskId};
+use crate::project::ProjectId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +65,12 @@ pub struct Task {
     /// 派给该节点的 dist worker，跳过 tag 匹配 + 跳过本地 spawn。
     #[serde(default)]
     pub pinned_node: Option<String>,
+    /// v2 跨节点 sandbox：task 关联的 project slug。`Some(...)` 时
+    /// `Fuxi::dispatch` 在没显式 pinned_node 的情况下，按
+    /// `Project.host_nodes` 自动 pin 到最闲节点；worker 收到 job 时 spawn
+    /// 进对应 sandbox（resolve_project_sandbox_cwd）。
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
 }
 
 impl Task {
@@ -79,6 +86,7 @@ impl Task {
             updated_at: now,
             required_tags: Vec::new(),
             pinned_node: None,
+            project_id: None,
         }
     }
 
@@ -91,6 +99,12 @@ impl Task {
     /// β · #57 builder：把本 task pin 到指定 dist 节点。
     pub fn with_pinned_node(mut self, node_id: impl Into<String>) -> Self {
         self.pinned_node = Some(node_id.into());
+        self
+    }
+
+    /// v2 跨节点：声明本 task 关联到某 project slug。
+    pub fn with_project_id(mut self, project_id: ProjectId) -> Self {
+        self.project_id = Some(project_id);
         self
     }
 }
@@ -136,5 +150,38 @@ mod tests {
         assert!(Blocked.can_transition_to(Cancelled));
         assert!(!Blocked.can_transition_to(InProgress));
         assert!(!Blocked.can_transition_to(Done));
+    }
+
+    /// v2 跨节点：task 必须能携带 project_id 让 dispatch 决定路由。
+    #[test]
+    fn task_with_project_id_round_trip() {
+        use crate::project::ProjectId;
+        let pid = ProjectId::new("demo-site").unwrap();
+        let t = Task::new("frontend", "build login page").with_project_id(pid.clone());
+        assert_eq!(t.project_id.as_ref(), Some(&pid));
+
+        // serde roundtrip 保留 project_id
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.project_id.as_ref(), Some(&pid));
+    }
+
+    /// 老 Task JSON（无 project_id 字段）反序列化得 None，不能 fail——升级
+    /// 兼容性硬要求。
+    #[test]
+    fn task_deserializes_legacy_without_project_id() {
+        // 起一份新 task，序列化后手工删 project_id 字段模拟 v2 之前的 JSON。
+        let modern = Task::new("x", "y");
+        let mut value: serde_json::Value = serde_json::to_value(&modern).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("project_id");
+        obj.remove("pinned_node");
+        obj.remove("required_tags");
+        let legacy = serde_json::to_string(&value).unwrap();
+
+        let t: Task = serde_json::from_str(&legacy).expect("legacy task 应反序列化");
+        assert!(t.project_id.is_none());
+        assert!(t.required_tags.is_empty());
+        assert!(t.pinned_node.is_none());
     }
 }
