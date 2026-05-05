@@ -58,6 +58,14 @@
   flex-shrink: 0;
   font-weight: var(--weight-semibold);
   color: var(--accent);
+  letter-spacing: 0.2px;
+}
+
+.time {
+  flex-shrink: 0;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  font-feature-settings: "tnum";
 }
 
 .summary {

@@ -3,6 +3,13 @@ import type { ToolCallMessage } from "~/messages";
 import { ToolCallCard } from "./ToolCallCard";
 import styles from "./ToolGroupCard.module.css";
 
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  const hh = d.getHours().toString().padStart(2, "0");
+  const mm = d.getMinutes().toString().padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
 // 用户实测反馈（2026-05-05）：玄女一个 turn 跑 5 个 tool_call 渲染成 5 个独立卡，
 // 占满屏幕，文本回复夹在中间难找。改成默认折叠成一行 header
 // `[🔧 5 个工具调用 ▸]`，点击展开看完整 ToolCallCard list。
@@ -39,6 +46,14 @@ export const ToolGroupCard: Component<{
           onClick={() => setOpen(!open())}
           aria-expanded={open()}
         >
+          <Show when={props.role_display}>
+            <span class={styles.who}>{props.role_display}</span>
+          </Show>
+          <time class={styles.time}>{fmtTime(props.items[0]!.ts)}</time>
+          <span class={styles.icon} aria-hidden="true">
+            🔧
+          </span>
+          <span class={styles.summary}>{summary()}</span>
           <span
             class={styles.chev}
             classList={{ [styles.chevOpen ?? ""]: open() }}
@@ -46,13 +61,6 @@ export const ToolGroupCard: Component<{
           >
             ›
           </span>
-          <span class={styles.icon} aria-hidden="true">
-            🔧
-          </span>
-          <Show when={props.role_display}>
-            <span class={styles.who}>{props.role_display}</span>
-          </Show>
-          <span class={styles.summary}>{summary()}</span>
         </button>
         <Show when={open()}>
           <div class={styles.list}>
