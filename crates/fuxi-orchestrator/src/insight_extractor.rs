@@ -75,6 +75,9 @@ pub trait CangjieSpawner: Send + Sync {
 pub const CANGJIE_ROLE: &str = "cangjie";
 /// fuxi-memory 自家 extractor 的 role——这里也黑名单，避免给"事实抽取"的 task 抽 insight。
 pub const EXTRACTOR_ROLE: &str = "extractor";
+/// 玄女 role——她的 user-turn task 不是真"门客交付"，提取无意义且形成 cangjie →
+/// bridge → 玄女 → cangjie 循环（2026-05-05 home 实测）。
+pub const XUANNV_ROLE: &str = "xuannv";
 /// hetu_patterns.source 标签——`fuxi insight list` 区分手工 vs 自动用得到。
 pub const CANGJIE_SOURCE: &str = "cangjie-auto";
 
@@ -242,10 +245,14 @@ async fn process_task(
     task_id: TaskId,
     task_agent: Option<AgentId>,
 ) -> std::result::Result<(), String> {
-    // 1) 防递归：cangjie / extractor 自己跑的 task 直接跳过。
+    // 1) 防递归 + 防玄女对话循环：cangjie / extractor / xuannv 跑的 task 直接跳过。
+    //    xuannv 是 2026-05-05 加的——玄女 user-turn task 完成（每条对话回复都触发）
+    //    本身没"门客交付"语义，提取无意义；且仓颉发 sentinel → bridge → 玄女 →
+    //    user-turn done → 再起仓颉，会形成死循环。底层治本在 sentinel 注入桥
+    //    （should_inject_for_role 已黑 cangjie），这里再加一层防御兜底。
     if let Some(agent) = task_agent
         && let Some(role) = spawner.role_of(agent).await
-        && (role == CANGJIE_ROLE || role == EXTRACTOR_ROLE)
+        && (role == CANGJIE_ROLE || role == EXTRACTOR_ROLE || role == XUANNV_ROLE)
     {
         debug!(%task_id, %agent, %role, "insight_extractor: 内部 role 的 task，跳过");
         return Ok(());
@@ -793,6 +800,26 @@ mod tests {
         publish_trajectory(&bus, agent, task).await;
         assert_no_records(&hetu, 100).await;
         assert_eq!(spawner.prompts().len(), 0, "防递归应直接跳过");
+    }
+
+    /// xuannv role 跳过——2026-05-05 实测：玄女 user-turn task 完成不该当成
+    /// 可提取目标，否则触发 cangjie → bridge → 玄女 → cangjie 死循环。
+    #[tokio::test]
+    async fn xuannv_role_task_is_skipped() {
+        let (bus, hetu) = make_setup().await;
+        let agent = AgentId::new();
+        let task = TaskId::new();
+
+        let spawner = MockSpawner::new(vec![]);
+        spawner.set_role(agent, XUANNV_ROLE);
+
+        let cfg = InsightExtractorConfig::default();
+        let _h = InsightExtractorTask::new(bus.clone(), hetu.clone(), spawner.clone(), cfg).spawn();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        publish_trajectory(&bus, agent, task).await;
+        assert_no_records(&hetu, 100).await;
+        assert_eq!(spawner.prompts().len(), 0, "玄女 task 应直接跳过");
     }
 
     /// extractor role 同样跳过。

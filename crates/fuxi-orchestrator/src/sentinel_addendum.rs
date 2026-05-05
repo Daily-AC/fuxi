@@ -135,10 +135,16 @@ PWA 任务私聊页渲染为左侧 worker 卡片（`text/markdown` 走 md 渲染
 
 /// 是否给该 role 注入 sentinel 教学。
 ///
-/// 玄女（接收方）和 extractor（幕后工）不注入；其他 worker role 都注入。
-/// 列表硬编码——目前只两条特例，未来若要扩展可考虑改 `WorkerKind` flag。
+/// 黑名单（不注入）：
+/// - **xuannv**：sentinel 的接收方，自己发没人接（bridge 把 AgentRequestReview
+///   翻成 intervene 给 xuannv，xuannv 自己发 = 死循环）
+/// - **extractor**：fact 抽取器，平台幕后工，不属"门客交付"模型
+/// - **cangjie**：insight 抽取器；让仓颉读 sentinel 教学会让它把 judge 的
+///   `{"score":...}` 输出当成 sentinel summary 发出去 → bridge 翻给玄女 →
+///   玄女 task done → InsightExtractor 又起新仓颉 → 死循环（**2026-05-05
+///   home 实测撞过 22 次 cc 调用**才发现，治本在此层不让仓颉读 sentinel 教学）
 pub fn should_inject_for_role(role: &str) -> bool {
-    !matches!(role, "xuannv" | "extractor")
+    !matches!(role, "xuannv" | "extractor" | "cangjie")
 }
 
 /// β · #57 玄女专属 dispatch routing 教学。
@@ -383,9 +389,13 @@ mod tests {
     }
 
     #[test]
-    fn should_inject_skips_xuannv_and_extractor() {
+    fn should_inject_skips_xuannv_extractor_and_cangjie() {
         assert!(!should_inject_for_role("xuannv"));
         assert!(!should_inject_for_role("extractor"));
+        // 2026-05-05 实测死循环教训：cangjie 必须豁免——读了 sentinel 教学
+        // 会把 judge 输出 {"score":...} 当 sentinel summary 发，bridge → 玄女
+        // → 又起新仓颉
+        assert!(!should_inject_for_role("cangjie"));
         // 其他 role 全部 inject
         assert!(should_inject_for_role("luban"));
         assert!(should_inject_for_role("luban-codex"));
