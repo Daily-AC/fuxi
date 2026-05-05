@@ -305,7 +305,7 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
         {(t) => <Banner task={t()} onlineNodeIds={onlineNodeIds()} />}
       </Show>
 
-      <Thread messages={messages} online={online} />
+      <Thread messages={messages} online={online} members={() => ctx().members} />
 
       <MentionComposer
         candidates={candidates()}
@@ -491,6 +491,11 @@ function toolCallText(call: TaskGroupCard["members"][number]["last_tool_call"]):
 interface ThreadProps {
   messages: Accessor<Message[]>;
   online: Accessor<boolean>;
+  /** task 成员 lookup（agent_id → role_display）。tool_group 折叠卡注入用——
+   *  Thread 是 module-level 组件，page 的 ctx createMemo 访问不到，所以从 props 传。
+   *  bug #78（2026-05-05 用户实测）：之前直接调用 `ctx()` 撞 ReferenceError，
+   *  history fold 抛错，整个 thread 渲染空白「等待第一条消息」。 */
+  members: Accessor<Record<string, { role: string; role_display: string }>>;
 }
 
 const STICK_THRESHOLD = 80;
@@ -565,10 +570,10 @@ const Thread: Component<ThreadProps> = (props) => {
             if (msg.kind === "tool_call") return <ToolCallCard msg={msg} />;
             // 用户实测 2026-05-05：连续 tool_call 占屏。同 agent 连续 ≥2 条折成 group
             if (msg.kind === "tool_group") {
-              const ctxLookup = ctx().members[msg.agent];
+              const memberLookup = props.members()[msg.agent];
               return (
                 <div class={styles.rowLeft}>
-                  <ToolGroupCard items={msg.items} role_display={ctxLookup?.role_display} />
+                  <ToolGroupCard items={msg.items} role_display={memberLookup?.role_display} />
                 </div>
               );
             }
