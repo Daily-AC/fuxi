@@ -415,6 +415,75 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
   return prev;
 }
 
+/** Tool 调用 group · 用户实测反馈 2026-05-05：连续 5 个 tool_call 占屏，
+ *  文本回复夹中间难找。renderer 用，不进 reducer。
+ *  - group 含 ≥1 条同 agent 的连续 tool_call
+ *  - 连续被打断（user/agent 文本/marker/system）则切下一组
+ *  - 单条 tool_call 也走 group 路径，但 ToolGroupCard 内部 fallback 到原
+ *    ToolCallCard（视觉无变化，零回归）*/
+export interface ToolGroupView {
+  kind: "tool_group";
+  /** group 第一条的 ev id 当唯一 key。*/
+  id: string;
+  agent: string;
+  role?: string;
+  role_display?: string;
+  items: ToolCallMessage[];
+  /** 用第一条 ts 排序定位。*/
+  ts: number;
+}
+
+/** Renderer 用：扫 messages，连续同 agent 的 tool_call 折成 ToolGroupView。
+ *  不改 reducer / 事件流——保持 Message 数组真实，只在渲染前做"视觉聚合"。
+ *
+ *  group 边界规则：
+ *  - 连续两条 tool_call 同 agent → 合一组
+ *  - 不同 agent / 中间夹任何非 tool_call message → 切新组
+ *  - thinking 不切（thinking 跟 tool_call 都属"门客内部活"，混在一组连续）—— 反例考虑：
+ *    实测玄女 5 个 Bash 调用之间没 thinking，简单按 tool_call only 折叠即够。先简化。 */
+export function groupConsecutiveToolCalls(
+  msgs: Message[],
+): Array<Message | ToolGroupView> {
+  const out: Array<Message | ToolGroupView> = [];
+  let buf: ToolCallMessage[] = [];
+
+  const flush = (): void => {
+    if (buf.length === 0) return;
+    if (buf.length === 1) {
+      out.push(buf[0]!);
+      buf = [];
+      return;
+    }
+    const first = buf[0]!;
+    const view: ToolGroupView = {
+      kind: "tool_group",
+      id: `tg-${first.id}`,
+      agent: first.agent,
+      role: undefined,
+      role_display: undefined,
+      items: buf,
+      ts: first.ts,
+    };
+    out.push(view);
+    buf = [];
+  };
+
+  for (const m of msgs) {
+    if (m.kind === "tool_call") {
+      // 同 agent 续；切 agent 先 flush 再起新 buf
+      if (buf.length > 0 && !eqAgent(buf[0]!.agent, m.agent)) {
+        flush();
+      }
+      buf.push(m);
+      continue;
+    }
+    flush();
+    out.push(m);
+  }
+  flush();
+  return out;
+}
+
 /** optimistic user message factory。
  *  v3 加 opts 让 task thread / 玄女主对话 caller 传 mentions（worker chips）+
  *  pinned_node（node chip）一起进 bubble，让 optimistic 渲染时 @ 标签即时可见

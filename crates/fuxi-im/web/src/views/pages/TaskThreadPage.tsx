@@ -16,6 +16,7 @@ import { startReconnectingSocket, type ReconnectController } from "~/lib/reconne
 import { pushToast } from "~/lib/toast";
 import {
   applyTaskThreadEvent,
+  groupConsecutiveToolCalls,
   makeUserMessage,
   markUserMessage,
   mergeMessages,
@@ -31,6 +32,7 @@ import { WorkerBubble } from "~/components/messages/WorkerBubble";
 import { XuannvBubble } from "~/components/messages/XuannvBubble";
 import { InlineFileCard } from "~/components/messages/InlineFileCard";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
+import { ToolGroupCard } from "~/components/messages/ToolGroupCard";
 import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
 import { SystemMessageRow } from "~/components/messages/SystemMessageRow";
@@ -537,7 +539,7 @@ const Thread: Component<ThreadProps> = (props) => {
           </div>
         }
       >
-        <For each={props.messages()}>
+        <For each={groupConsecutiveToolCalls(props.messages())}>
           {(msg) => {
             if (msg.kind === "user") {
               return (
@@ -561,6 +563,15 @@ const Thread: Component<ThreadProps> = (props) => {
               );
             }
             if (msg.kind === "tool_call") return <ToolCallCard msg={msg} />;
+            // 用户实测 2026-05-05：连续 tool_call 占屏。同 agent 连续 ≥2 条折成 group
+            if (msg.kind === "tool_group") {
+              const ctxLookup = ctx().members[msg.agent];
+              return (
+                <div class={styles.rowLeft}>
+                  <ToolGroupCard items={msg.items} role_display={ctxLookup?.role_display} />
+                </div>
+              );
+            }
             if (msg.kind === "thinking") return <ThinkingRow msg={msg} />;
             if (msg.kind === "marker") return <StatusMarkerRow msg={msg} />;
             // bug #76：bridge / sentinel 注入的系统消息走玄女侧灰底气泡

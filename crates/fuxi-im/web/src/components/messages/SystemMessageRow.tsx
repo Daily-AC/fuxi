@@ -2,8 +2,9 @@ import { Show, createSignal, type Component } from "solid-js";
 import type { SystemMessage } from "~/messages";
 import styles from "./SystemMessageRow.module.css";
 
-// bug #76 · 系统注入消息渲染——玄女侧（左对齐）灰底气泡 + 「系统」角标。
-// 区别于右侧的 UserBubble（用户敲键盘发的）。
+// 用户实测反馈（2026-05-05）：系统消息（agent_dead/review_request/trigger_fired/...）
+// 渲染成大卡片占用太多视觉空间，重点内容失焦。改成 StatusMarkerRow 同款的
+// 居中折叠 marker——默认只显一行 label `─ 📋 待审 ▸ ─`，点开看全文。
 //
 // origin 标记决定角标文案 + 颜色色调：
 //   review_request   → 「📋 待审」 — accent
@@ -20,39 +21,39 @@ const ORIGIN_LABEL: Record<string, string> = {
   carbon_copy: "📨 抄送",
 };
 
-const COLLAPSE_THRESHOLD = 240; // 超过 240 字符折叠
-
 export const SystemMessageRow: Component<{ msg: SystemMessage }> = (props) => {
   const [expanded, setExpanded] = createSignal(false);
-  const longText = (): boolean => props.msg.text.length > COLLAPSE_THRESHOLD;
-  const visibleText = (): string =>
-    longText() && !expanded()
-      ? `${props.msg.text.slice(0, COLLAPSE_THRESHOLD)}…`
-      : props.msg.text;
   const label = (): string =>
     ORIGIN_LABEL[props.msg.origin] ?? `📨 系统消息（${props.msg.origin}）`;
 
   return (
-    <article
-      class={styles.row}
+    <div
+      class={styles.wrap}
       data-testid={`system-msg-${props.msg.id}`}
       data-origin={props.msg.origin}
     >
-      <header class={styles.head}>
-        <span class={styles.tag}>{label()}</span>
-        <span class={styles.kind}>系统注入 · 非用户语录</span>
-      </header>
-      <pre class={styles.body}>{visibleText()}</pre>
-      <Show when={longText()}>
-        <button
-          type="button"
-          class={styles.toggle}
-          onClick={() => setExpanded(!expanded())}
-          data-testid={`system-msg-toggle-${props.msg.id}`}
-        >
-          {expanded() ? "收起" : "展开全文"}
-        </button>
+      <button
+        type="button"
+        class={styles.marker}
+        onClick={() => setExpanded(!expanded())}
+        data-testid={`system-msg-toggle-${props.msg.id}`}
+        aria-expanded={expanded()}
+      >
+        <span class={styles.line} aria-hidden="true" />
+        <span class={styles.label}>{label()}</span>
+        <span class={styles.chevron} aria-hidden="true">
+          {expanded() ? "▾" : "▸"}
+        </span>
+        <span class={styles.line} aria-hidden="true" />
+      </button>
+      <Show when={expanded()}>
+        <article class={styles.detail} data-origin={props.msg.origin}>
+          <header class={styles.head}>
+            <span class={styles.kind}>系统注入 · 非用户语录</span>
+          </header>
+          <pre class={styles.body}>{props.msg.text}</pre>
+        </article>
       </Show>
-    </article>
+    </div>
   );
 };

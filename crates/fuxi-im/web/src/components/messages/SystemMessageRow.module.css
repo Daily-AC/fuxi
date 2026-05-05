@@ -1,26 +1,93 @@
-/* bug #76 · 系统注入消息（玄女侧 + 角标），区别右侧 user bubble */
-.row {
+/* 系统注入消息（玄女侧）· 默认 marker 风格收起，点开展开大卡。
+ * 用户实测：大卡占空间、重点失焦——改成横线一行 + chevron。 */
+
+.wrap {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 10px var(--space-4);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  letter-spacing: 0.4px;
+  font-family: inherit;
+  width: 100%;
+  /* 触控目标 ≥ 44px 高度——折叠状态下整条横线都可点 */
+  min-height: 44px;
+}
+
+.marker:hover {
+  color: var(--text-primary);
+}
+
+.marker:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.label {
+  flex-shrink: 0;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: var(--size-meta);
+}
+
+/* origin 颜色分流——marker 状态用更弱的 hint */
+.wrap[data-origin="agent_dead"] .label,
+.wrap[data-origin="review_timeout"] .label {
+  color: var(--danger, #C76A6A);
+  opacity: 0.85;
+}
+
+.wrap[data-origin="review_request"] .label,
+.wrap[data-origin="trigger_fired"] .label {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* 展开后的详情卡——保留旧版视觉给"想看全文"的场景 */
+.detail {
   display: block;
   width: 100%;
-  flex: 0 0 auto;
   box-sizing: border-box;
-  align-self: stretch;
   background: var(--surface);
   border: 1px dashed var(--border);
   border-left: 3px solid var(--text-muted);
   border-radius: 8px;
   padding: 10px 12px;
   margin: 0;
-  /* 视觉信号：低饱和 + 轻虚线边——明确告诉用户"这不是普通对话气泡" */
 }
 
-.row[data-origin="agent_dead"],
-.row[data-origin="review_timeout"] {
+.detail[data-origin="agent_dead"],
+.detail[data-origin="review_timeout"] {
   border-left-color: var(--danger, #C76A6A);
 }
 
-.row[data-origin="review_request"],
-.row[data-origin="trigger_fired"] {
+.detail[data-origin="review_request"],
+.detail[data-origin="trigger_fired"] {
   border-left-color: var(--accent);
 }
 
@@ -30,12 +97,6 @@
   gap: var(--space-2);
   margin-bottom: 6px;
   font-size: var(--size-aux);
-}
-
-.tag {
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-  white-space: nowrap;
 }
 
 .kind {
@@ -48,23 +109,12 @@
   margin: 0;
   font-family: var(--font-mono);
   font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--text-secondary);
+  line-height: 1.55;
+  color: var(--text-primary);
   white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.toggle {
-  appearance: none;
-  background: transparent;
-  border: 0;
-  margin-top: 6px;
-  padding: 4px 0;
-  font-size: var(--size-aux);
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.toggle:hover {
-  text-decoration: underline;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }

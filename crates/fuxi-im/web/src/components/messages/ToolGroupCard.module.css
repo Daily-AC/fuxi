@@ -1,0 +1,76 @@
+/* tool_call group 折叠卡 · 用户实测反馈 2026-05-05：连续 tool_call 占屏。
+ * 默认折成一行，点击展开看完整 ToolCallCard list。 */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 92%;
+  align-self: flex-start;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+  font-family: inherit;
+  width: 100%;
+  text-align: left;
+  min-height: 36px;
+}
+
+.head:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chev {
+  flex-shrink: 0;
+  display: inline-block;
+  width: 12px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.chevOpen {
+  transform: rotate(90deg);
+}
+
+.icon {
+  flex-shrink: 0;
+  font-size: var(--size-aux);
+}
+
+.who {
+  flex-shrink: 0;
+  font-weight: var(--weight-semibold);
+  color: var(--accent);
+}
+
+.summary {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 16px;
+  /* 展开时缩进——视觉表达"这些都属于上面那个 group"层级关系 */
+}
