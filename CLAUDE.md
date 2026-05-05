@@ -110,6 +110,9 @@ fuxi/
 - **spawn 语义是"新建"，去重不塞在 spawn_worker**（2026-04-20 `fbba2ec`）：用户"起三个鲁班"就真起三个。复用职责在 `dispatch_to_any(role)`（`claim_idle_by_role` 原子），GC 负责回收。
 - **fuxi-memory 不能依赖 fuxi-orchestrator**（循环依赖风险）。需要调 orchestrator 的 pattern：trait 定义在 memory，impl adapter 放 **fuxi-cli**（顶层依赖全部 crate）。参考 `fuxi-cli/src/extractor_hook.rs::FuxiExtractorSpawner`。
 - **mock fixture 必须跟 backend 实际 wire 形式对齐**（2026-04-26 ε `d87af4d` 修，bug 埋了一个月才被用户实测撞穿）：`fromStoredMessage` 把 backend `conv_store::handle_event` 写库的 `serde_json::json!({"text":"..."})` JSON 对象 当作裸 string 读 → 永远空 → message.trim()=="" 进 #24 防御 → 历史全过滤 → 用户感知"刷新一次玄女对话历史就全没了"。前端 mock fixture 用的是 string 形式（早期 PoC 留下的简化），单测/e2e 都走 string 分支不报错——latent type mismatch 不被发现。**新加 IM/PWA 客户端反序列化 helper 时，先 `sqlite3 *.db` 看一眼真数据形状**，别只信 fixture。
+- **加 Project / Task 字段必加 `#[serde(default)]`**（2026-05-06 v2 跨节点教训）：v2 加 `Project.host_nodes` / `Task.project_id` 时，没 `#[serde(default)]` 会让 `registry.list()` 在老 meta.json / 老 events.db 里 task JSON 上全炸 deserialize error。**新字段必须 default 兼容旧持久化**（meta.json + sqlite 里所有 Task/Event JSON 都要兼容）。反回归单测 `project_meta_deserializes_legacy_without_host_nodes` / `task_deserializes_legacy_without_project_id` 在 fuxi-core 兜着。
+- **NodeLoadProvider auto_pin 守 task.pinned_node**（2026-05-06 v2 跨节点）：用户显式 `@<node>` pin 时 dispatch 不该悄悄改写。`Fuxi::auto_pin_from_project` 入口立即返 None；调用方再加 `task.pinned_node.is_none()` 守卫双保险。saturation = `inflight/max_concurrency`，max=0 归一为 1（dist controller register 也独立保护过，这里是 second-line defense）。
+- **worker pre-spawn git fetch 必须 best-effort**（2026-05-06 v2 跨节点）：`try_fetch_default_branch` 失败只 log warn 继续。worker 短暂掉线（VPN 抖 / ssh tunnel 断）时硬挂 dispatch 让用户体感"任务无故消失"。离线 sandbox 跑完 push 回去若 base 过期，git 自己 reject 比这层挂友好。`FUXI_DISABLE_PRESPAWN_FETCH=1` 给 CI 开关。
 
 ## 决策 + 过程文档
 
@@ -118,7 +121,9 @@ fuxi/
 - `docs/architecture-v1.1-roadmap.md` — M2-M5 路线图（M2 已完，M3-M5 待推）
 - `docs/audit/cratewise-inventory.md` + `docs/audit/event-flow.md` — 审查基础材料
 - `docs/decisions/` — 9 份独立决策（01 并行 cc / 02 soul-first skill / 03 任务树 UI / 04 intervene 退化 / 05 让贤保留·被 08 override / 06 文化命名 / 07 P2 召回 scope / 08 让贤拆除 / **09 TUI 照抄 opencode 12 条**）
-- `docs/handoff/v1-session10.md` — **最新** 开工指引（P2.7/P2.8/P2.9 + CI 全绿；**P2.7 inline push 还没在 home 实测**）
+- `docs/handoff/v1-session13.md` — **最新** 开工指引（v2 跨节点 sandbox 全 ship + 答辩 dry-run 步骤）
+- `docs/handoff/v1-session12.md` — 上一份（三 Bug 修 + memory v2.1 + v2 路线图）
+- `docs/handoff/v1-session10.md` — 历史（P2.7/P2.8/P2.9 + CI 全绿）
 - `docs/handoff/v1-session9.md` — 上一份（phase 3 全通 + 用户实测 5 个 P0/P1）
 - `docs/handoff/v1-session5.md` — 历史保留（M4-REDUX 已 ship · Batch C 待开）
 - `docs/handoff/v1-session4.md` — 历史保留
