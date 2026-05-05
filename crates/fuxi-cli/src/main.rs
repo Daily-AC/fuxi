@@ -13,8 +13,8 @@
 
 use clap::{Parser, Subcommand};
 use fuxi_cli::{
-    banner, demo, dist, memory_cmd, note_cmd, project_cmd, repl, skill, subcommands, theme, up,
-    watch, xuannv_cmd,
+    banner, demo, dist, insight_cmd, memory_cmd, note_cmd, profile_cmd, project_cmd, repl, skill,
+    subcommands, theme, up, watch, xuannv_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -77,6 +77,12 @@ enum Command {
     /// 【门客工具】轻量文件推送 —— 把一段小 markdown/纯文本直接贴进任务对话流。
     /// `fuxi note --task <id> [--from <agent-uuid>] <file>`。≤ 256KB；超限走 deliverable。
     Note(note_cmd::NoteArgs),
+    /// 【玄女工具】用户身份卡（user_profile）—— set/get/list/unset。
+    /// 跟 `fuxi memory record` 严格分流（事实流 vs 身份卡），spawn 注入用 summary 层。
+    Profile(profile_cmd::ProfileArgs),
+    /// 【玄女只读·仓颉写】河图洛书心法（hetu insight）—— list/record/supersede。
+    /// 论文：抽象度决定可迁移性；spawn 注入门客 prompt 用。
+    Insight(insight_cmd::InsightArgs),
     /// L3 持久 sandbox 管理（Decision 21）—— per-门客 per-project 长期工作区。
     #[command(subcommand)]
     Sandbox(SandboxCmd),
@@ -233,6 +239,8 @@ async fn main() -> anyhow::Result<()> {
             DeliverableCmd::Produce(args) => project_cmd::run_deliverable_produce(args).await,
         },
         Some(Command::Note(args)) => note_cmd::run_note(args).await,
+        Some(Command::Profile(args)) => profile_cmd::run(args).await,
+        Some(Command::Insight(args)) => insight_cmd::run(args).await,
         Some(Command::Sandbox(s)) => match s {
             SandboxCmd::List(args) => project_cmd::run_sandbox_list(args).await,
             SandboxCmd::Retire(args) => project_cmd::run_sandbox_retire(args).await,

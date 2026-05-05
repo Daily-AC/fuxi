@@ -34,8 +34,9 @@ use fuxi_im::push::notify::HyperPushSender;
 use fuxi_im::state::{AppState, ImAuth, ImPush};
 use fuxi_memory::OracleStore;
 use fuxi_orchestrator::{
-    DEFAULT_TICK_INTERVAL_SECS, Fuxi, FuxiConfig, IdleGcTask, IdleShutdowner, SystemEventBridge,
-    ttl_from_env,
+    DEFAULT_TICK_INTERVAL_SECS, Fuxi, FuxiConfig, IdleGcTask, IdleShutdowner,
+    InsightExtractorConfig, InsightExtractorTask, SystemEventBridge,
+    insight_extractor_config_from_env, ttl_from_env,
 };
 use fuxi_scheduler::keeper::SystemClock;
 use fuxi_scheduler::watcher::{FsWatcherConfig, FsWatcherRig};
@@ -136,6 +137,44 @@ pub async fn run(args: StartArgs) -> Result<()> {
         tick_secs = DEFAULT_TICK_INTERVAL_SECS,
         "IdleGcTask 已启动（同 repl.rs 路径——bug #77 修：im start 此前漏启，worker 永不回收）"
     );
+
+    // memory-v2 · 仓颉 InsightExtractorTask（论文 arXiv:2604.14004 Memory Transfer
+    // Learning）。subscribe TaskStateChanged Done → spawn 仓颉跑 extraction →
+    // judge per insight → 过 0.6 阈值 record 进 hetu_patterns。
+    //
+    // FUXI_INSIGHT_EXTRACTOR_ENABLED **default true**（v2 跟 v1 反——v1 extractor
+    // 是 noise/cost 大默认关，v2 论文支持开）；显式 0/false 关。仓颉 ROLE.md 加载
+    // 失败 → warn 不 fail——insight 提取是非关键链路，不能拖死整个 im start。
+    match crate::insight_extractor_hook::load_cangjie_launch() {
+        Ok((cangjie_profile, cangjie_cc_cfg)) => {
+            let hetu = Arc::new(
+                fuxi_memory::HetuStore::connect_file(&events_db_path)
+                    .await
+                    .with_context(|| {
+                        format!("打开 hetu_patterns 库 {}", events_db_path.display())
+                    })?,
+            );
+            let spawner = Arc::new(crate::insight_extractor_hook::FuxiCangjieSpawner::new(
+                fuxi.clone(),
+                bus.clone(),
+                cangjie_profile,
+                cangjie_cc_cfg,
+            ));
+            let cfg: InsightExtractorConfig = insight_extractor_config_from_env();
+            let enabled = cfg.enabled;
+            let _insight_task = InsightExtractorTask::new(bus.clone(), hetu, spawner, cfg).spawn();
+            tracing::info!(
+                enabled,
+                "InsightExtractorTask 已装配（仓颉路径，写入 hetu_patterns insight 层）"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "load_cangjie_launch 失败——InsightExtractorTask 跳过装配，insight 自动提取关闭"
+            );
+        }
+    }
 
     // 3. Scheduler（更漏）—— 与 up.rs 一致
     let sched_store = match args.sched_db.as_ref().or(Some(&events_db_path)) {

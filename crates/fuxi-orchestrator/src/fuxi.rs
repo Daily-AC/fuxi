@@ -118,6 +118,19 @@ pub struct Fuxi {
     /// 每次 spawn 检查时若距上次 < TTL 用缓存值，否则递归扫描 `<projects_root>/<project>/`。
     /// **避免每次 spawn 全量扫多 GB sandbox 拖慢启动**。
     disk_quota_cache: Arc<RwLock<HashMap<fuxi_core::ProjectId, (std::time::Instant, u64)>>>,
+    /// memory-v2 (#48) 注入桥用的 store 句柄——`launch_and_register` 在 spawn worker
+    /// 时拉用户身份卡 + 同 role 历史心法，拼到 cc/codex 的 system prompt addendum。
+    /// `Option`：未注入 = 完全跳过 memory 注入（向后兼容；测试时也方便不带 store 跑）。
+    /// 由 fuxi-cli `fuxi im start` 在启动期注入同一份 SQLite pool 的 store。
+    memory_stores: Arc<RwLock<Option<MemoryStores>>>,
+}
+
+/// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
+/// （events.db）但不同 table，clone 便宜（内部 `Arc<SqlitePool>`）。
+#[derive(Clone)]
+pub struct MemoryStores {
+    pub user_profile: fuxi_memory::UserProfileStore,
+    pub hetu: fuxi_memory::HetuStore,
 }
 
 impl Fuxi {
@@ -146,6 +159,7 @@ impl Fuxi {
             dist_enqueuer: Arc::new(RwLock::new(None)),
             project_registry: Arc::new(RwLock::new(None)),
             disk_quota_cache: Arc::new(RwLock::new(HashMap::new())),
+            memory_stores: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -217,6 +231,14 @@ impl Fuxi {
         registry: Arc<fuxi_workspace::FileSystemProjectRegistry>,
     ) {
         *self.project_registry.write().await = Some(registry);
+    }
+
+    /// memory-v2 (#48) 注入桥——把 user_profile + hetu 心法 store 绑给 Fuxi。
+    /// 注入后 `launch_and_register` 在 spawn 每个 cc/codex 门客时会自动从这两表
+    /// 拉身份卡 + 同 role 心法拼到 system prompt（黑名单 xuannv/extractor/cangjie 跳过）。
+    /// 幂等；未注入时所有 spawn 跳过 memory 注入（向后兼容）。
+    pub async fn set_memory_stores(&self, stores: MemoryStores) {
+        *self.memory_stores.write().await = Some(stores);
     }
 
     /// 读某门客分配的 worktree 路径——纯转发 shelf，供 TUI/CLI 用。
@@ -810,6 +832,10 @@ impl Fuxi {
         // 注入开关（routing 是派活契约，不归 sentinel 全局逃生口管）。
         let inject_routing =
             crate::sentinel_addendum::should_inject_routing_for_role(&profile.role);
+        // #48 memory-v2 注入——只在 set_memory_stores 注入过 + role 不在黑名单
+        // （xuannv/extractor/cangjie）时拉用户身份卡 + 同 role 心法拼 system prompt。
+        // 没设 stores 时整段跳过——保持本 method 在测试 / 早期启动场景可单测无依赖。
+        let memory_stores = self.memory_stores.read().await.clone();
 
         // 适配器 launch。每个分支都返回一个统一的
         //    `Result<(Arc<dyn Agent>, String /* endpoint_hint */), CoreError>`，
@@ -828,6 +854,19 @@ impl Fuxi {
                 if inject_routing {
                     // β · #57 玄女专属：派活路由规则注入（独立于 sentinel）
                     crate::sentinel_addendum::inject_xuannv_routing_cc(&mut cc_cfg);
+                }
+                // #48 memory-v2 注入——sentinel addendum 之后追加身份卡 + 心法。
+                // 失败时 warn 不挂——memory 注入失败应降级为"裸 spawn"而非整 spawn 失败。
+                if let Some(stores) = memory_stores.as_ref()
+                    && let Err(e) = crate::sentinel_addendum::inject_role_memory_cc(
+                        &mut cc_cfg,
+                        &profile.role,
+                        &stores.user_profile,
+                        &stores.hetu,
+                    )
+                    .await
+                {
+                    warn!(error = %e, role = %profile.role, "memory-v2 cc 注入失败，降级裸 spawn");
                 }
                 match CcAgent::launch_with_id(agent_id, profile.clone(), cc_cfg).await {
                     Ok(a) => {
@@ -860,6 +899,21 @@ impl Fuxi {
                 if inject_addendum {
                     // codex 专用：把 sentinel 教学拼到 profile.system_prompt 末尾
                     crate::sentinel_addendum::inject_codex_profile(&mut profile);
+                }
+                // #48 memory-v2 注入——同 cc 思路，落 profile.system_prompt 末尾。
+                // 把 role 先 clone 出来，再 `&mut profile` 借用——否则 borrow 冲突。
+                if let Some(stores) = memory_stores.as_ref() {
+                    let role_for_memory = profile.role.clone();
+                    if let Err(e) = crate::sentinel_addendum::inject_role_memory_codex(
+                        &mut profile,
+                        &role_for_memory,
+                        &stores.user_profile,
+                        &stores.hetu,
+                    )
+                    .await
+                    {
+                        warn!(error = %e, role = %role_for_memory, "memory-v2 codex 注入失败，降级裸 spawn");
+                    }
                 }
                 match CodexAgent::launch_with_id(agent_id, profile.clone(), codex_cfg).await {
                     Ok(a) => {
