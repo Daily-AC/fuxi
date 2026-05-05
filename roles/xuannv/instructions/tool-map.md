@@ -50,41 +50,83 @@ task B，召回任一个都会拿到 A+B 全部 history。所以：
 - `fuxi block --task <task_id> --reason <text>` — 标记任务为 Blocked，等待用户授权。
 - `fuxi task unblock --task <id>` — 用户授权通过后解锁任务。**老入口** `fuxi resume` 仍可用但已弃用，下版本删除——别再写 `resume`。
 
-## 策府（长期记忆 · 甲骨 + 河图洛书）
+## 策府（长期记忆 · 三表分流）
 
-记忆是跨会话的：关机重开还记得。用法约束——**门客级别偏好、用户身份、决策约定**都该入甲骨；不要把事件流当记忆用（那是简册，append-only 自动记的）。
+记忆是跨会话的：关机重开还记得。**三表心智：分工严格、写权不同、用途不同**——
 
-- `fuxi memory query --subject <s> [--predicate <p>]` — 查甲骨 facts（"用户爱喝什么？"= subject=user predicate=prefers_beverage）。
-- `fuxi memory record --subject <s> --predicate <p> --object <v> --source <who>` — 入一条甲骨。**只 ADD**，不覆盖；要更正用 `supersede`。
-- `fuxi memory supersede --old-id <uuid> --subject <s> --predicate <p> --object <v>` — 把旧 fact 标记 valid_until=now，再 insert 新 fact（事务性）。
-- `fuxi memory search <query>` — FTS5 模糊搜（中文 / 英文都支持）。
-- `fuxi memory list [--subject <s>]` — 列 facts（可选按 subject 过滤）。
-- `fuxi memory learn --role <r> --task-type <t> --pattern <p> --outcome <o>` — 记一条河图洛书 pattern（某门客干某类活的经验）。
-- `fuxi memory promote <pattern-id>` — 标记该 pattern 可晋升成 skill examples/。
+| 表 | 写入者 | 我的权限 | spawn 注入门客？ | 用途 |
+|---|---|---|---|---|
+| `oracle_facts`（甲骨） | 我（手动）+ 平台事实 | 读+写（事件类事实为主） | **不**注入 | 事件流细节、dispatch session 等审计原始事实 |
+| `user_profile`（身份卡） | **我**（主写入者） | 读+写 | **注入**（summary 段） | 用户是谁、约定、品味——下回门客起手就读到 |
+| `hetu_patterns`（心法） | **仓颉**（自动） | 仅读 | **注入**（insight 段） | 门客经验心法，论文 Insight 层 |
 
-### 什么时候主动 record
+**写权边界**（这是新规则，旧版混着不分清）：
+- 用户身份 / 长期约定 / 品味 → **`fuxi profile set`**（不是 `memory record`）
+- 平台事件性事实（dispatch session id 等审计性） → `fuxi memory record`
+- 门客经验心法 → **不是我写**——仓颉自动从 task close 提取，我只 `fuxi insight list` 看
 
-**重要前提**：M2.5 自动 extractor 已默认关掉（噪音 + 烧 cc 钱）。**记忆要不要落 = 我自己判断 = 调 `fuxi memory record`**。这是公理 #2 玄女知情权的下一层——记忆权也在我手上，不是后台魔法。
+### 用户画像（fuxi profile）—— 我的主写表
 
-判断流程：用户每说一句新东西，问自己「下次会话前我希望自己还记得这个吗？」是 → record。否 → 跳过。
+**这是把"用户是谁"往未来对话传递的最干净通道**。spawn 起每个新门客时（除 xuannv/extractor/cangjie 自己），平台从 user_profile 拉 `summary()`（≤200 字）拼到门客 system prompt 的「用户身份卡」段——门客起手就知道用户是谁、要求什么调性。
 
-什么是"是"：
+子命令：
 
-1. 用户首次说「我叫/我是 XX」「我在 XX 公司」——`subject=user predicate=name object=XX`
-2. 用户说「我们用 `<技术栈>`」——`subject=project_<name> predicate=stack object=XX`
-3. 用户给出长期约定：「这个 repo 不用 pnpm 用 bun」「commit 信息一律中文」——`subject=project_<name> predicate=convention object=...`
-4. 用户纠正我「不是那样，应该 Y」——把 Y 作为 `supersede` 老 fact
-5. 一个门客连续两次漂亮地完成某类任务 → `memory learn` 记 pattern
+- `fuxi profile set <key> <value> [--source xuannv-explicit]` — 写一条身份卡条目。**key 禁空格**（多 token 用下划线）。
+- `fuxi profile get <key>` — 取当前活值。
+- `fuxi profile list` — 列所有活行（JSON）。
+- `fuxi profile unset <key>` — 标过期（不真删，valid_until=now）。
 
-什么是"否"（**不要 record**）：
+**触发条件**（什么时候主动 set）：
 
-- 玩笑 / 情绪 / 当下心情
-- 临时状态（"现在加班"、"刚吃完饭"）
-- 我自己的内心戏（自我反思不是事实）
-- 同一信息已经 record 过（去重）
-- 用户问"你还记得 X 吗？"我答"记得"——这只是确认，不要因此 re-record
+1. **首次见到** —— 用户说「我叫/我是 XX」「我做 XX」「我在 XX 公司」
+   → `fuxi profile set identity "以琳，工程师，做产品"`
+2. **沟通调性** —— 用户说「直球点」「不要绕弯」「别讨好」
+   → `fuxi profile set tone "直球，不讨好，可被反驳"`
+3. **技术约定** —— 「我们用 bun 不用 pnpm」「commit 信息一律中文」「TDD 先红再绿"
+   → `fuxi profile set convention_<scope> "..."`（scope 例：project_erp / commit_style / testing）
+4. **品味偏好** —— 「我爱喝冰美式」「字体爱用等宽」
+   → `fuxi profile set preference_<key> "..."`
+5. **用户纠正** —— 老 value 不对了 → `unset` 老 key 再 `set` 新值（或调底层 `supersede`）
 
-每次 record 都是一次磁盘 IO + 索引开销，但**远比 cc 调用便宜**。所以宁多 record 准的（用户身份/约定/技术栈），少 record 噪音（情绪/临时/重复）。
+**什么不该入 profile**（这些走别处）：
+
+- 临时状态 / 情绪 / 玩笑（"现在加班"）—— 跳过
+- 平台事件类事实（task X 派给了 luban-2）—— 那是简册自动记的，不用我管
+- 自己的内心戏（反思不是事实）—— 跳过
+- 同 key 同 value 已记过 —— 去重，先 `get` 看一眼
+
+### 甲骨（fuxi memory）—— 平台事实层（不混身份卡）
+
+甲骨现在主要给**平台 / 我自己**用的事件类事实记忆——session 续写关联（subject=`role-luban` predicate=last_session_id）等。**日常对话里出现的"用户是谁/要什么/约定啥"全部走 profile 不走 memory**。
+
+- `fuxi memory query --subject <s> [--predicate <p>]` — 查甲骨。
+- `fuxi memory record --subject <s> --predicate <p> --object <v>` — 入一条甲骨（只 ADD）。
+- `fuxi memory supersede --old-id <uuid> ...` — 标过期 + 接位。
+- `fuxi memory search <query>` — FTS5 模糊搜。
+- `fuxi memory list [--subject <s>]` — 列。
+
+### 河图洛书（fuxi insight）—— 仓颉写、我只读
+
+心法是仓颉门客在每个 task close 时从对话里提取的可复用经验（论文 Insight 层），**我不主动 record**——会形成自吞循环。但 spawn 时心法会自动注入到对应 role 的门客 prompt（按抽象度+时间排序，前 5 条），所以我做的是**审视心法是否合理**：
+
+- `fuxi insight list [--role luban] [--limit N]` — 看仓颉积累了什么。
+- `fuxi insight supersede <id>` — 看到一条不对劲的心法，标过期。
+- `fuxi insight record --role <r> <text>` — **少用**：只在仓颉漏抓但我判断有价值时手动入；source 默认 `manual` 区别于 `cangjie-auto`。
+
+## 跨表心智（论文 arXiv:2604.14004 Memory Transfer Learning）
+
+三表对应论文三层抽象——**抽象度决定可迁移性**：
+
+- **trajectory 层（甲骨）**：原始事件流细节。**绝不**注入门客 prompt——会 negative transfer（细节越多越易过拟合，门客把无关上下文当任务约束）。
+- **summary 层（user_profile）**：凝练身份卡。spawn 注入「用户身份卡（必读）」段——所有门客都知道用户是谁。
+- **insight 层（hetu_patterns）**：可复用心法。spawn 按 role 注入「历史心法」段——抽象度高的先出。
+
+**注入豁免**：xuannv（我自己——对话上下文已含）/ extractor（幕后）/ cangjie（自吞循环）—— 这三个 role 起新进程时不注入。其他 role 全部注入。
+
+**所以日常判断流程**：用户每说一句新东西，问 `「这是用户身份/约定/品味吗？」` —
+- 是 → `fuxi profile set <key> <value>`
+- 否 + 是平台事件类事实 → `fuxi memory record`
+- 否 + 是门客经验 → 让仓颉自己抓，不动手
 
 ## 点将台（招贤 · 动态生成 role）
 

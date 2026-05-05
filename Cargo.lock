@@ -1410,6 +1410,7 @@ dependencies = [
  "fuxi-agent-codex",
  "fuxi-core",
  "fuxi-events",
+ "fuxi-memory",
  "fuxi-workspace",
  "serde",
  "serde_json",

@@ -23,6 +23,7 @@ pub mod dist_enqueuer;
 pub mod error;
 pub mod fuxi;
 pub mod idle_gc;
+pub mod insight_extractor;
 pub mod mailbox;
 pub mod recall;
 pub mod registry;
@@ -34,6 +35,11 @@ pub use error::{OrchestratorError, Result};
 pub use fuxi::{Fuxi, FuxiConfig, WorkerKind};
 pub use idle_gc::{
     DEFAULT_IDLE_TTL_SECS, DEFAULT_TICK_INTERVAL_SECS, IdleGcTask, IdleShutdowner, ttl_from_env,
+};
+pub use insight_extractor::{
+    CANGJIE_ROLE, CANGJIE_SOURCE, CangjieSpawner, CangjieSpawnerError, CangjieSpawnerResult,
+    DEFAULT_EXTRACT_TEMPLATE, DEFAULT_JUDGE_TEMPLATE, EXTRACTOR_ROLE, InsightExtractorConfig,
+    InsightExtractorTask, config_from_env as insight_extractor_config_from_env,
 };
 pub use mailbox::{
     MailboxMessage, MailboxMessageState, fold_mailbox, mailbox_for_agent,

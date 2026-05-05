@@ -52,6 +52,7 @@
 
 use fuxi_agent_cc::CcLaunchConfig;
 use fuxi_core::agent::AgentProfile;
+use fuxi_memory::{HetuStore, UserProfileStore};
 
 /// 教学文案——拼到 worker system prompt 的 addendum 段。
 ///
@@ -196,6 +197,135 @@ pub fn inject_codex_profile(profile: &mut AgentProfile) {
     } else {
         profile.system_prompt = format!("{}\n\n{}", profile.system_prompt, trimmed);
     }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// memory-v2（论文 arXiv:2604.14004 Memory Transfer Learning）注入桥
+//
+// 三表心智：
+//   - oracle_facts   = trajectory 层 → **绝不**注入门客 prompt（negative transfer）
+//   - user_profile   = summary 层    → 注入「用户身份卡」段
+//   - hetu_patterns  = insight 层    → 注入「历史心法」段（至多 5 条，按抽象度 + 时间排序）
+//
+// 黑名单：xuannv（接收方/对话上下文已含用户原话，再注入会污染）/ extractor（幕后工
+// 不需要身份卡）/ cangjie（自吞循环——它就是写 hetu 的人，再读自己写的内容会放大噪声）。
+// 跟 sentinel 黑名单概念同族但语义不同（sentinel 黑名单是"不教 sentinel"，memory 黑
+// 名单是"不注入身份卡 + 心法"），故各持各的列表。
+// ──────────────────────────────────────────────────────────────────
+
+/// memory-v2 注入条目数上限——多 > 5 条会稀释门客 prompt（论文：注入越多越易过拟合）。
+const MEMORY_MAX_INSIGHTS: usize = 5;
+
+/// 是否给该 role 注入 memory（user_profile + hetu_patterns）。
+///
+/// 黑名单：
+/// - **xuannv**：玄女自身就是用户对话的接收方，身份卡跟对话上下文重复
+/// - **extractor**：fact 提取器，幕后跑，不属"门客在用户领域执行任务"模型
+/// - **cangjie**：仓颉是 insight 提取器；让它读自己写的 hetu 形成自吞循环，放大噪声
+pub fn should_inject_memory_for_role(role: &str) -> bool {
+    !matches!(role, "xuannv" | "extractor" | "cangjie")
+}
+
+/// 拼装 memory addendum 文案——纯字符串组装，无 IO。
+///
+/// 入参：
+/// - `summary` 来自 `UserProfileStore::summary()`（≤ 200 字凝练身份卡，可能空串）
+/// - `insights` 是若干条 `(pattern, abstraction_score)`——已按抽象度+时间降序，
+///   函数内不再排序，仅截前 [`MEMORY_MAX_INSIGHTS`] 条
+///
+/// 文案契约（玄女 instructions / 论文逻辑都依赖这两个 heading 字面量）：
+/// - 用户身份卡段标题：`## 用户身份卡（必读）`
+/// - 历史心法段标题：`## 你这个角色（{role}）的历史心法（论文：抽象度决定可迁移性）`
+///
+/// 空 store 走"暂无"占位——让门客显式知道"这是 memory-v2 注入位但当前空"，
+/// 比省略整段更不歧义（防止它误认为 system prompt 出错）。
+fn render_memory_addendum(role: &str, summary: &str, insights: &[String]) -> String {
+    let mut out = String::from("---\n## 用户身份卡（必读）\n");
+    if summary.trim().is_empty() {
+        out.push_str("（暂无——用户画像还没记，等玄女通过 `fuxi profile set` 入卡）\n");
+    } else {
+        out.push_str(summary.trim());
+        out.push('\n');
+    }
+    out.push_str("\n## 你这个角色（");
+    out.push_str(role);
+    out.push_str("）的历史心法（论文：抽象度决定可迁移性）\n");
+    if insights.is_empty() {
+        out.push_str("（暂无——仓颉还没积累到这个角色的可复用心法）\n");
+    } else {
+        for ins in insights.iter().take(MEMORY_MAX_INSIGHTS) {
+            // 心法可能跨多行；统一压成单行 markdown bullet（首行加 `- `，剩余行
+            // 撒 leading 空格保持 list item 连续性）。多行心法在论文里少见但也别让
+            // 它撑破 markdown 结构。
+            let mut lines = ins.lines();
+            if let Some(first) = lines.next() {
+                out.push_str("- ");
+                out.push_str(first);
+                out.push('\n');
+                for rest in lines {
+                    out.push_str("  ");
+                    out.push_str(rest);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 拉 user_profile + hetu_patterns 心法，组装注入文案——cc + codex 共用一段。
+async fn fetch_and_render(
+    role: &str,
+    profile: &UserProfileStore,
+    hetu: &HetuStore,
+) -> Result<String, fuxi_memory::Error> {
+    let summary = profile.summary().await?;
+    let recent = hetu.recent_for_role(role, MEMORY_MAX_INSIGHTS).await?;
+    let insights: Vec<String> = recent.into_iter().map(|p| p.pattern).collect();
+    Ok(render_memory_addendum(role, &summary, &insights))
+}
+
+/// cc 路径 memory 注入——拉 store → 拼 addendum → 拼到 `cc_cfg.append_system_prompt`。
+///
+/// 黑名单 role / 全局 disable → noop（store 都不读，省 IO）。
+/// 已有 addendum 时**追加**（保留 sentinel + role-specific 在前）。
+pub async fn inject_role_memory_cc(
+    cfg: &mut CcLaunchConfig,
+    role: &str,
+    profile: &UserProfileStore,
+    hetu: &HetuStore,
+) -> Result<(), fuxi_memory::Error> {
+    if is_globally_disabled() || !should_inject_memory_for_role(role) {
+        return Ok(());
+    }
+    let addendum = fetch_and_render(role, profile, hetu).await?;
+    let trimmed = addendum.trim_end();
+    cfg.append_system_prompt = match cfg.append_system_prompt.take() {
+        Some(existing) if !existing.trim().is_empty() => Some(format!("{existing}\n\n{trimmed}")),
+        _ => Some(trimmed.to_string()),
+    };
+    Ok(())
+}
+
+/// codex 路径 memory 注入——同 cc 思路，但落在 `profile.system_prompt` 末尾
+/// （codex `compose_prompt` 把整段 prepend 到 dispatch prompt）。
+pub async fn inject_role_memory_codex(
+    profile_obj: &mut AgentProfile,
+    role: &str,
+    profile: &UserProfileStore,
+    hetu: &HetuStore,
+) -> Result<(), fuxi_memory::Error> {
+    if is_globally_disabled() || !should_inject_memory_for_role(role) {
+        return Ok(());
+    }
+    let addendum = fetch_and_render(role, profile, hetu).await?;
+    let trimmed = addendum.trim_end();
+    profile_obj.system_prompt = if profile_obj.system_prompt.trim().is_empty() {
+        trimmed.to_string()
+    } else {
+        format!("{}\n\n{}", profile_obj.system_prompt, trimmed)
+    };
+    Ok(())
 }
 
 /// β · #57 把 dispatch routing 教学拼到玄女 cc 的 `append_system_prompt`。
@@ -365,6 +495,174 @@ mod tests {
         let got = cfg.append_system_prompt.expect("should be set");
         assert!(got.starts_with("# 你是玄女"), "role 段应在前");
         assert!(got.contains("required_tags"), "routing 段应被附加");
+    }
+
+    // ── memory-v2 注入桥测试 ──
+
+    #[test]
+    fn should_inject_memory_skips_xuannv_extractor_cangjie() {
+        assert!(!should_inject_memory_for_role("xuannv"));
+        assert!(!should_inject_memory_for_role("extractor"));
+        assert!(!should_inject_memory_for_role("cangjie"));
+        // 其他 role 注入
+        assert!(should_inject_memory_for_role("luban"));
+        assert!(should_inject_memory_for_role("luban-codex"));
+        assert!(should_inject_memory_for_role("zhudiesi"));
+    }
+
+    #[test]
+    fn render_memory_addendum_with_summary_and_insights() {
+        let txt = render_memory_addendum(
+            "luban",
+            "identity: 以琳；tone: 直球",
+            &["TDD 红绿循环".to_string(), "Cargo.lock rm 重建".to_string()],
+        );
+        assert!(txt.contains("## 用户身份卡（必读）"));
+        assert!(txt.contains("identity: 以琳；tone: 直球"));
+        assert!(txt.contains("## 你这个角色（luban）的历史心法"));
+        assert!(txt.contains("- TDD 红绿循环"));
+        assert!(txt.contains("- Cargo.lock rm 重建"));
+        assert!(txt.contains("抽象度决定可迁移性"));
+    }
+
+    #[test]
+    fn render_memory_addendum_caps_at_5_insights() {
+        let many: Vec<String> = (0..10).map(|i| format!("心法 {i}")).collect();
+        let txt = render_memory_addendum("luban", "identity: x", &many);
+        // 前 5 条入，后 5 条不入
+        assert!(txt.contains("心法 0"));
+        assert!(txt.contains("心法 4"));
+        assert!(!txt.contains("心法 5"));
+        assert!(!txt.contains("心法 9"));
+    }
+
+    #[test]
+    fn render_memory_addendum_empty_uses_placeholders() {
+        let txt = render_memory_addendum("luban", "", &[]);
+        // 空身份卡 → 占位
+        assert!(txt.contains("（暂无——用户画像还没记"));
+        // 空心法 → 占位
+        assert!(txt.contains("（暂无——仓颉还没积累"));
+        // 标题段仍在（玄女 instructions / 测试都靠 heading 字面）
+        assert!(txt.contains("## 用户身份卡"));
+        assert!(txt.contains("## 你这个角色（luban）的历史心法"));
+    }
+
+    /// memory addendum 不能含 oracle_facts 任何字段——论文核心 safety boundary。
+    #[test]
+    fn render_memory_addendum_does_not_leak_oracle_keywords() {
+        let txt = render_memory_addendum("luban", "identity: x", &["foo".to_string()]);
+        // 几个 oracle_facts 内部字段名——render 不应该提到
+        assert!(!txt.contains("subject"));
+        assert!(!txt.contains("predicate"));
+        assert!(!txt.contains("object"));
+        assert!(!txt.contains("oracle_facts"));
+    }
+
+    #[tokio::test]
+    async fn inject_role_memory_cc_appends_after_existing() {
+        use fuxi_memory::{HetuStore, NewPattern, NewProfile, UserProfileStore};
+        let profile = UserProfileStore::connect_memory().await.unwrap();
+        profile
+            .record(NewProfile::new("identity", "以琳，工程师"))
+            .await
+            .unwrap();
+        let hetu = HetuStore::connect_memory().await.unwrap();
+        hetu.record(NewPattern::insight("luban", "TDD 红绿").with_abstraction_score(0.9))
+            .await
+            .unwrap();
+
+        let mut cfg = CcLaunchConfig {
+            append_system_prompt: Some("# 你是鲁班".into()),
+            ..Default::default()
+        };
+        inject_role_memory_cc(&mut cfg, "luban", &profile, &hetu)
+            .await
+            .unwrap();
+        let got = cfg.append_system_prompt.unwrap();
+        // role-specific 在前，memory 在后
+        assert!(got.starts_with("# 你是鲁班"));
+        let role_pos = got.find("# 你是鲁班").unwrap();
+        let card_pos = got.find("用户身份卡").unwrap();
+        assert!(role_pos < card_pos);
+        // 内容齐全
+        assert!(got.contains("以琳"));
+        assert!(got.contains("- TDD 红绿"));
+    }
+
+    #[tokio::test]
+    async fn inject_role_memory_cc_blacklist_noop() {
+        use fuxi_memory::{HetuStore, NewPattern, NewProfile, UserProfileStore};
+        let profile = UserProfileStore::connect_memory().await.unwrap();
+        profile
+            .record(NewProfile::new("identity", "x"))
+            .await
+            .unwrap();
+        let hetu = HetuStore::connect_memory().await.unwrap();
+        hetu.record(NewPattern::insight("xuannv", "y"))
+            .await
+            .unwrap();
+
+        for role in ["xuannv", "extractor", "cangjie"] {
+            let mut cfg = CcLaunchConfig::default();
+            inject_role_memory_cc(&mut cfg, role, &profile, &hetu)
+                .await
+                .unwrap();
+            assert!(
+                cfg.append_system_prompt.is_none(),
+                "{role} 应被黑名单 noop，结果：{:?}",
+                cfg.append_system_prompt
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inject_role_memory_cc_empty_stores_uses_placeholders() {
+        use fuxi_memory::{HetuStore, UserProfileStore};
+        let profile = UserProfileStore::connect_memory().await.unwrap();
+        let hetu = HetuStore::connect_memory().await.unwrap();
+        let mut cfg = CcLaunchConfig::default();
+        inject_role_memory_cc(&mut cfg, "luban", &profile, &hetu)
+            .await
+            .unwrap();
+        let got = cfg.append_system_prompt.expect("should set");
+        assert!(got.contains("用户身份卡"));
+        assert!(got.contains("（暂无"));
+    }
+
+    #[tokio::test]
+    async fn inject_role_memory_codex_appends_to_system_prompt() {
+        use fuxi_memory::{HetuStore, NewPattern, NewProfile, UserProfileStore};
+        let profile = UserProfileStore::connect_memory().await.unwrap();
+        profile
+            .record(NewProfile::new("tone", "直球"))
+            .await
+            .unwrap();
+        let hetu = HetuStore::connect_memory().await.unwrap();
+        hetu.record(NewPattern::insight("luban-codex", "rule X"))
+            .await
+            .unwrap();
+
+        let mut p = make_profile("luban-codex", "# 你是鲁班 codex");
+        inject_role_memory_codex(&mut p, "luban-codex", &profile, &hetu)
+            .await
+            .unwrap();
+        assert!(p.system_prompt.contains("# 你是鲁班 codex"));
+        assert!(p.system_prompt.contains("用户身份卡"));
+        assert!(p.system_prompt.contains("直球"));
+        assert!(p.system_prompt.contains("- rule X"));
+    }
+
+    #[tokio::test]
+    async fn inject_role_memory_codex_blacklist_noop() {
+        use fuxi_memory::{HetuStore, UserProfileStore};
+        let profile = UserProfileStore::connect_memory().await.unwrap();
+        let hetu = HetuStore::connect_memory().await.unwrap();
+        let mut p = make_profile("cangjie", "# 仓颉本体");
+        inject_role_memory_codex(&mut p, "cangjie", &profile, &hetu)
+            .await
+            .unwrap();
+        assert_eq!(p.system_prompt, "# 仓颉本体");
     }
 
     #[test]
