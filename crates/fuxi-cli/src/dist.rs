@@ -1879,6 +1879,59 @@ fn build_codex_prompt_from_job(job: &DistJob) -> String {
     fuxi_agent_codex::compose_prompt(system, &job.title, &job.body)
 }
 
+/// v2 跨节点 sandbox · best-effort `git fetch origin <branch>`。
+///
+/// 跨节点真协作的前提：worker 节点开 sandbox 前必须 fetch 一下 home 端 main
+/// 的最新 commit，否则起出来的 worktree 是过期 base，跑完 push 回去也是脏 base。
+///
+/// **不 fail-fast**：fetch 失败（远端不可达 / 网络断 / no remote）只 warn，照常
+/// 开 sandbox。理由：worker 可能短暂掉线但本地依旧能干活，硬挂会让"网卡飘"
+/// 变成 dispatch 中断；让现有数据下能跑起来，由用户事后 git pull 修。
+///
+/// `FUXI_DISABLE_PRESPAWN_FETCH=1` 完全禁用（CI / 本地开发时偶尔需要）。
+pub(crate) async fn try_fetch_default_branch(canonical: &std::path::Path, branch: &str) -> bool {
+    if std::env::var_os("FUXI_DISABLE_PRESPAWN_FETCH").is_some() {
+        tracing::debug!(
+            path = %canonical.display(),
+            branch,
+            "FUXI_DISABLE_PRESPAWN_FETCH set, skip pre-spawn git fetch"
+        );
+        return false;
+    }
+    let out = match tokio::process::Command::new("git")
+        .current_dir(canonical)
+        .args(["fetch", "origin", branch])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                path = %canonical.display(),
+                branch,
+                error = %e,
+                "pre-spawn git fetch 启动失败（git binary 缺？），继续打开 sandbox"
+            );
+            return false;
+        }
+    };
+    if !out.status.success() {
+        tracing::warn!(
+            path = %canonical.display(),
+            branch,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "pre-spawn git fetch 失败（远端不可达 / no remote / 权限），继续打开 sandbox"
+        );
+        return false;
+    }
+    tracing::info!(
+        path = %canonical.display(),
+        branch,
+        "pre-spawn git fetch origin/{} 完成", branch
+    );
+    true
+}
+
 /// Decision 21 phase 3 跨节点 sandbox · worker 端按 `job.project` 解出
 /// cc/codex 应该 spawn 进哪个目录。
 ///
@@ -1918,6 +1971,12 @@ async fn resolve_project_sandbox_cwd(
                  请先在本机跑 `fuxi project add <path>` 注册同名 slug",
             )
         })?;
+    // v2 跨节点 sandbox：在打开 worktree 前先 fetch origin main，让 sandbox 起在
+    // home 端最新 base 上。fetch 失败 best-effort（log warn 继续）——worker 短暂
+    // 掉线时不要把 dispatch 整挂；离线起的 sandbox 跑完 push 回去时若 base 已过期
+    // 走 git refused，那是 git 本身的健全检查，比这里硬挂友好。
+    let _ = try_fetch_default_branch(&project.canonical_path, &project.default_branch).await;
+
     if let Some(task_raw) = job.ephemeral_task.as_deref() {
         let trimmed = task_raw.strip_prefix("task-").unwrap_or(task_raw);
         let task_uuid = uuid::Uuid::parse_str(trimmed)
@@ -6067,6 +6126,147 @@ mod tests {
         // 末 2 个是 restore 之后 enqueue 的 fresh queued
         assert_eq!(order[4], new_q1);
         assert_eq!(order[5], new_q2);
+    }
+
+    // ── v2 跨节点 sandbox · pre-spawn git fetch ─────────────────────────
+
+    /// 起一个 source repo（home 端），返回路径 + 第二条 commit 的 hash。
+    async fn make_seed_repo_with_two_commits() -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&path)
+                .args(&args)
+                .output()
+                .await;
+        }
+        tokio::fs::write(path.join("README.md"), "v1")
+            .await
+            .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "v1"]] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&path)
+                .args(&args)
+                .output()
+                .await;
+        }
+        tokio::fs::write(path.join("README.md"), "v2")
+            .await
+            .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "v2"]] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&path)
+                .args(&args)
+                .output()
+                .await;
+        }
+        let out = tokio::process::Command::new("git")
+            .current_dir(&path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await
+            .unwrap();
+        let head = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        (dir, path, head)
+    }
+
+    /// fetch 后 `origin/main` 应跟上 home 的 HEAD。
+    #[tokio::test]
+    async fn fetch_default_branch_advances_origin_ref() {
+        let (_home_td, home_path, head_initial) = make_seed_repo_with_two_commits().await;
+
+        // worker clone（file:// remote）
+        let worker_td = tempfile::tempdir().unwrap();
+        let worker_path = worker_td.path().join("worker");
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                home_path.to_string_lossy().as_ref(),
+                worker_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        // worker 端配置 user 让后续 git op 不抱怨
+        for args in [
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&worker_path)
+                .args(&args)
+                .output()
+                .await;
+        }
+
+        // home 推第三条 commit
+        tokio::fs::write(home_path.join("README.md"), "v3")
+            .await
+            .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "v3"]] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&home_path)
+                .args(&args)
+                .output()
+                .await;
+        }
+        let out = tokio::process::Command::new("git")
+            .current_dir(&home_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await
+            .unwrap();
+        let head_v3 = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert_ne!(head_v3, head_initial);
+
+        // worker fetch
+        let ok = try_fetch_default_branch(&worker_path, "main").await;
+        assert!(ok, "fetch 应成功");
+
+        // worker 上的 origin/main 应跟上
+        let out = tokio::process::Command::new("git")
+            .current_dir(&worker_path)
+            .args(["rev-parse", "origin/main"])
+            .output()
+            .await
+            .unwrap();
+        let origin_main = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert_eq!(
+            origin_main, head_v3,
+            "fetch 后 worker 端 origin/main 应等于 home 端 HEAD"
+        );
+    }
+
+    /// 没有 origin remote 时 fetch 应 best-effort 失败返 false，不 panic。
+    #[tokio::test]
+    async fn fetch_default_branch_returns_false_when_no_remote() {
+        let (_td, path, _head) = make_seed_repo_with_two_commits().await;
+        // 这是源 repo 自己（无 origin remote）
+        let ok = try_fetch_default_branch(&path, "main").await;
+        assert!(!ok, "无 remote 应返 false 而不是 panic");
+    }
+
+    /// FUXI_DISABLE_PRESPAWN_FETCH=1 时直接跳过——返 false 但不 spawn git 进程。
+    /// 测试通过设置 env + 跑 fetch 即返，不验证副作用（无法分辨"未跑 git"和"跑了但失败"
+    /// 仅靠返回值）；真正的开关效果在 stdout 的 tracing log。
+    #[tokio::test]
+    async fn fetch_default_branch_respects_disable_env() {
+        // tempdir 起空目录——若 env 没生效会调 git 失败；env 生效则秒返 false
+        let dir = tempfile::tempdir().unwrap();
+
+        // env 设置仅在本测试 scope 内有效——其他并发测试拿空值不受影响。
+        // SAFETY: tokio 单测多线程；变量只在此函数内读写，并行其他测不会读它。
+        // 注意 std::env::set_var unsafe 在 Rust 2024 edition 已移除安全性 attribute。
+        unsafe { std::env::set_var("FUXI_DISABLE_PRESPAWN_FETCH", "1") };
+        let ok = try_fetch_default_branch(dir.path(), "main").await;
+        unsafe { std::env::remove_var("FUXI_DISABLE_PRESPAWN_FETCH") };
+        assert!(!ok);
     }
 
     /// path 4 α #8：`new_with_persistence` free-fn ctor smoke test——
