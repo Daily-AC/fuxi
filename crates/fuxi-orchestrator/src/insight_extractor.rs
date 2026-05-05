@@ -569,15 +569,22 @@ fn build_trajectory(events: &[Event]) -> String {
     out
 }
 
-/// 从历史里抓第一个 UserPrompted 的文本前 60 字作 task_title hint。
+/// 从历史里抓 task_title hint。优先 UserPrompted（用户原话），否则退回 TaskCreated.title
+/// （luban 等被派活的门客 task 通常无 UserPrompted，只有 TaskCreated 携带 dispatch
+/// title）。两者均 60 字截断。
 fn task_title_from_history(events: &[Event]) -> Option<String> {
-    events.iter().find_map(|ev| {
+    let mut from_dispatch: Option<String> = None;
+    for ev in events {
         if let EventKind::UserPrompted { text } = &ev.kind {
-            Some(text.chars().take(60).collect::<String>())
-        } else {
-            None
+            return Some(text.chars().take(60).collect::<String>());
         }
-    })
+        if from_dispatch.is_none()
+            && let EventKind::TaskCreated { title, .. } = &ev.kind
+        {
+            from_dispatch = Some(title.chars().take(60).collect::<String>());
+        }
+    }
+    from_dispatch
 }
 
 fn parse_candidates(text: &str) -> std::result::Result<Vec<InsightCandidate>, serde_json::Error> {
@@ -586,7 +593,13 @@ fn parse_candidates(text: &str) -> std::result::Result<Vec<InsightCandidate>, se
 }
 
 /// review / validation 类 task 关键词。env `FUXI_INSIGHT_REVIEW_KEYWORDS`（CSV）
-/// 可覆盖；空 / 未设走默认。检查时 title 优先，未命中再扫 trajectory 头部。
+/// 可覆盖；空 / 未设走默认。
+///
+/// **只匹配 title，不扫 trajectory 体**——trajectory 含 `_fuxi:request_review`
+/// sentinel JSON 等平台标记会误命中（home 实测撞过 task-e0a361b7：luban 写完
+/// NOTE.md 发 sentinel JSON，trajectory 头出现 "request_review" → 误判 review 类
+/// → 跳过该 task 的合法 insight 抽取）。用户的 review 意图通过 task title 传递
+/// （user-turn 用户原话；luban 子任务 = xuannv dispatch title），足够。
 const DEFAULT_REVIEW_KEYWORDS: &[&str] = &[
     "review",
     "validation",
@@ -603,7 +616,7 @@ const DEFAULT_REVIEW_KEYWORDS: &[&str] = &[
     "把关",
 ];
 
-fn should_skip_review(title: &str, trajectory: &str) -> bool {
+fn should_skip_review(title: &str, _trajectory: &str) -> bool {
     let custom = std::env::var("FUXI_INSIGHT_REVIEW_KEYWORDS").ok();
     let keywords: Vec<String> = match custom.as_deref() {
         Some(s) if !s.trim().is_empty() => s.split(',').map(|k| k.trim().to_lowercase()).collect(),
@@ -613,14 +626,7 @@ fn should_skip_review(title: &str, trajectory: &str) -> bool {
             .collect(),
     };
     let title_lc = title.to_lowercase();
-    if keywords.iter().any(|k| title_lc.contains(k)) {
-        return true;
-    }
-    // trajectory 头部 200 字也扫一下——title 可能简略（如"检查一下..."）但
-    // trajectory 里用户一句话明确写"review xxx"。只看头部限制误命中。
-    let head: String = trajectory.chars().take(200).collect();
-    let head_lc = head.to_lowercase();
-    keywords.iter().any(|k| head_lc.contains(k))
+    keywords.iter().any(|k| title_lc.contains(k))
 }
 
 fn parse_verdict(text: &str) -> std::result::Result<JudgeVerdict, serde_json::Error> {
@@ -1271,16 +1277,16 @@ mod tests {
         assert!(!should_skip_review("调研 sia 项目", ""));
     }
 
-    /// trajectory 头部含关键词也算 review 类。
+    /// trajectory 体不参与 review 关键词匹配——避免 sentinel JSON `request_review` 误命中。
     #[test]
-    fn should_skip_review_matches_trajectory_head() {
+    fn should_skip_review_ignores_trajectory_body() {
         unsafe { std::env::remove_var("FUXI_INSIGHT_REVIEW_KEYWORDS") };
-        let traj = "用户：帮我 review 一下昨天 luban 改的那段\n门客：好的";
-        assert!(should_skip_review("用户提问", traj));
-        // 关键词在 200 字外不算（防误命中）
-        let pad: String = "x".repeat(300);
-        let late = format!("{pad} review 这个");
-        assert!(!should_skip_review("中性标题", &late));
+        // trajectory 含 request_review sentinel + "review" 字样，title 中性 → 不应跳
+        let traj_with_sentinel =
+            r#"门客：已追加。{"_fuxi":"request_review","kind":"code_change","summary":"x"}"#;
+        assert!(!should_skip_review("v2.1 测试 NOTE.md", traj_with_sentinel));
+        let traj_with_review_word = "用户：帮我 review 一下";
+        assert!(!should_skip_review("中性标题", traj_with_review_word));
     }
 
     /// env override 关键词清单。
