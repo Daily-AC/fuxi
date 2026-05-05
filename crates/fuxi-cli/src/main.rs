@@ -100,6 +100,11 @@ enum ProjectCmd {
     Add(project_cmd::ProjectAddArgs),
     /// 列出所有已注册 project。
     List(project_cmd::ProjectListArgs),
+    /// v2 跨节点 sandbox：加入 home 上已注册的 project（git clone + 本机 add +
+    /// 通告 home host_nodes）。
+    /// `fuxi project join --slug erp --controller https://im.qmledmq.cn:8443 \
+    ///                    --token $TOKEN --remote-url ssh://home/home/e0-7/erp`
+    Join(project_cmd::ProjectJoinArgs),
     /// 一屏显示 project 元信息 + sandboxes 数 + 交付数。
     Info(project_cmd::ProjectInfoArgs),
     /// 删除一个 project（连带 sandboxes / ephemeral / archive / deliverables）。
@@ -232,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Project(p)) => match p {
             ProjectCmd::Add(args) => project_cmd::run_add(args).await,
             ProjectCmd::List(args) => project_cmd::run_list(args).await,
+            ProjectCmd::Join(args) => project_cmd::run_join(args).await,
             ProjectCmd::Info(args) => project_cmd::run_info(args).await,
             ProjectCmd::Rm(args) => project_cmd::run_remove(args).await,
         },
