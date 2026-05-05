@@ -11,7 +11,7 @@
 //! 输出：人类可读纯文本（不上 banner / 颜色）——这是工具型命令，PWA 后续
 //! 会有自己的 GUI 注册流。
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use fuxi_core::{DeliverableKind, Event, EventKind, EventMeta, ProjectId, TaskId};
 use fuxi_events::EventStore;
@@ -19,7 +19,7 @@ use fuxi_workspace::{
     DeliverablesManager, EphemeralWorkspaceManager, FileSystemProjectRegistry,
     PersistentSandboxManager,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[derive(Debug, Args)]
@@ -40,6 +40,46 @@ pub struct ProjectAddArgs {
 
 #[derive(Debug, Args)]
 pub struct ProjectListArgs {
+    #[arg(long = "registry-root")]
+    pub registry_root: Option<PathBuf>,
+}
+
+/// `fuxi project join`——v2 跨节点 sandbox：worker 端加入 home 已注册的 project。
+///
+/// 流程：
+/// 1. 查 home `GET /api/projects/<slug>` 拿 canonical_path / default_branch
+/// 2. `git clone <remote-url> <target>`（git 自带 ssh / https 支持）
+/// 3. 本地 `registry.add(target, slug, branch)` 登记
+/// 4. POST `/api/projects/<slug>/host_nodes` 通告自己——home 端 dispatch 即可路由
+///
+/// `--remote-url` 当前必传：mac/其他 worker 没法猜 home repo 的可达路径。
+/// 简单形态如 `ssh://home/home/e0-7/demo-site`（`home` 是 ssh config 里的 alias，
+/// `/home/e0-7/demo-site` 是 home 端的 canonical_path）。
+#[derive(Debug, Args)]
+pub struct ProjectJoinArgs {
+    /// home 端登记的 project slug。
+    #[arg(long)]
+    pub slug: String,
+    /// home 端 IM controller 基址，如 `https://im.qmledmq.cn:8443`。
+    #[arg(long)]
+    pub controller: String,
+    /// HMAC token——本机签出（`fuxi im issue-token`）或 home 端发的长期 token。
+    /// 兼容 PWA cookie 鉴权机制（middleware::cookie_auth_layer）。
+    #[arg(long)]
+    pub token: String,
+    /// 本机 clone 目标路径（绝对 / 相对均可）。
+    /// 不传时从 canonical_path 的 basename 派生 + 落 `~`（如 home 上是
+    /// `/home/e0-7/demo-site` → 本机落 `~/demo-site`）。
+    #[arg(long)]
+    pub target: Option<PathBuf>,
+    /// home repo 的 git URL——必须可被本机 git 访问。例如 `ssh://home/home/e0-7/demo-site`。
+    #[arg(long = "remote-url")]
+    pub remote_url: String,
+    /// 本机的 dist 节点 id——同 worker register 时声明的 node_id。
+    /// 不传走 `$FUXI_NODE_ID` env 或 `hostname`。
+    #[arg(long = "node-id")]
+    pub node_id: Option<String>,
+    /// 注册表 root 覆写（默认 `$HOME/.fuxi/projects/`）。
     #[arg(long = "registry-root")]
     pub registry_root: Option<PathBuf>,
 }
@@ -78,6 +118,195 @@ pub async fn run_add(args: ProjectAddArgs) -> Result<()> {
         registry.root().display(),
         project.id
     );
+    Ok(())
+}
+
+/// 给 `fuxi project join` 用：从 home canonical_path 派生本机 target 路径。
+///
+/// 规则：取末段 basename（注意 trailing slash 也兼容），落到 `$HOME` 下。
+/// 跟 home canonical_path 同 basename 但路径**不**一致，是有意为之——home 用
+/// `/home/e0-7/foo`，mac 用 `/Users/zyl/foo`，两边 canonical_path 不同没关系，
+/// dispatch 层只用 project_id 路由，sandbox 起在各自 canonical_path/.fuxi/...。
+pub(crate) fn derive_join_target(home_canonical: &Path) -> Option<PathBuf> {
+    let base = home_canonical.file_name()?.to_str()?;
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(base))
+}
+
+/// `$FUXI_NODE_ID` → `hostname` → fail。worker register 用同样的 fallback 链，
+/// 这里复用确保两条路径用同一 node_id。
+pub(crate) fn resolve_self_node_id(explicit: Option<String>) -> Result<String> {
+    if let Some(s) = explicit
+        && !s.trim().is_empty()
+    {
+        return Ok(s);
+    }
+    if let Ok(s) = std::env::var("FUXI_NODE_ID")
+        && !s.trim().is_empty()
+    {
+        return Ok(s);
+    }
+    let out = std::process::Command::new("hostname")
+        .output()
+        .context("调 hostname 命令失败")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "hostname 命令非 0 退出: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let s = String::from_utf8(out.stdout)
+        .context("hostname 输出非 UTF-8")?
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        Err(anyhow!("hostname 返回空——请用 --node-id 显式指定"))
+    } else {
+        // 同 worker register 端：lowercase + 强制小写 ascii，避免 dispatch 路由
+        // 时大小写不匹配（"MyMac" vs "mymac"）。
+        Ok(s.to_ascii_lowercase())
+    }
+}
+
+pub async fn run_join(args: ProjectJoinArgs) -> Result<()> {
+    use reqwest::Client;
+    use serde_json::json;
+
+    let slug = ProjectId::new(args.slug.clone()).context("非法 project slug")?;
+    let controller_base = args.controller.trim_end_matches('/').to_string();
+
+    // 1. 查 home /api/projects/<slug>
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("build http client")?;
+    let url = format!("{controller_base}/api/projects/{slug}");
+    let resp = client
+        .get(&url)
+        .header("authorization", format!("Bearer {}", args.token))
+        .send()
+        .await
+        .with_context(|| format!("GET {url} 失败"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "GET {url} → {status}: {body}\n\
+             检查：1) controller 地址 + token 是否正确  \
+             2) home 端是否已 `fuxi project add` 该 slug",
+        ));
+    }
+    let view: serde_json::Value = resp
+        .json()
+        .await
+        .context("home /api/projects 响应解析失败")?;
+    let home_canonical = view
+        .get("canonical_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("响应缺 canonical_path: {view:?}"))?;
+    let default_branch = view
+        .get("default_branch")
+        .and_then(|v| v.as_str())
+        .unwrap_or("main")
+        .to_string();
+
+    // 2. 决定 target 路径
+    let target = match args.target {
+        Some(p) => p,
+        None => derive_join_target(Path::new(home_canonical)).ok_or_else(|| {
+            anyhow!(
+                "无法从 home canonical_path {home_canonical:?} 派生 target——\
+                 请显式 --target <path>"
+            )
+        })?,
+    };
+    if target.exists() {
+        // 已存在：跳过 clone（认为用户已经 clone 过了）
+        println!(
+            "  target {} 已存在 → 跳过 git clone（假定已是 home 项目的 clone）",
+            target.display()
+        );
+    } else {
+        println!("  git clone {} {} ...", args.remote_url, target.display());
+        let out = tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                "--branch",
+                &default_branch,
+                args.remote_url.as_str(),
+                target.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .context("起 git clone 失败")?;
+        if !out.status.success() {
+            return Err(anyhow!(
+                "git clone 失败: {}\n  stderr: {}",
+                args.remote_url,
+                String::from_utf8_lossy(&out.stderr).trim(),
+            ));
+        }
+    }
+
+    // 3. 本地 registry add
+    let registry = registry_for(args.registry_root)?;
+    // 已存在同 slug 时也算成功——可能用户重跑 `join`；只输出一行
+    let canonical_real = target
+        .canonicalize()
+        .with_context(|| format!("canonicalize {} 失败", target.display()))?;
+    if let Some(existing) = registry.get(&slug).await? {
+        if existing.canonical_path != canonical_real {
+            return Err(anyhow!(
+                "本机已有 project {} 但 canonical_path 不一致：\n  已注册: {}\n  本次: {}\n\
+                 请先 `fuxi project rm {}` 再 join，或换一个 --target",
+                slug,
+                existing.canonical_path.display(),
+                canonical_real.display(),
+                slug,
+            ));
+        }
+        println!(
+            "  本机已注册 project {} → {} ：跳过 registry.add",
+            slug,
+            existing.canonical_path.display()
+        );
+    } else {
+        registry
+            .add(
+                target.clone(),
+                Some(slug.to_string()),
+                Some(default_branch.clone()),
+            )
+            .await
+            .context("本机 registry.add 失败")?;
+    }
+
+    // 4. POST /api/projects/<slug>/host_nodes
+    let node_id = resolve_self_node_id(args.node_id)?;
+    let url = format!("{controller_base}/api/projects/{slug}/host_nodes");
+    let resp = client
+        .post(&url)
+        .header("authorization", format!("Bearer {}", args.token))
+        .header("content-type", "application/json")
+        .body(json!({"node_id": node_id}).to_string())
+        .send()
+        .await
+        .with_context(|| format!("POST {url} 失败"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("POST {url} → {status}: {body}"));
+    }
+
+    println!(
+        "已 join project {} → 本机 {} ；已通告 home host_node={}",
+        slug,
+        canonical_real.display(),
+        node_id
+    );
+    println!("  默认 branch: {default_branch}");
+    println!("  下一步：home 端 `fuxi dispatch ... --project {slug}`，玄女会按节点负载自动路由。");
     Ok(())
 }
 
@@ -944,6 +1173,39 @@ mod tests {
         .await
         .expect_err("未注册 project 应失败");
         assert!(err.to_string().contains("未注册"), "got: {err}");
+    }
+
+    /// derive_join_target：home canonical_path basename 落到 $HOME。
+    #[test]
+    fn derive_join_target_picks_basename_under_home() {
+        // SAFETY：单测内独占设置；其他并发测不读 HOME。
+        unsafe { std::env::set_var("HOME", "/Users/test") };
+        let target = derive_join_target(Path::new("/home/e0-7/demo-site")).expect("应能派生");
+        assert_eq!(target, PathBuf::from("/Users/test/demo-site"));
+    }
+
+    /// 末尾斜杠不影响 basename 提取。
+    #[test]
+    fn derive_join_target_handles_trailing_slash() {
+        unsafe { std::env::set_var("HOME", "/Users/test") };
+        let target = derive_join_target(Path::new("/home/e0-7/demo-site/")).expect("应能派生");
+        assert_eq!(target, PathBuf::from("/Users/test/demo-site"));
+    }
+
+    /// 显式 --node-id 优先级最高。
+    #[test]
+    fn resolve_self_node_id_explicit_wins() {
+        let id = resolve_self_node_id(Some("explicit-mac".into())).unwrap();
+        assert_eq!(id, "explicit-mac");
+    }
+
+    /// $FUXI_NODE_ID 次优先。
+    #[test]
+    fn resolve_self_node_id_env_used_when_no_explicit() {
+        unsafe { std::env::set_var("FUXI_NODE_ID", "env-node") };
+        let id = resolve_self_node_id(None).unwrap();
+        unsafe { std::env::remove_var("FUXI_NODE_ID") };
+        assert_eq!(id, "env-node");
     }
 
     #[tokio::test]
