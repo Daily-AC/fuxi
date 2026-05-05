@@ -65,10 +65,18 @@ pub struct IdleGcTask {
     bus: EventBus,
     ttl: Duration,
     tick_interval: Duration,
+    /// Bug 修：xuannv id 的 watch handle —— GC 跳过她，避免 shutdown 风暴。
+    /// 根因：shutdown_agent 对 xuannv silent return Ok（exempt），但 GC pre-publish
+    /// AgentShuttingDown 事件不知道；下次 tick 再循环。8/8 storm agent 全是 xuannv，
+    /// 单实例触发 1830 噪音事件（事件库实证）。
+    /// 用 watch 而非裸 Option：GC 启动早于 xuannv spawn（im.rs 顺序），且 xuannv
+    /// 重生后 id 会变；watch 让 tick_once 每次都 borrow 到当前真值。None = 测试。
+    xuannv_id: Option<tokio::sync::watch::Receiver<Option<AgentId>>>,
 }
 
 impl IdleGcTask {
     /// 构造。TTL 一般走 [`ttl_from_env`]；tick_interval 走默认 30s。
+    /// xuannv_id 默认 None；构造后用 [`Self::with_xuannv_exempt`] 链式注入。
     pub fn new(
         shelf: Arc<Shelf>,
         shutdowner: Arc<dyn IdleShutdowner>,
@@ -82,7 +90,19 @@ impl IdleGcTask {
             bus,
             ttl,
             tick_interval,
+            xuannv_id: None,
         }
+    }
+
+    /// 注入 xuannv id watch handle —— GC tick_once 跳过她，不预发 AgentShuttingDown。
+    /// 生产用 `fuxi.xuannv_id_watch()`；测试可手 build：
+    /// `let (_, rx) = tokio::sync::watch::channel(Some(id));`
+    pub fn with_xuannv_exempt(
+        mut self,
+        watch: tokio::sync::watch::Receiver<Option<AgentId>>,
+    ) -> Self {
+        self.xuannv_id = Some(watch);
+        self
     }
 
     /// 起后台 loop。`JoinHandle::abort()` 可立即停（shutdown path 用）。
@@ -115,7 +135,16 @@ impl IdleGcTask {
         }
         debug!(count = stale.len(), "idle GC: 发现过期门客");
         let mut count = 0usize;
+        // 取当前 xuannv id 一次（watch borrow 廉价，但避免在 for 内每次 borrow）。
+        let xuannv_now = self.xuannv_id.as_ref().and_then(|w| *w.borrow());
         for id in stale {
+            // Bug 修：xuannv 不能被 GC 关（shutdown_agent silent return Ok），
+            // 但旧版 GC 仍预发 AgentShuttingDown 事件 → 30s 一次永远循环。这里
+            // 在预发之前就跳过她，从源头消噪音。事件库实证：单 xuannv 实例
+            // 触发 1830 噪音事件（agent f6e2b1a2，2026-05-04 17:29 起 15h）。
+            if xuannv_now == Some(id) {
+                continue;
+            }
             // 先发 AgentShuttingDown——激活 publisher-orphan + 让订阅者能在
             // 实际 shutdown 完成前就知道 intent。reason 字符串是 API 契约："idle_ttl"。
             let mut meta = EventMeta::now();
@@ -367,6 +396,116 @@ mod tests {
             found,
             "应在 bus 上看到 AgentShuttingDown{{reason:idle_ttl}}"
         );
+    }
+
+    /// Bug 修：xuannv 即便长时间 idle 也不应被 GC 触发任何 shutdown 信号——
+    /// shutdowner 不调，bus 上不发 AgentShuttingDown。
+    #[tokio::test]
+    async fn idle_gc_skips_xuannv_no_shutdown_no_event() {
+        let shelf = Arc::new(Shelf::new());
+        let xuannv = NullAgent::new("xuannv") as Arc<dyn Agent>;
+        let xuannv_id = xuannv.card().id;
+        shelf
+            .insert(ShelfEntry {
+                card: xuannv.card().clone(),
+                agent: xuannv,
+                status: ShelfStatus::Idle,
+                worktree: None,
+                idle_since: Some(Instant::now() - Duration::from_secs(3600)),
+            })
+            .await;
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let mut sub = bus.subscribe();
+        let shutdowner = CountingShutdowner::new();
+        let gc = IdleGcTask::new(
+            shelf.clone(),
+            shutdowner.clone(),
+            bus.clone(),
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+        .with_xuannv_exempt({
+            let (_tx, rx) = tokio::sync::watch::channel(Some(xuannv_id));
+            // _tx 必须 leak 否则 rx 立即 closed；测试里直接 forget。
+            std::mem::forget(_tx);
+            rx
+        });
+        let n = gc.tick_once().await.unwrap();
+        assert_eq!(n, 0, "xuannv 不应进入 shutdown 计数");
+        assert_eq!(
+            shutdowner.calls.load(Ordering::Relaxed),
+            0,
+            "shutdowner 不该被调用"
+        );
+
+        // bus 上不应有 AgentShuttingDown for xuannv
+        let mut saw_shutdown = false;
+        for _ in 0..3 {
+            if let Ok(Some(Ok(ev))) =
+                tokio::time::timeout(Duration::from_millis(50), sub.next()).await
+                && let EventKind::AgentShuttingDown { .. } = &ev.kind
+                && ev.meta.agent == Some(xuannv_id)
+            {
+                saw_shutdown = true;
+                break;
+            }
+        }
+        assert!(
+            !saw_shutdown,
+            "bus 上不应出现针对 xuannv 的 AgentShuttingDown"
+        );
+    }
+
+    /// Bug 修：xuannv 豁免不影响其他 idle 门客被正常 GC。
+    #[tokio::test]
+    async fn idle_gc_xuannv_exempt_does_not_block_others() {
+        let shelf = Arc::new(Shelf::new());
+
+        let xuannv = NullAgent::new("xuannv") as Arc<dyn Agent>;
+        let xuannv_id = xuannv.card().id;
+        shelf
+            .insert(ShelfEntry {
+                card: xuannv.card().clone(),
+                agent: xuannv,
+                status: ShelfStatus::Idle,
+                worktree: None,
+                idle_since: Some(Instant::now() - Duration::from_secs(3600)),
+            })
+            .await;
+
+        let worker = NullAgent::new("luban") as Arc<dyn Agent>;
+        let worker_id = worker.card().id;
+        shelf
+            .insert(ShelfEntry {
+                card: worker.card().clone(),
+                agent: worker,
+                status: ShelfStatus::Idle,
+                worktree: None,
+                idle_since: Some(Instant::now() - Duration::from_secs(3600)),
+            })
+            .await;
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let shutdowner = CountingShutdowner::new();
+        let gc = IdleGcTask::new(
+            shelf.clone(),
+            shutdowner.clone(),
+            bus,
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+        .with_xuannv_exempt({
+            let (_tx, rx) = tokio::sync::watch::channel(Some(xuannv_id));
+            // _tx 必须 leak 否则 rx 立即 closed；测试里直接 forget。
+            std::mem::forget(_tx);
+            rx
+        });
+        let n = gc.tick_once().await.unwrap();
+        assert_eq!(n, 1, "应只回收 1 只（worker），跳过 xuannv");
+        let hits = shutdowner.hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, worker_id);
     }
 
     #[tokio::test]
