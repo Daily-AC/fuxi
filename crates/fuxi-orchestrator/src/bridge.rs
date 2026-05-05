@@ -168,6 +168,20 @@ pub trait Intervener: Send + Sync {
         let _ = (project_id, task, reason);
         Ok(())
     }
+
+    /// Bug 修：task 终态（Done/Cancelled）时由 bridge 触发——按 task 反查所属
+    /// project 的 L2 ephemeral 工作区，命中即归档。AgentDead 路径已存在但只
+    /// 在门客死亡时生效；门客被 idle GC 走（不发 AgentDead）或 task 因别的
+    /// 路径终结时，L2 永远不归档（用户实测 sia/L2/86106710 在 disk 躺 3 天）。
+    /// 默认 silent Ok；生产 Fuxi 覆盖。
+    async fn archive_l2_for_task(
+        &self,
+        task: TaskId,
+        reason: fuxi_core::ArchiveReason,
+    ) -> Result<()> {
+        let _ = (task, reason);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -226,6 +240,14 @@ impl Intervener for Fuxi {
         reason: fuxi_core::ArchiveReason,
     ) -> Result<()> {
         Fuxi::archive_l2_workspace(self, project_id, task, reason).await
+    }
+
+    async fn archive_l2_for_task(
+        &self,
+        task: TaskId,
+        reason: fuxi_core::ArchiveReason,
+    ) -> Result<()> {
+        Fuxi::archive_l2_for_task(self, task, reason).await
     }
 }
 
@@ -694,6 +716,29 @@ async fn handle_event(
                 warn!(error = %e, "bridge: intervene(OrchestratorCcReceived) 失败");
             }
         }
+        EventKind::TaskStateChanged { to, .. } => {
+            // Bug 修：task 终态时归档关联 L2 ephemeral 工作区。AgentDead 路径
+            // （bridge.rs:531-554）只在门客死亡时生效——但实测门客被 idle GC
+            // 走 / 状态机 bug 卡 ShuttingDown 不死时，task 已 done 但 workspace
+            // 永远不归档。这里加第二条触发器作为兜底。archive 是幂等的
+            // （ephemeral_workspace.rs:201 不存在 → silent Ok），跟 AgentDead
+            // 路径冲突时谁先到谁干活，另一边 noop。
+            if !matches!(
+                to,
+                fuxi_core::task::TaskState::Done | fuxi_core::task::TaskState::Cancelled
+            ) {
+                return;
+            }
+            let Some(task_id) = ev.meta.task else {
+                return;
+            };
+            if let Err(e) = intervener
+                .archive_l2_for_task(task_id, fuxi_core::ArchiveReason::TaskCompleted)
+                .await
+            {
+                warn!(error = %e, "bridge: TaskStateChanged 自动归档 L2 失败");
+            }
+        }
         _ => {}
     }
 }
@@ -816,6 +861,21 @@ mod tests {
                 .lock()
                 .await
                 .push((project_id, task, reason));
+            Ok(())
+        }
+        async fn archive_l2_for_task(
+            &self,
+            task: TaskId,
+            reason: fuxi_core::ArchiveReason,
+        ) -> Result<()> {
+            // mock：把 task-centric 调用记成 project_id="by-task" 占位，
+            // 测试断言自己 unwrap reason / task 即可。生产 Fuxi 覆盖时走真路径。
+            let placeholder =
+                fuxi_core::ProjectId::new("by-task".to_string()).expect("placeholder project id");
+            self.archive_calls
+                .lock()
+                .await
+                .push((placeholder, task, reason));
             Ok(())
         }
     }
@@ -970,6 +1030,105 @@ mod tests {
         assert!(
             mock.archive_snapshot().await.is_empty(),
             "L3 sandbox 死不应触发 L2 archive"
+        );
+    }
+
+    /// Bug 修：task 状态变 Done → 触发 L2 归档兜底（AgentDead 路径漏的场景）。
+    #[tokio::test]
+    async fn task_state_done_triggers_l2_archive() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let task = TaskId::new();
+
+        let mock = MockIntervener::new();
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::Delivering,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        for _ in 0..100 {
+            if !mock.archive_snapshot().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let archives = mock.archive_snapshot().await;
+        assert_eq!(
+            archives.len(),
+            1,
+            "TaskStateChanged Done 应触发一次 L2 archive"
+        );
+        let (_project, archived_task, reason) = &archives[0];
+        assert_eq!(*archived_task, task);
+        assert_eq!(*reason, fuxi_core::ArchiveReason::TaskCompleted);
+    }
+
+    /// task Cancelled 终态同样触发 L2 归档。
+    #[tokio::test]
+    async fn task_state_cancelled_triggers_l2_archive() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let task = TaskId::new();
+
+        let mock = MockIntervener::new();
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::Blocked,
+                to: fuxi_core::task::TaskState::Cancelled,
+            },
+        })
+        .expect("publish");
+
+        for _ in 0..100 {
+            if !mock.archive_snapshot().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(mock.archive_snapshot().await.len(), 1);
+    }
+
+    /// 非终态（Ready / InProgress / Delivering）不应触发归档——避免反复刷盘 + 错误事件。
+    #[tokio::test]
+    async fn task_state_non_terminal_does_not_archive() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let task = TaskId::new();
+
+        let mock = MockIntervener::new();
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::New,
+                to: fuxi_core::task::TaskState::InProgress,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.archive_snapshot().await.is_empty(),
+            "非终态不应触发 archive"
         );
     }
 

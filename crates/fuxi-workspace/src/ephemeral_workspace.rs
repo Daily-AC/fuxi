@@ -383,7 +383,8 @@ impl EphemeralWorkspaceManager {
         Ok(())
     }
 
-    fn path_for(&self, task: TaskId) -> PathBuf {
+    /// 单 task 的 ephemeral 路径——orchestrator 反查 task→workspace 时用。
+    pub fn path_for(&self, task: TaskId) -> PathBuf {
         self.ephemeral_root.join(task.to_string())
     }
 
