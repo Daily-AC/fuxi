@@ -940,7 +940,7 @@ export interface TaskThreadCtx {
   xuannv_id?: string;
 }
 
-function lookupMember(ctx: TaskThreadCtx, agent: string | null | undefined):
+export function lookupMember(ctx: TaskThreadCtx, agent: string | null | undefined):
   | { role: string; role_display: string }
   | null {
   if (!agent) return null;
