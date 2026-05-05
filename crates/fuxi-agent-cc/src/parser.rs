@@ -1233,10 +1233,7 @@ mod tests {
             &mut st,
             None,
         );
-        assert!(matches!(
-            out[0].kind,
-            EventKind::AgentResponded { .. }
-        ));
+        assert!(matches!(out[0].kind, EventKind::AgentResponded { .. }));
     }
 
     /// `summary` 必填 + `kind` 必为枚举值之一；缺字段或 kind 非法 → 退化普通 AgentResponded。
