@@ -131,6 +131,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
         ttl_from_env(),
         std::time::Duration::from_secs(DEFAULT_TICK_INTERVAL_SECS),
     )
+    .with_xuannv_exempt(fuxi.xuannv_id_watch())
     .spawn();
     tracing::info!(
         ttl_secs = ttl_from_env().as_secs(),

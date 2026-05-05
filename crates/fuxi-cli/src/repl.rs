@@ -286,6 +286,7 @@ pub async fn run(args: Args) -> Result<()> {
         ttl_from_env(),
         Duration::from_secs(DEFAULT_TICK_INTERVAL_SECS),
     )
+    .with_xuannv_exempt(fuxi.xuannv_id_watch())
     .spawn();
 
     // 玄女 cc session 续写：策府存哪一个 session_id 就 `--resume` 它，没有则
