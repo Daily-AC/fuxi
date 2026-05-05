@@ -660,6 +660,36 @@ impl Fuxi {
         Ok(())
     }
 
+    /// Bug 修：按 task 反查 L2 ephemeral 工作区并归档。bridge.rs 在 task 终态
+    /// （Done/Cancelled）时触发——AgentDead 路径漏（门客 idle GC 走 / 状态机
+    /// bug 卡 ShuttingDown 不死）的兜底。registry 未注入或没匹配项目都 silent
+    /// Ok（大多数 task 不是 L2，不发 spurious 事件）。
+    pub async fn archive_l2_for_task(
+        &self,
+        task: TaskId,
+        reason: fuxi_core::ArchiveReason,
+    ) -> Result<()> {
+        let registry_opt = self.project_registry.read().await.clone();
+        let Some(registry) = registry_opt else {
+            return Ok(());
+        };
+        let projects = match registry.list().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "archive_l2_for_task: registry.list 失败");
+                return Ok(());
+            }
+        };
+        for project in projects {
+            let mgr =
+                fuxi_workspace::EphemeralWorkspaceManager::new(project.clone(), registry.root());
+            if mgr.path_for(task).exists() {
+                return self.archive_l2_workspace(project.id, task, reason).await;
+            }
+        }
+        Ok(())
+    }
+
     /// Decision 21 phase 2：把 L2 ephemeral 提升为 L3 持久 sandbox。
     ///
     /// 调用方一般是用户在 PWA 或 CLI 上明示「这次任务做得不错，留下 sandbox
