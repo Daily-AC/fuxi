@@ -183,7 +183,7 @@ pub async fn run_join(args: ProjectJoinArgs) -> Result<()> {
     let url = format!("{controller_base}/api/projects/{slug}");
     let resp = client
         .get(&url)
-        .header("authorization", format!("Bearer {}", args.token))
+        .header("cookie", format!("fuxi_im_token={}", args.token))
         .send()
         .await
         .with_context(|| format!("GET {url} 失败"))?;
@@ -287,7 +287,7 @@ pub async fn run_join(args: ProjectJoinArgs) -> Result<()> {
     let url = format!("{controller_base}/api/projects/{slug}/host_nodes");
     let resp = client
         .post(&url)
-        .header("authorization", format!("Bearer {}", args.token))
+        .header("cookie", format!("fuxi_im_token={}", args.token))
         .header("content-type", "application/json")
         .body(json!({"node_id": node_id}).to_string())
         .send()
