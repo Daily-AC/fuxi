@@ -96,10 +96,21 @@ export interface InterveneRequest {
   attachments?: string[];
 }
 
+/** POST /api/dispatch 请求体——后端 `handlers::dispatch::DispatchBody`。
+ *
+ *  v2 跨节点 sandbox：可选 `project` 把 task 关联到已注册项目；
+ *  Fuxi::dispatch 会按 project.host_nodes auto-pin 到最闲节点 + worker 端
+ *  resolve_project_sandbox_cwd 把 cc/codex spawn 进对应 sandbox。
+ *
+ *  PWA composer @<slug> 解析后走这条路（不走 intervene），避免玄女把整段
+ *  prompt 又转一遍——dispatch 直接进玄女、auto-pin 路由 + dist enqueue。 */
 export interface DispatchRequest {
+  /** 短标题（PWA 任务卡显示）。 */
   title: string;
-  text: string;
-  role?: string;
+  /** 任务详情（玄女 / 门客读到的具体诉求）。 */
+  description: string;
+  /** v2 跨节点：已注册项目 slug。无值 → 不绑项目（v1 兼容）。 */
+  project?: string;
 }
 
 export interface DispatchResponse {

@@ -7,11 +7,21 @@
 // 候选两种 kind：worker（默认 · 现有）和 node（dist topology 节点 · #60）。
 // 序列化时 worker chips → mentions[]；node chips → pinned_node（取第一个）。
 
-import type { NodeView, TaskMember } from "~/types/api";
+import type { NodeView, ProjectView, TaskMember } from "~/types/api";
 
-/** 候选的 kind：worker = 现有 agent；node = dist topology 节点（#60）。
- *  缺省视为 worker（旧调用兼容）。*/
-export type MentionKind = "worker" | "node";
+/** 候选的 kind：worker = 现有 agent；node = dist topology 节点（#60）；
+ *  project = 已注册项目（v2 跨节点 sandbox · session14+15）。
+ *  缺省视为 worker（旧调用兼容）。
+ *
+ *  序列化路径：
+ *  - worker chip → mentions[]（target = mentions[0]）
+ *  - node chip → pinned_node（取第一个）
+ *  - project chip → project（取第一个；多于一个 multi_project=true）
+ *
+ *  project chip 跟 worker / node 互斥语义：composer 序列化看到 project 时
+ *  上层应当走 `client.dispatch`（创新 task）而不是 intervene。具体派活逻辑由
+ *  caller（XuannvPage handleSubmit）按 SerializedIntervene.project 是否 set 决定。*/
+export type MentionKind = "worker" | "node" | "project";
 
 export interface MentionCandidate {
   /** worker 用 agent_id；node 用 node_id。chip 上一律走 id。*/
@@ -78,6 +88,21 @@ export function candidatesFromNodes(nodes: NodeView[]): MentionCandidate[] {
     }));
 }
 
+/** v2 跨节点 sandbox：ProjectView 数组转 MentionCandidate。
+ *  - agent_id 用 project.id (slug)；上层序列化 → SerializedIntervene.project
+ *  - role 固定 "project"，chip 走绿色专属色（区分 worker 黄 + node 蓝）
+ *  - hint 显 default_branch（让用户一眼知道往哪条 base 派）*/
+export function candidatesFromProjects(projects: ProjectView[]): MentionCandidate[] {
+  return projects.map((p) => ({
+    agent_id: p.id,
+    role: "project",
+    role_display: p.id,
+    hint: p.default_branch,
+    last_active_at: null,
+    kind: "project" as MentionKind,
+  }));
+}
+
 function hintForMember(m: TaskMember): string | null {
   if (m.last_activity) return m.last_activity;
   const tool = toolCallText(m.last_tool_call);
@@ -117,7 +142,8 @@ export function fuzzyMatch(list: MentionCandidate[], query: string): MentionCand
 }
 
 /** Intervene 请求 · target 取第一个 worker chip；无 worker chip 时 undefined（backend 用玄女默认）。
- *  #60：node chip 走 pinned_node 字段，跟 worker mentions 互不干扰。 */
+ *  #60：node chip 走 pinned_node 字段，跟 worker mentions 互不干扰。
+ *  v2 跨节点：project chip 走 project 字段，caller 检测 project set → 走 dispatch 路径。 */
 export interface SerializedIntervene {
   /** target = 第一个 worker chip 的 agent_id；无 worker chip 时 undefined（backend 默认走玄女）。 */
   target?: string;
@@ -134,6 +160,12 @@ export interface SerializedIntervene {
   pinned_node?: string;
   /** #60 加 · node chip 数 > 1 时 true，UI 用来 toast 警示「多于一个节点 chip 取第一个」。 */
   multi_node: boolean;
+  /** v2 跨节点：第一个 project chip 的 slug（无 project chip 时 undefined）。
+   *  契约：caller 见 project set → 调 `client.dispatch({ project, ... })` 创新 task；
+   *  不 set 时走原 intervene 路径。auto-pin 由后端按 project.host_nodes 选最闲节点。*/
+  project?: string;
+  /** project chip 数 > 1 时 true，UI 用来 toast 警示「只派给第一个项目」。 */
+  multi_project: boolean;
 }
 
 const CHIP_PLACEHOLDER = "​";
@@ -150,6 +182,7 @@ export function serializeComposer(
 ): SerializedIntervene {
   const mentions: string[] = [];
   const nodeIds: string[] = [];
+  const projectSlugs: string[] = [];
   let text = "";
   for (const seg of segments) {
     if (seg.kind === "text") {
@@ -158,6 +191,8 @@ export function serializeComposer(
     }
     if (seg.chip.kind === "node") {
       nodeIds.push(seg.chip.agent_id);
+    } else if (seg.chip.kind === "project") {
+      projectSlugs.push(seg.chip.agent_id);
     } else {
       mentions.push(seg.chip.agent_id);
     }
@@ -165,6 +200,7 @@ export function serializeComposer(
   }
   const target = mentions[0] ?? fallbackAgentId;
   const pinned_node = nodeIds[0];
+  const project = projectSlugs[0];
   return {
     target,
     text: text.trim(),
@@ -172,6 +208,8 @@ export function serializeComposer(
     multi: mentions.length > 1,
     pinned_node,
     multi_node: nodeIds.length > 1,
+    project,
+    multi_project: projectSlugs.length > 1,
   };
 }
 
@@ -203,3 +241,10 @@ export const MULTI_NODE_WARNING =
 /** #60：node chip 专属蓝色（spec §gap e 钉的 #7AA0E5）。
  *  独立 export 让 MentionChip / NodeChip 共用同一颜色源。*/
 export const NODE_CHIP_COLOR = "#7AA0E5";
+
+/** v2 跨节点：多于一个 project chip 时 toast 文案。 */
+export const MULTI_PROJECT_WARNING =
+  "fuxi 当前只派给第一个 @ 的项目，其余仅作引用";
+
+/** v2 跨节点：project chip 专属绿色（区分 worker 黄 + node 蓝）。 */
+export const PROJECT_CHIP_COLOR = "#7AC97A";

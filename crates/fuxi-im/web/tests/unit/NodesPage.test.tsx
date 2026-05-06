@@ -175,6 +175,21 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
     unmount();
   });
 
+  it("P2-A · idle worker 无 task = settled · data-settled=true + 等清理 badge", async () => {
+    // 蒲松 fixture：idle + null current_task → "已完成等清理" 视觉折叠
+    // 跑完一锤子任务等 IdleGc 600s 期间，PWA 不该让用户误以为该门客还活着接活
+    const { getByTestId, queryByTestId, unmount } = setup({ nodes: [HOME] });
+    await new Promise((r) => setTimeout(r, 30));
+    const row = getByTestId("node-worker-a-pusong");
+    expect(row.getAttribute("data-settled")).toBe("true");
+    expect(queryByTestId("worker-settled-a-pusong")?.textContent).toContain("等清理");
+    // 鲁班 busy 不该挂这个 badge
+    const lubanRow = getByTestId("node-worker-a-luban");
+    expect(lubanRow.getAttribute("data-settled")).toBe("false");
+    expect(queryByTestId("worker-settled-a-luban")).toBeNull();
+    unmount();
+  });
+
   it("/api/nodes/stream 推 worker_heartbeat_state_changed → refetch + 实时刷 inflight 数", async () => {
     // 真因回归 · Bug B：NodesPage 旧版只 fetchNodes 一次无 WS 订阅，inflight 数
     // 永不动。修后必须订阅 nodes-stream，每条 push refetch /api/nodes 拿最新数。

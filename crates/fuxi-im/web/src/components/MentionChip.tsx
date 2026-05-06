@@ -1,6 +1,10 @@
 import { Show, type Component, type JSX } from "solid-js";
 import { colorForRole } from "~/tokens";
-import { NODE_CHIP_COLOR, type MentionKind } from "~/lib/mentions";
+import {
+  NODE_CHIP_COLOR,
+  PROJECT_CHIP_COLOR,
+  type MentionKind,
+} from "~/lib/mentions";
 import styles from "./MentionChip.module.css";
 
 // MentionChip · v3 #N2' / #37 + dist #60
@@ -28,20 +32,29 @@ export interface MentionChipProps {
 
 export const MentionChip: Component<MentionChipProps> = (props) => {
   const isNode = (): boolean => props.kind === "node";
-  const color = (): string => (isNode() ? NODE_CHIP_COLOR : colorForRole(props.role));
+  const isProject = (): boolean => props.kind === "project";
+  const color = (): string => {
+    if (isNode()) return NODE_CHIP_COLOR;
+    if (isProject()) return PROJECT_CHIP_COLOR;
+    return colorForRole(props.role);
+  };
   // chip 背景：alpha 0.15（spec §C 写的 rgba(229,165,71,.15) 鲁班例）
   const style = (): JSX.CSSProperties => ({
     "--chip-color": color(),
     "--chip-bg": `${color()}26`, // 26 hex = ~0.15 alpha
     "--chip-border": color(),
   });
-  // testid：worker = mention-chip-<agent_id>（旧）；node = mention-chip-node-<node_id>（新）
-  const testId = (): string =>
-    isNode() ? `mention-chip-node-${props.agent_id}` : `mention-chip-${props.agent_id}`;
-  const removeTestId = (): string =>
-    isNode()
-      ? `mention-chip-remove-node-${props.agent_id}`
-      : `mention-chip-remove-${props.agent_id}`;
+  // testid：worker = mention-chip-<id>；node = mention-chip-node-<id>；project = mention-chip-project-<slug>
+  const testId = (): string => {
+    if (isNode()) return `mention-chip-node-${props.agent_id}`;
+    if (isProject()) return `mention-chip-project-${props.agent_id}`;
+    return `mention-chip-${props.agent_id}`;
+  };
+  const removeTestId = (): string => {
+    if (isNode()) return `mention-chip-remove-node-${props.agent_id}`;
+    if (isProject()) return `mention-chip-remove-project-${props.agent_id}`;
+    return `mention-chip-remove-${props.agent_id}`;
+  };
 
   return (
     <span
