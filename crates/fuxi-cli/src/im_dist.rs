@@ -332,13 +332,23 @@ impl NodesProvider for DistControllerNodesProvider {
                 .last_seen_ms_ago
                 .map(|ms| ms < ONLINE_HEARTBEAT_THRESHOLD_MS)
                 .unwrap_or(false);
-            // workers：home 从 shelf 拿；远端 dist 节点从 events 历史反查
-            // （`source_node_id == 节点` + 未终态的 cc agent，#74 实测修复用户
-            // 反馈"mac 节点 workers:[] 跟现实不符"）。home_workers_from_shelf
-            // 必须传 `online`，否则节点掉线时 idle worker 仍报 idle，dispatcher
-            // claim_idle_by_role 会派活到死节点。
+            // workers：home 是 dual-role 节点（shelf 的常驻门客 + v1-session14 后
+            // 内嵌 dist worker 起的 per-job cc 子进程）。两个数据源 union dedupe，
+            // 否则 home inflight=N 但 workers=[] —— 内嵌 worker 起的 cc 不入 shelf
+            // 全被前端漏掉，用户看到"4/4 但无 worker 实例"觉得是 bug。
+            // 远端节点（mac 等）只有 dist worker 一种来源，从 events 反查即可。
             let workers = if s.node_id == HOME_NODE_ID {
-                home_workers_from_shelf(fuxi, online).await
+                let mut shelf = home_workers_from_shelf(fuxi, online).await;
+                let dist =
+                    fuxi_im::nodes_provider::dist_workers_from_events(fuxi.bus(), &s.node_id).await;
+                let known: std::collections::HashSet<String> =
+                    shelf.iter().map(|w| w.agent_id.clone()).collect();
+                for w in dist {
+                    if !known.contains(&w.agent_id) {
+                        shelf.push(w);
+                    }
+                }
+                shelf
             } else {
                 fuxi_im::nodes_provider::dist_workers_from_events(fuxi.bus(), &s.node_id).await
             };

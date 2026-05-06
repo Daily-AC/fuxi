@@ -996,6 +996,31 @@ impl DistController {
                 }),
             },
         });
+        // Bug 修（v1-session15+）：dist 路径 task 没 lifecycle 终态 emit，task 永远
+        // 卡 running——worker 只 emit AgentSpawning/AgentDead 不动 Task lifecycle，
+        // home pump 在 dist 路径根本不跑（dispatch 走 enqueue 直接 return）。
+        // controller 收到 worker report 是把"dist 视图终结"翻译成"task 视图终结"
+        // 的唯一时机。task_id 缺失（老 job / 测试）跳过。
+        if let Some(task_str) = removed_job.as_ref().and_then(|j| j.task_id.as_deref()) {
+            let trimmed = task_str.strip_prefix("task-").unwrap_or(task_str);
+            if let Ok(task_uuid) = uuid::Uuid::parse_str(trimmed) {
+                let task_id = fuxi_core::TaskId::from(task_uuid);
+                let mut meta = EventMeta::now();
+                meta.task = Some(task_id);
+                let to = if req.ok {
+                    fuxi_core::task::TaskState::Done
+                } else {
+                    fuxi_core::task::TaskState::Cancelled
+                };
+                let _ = self.bus.publish(Event {
+                    meta,
+                    kind: EventKind::TaskStateChanged {
+                        from: fuxi_core::task::TaskState::InProgress,
+                        to,
+                    },
+                });
+            }
+        }
         existed
     }
 
