@@ -62,6 +62,11 @@ const IDLE_WAIT_CEILING_SECS: u64 = 60;
 /// 轮询间隔——shelf 内存读 + 异步锁，500ms 不重。
 const IDLE_POLL_INTERVAL_MS: u64 = 500;
 
+/// 文件落档 polling 间隔——30s 是"用户写完 handoff 等不到 1 分钟玄女就被换"
+/// 的可接受延迟。`bus.subscribe()` 跨进程拿不到事件（CLI 直写 SQLite，
+/// fuxi-im 进程的 broadcast 收不到），polling 是兜底。
+const FILE_POLL_INTERVAL_SECS: u64 = 30;
+
 pub fn start_watcher(
     fuxi: Arc<Fuxi>,
     bus: EventBus,
@@ -78,24 +83,47 @@ pub fn start_watcher(
                 warn!(?err, "启动期 handoff 接班流程失败");
             }
         }
-        info!("玄女 handoff 监听器启动");
-        while let Some(maybe_ev) = sub.next().await {
-            let ev = match maybe_ev {
-                Ok(e) => e,
-                Err(err) => {
-                    debug!(?err, "handoff 监听器跳过非事件信号");
-                    continue;
+        info!(
+            interval_secs = FILE_POLL_INTERVAL_SECS,
+            "玄女 handoff 监听器启动（同进程 EventBus + 跨进程 fs polling 双保险）"
+        );
+        let mut poll_tick = tokio::time::interval(Duration::from_secs(FILE_POLL_INTERVAL_SECS));
+        // 第一 tick 是 immediate，跳过——启动期已经查过了
+        poll_tick.tick().await;
+
+        loop {
+            tokio::select! {
+                // 同进程：bus 上看到 XuannvHandoffWritten（fuxi-im 自己的子进程
+                // 写入，或将来的内部路径——当前 CLI 走跨进程，fs polling 兜底）
+                maybe_ev = sub.next() => {
+                    match maybe_ev {
+                        Some(Ok(ev)) if matches!(ev.kind, EventKind::XuannvHandoffWritten { .. }) => {
+                            info!("收到 XuannvHandoffWritten 事件（同进程），开始接班流程");
+                            if let Err(err) = run_handoff(&fuxi, &oracle, &role).await {
+                                warn!(?err, "玄女 handoff 接班流程失败");
+                            }
+                        }
+                        Some(Ok(_)) => {} // 其它事件忽略
+                        Some(Err(err)) => debug!(?err, "handoff 监听器跳过 sub 错误"),
+                        None => {
+                            info!("玄女 handoff 监听器退出（bus 关闭）");
+                            break;
+                        }
+                    }
                 }
-            };
-            if !matches!(ev.kind, EventKind::XuannvHandoffWritten { .. }) {
-                continue;
-            }
-            info!("收到 XuannvHandoffWritten 事件，开始接班流程");
-            if let Err(err) = run_handoff(&fuxi, &oracle, &role).await {
-                warn!(?err, "玄女 handoff 接班流程失败");
+                // 跨进程：fs polling 兜底——CLI `fuxi xuannv handoff write` 是另一
+                // 进程，它直写 SQLite 不经过本进程 broadcast；只能通过文件系统
+                // 检测落档。30s 间隔够用（handoff 不高频）。
+                _ = poll_tick.tick() => {
+                    if handoff_path().exists() {
+                        info!("fs poll 命中 handoff 文件落档，开始接班流程");
+                        if let Err(err) = run_handoff(&fuxi, &oracle, &role).await {
+                            warn!(?err, "玄女 handoff 接班流程失败（poll 路径）");
+                        }
+                    }
+                }
             }
         }
-        info!("玄女 handoff 监听器退出（bus 关闭）");
     })
 }
 
