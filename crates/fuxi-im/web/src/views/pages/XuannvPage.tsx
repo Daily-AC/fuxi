@@ -24,10 +24,12 @@ import { Conversation } from "~/views/Conversation";
 import {
   candidatesFromMembers,
   candidatesFromNodes,
+  candidatesFromProjects,
   sortCandidates,
   type MentionCandidate,
   type SerializedIntervene,
 } from "~/lib/mentions";
+import { pushToast } from "~/lib/toast";
 import styles from "./XuannvPage.module.css";
 
 // 玄女 tab · v3 #N5' / #40
@@ -57,6 +59,8 @@ export const XuannvPage: Component = () => {
   const [tasksOverview] = createResource(() => client.fetchTasksOverview());
   // v3 #60 dist · 拉 /api/nodes online 节点作 @ 候选追加段
   const [nodesData] = createResource(() => client.fetchNodes());
+  // v2 跨节点 · 拉 /api/projects 已注册项目作 @ 候选追加段
+  const [projectsData] = createResource(() => client.fetchProjects());
   const candidates = createMemo<MentionCandidate[]>(() => {
     const ov = tasksOverview();
     const workers: MentionCandidate[] = [];
@@ -72,7 +76,10 @@ export const XuannvPage: Component = () => {
     }
     const sorted = sortCandidates(workers);
     const nodes = nodesData() ? candidatesFromNodes(nodesData()!.nodes) : [];
-    return [...sorted, ...nodes];
+    const projects = projectsData()
+      ? candidatesFromProjects(projectsData()!.projects)
+      : [];
+    return [...sorted, ...nodes, ...projects];
   });
 
   let controller: ReconnectController | null = null;
@@ -162,6 +169,32 @@ export const XuannvPage: Component = () => {
     }
   };
 
+  const attemptDispatch = async (
+    req: SerializedIntervene,
+    project: string,
+    msgId: string,
+  ): Promise<void> => {
+    // 派往项目的 task：title 截 body 第一行前 60 字符，description 用全文。
+    // 后端 /api/dispatch handler 会按 project.host_nodes auto-pin 到最闲节点 +
+    // dist enqueue，worker 端 spawn cc 进对应 sandbox。本流程**不**经 intervene，
+    // 玄女不会逐字看到这条 prompt，但会通过 EventBus 收到 TaskCreated/TaskDispatched。
+    const firstLine = req.text.split("\n")[0]?.trim() ?? "";
+    const title = firstLine.length > 0 ? firstLine.slice(0, 60) : `派给 ${project}`;
+    try {
+      await client.dispatch({ title, description: req.text, project });
+      setMessages((prev) => markUserMessage(prev, msgId, { pending: false, error: null }));
+      pushToast(`已派给项目 ${project}`, "info");
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? `派活失败 (${err.status})`
+          : err instanceof Error
+            ? err.message
+            : "派活失败";
+      setMessages((prev) => markUserMessage(prev, msgId, { pending: false, error: msg }));
+    }
+  };
+
   const handleSubmit = async (req: SerializedIntervene): Promise<void> => {
     // optimistic user bubble · 用 req.text（chip 占位的零宽字符不影响显示）
     // 阶段 3：附件 ids 在 composer 里已上传完成，optimistic 直接挂 placeholder Upload[]
@@ -180,6 +213,12 @@ export const XuannvPage: Component = () => {
       pinned_node: req.pinned_node,
     });
     setMessages((prev) => [...prev, m]);
+
+    // v2 跨节点 · @<slug> 走 dispatch 路径（创新 task），不污染玄女 thread context
+    if (req.project) {
+      await attemptDispatch(req, req.project, m.id);
+      return;
+    }
     await attemptIntervene(req, m.id);
   };
 

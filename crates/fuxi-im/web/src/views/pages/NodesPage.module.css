@@ -185,6 +185,28 @@
   border-bottom: 0;
 }
 
+/* P2-A · idle 门客无 current_task = "已完成等清理" 视觉折叠：
+ * 底色变浅 + 小一号 + workerRole/workerStatusText 进入 muted 色，让用户一眼区分
+ * "活的待命门客" vs "刚跑完等 GC 的僵尸 idle"。后端 IdleGc 600s 会自动 emit AgentDead；
+ * 那之前用户在 PWA 不该误以为 cangjie/extractor 这种一锤子角色还活着等派活。 */
+.workerRowSettled .workerBtn {
+  min-height: 36px;
+  padding: 4px var(--space-2);
+  opacity: 0.6;
+}
+
+.workerRowSettled .workerRole,
+.workerRowSettled .workerStatusText {
+  color: var(--text-muted);
+}
+
+.settledBadge {
+  margin-left: auto;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .workerBtn {
   display: flex;
   align-items: center;

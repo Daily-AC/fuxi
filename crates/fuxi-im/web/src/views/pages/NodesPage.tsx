@@ -226,11 +226,20 @@ const WorkerRow: Component<{ worker: NodeWorker }> = (props) => {
     });
   };
   const tappable = (): boolean => Boolean(props.worker.current_task_id);
+  // P2-A · "已完成等清理" 视觉折叠：worker idle 且无 current_task = 跑完一轮等 IdleGc。
+  // 跟"真等派活的 idle"无后端区分（status 都是 idle），但 UX 上要让用户一眼看出
+  // "这门客刚跑完不必再派"。CSS .workerRowSettled 把行压扁 + 灰显 + 加小标签。
+  // 召回机制（fuxi spawn --recall-role）在玄女那边知情，用户看到 "等清理" 文案
+  // 不会误以为该门客还接活——要再用走召回起新进程。
+  const isSettled = (): boolean =>
+    props.worker.status === "idle" && !props.worker.current_task_id;
   return (
     <li
       class={styles.workerRow}
+      classList={{ [styles.workerRowSettled ?? ""]: isSettled() }}
       data-testid={`node-worker-${props.worker.agent_id}`}
       data-status={props.worker.status}
+      data-settled={isSettled() ? "true" : "false"}
     >
       <button
         type="button"
@@ -240,7 +249,9 @@ const WorkerRow: Component<{ worker: NodeWorker }> = (props) => {
         aria-label={
           tappable()
             ? `跳转任务 ${props.worker.current_task_title ?? ""}`
-            : `${props.worker.role_display} ${statusLabel(props.worker.status)}`
+            : `${props.worker.role_display} ${statusLabel(props.worker.status)}${
+                isSettled() ? "（已完成等清理）" : ""
+              }`
         }
       >
         <span
@@ -254,6 +265,11 @@ const WorkerRow: Component<{ worker: NodeWorker }> = (props) => {
           fallback={<span class={styles.workerStatusText}>{statusLabel(props.worker.status)}</span>}
         >
           <span class={styles.workerTaskTitle}>{props.worker.current_task_title}</span>
+        </Show>
+        <Show when={isSettled()}>
+          <span class={styles.settledBadge} data-testid={`worker-settled-${props.worker.agent_id}`}>
+            等清理
+          </span>
         </Show>
       </button>
     </li>

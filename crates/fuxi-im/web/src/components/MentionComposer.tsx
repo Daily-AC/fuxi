@@ -12,6 +12,7 @@ import { MentionChip } from "./MentionChip";
 import {
   MULTI_MENTION_WARNING,
   MULTI_NODE_WARNING,
+  MULTI_PROJECT_WARNING,
   fuzzyMatch,
   serializeComposer,
   type ComposerSegment,
@@ -141,8 +142,11 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     closeAutocomplete();
   };
 
-  /** #60：唯一 key 是 (kind, id) — agent_id 和 node_id 理论上可冲（极端 demo），按 kind 区分匹配。*/
-  const onRemoveChip = (agent_id: string, kind: "worker" | "node" = "worker"): void => {
+  /** #60：唯一 key 是 (kind, id) — agent_id / node_id / project_slug 理论上可冲，按 kind 区分匹配。*/
+  const onRemoveChip = (
+    agent_id: string,
+    kind: "worker" | "node" | "project" = "worker",
+  ): void => {
     setSegments((prev) => {
       const out: ComposerSegment[] = [];
       let removed = false;
@@ -332,6 +336,9 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
       }
       if (req.multi_node) {
         pushToast(MULTI_NODE_WARNING, "warn");
+      }
+      if (req.multi_project) {
+        pushToast(MULTI_PROJECT_WARNING, "warn");
       }
       await props.onSubmit(req);
       reset();

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   candidatesFromMembers,
   candidatesFromNodes,
+  candidatesFromProjects,
   chipsOf,
   fuzzyMatch,
   previewText,
@@ -9,11 +10,13 @@ import {
   sortCandidates,
   MULTI_MENTION_WARNING,
   MULTI_NODE_WARNING,
+  MULTI_PROJECT_WARNING,
   NODE_CHIP_COLOR,
+  PROJECT_CHIP_COLOR,
   type ComposerSegment,
   type MentionCandidate,
 } from "~/lib/mentions";
-import type { NodeView, TaskMember } from "~/types/api";
+import type { NodeView, ProjectView, TaskMember } from "~/types/api";
 
 const LUBAN: MentionCandidate = {
   agent_id: "a-luban",
@@ -282,6 +285,101 @@ describe("mentions · #60 dist node 候选 + pinned_node", () => {
 
   it("NODE_CHIP_COLOR · spec 钉的 #7AA0E5 蓝色", () => {
     expect(NODE_CHIP_COLOR.toLowerCase()).toBe("#7aa0e5");
+  });
+
+  it("v2 cross-node · candidatesFromProjects · ProjectView 转 candidate", () => {
+    const projects: ProjectView[] = [
+      {
+        id: "demo-site",
+        canonical_path: "/home/e0-7/demo-site",
+        default_branch: "main",
+        created_at: "2026-05-06T03:29:51Z",
+      },
+      {
+        id: "erp",
+        canonical_path: "/Users/e0_7/erp",
+        default_branch: "develop",
+        created_at: "2026-04-26T00:00:00Z",
+      },
+    ];
+    const out = candidatesFromProjects(projects);
+    expect(out.length).toBe(2);
+    expect(out.map((c) => c.agent_id)).toEqual(["demo-site", "erp"]);
+    expect(out.every((c) => c.kind === "project")).toBe(true);
+    expect(out.every((c) => c.role === "project")).toBe(true);
+    expect(out[0]?.hint).toBe("main");
+    expect(out[1]?.hint).toBe("develop");
+  });
+
+  it("v2 cross-node · serializeComposer · 单 project chip · project=slug · multi_project=false", () => {
+    const segs: ComposerSegment[] = [
+      { kind: "text", text: "派 " },
+      {
+        kind: "chip",
+        chip: {
+          agent_id: "demo-site",
+          role: "project",
+          role_display: "demo-site",
+          kind: "project",
+        },
+      },
+      { kind: "text", text: " 修首页" },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.project).toBe("demo-site");
+    expect(out.multi_project).toBe(false);
+    expect(out.mentions).toEqual([]);
+    expect(out.pinned_node).toBeUndefined();
+  });
+
+  it("v2 cross-node · serializeComposer · 两个 project chip · multi_project=true · 取第一个", () => {
+    const segs: ComposerSegment[] = [
+      {
+        kind: "chip",
+        chip: { agent_id: "demo-site", role: "project", role_display: "demo-site", kind: "project" },
+      },
+      { kind: "text", text: " " },
+      {
+        kind: "chip",
+        chip: { agent_id: "erp", role: "project", role_display: "erp", kind: "project" },
+      },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.project).toBe("demo-site");
+    expect(out.multi_project).toBe(true);
+  });
+
+  it("v2 cross-node · serializeComposer · worker + project mix · 各走各路", () => {
+    const segs: ComposerSegment[] = [
+      {
+        kind: "chip",
+        chip: { agent_id: "a-luban", role: "luban", role_display: "鲁班", kind: "worker" },
+      },
+      { kind: "text", text: " 改 " },
+      {
+        kind: "chip",
+        chip: { agent_id: "demo-site", role: "project", role_display: "demo-site", kind: "project" },
+      },
+    ];
+    const out = serializeComposer(segs);
+    expect(out.target).toBe("a-luban");
+    expect(out.mentions).toEqual(["a-luban"]);
+    expect(out.project).toBe("demo-site");
+    expect(out.multi).toBe(false);
+    expect(out.multi_project).toBe(false);
+  });
+
+  it("v2 cross-node · 无 project chip · project undefined · multi_project=false", () => {
+    const segs: ComposerSegment[] = [{ kind: "text", text: "你好" }];
+    const out = serializeComposer(segs);
+    expect(out.project).toBeUndefined();
+    expect(out.multi_project).toBe(false);
+  });
+
+  it("v2 cross-node · MULTI_PROJECT_WARNING / PROJECT_CHIP_COLOR 文案 + 颜色", () => {
+    expect(MULTI_PROJECT_WARNING).toContain("第一个");
+    expect(MULTI_PROJECT_WARNING).toContain("项目");
+    expect(PROJECT_CHIP_COLOR.toLowerCase()).toBe("#7ac97a");
   });
 
   it("缺省 chip.kind · 视为 worker（兼容老 chip token）", () => {
