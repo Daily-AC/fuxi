@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
+use fuxi_core::ProjectId;
 use fuxi_core::task::Task;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,11 @@ pub struct DispatchBody {
     pub title: String,
     /// 任务详情（长）—— 玄女 / 门客读到的具体诉求。
     pub description: String,
+    /// v2 跨节点 sandbox：把 task 关联到 project。dispatch 看到时按
+    /// project.host_nodes auto-pin 到最闲节点 + worker 端 spawn 进对应 sandbox。
+    /// `None` = 不绑项目（保留 v1 行为，cc 跑在 dispatch cwd）。
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,7 +53,12 @@ pub async fn dispatch(
             Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
         })?;
 
-    let task = Task::new(title, description);
+    let mut task = Task::new(title, description);
+    if let Some(slug) = body.project.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let pid = ProjectId::new(slug.to_string())
+            .map_err(|e| Error::BadRequest(format!("非法 project slug {slug:?}: {e}")))?;
+        task = task.with_project_id(pid);
+    }
     let task_id = task.id;
     state.fuxi.dispatch(xuannv, task).await?;
 
@@ -143,6 +154,27 @@ mod tests {
         fuxi.set_xuannv(AgentId::new()).await;
         let resp = app.oneshot(req("title", "desc")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// v2 跨节点：非法 project slug 应 400。合法 slug + 玄女未起仍 503——验
+    /// project 解析在 xuannv 检查之前不变，错误码语义不冲突。
+    #[tokio::test]
+    async fn rejects_invalid_project_slug() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let body = serde_json::json!({
+            "title": "t",
+            "description": "d",
+            "project": "BAD-SLUG"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/dispatch")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

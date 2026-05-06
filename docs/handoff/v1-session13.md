@@ -159,6 +159,18 @@ DistEnqueuer.enqueue 改用 `enqueue_with_project` 把 `task.project_id` 透传
 
 ### 已知差距 / 答辩可能被问到
 
+- **🚨 P1：home 节点缺独立 dist worker**（2026-05-06 凌晨方案 B dry-run 撞穿）：
+  home 端 dist controller 同进程自注册了 `node_id="home"`（max_concurrency=4），
+  但**没有真的 `fuxi dist worker --node home` 进程**来 pull pinned 给 home 的 job。
+  实测：dispatch demo-site task → auto_pin 选 home（mac 更忙）→ 进 dist queue
+  `state=queued, assignee=""` → 永远没人接手 → cc 永不 spawn → PWA 看 task 卡 running。
+  - **解 a（answer-prep 临时）**：home 上手起 `fuxi dist worker --controller
+    https://im.qmledmq.cn:8443 --node home --cc-bin ~/.local/bin/claude
+    --max-concurrency 4 &`（systemd 化以免重启丢）
+  - **解 b（设计正解）**：fuxi-im 进程内嵌 home worker（与 dist controller 装配
+    一起），不再独立进程。落点 `fuxi-cli/src/im_dist.rs::build_dist_layer`——
+    下次 session 做
+  - 这是答辩演示 demo 上线**必修项**，否则用户 PWA 派 task 给 demo-site 永远转圈
 - **task push back 没自动**：worker 跑完 task done **不**自动 `git push origin <branch>`
   back to home. 当前是 worker side spawn 时已 fetch 过，新 commit 留在 worker 本地
   branch；home 要看到 mac 的成果，要么 home `git fetch origin <task-branch>`
