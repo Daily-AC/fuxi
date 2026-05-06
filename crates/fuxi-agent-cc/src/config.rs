@@ -8,6 +8,11 @@
 
 use std::path::PathBuf;
 
+/// 环境变量：`FUXI_CC_CONTEXT_WINDOW`。覆盖 context window 估值，给 task #8
+/// 上下文水位监控用。未设时按 `FUXI_CC_MODEL` 名字启发式推断；都无 → 1_000_000
+/// 兜底（用户主账号 = opus-4-7-1m）。设错只影响 35%/45% 阈值触发时机，不破功能。
+pub const CONTEXT_WINDOW_ENV: &str = "FUXI_CC_CONTEXT_WINDOW";
+
 /// 环境变量：`FUXI_CC_MODEL`。若设置则透传 `--model $ENV`；未设置则**不传** `--model`。
 ///
 /// WHY：早期为 instruction-following 可靠性硬编 `sonnet`（haiku 不稳）。但
@@ -170,6 +175,29 @@ impl CcLaunchConfig {
         }
 
         args
+    }
+}
+
+/// 解出 cc 当前 context window 估值（task #8 玄女水位监控用）。
+/// 优先级：`FUXI_CC_CONTEXT_WINDOW` 整数 > model 名启发式 > 1M 兜底。
+///
+/// model 启发式：包含 `1m`（大小写不敏感）→ 1_000_000；其他已知 `sonnet`/
+/// `haiku`/`opus` 但**不含** `1m` → 200_000。完全未识别 → 1_000_000（保守按
+/// 用户主账号默认）。
+pub fn resolve_default_window_size() -> u64 {
+    if let Ok(s) = std::env::var(CONTEXT_WINDOW_ENV)
+        && let Ok(n) = s.parse::<u64>()
+        && n > 0
+    {
+        return n;
+    }
+    let model = resolve_default_model().unwrap_or_default().to_lowercase();
+    if model.contains("1m") {
+        1_000_000
+    } else if model.contains("sonnet") || model.contains("haiku") || model.contains("opus") {
+        200_000
+    } else {
+        1_000_000
     }
 }
 
@@ -454,6 +482,39 @@ mod tests {
             !args.iter().any(|a| a == "--model"),
             "无 model 时不应出现 --model flag；实际 args: {args:?}"
         );
+    }
+
+    /// task #8 · `FUXI_CC_CONTEXT_WINDOW` 显式整数 > 模型启发式。
+    #[test]
+    fn explicit_window_env_wins() {
+        unsafe {
+            std::env::set_var(CONTEXT_WINDOW_ENV, "123456");
+            std::env::set_var(DEFAULT_MODEL_ENV, "sonnet");
+        }
+        assert_eq!(resolve_default_window_size(), 123_456);
+        unsafe {
+            std::env::remove_var(CONTEXT_WINDOW_ENV);
+            std::env::remove_var(DEFAULT_MODEL_ENV);
+        }
+    }
+
+    /// model 名含 `1m` → 1M；含 `sonnet`/`haiku`/`opus` 但不含 1m → 200k。
+    #[test]
+    fn model_heuristic_picks_window() {
+        unsafe {
+            std::env::remove_var(CONTEXT_WINDOW_ENV);
+            std::env::set_var(DEFAULT_MODEL_ENV, "opus-4-7-1m");
+        }
+        assert_eq!(resolve_default_window_size(), 1_000_000);
+        unsafe {
+            std::env::set_var(DEFAULT_MODEL_ENV, "sonnet");
+        }
+        assert_eq!(resolve_default_window_size(), 200_000);
+        unsafe {
+            std::env::remove_var(DEFAULT_MODEL_ENV);
+        }
+        // 都无 → 1M 兜底（用户主账号默认）
+        assert_eq!(resolve_default_window_size(), 1_000_000);
     }
 
     /// `FUXI_CC_MODEL=haiku` 显式覆盖时仍正确透传——成本敏感场景用得上。

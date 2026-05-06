@@ -471,6 +471,28 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
                 SystemEventBridge::spawn(fuxi.clone(), bus.clone(), id, trigger_lookup);
                 tracing::info!(xuannv = %id, "SystemEventBridge 已装配");
+
+                // task #8 玄女上下文水位监控——35%/45% 跨阈值触发 addendum /
+                // handoff offer。订阅 EventBus 上玄女自身的 UsageReport 累加。
+                // intervener 走 Fuxi 的 `intervene_system` 注入系统消息。
+                let intervener: Arc<dyn fuxi_orchestrator::Intervener> = fuxi.clone();
+                let _ctx_watcher = fuxi_orchestrator::xuannv_context::start_watcher(
+                    fuxi.xuannv_id_watch(),
+                    intervener,
+                    bus.clone(),
+                );
+                tracing::info!("玄女上下文水位监控已装配（35%/45% 阈值）");
+
+                // task #8 handoff 落档检测器——监听 XuannvHandoffWritten 事件
+                // → 等当前 turn idle → kill 当前玄女 → 新 spawn（注入 prelude）。
+                let _handoff_watcher = crate::xuannv_handoff::start_watcher(
+                    fuxi.clone(),
+                    bus.clone(),
+                    oracle.clone(),
+                    xuannv_role.clone(),
+                );
+                tracing::info!("玄女 handoff 监控已装配");
+
                 h
             }
             Err(e) => {

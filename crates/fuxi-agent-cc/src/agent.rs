@@ -191,7 +191,8 @@ impl CcAgent {
             status: AgentStatus::Idle,
             active_tx: None,
             current_task: None,
-            translate_state: TranslateState::with_role(role_for_parser.clone()),
+            translate_state: TranslateState::with_role(role_for_parser.clone())
+                .with_window_size(crate::config::resolve_default_window_size()),
             death_tx: Some(death_tx),
             pending: PendingOutbox::new(),
         }));
@@ -270,7 +271,8 @@ impl Agent for CcAgent {
             inner.status = AgentStatus::Busy;
             inner.active_tx = Some(tx);
             inner.current_task = Some(task.id);
-            inner.translate_state = TranslateState::with_role(self.card.profile.role.clone());
+            inner.translate_state = TranslateState::with_role(self.card.profile.role.clone())
+                .with_window_size(crate::config::resolve_default_window_size());
             // 发送必须在锁外——channel.send 本身不会 block，但保守点
             inner.channel.send(msg).map_err(CcError::from)?;
         }

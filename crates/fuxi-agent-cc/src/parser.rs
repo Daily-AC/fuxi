@@ -49,6 +49,41 @@ fn try_parse_request_review_sentinel(text: &str) -> Option<RequestReviewSentinel
     Some(parsed)
 }
 
+/// cc result event 里 `usage` 子对象的 fuxi 视角抽取——只关心累加上下文窗口
+/// 用得到的四个字段，其余 (`server_tool_use`/`iterations`/`speed`...) 一律忽略。
+///
+/// `total_tokens` 故意 = `input + cache_creation + output`，**不**算
+/// `cache_read`。`cache_read` 是命中先前 turn 已经放进 context window 的 prefix
+/// 缓存——对窗口增量贡献为 0（那部分已在上一轮 cache_creation 里计过）。这条
+/// 公式让 turn-by-turn 累加就等于总窗口占用。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsageInfo {
+    pub input_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl UsageInfo {
+    /// `input + cache_creation + output`（**不含** cache_read）——见上方注释。
+    pub fn total(&self) -> u64 {
+        self.input_tokens + self.cache_creation_tokens + self.output_tokens
+    }
+}
+
+/// 从 cc 一条 result 事件的 JSON 里挖 `usage` —— 容错形：缺字段当 0；整段 usage
+/// 缺则返 None（短 turn / 错误 result 可能没 usage）。
+fn parse_usage(v: &Value) -> Option<UsageInfo> {
+    let u = v.get("usage")?;
+    let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(UsageInfo {
+        input_tokens: get("input_tokens"),
+        cache_creation_tokens: get("cache_creation_input_tokens"),
+        cache_read_tokens: get("cache_read_input_tokens"),
+        output_tokens: get("output_tokens"),
+    })
+}
+
 /// 一条 stream-json 行被解析后的中间形态。
 ///
 /// 只保留 fuxi 翻译用得到的字段；原始 JSON 存在 `raw` 兜底，方便
@@ -83,10 +118,17 @@ pub enum CcEvent {
     },
     /// `type:"rate_limit_event"`.
     RateLimit { info: Value },
-    /// `type:"result", subtype:"success"`.
-    ResultSuccess { text: String },
+    /// `type:"result", subtype:"success"`. `usage` 可能缺（极端流截断时）——
+    /// task #8 玄女上下文累加用，按 None 容忍跳过。
+    ResultSuccess {
+        text: String,
+        usage: Option<UsageInfo>,
+    },
     /// `type:"result", subtype:"error"`.
-    ResultError { reason: String },
+    ResultError {
+        reason: String,
+        usage: Option<UsageInfo>,
+    },
     /// 兜底——未知类型不让 parser 崩，交给 translator 变 `Custom`。
     Unknown { raw: Value },
 }
@@ -96,7 +138,7 @@ pub enum CcEvent {
 ///
 /// 为什么不直接用 `std::mem::replace`：thinking 块的结束边界是「下一条
 /// 非-thinking 事件到来」——这个判断必须由调用方（agent 事件循环）驱动。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TranslateState {
     /// 当前 worker 的 role 名（"luban" / "cangjie" / "extractor" / ...）。决定
     /// `_fuxi:request_review` sentinel 是否参与翻译——只有"门客交付"模型的
@@ -130,6 +172,26 @@ pub struct TranslateState {
     /// 已发则跳过冗余文本；未发（极短响应只在 result 里给 text 的冷场景）才发。
     /// terminal 后由 pump 调 `finish()` reset 给下一 turn。
     responded_this_turn: bool,
+    /// 当前模型的 context window 上限——用来在 `UsageReport` 事件里填
+    /// `window_size` + `pct`。任意构造路径默认 1_000_000（opus-4-7-1m / sonnet-1m
+    /// 这类 1M 模型）；`with_window_size` 让 production 显式设非默认值（如老
+    /// sonnet 200k）。
+    ///
+    /// 必须 > 0：算 `pct = total / window_size` 时的除零保护。
+    window_size: u64,
+}
+
+impl Default for TranslateState {
+    fn default() -> Self {
+        Self {
+            role: None,
+            in_thinking: false,
+            tool_use_id_to_name: std::collections::HashMap::new(),
+            responded_this_turn: false,
+            // 默认 1M：用户主账号 = opus-4-7-1m。非 1M 模型走 with_window_size 显式覆盖。
+            window_size: 1_000_000,
+        }
+    }
 }
 
 impl TranslateState {
@@ -144,6 +206,18 @@ impl TranslateState {
             role: Some(role.into()),
             ..Self::default()
         }
+    }
+
+    /// 显式设非默认 context window（如 sonnet 200k 模型）。返回 self 让调用方
+    /// 链式构造：`TranslateState::with_role("xuannv").with_window_size(200_000)`。
+    pub fn with_window_size(mut self, n: u64) -> Self {
+        self.window_size = n.max(1); // 防除零
+        self
+    }
+
+    /// 当前 window_size——orchestrator pump 算 pct 时也可能直接读。
+    pub fn window_size(&self) -> u64 {
+        self.window_size
     }
 
     /// `_fuxi:request_review` sentinel 是否对当前 role 生效。
@@ -304,8 +378,9 @@ fn classify_result(v: Value) -> CcEvent {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let usage = parse_usage(&v);
     match subtype {
-        "success" => CcEvent::ResultSuccess { text },
+        "success" => CcEvent::ResultSuccess { text, usage },
         _ => {
             let reason = if text.is_empty() {
                 v.get("terminal_reason")
@@ -315,7 +390,7 @@ fn classify_result(v: Value) -> CcEvent {
             } else {
                 text
             };
-            CcEvent::ResultError { reason }
+            CcEvent::ResultError { reason, usage }
         }
     }
 }
@@ -475,7 +550,7 @@ pub fn translate(
                 },
             ));
         }
-        CcEvent::ResultSuccess { text } => {
+        CcEvent::ResultSuccess { text, usage } => {
             // 任务命中终态——先发状态转移。
             // InProgress → Delivering → Done 是合法路径，但我们没有 Delivering
             // 的语义锚点，直接从 InProgress 推到 Done 会破坏 can_transition_to；
@@ -499,13 +574,23 @@ pub fn translate(
                     EventKind::AgentResponded { text },
                 ));
             }
+            // task #8：cc result 一般会带 usage——按本 turn 增量发 UsageReport。
+            // 上层（orchestrator pump）累加；订阅者（firehose / 玄女上下文监控器）
+            // 各自决定是否消费。usage 缺时就不发——容忍奇怪流。
+            if let Some(u) = usage {
+                push_usage_report(&mut out, agent_id, task_id, u, state.window_size);
+            }
         }
-        CcEvent::ResultError { reason } => {
+        CcEvent::ResultError { reason, usage } => {
             out.push(mk_event(
                 agent_id,
                 task_id,
                 EventKind::TaskBlocked { reason },
             ));
+            // 失败 turn 也算上下文耗用——cc 失败前可能跑了几轮 thinking + tool。
+            if let Some(u) = usage {
+                push_usage_report(&mut out, agent_id, task_id, u, state.window_size);
+            }
         }
         CcEvent::Unknown { raw } => {
             tracing::warn!(?raw, "cc_unknown_event");
@@ -528,6 +613,33 @@ fn mk_event(agent: AgentId, task: Option<TaskId>, kind: EventKind) -> Event {
     meta.agent = Some(agent);
     meta.task = task;
     Event { meta, kind }
+}
+
+/// 把一条 `UsageInfo` + window_size 翻成 `EventKind::UsageReport` 并推到 out。
+/// 抽出来防 ResultSuccess / ResultError 两路的代码漂移。`pct` 用 f32 精度足够
+/// （订阅者只关心整数百分比阈值）；window_size 必非 0（TranslateState 构造守过）。
+fn push_usage_report(
+    out: &mut Vec<Event>,
+    agent: AgentId,
+    task: Option<TaskId>,
+    u: UsageInfo,
+    window_size: u64,
+) {
+    let total = u.total();
+    let pct = (total as f64 / window_size as f64) as f32;
+    out.push(mk_event(
+        agent,
+        task,
+        EventKind::UsageReport {
+            input_tokens: u.input_tokens,
+            cache_creation_tokens: u.cache_creation_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            output_tokens: u.output_tokens,
+            total_tokens: total,
+            window_size,
+            pct,
+        },
+    ));
 }
 
 #[cfg(test)]
@@ -667,7 +779,28 @@ mod tests {
     fn parse_result_success() {
         let line = r#"{"type":"result","subtype":"success","result":"done"}"#;
         match parse_line(line).expect("parse") {
-            CcEvent::ResultSuccess { text } => assert_eq!(text, "done"),
+            CcEvent::ResultSuccess { text, usage } => {
+                assert_eq!(text, "done");
+                assert!(usage.is_none(), "无 usage 字段时返 None");
+            }
+            other => panic!("expected ResultSuccess, got {other:?}"),
+        }
+    }
+
+    /// task #8 · result 携 usage 时 parser 应抽出 4 个 token 字段。
+    #[test]
+    fn parse_result_success_with_usage() {
+        let line = r#"{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":10,"cache_creation_input_tokens":42000,"cache_read_input_tokens":300000,"output_tokens":250}}"#;
+        match parse_line(line).expect("parse") {
+            CcEvent::ResultSuccess { usage, .. } => {
+                let u = usage.expect("usage present");
+                assert_eq!(u.input_tokens, 10);
+                assert_eq!(u.cache_creation_tokens, 42_000);
+                assert_eq!(u.cache_read_tokens, 300_000);
+                assert_eq!(u.output_tokens, 250);
+                // total = input + cache_creation + output（不含 cache_read）
+                assert_eq!(u.total(), 42_260);
+            }
             other => panic!("expected ResultSuccess, got {other:?}"),
         }
     }
@@ -676,7 +809,10 @@ mod tests {
     fn parse_result_error() {
         let line = r#"{"type":"result","subtype":"error","result":"","terminal_reason":"timeout"}"#;
         match parse_line(line).expect("parse") {
-            CcEvent::ResultError { reason } => assert_eq!(reason, "timeout"),
+            CcEvent::ResultError { reason, usage } => {
+                assert_eq!(reason, "timeout");
+                assert!(usage.is_none());
+            }
             other => panic!("expected ResultError, got {other:?}"),
         }
     }
@@ -970,7 +1106,10 @@ mod tests {
     fn translate_result_success_emits_state_change_and_response() {
         let mut st = TranslateState::new();
         let out = translate(
-            CcEvent::ResultSuccess { text: "hi".into() },
+            CcEvent::ResultSuccess {
+                text: "hi".into(),
+                usage: None,
+            },
             fresh_agent(),
             None,
             &mut st,
@@ -996,6 +1135,7 @@ mod tests {
         let out = translate(
             CcEvent::ResultError {
                 reason: "api".into(),
+                usage: None,
             },
             fresh_agent(),
             None,
@@ -1042,6 +1182,7 @@ mod tests {
         let out = translate(
             CcEvent::ResultSuccess {
                 text: "done".into(),
+                usage: None,
             },
             fresh_agent(),
             None,
@@ -1076,6 +1217,7 @@ mod tests {
         let out2 = translate(
             CcEvent::ResultSuccess {
                 text: "hello world".into(),
+                usage: None,
             },
             fresh_agent(),
             None,
@@ -1097,7 +1239,10 @@ mod tests {
     fn translate_result_only_still_emits_responded_without_prior_assistant() {
         let mut st = TranslateState::new();
         let out = translate(
-            CcEvent::ResultSuccess { text: "ok".into() },
+            CcEvent::ResultSuccess {
+                text: "ok".into(),
+                usage: None,
+            },
             fresh_agent(),
             None,
             &mut st,
@@ -1105,6 +1250,111 @@ mod tests {
         );
         assert_eq!(out.len(), 2, "冷场景应发 TaskStateChanged + AgentResponded");
         assert!(matches!(out[1].kind, EventKind::AgentResponded { .. }));
+    }
+
+    /// task #8 · result 携 usage 时，translate 应在原 TaskStateChanged 与
+    /// AgentResponded 之后追加 UsageReport（window_size = state.window_size,
+    /// pct = total / window）。
+    #[test]
+    fn translate_result_with_usage_emits_usage_report() {
+        let mut st = TranslateState::new(); // window_size 默认 1_000_000
+        let usage = UsageInfo {
+            input_tokens: 100,
+            cache_creation_tokens: 200_000,
+            cache_read_tokens: 50_000,
+            output_tokens: 700,
+        };
+        let out = translate(
+            CcEvent::ResultSuccess {
+                text: "x".into(),
+                usage: Some(usage),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        // TaskStateChanged + AgentResponded + UsageReport
+        assert_eq!(out.len(), 3, "应发三条事件，got {}", out.len());
+        match &out[2].kind {
+            EventKind::UsageReport {
+                total_tokens,
+                window_size,
+                pct,
+                cache_read_tokens,
+                ..
+            } => {
+                // total = 100 + 200000 + 700 = 200800（不含 cache_read 50000）
+                assert_eq!(*total_tokens, 200_800);
+                assert_eq!(*cache_read_tokens, 50_000);
+                assert_eq!(*window_size, 1_000_000);
+                assert!((pct - 0.2008).abs() < 1e-4);
+            }
+            other => panic!("expected UsageReport, got {other:?}"),
+        }
+    }
+
+    /// 自定 window_size（如 sonnet 200k 模型）—— pct 计算应基于实际 window。
+    #[test]
+    fn translate_result_with_custom_window_uses_it_for_pct() {
+        let mut st = TranslateState::new().with_window_size(200_000);
+        let usage = UsageInfo {
+            input_tokens: 0,
+            cache_creation_tokens: 100_000,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+        };
+        let out = translate(
+            CcEvent::ResultSuccess {
+                text: "".into(),
+                usage: Some(usage),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        // 冷场景（无 prior assistant text + result.text 也空）—— 不发 AgentResponded
+        // → 只有 TaskStateChanged + UsageReport
+        let usage_report = out
+            .iter()
+            .find(|e| matches!(e.kind, EventKind::UsageReport { .. }))
+            .expect("有 UsageReport");
+        match &usage_report.kind {
+            EventKind::UsageReport {
+                window_size, pct, ..
+            } => {
+                assert_eq!(*window_size, 200_000);
+                assert!((pct - 0.5).abs() < 1e-6, "100k/200k = 0.5");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// ResultError 路径也要发 UsageReport（失败 turn 也耗了 token）。
+    #[test]
+    fn translate_result_error_with_usage_still_reports() {
+        let mut st = TranslateState::new();
+        let out = translate(
+            CcEvent::ResultError {
+                reason: "boom".into(),
+                usage: Some(UsageInfo {
+                    input_tokens: 5,
+                    cache_creation_tokens: 1_000,
+                    cache_read_tokens: 0,
+                    output_tokens: 5,
+                }),
+            },
+            fresh_agent(),
+            None,
+            &mut st,
+            None,
+        );
+        assert!(
+            out.iter()
+                .any(|e| matches!(e.kind, EventKind::UsageReport { .. })),
+            "失败 turn 也要发 UsageReport"
+        );
     }
 
     /// `finish()` 必须 reset responded_this_turn——否则下一 turn 的 result
@@ -1122,7 +1372,10 @@ mod tests {
         st.finish();
         // 新 turn 冷启动：应正常发 AgentResponded
         let out = translate(
-            CcEvent::ResultSuccess { text: "b".into() },
+            CcEvent::ResultSuccess {
+                text: "b".into(),
+                usage: None,
+            },
             fresh_agent(),
             None,
             &mut st,

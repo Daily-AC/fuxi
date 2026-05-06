@@ -139,6 +139,21 @@ enum XuannvCmd {
     /// 玄女进程。下次 `fuxi-im` 走 ensure_xuannv 时 fresh spawn → cc 重读
     /// `--append-system-prompt`（含 dispatch-routing.md 最新版）。
     Refresh,
+    /// 上下文交接（task #8）—— 玄女在自己跨 45% 阈值后跑此命令把
+    /// `~/.fuxi/xuannv-handoff.md` 写好；fuxi-im 后端检测到落档 → 等当前
+    /// turn idle → kill 当前玄女 + spawn 新玄女并 `--append-system-prompt`
+    /// 注入 prelude（handoff 内容）。
+    #[command(subcommand)]
+    Handoff(HandoffCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum HandoffCmd {
+    /// 写 handoff markdown：`fuxi xuannv handoff write '<≤500字 markdown 文本>'`
+    /// 或者 `fuxi xuannv handoff write -` 从 stdin 读。
+    Write(xuannv_cmd::HandoffWriteArgs),
+    /// 打印当前落档的 handoff 文件内容（用于 debug + 调试新副本接班是否拿到内容）。
+    Read,
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +271,10 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Command::Xuannv(x)) => match x {
             XuannvCmd::Refresh => xuannv_cmd::run_refresh().await,
+            XuannvCmd::Handoff(h) => match h {
+                HandoffCmd::Write(args) => xuannv_cmd::run_handoff_write(args).await,
+                HandoffCmd::Read => xuannv_cmd::run_handoff_read().await,
+            },
         },
         Some(Command::Bug(args)) => bug_cmd::run(args).await,
     }

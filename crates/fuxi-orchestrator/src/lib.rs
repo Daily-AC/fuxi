@@ -29,6 +29,7 @@ pub mod node_load;
 pub mod recall;
 pub mod registry;
 pub mod sentinel_addendum;
+pub mod xuannv_context;
 
 pub use bridge::{Intervener, SystemEventBridge};
 pub use dist_enqueuer::{DistEnqueueOptions, DistEnqueuer};

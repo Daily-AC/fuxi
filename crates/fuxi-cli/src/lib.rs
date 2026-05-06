@@ -55,3 +55,4 @@ pub mod up;
 pub mod watch;
 pub mod xuannv_bootstrap;
 pub mod xuannv_cmd;
+pub mod xuannv_handoff;

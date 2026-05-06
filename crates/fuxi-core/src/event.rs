@@ -567,6 +567,44 @@ pub enum EventKind {
         body: String,
     },
 
+    // ── 玄女上下文管理（task #8 / Decision 11）───────────────
+    /// 一次 LLM turn 结束后由 cc adapter 翻 result.usage 发出。`total_tokens`
+    /// 故意 = `input + cache_creation + output`，**不**算 `cache_read`——
+    /// cache_read 是命中 prefix cache 不占新 context window。`window_size` 是
+    /// 模型 context window 上限（如 1m ≈ 1_000_000）；`pct` = total/window 给
+    /// 订阅者免重算。
+    ///
+    /// 玄女自己的 turn 才参与上下文累加；其他门客的 UsageReport 只是审计材料
+    /// （未来给单 turn 成本核算 / 长 task 总耗用展示用）。
+    UsageReport {
+        input_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        output_tokens: u64,
+        /// = input + cache_creation + output。Adapter 算好上发，避免订阅者重算。
+        total_tokens: u64,
+        window_size: u64,
+        /// 0.0 ~ 1.0。Adapter 算好；订阅者比阈值时直接用。
+        pct: f32,
+    },
+    /// 玄女上下文跨过水位（35% / 45% / ...）触发的水位标记事件。
+    /// 同一 spawn 周期内每个阈值最多发一次（订阅者用阈值反查，不重复触发）。
+    /// `threshold_pct` 是按整数百分比记的阈值（35 / 45）方便日志可读。
+    XuannvContextWatermark {
+        threshold_pct: u8,
+        total_tokens: u64,
+        window_size: u64,
+        /// "addendum"（35%）/ "handoff_offer"（45%）—— 描述本次水位的动作类别。
+        action: String,
+    },
+    /// 玄女或用户已写下 handoff 文件——后端检测到此事件后，等当前 turn idle
+    /// 即 kill old + spawn new + 注入 prelude。`path` 是 handoff markdown 文件
+    /// 绝对路径；`length_chars` 给审计/日志。
+    XuannvHandoffWritten {
+        path: PathBuf,
+        length_chars: u32,
+    },
+
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
     /// minimum—prefer adding a typed variant.
@@ -1047,6 +1085,98 @@ mod tests {
             let back: EventKind = serde_json::from_value(v).expect("de");
             let again = serde_json::to_value(&back).expect("re-ser");
             assert_eq!(again.get("type").and_then(|x| x.as_str()), Some(expect));
+        }
+    }
+
+    /// task #8 玄女上下文管理：UsageReport tag + 字段保真。`total_tokens`
+    /// 故意 = `input + cache_creation + output`，**不**算 cache_read，
+    /// 反回归保护「fuxi-agent-cc 算总数公式」的核心约定。
+    #[test]
+    fn usage_report_tag_and_total_excludes_cache_read() {
+        let kind = EventKind::UsageReport {
+            input_tokens: 1_000,
+            cache_creation_tokens: 5_000,
+            cache_read_tokens: 200_000,
+            output_tokens: 500,
+            total_tokens: 6_500, // = 1000 + 5000 + 500，不含 cache_read
+            window_size: 1_000_000,
+            pct: 0.0065,
+        };
+        let v = serde_json::to_value(&kind).expect("ser");
+        assert_eq!(v.get("type").and_then(|x| x.as_str()), Some("usage_report"));
+        let back: EventKind = serde_json::from_value(v).expect("de");
+        match back {
+            EventKind::UsageReport {
+                input_tokens,
+                cache_creation_tokens,
+                cache_read_tokens,
+                output_tokens,
+                total_tokens,
+                window_size,
+                pct,
+            } => {
+                assert_eq!(input_tokens, 1_000);
+                assert_eq!(cache_creation_tokens, 5_000);
+                assert_eq!(cache_read_tokens, 200_000);
+                assert_eq!(output_tokens, 500);
+                assert_eq!(total_tokens, 6_500, "total 不含 cache_read");
+                assert_eq!(window_size, 1_000_000);
+                assert!((pct - 0.0065).abs() < 1e-6);
+            }
+            other => panic!("expect UsageReport, got {other:?}"),
+        }
+    }
+
+    /// task #8：水位事件 35% addendum。
+    #[test]
+    fn xuannv_context_watermark_tag_and_roundtrip() {
+        let kind = EventKind::XuannvContextWatermark {
+            threshold_pct: 35,
+            total_tokens: 350_000,
+            window_size: 1_000_000,
+            action: "addendum".into(),
+        };
+        let v = serde_json::to_value(&kind).expect("ser");
+        assert_eq!(
+            v.get("type").and_then(|x| x.as_str()),
+            Some("xuannv_context_watermark")
+        );
+        let back: EventKind = serde_json::from_value(v).expect("de");
+        match back {
+            EventKind::XuannvContextWatermark {
+                threshold_pct,
+                total_tokens,
+                window_size,
+                action,
+            } => {
+                assert_eq!(threshold_pct, 35);
+                assert_eq!(total_tokens, 350_000);
+                assert_eq!(window_size, 1_000_000);
+                assert_eq!(action, "addendum");
+            }
+            other => panic!("expect XuannvContextWatermark, got {other:?}"),
+        }
+    }
+
+    /// task #8：HandoffWritten 事件 tag + path 保真。
+    #[test]
+    fn xuannv_handoff_written_tag_and_roundtrip() {
+        let kind = EventKind::XuannvHandoffWritten {
+            path: PathBuf::from("/Users/e0_7/.fuxi/xuannv-handoff.md"),
+            length_chars: 412,
+        };
+        let v = serde_json::to_value(&kind).expect("ser");
+        assert_eq!(
+            v.get("type").and_then(|x| x.as_str()),
+            Some("xuannv_handoff_written")
+        );
+        let back: EventKind = serde_json::from_value(v).expect("de");
+        match back {
+            EventKind::XuannvHandoffWritten { path, length_chars } => {
+                assert_eq!(path, PathBuf::from("/Users/e0_7/.fuxi/xuannv-handoff.md"));
+                assert_eq!(length_chars, 412);
+            }
+            other => panic!("expect XuannvHandoffWritten, got {other:?}"),
         }
     }
 

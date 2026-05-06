@@ -364,6 +364,9 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         DeliverableRejected { .. } => "deliverable_rejected",
         DeliverableExpired { .. } => "deliverable_expired",
         AgentInlineMessagePushed { .. } => "agent_inline_message_pushed",
+        UsageReport { .. } => "usage_report",
+        XuannvContextWatermark { .. } => "xuannv_context_watermark",
+        XuannvHandoffWritten { .. } => "xuannv_handoff_written",
         Custom { .. } => "custom",
     }
 }

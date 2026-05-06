@@ -1802,6 +1802,20 @@ impl Fuxi {
             );
             return Ok(());
         }
+        self.shutdown_agent_inner(id, reason).await
+    }
+
+    /// task #8 上下文交接专用——绕过 [`Self::shutdown_agent`] 的玄女豁免，强 kill
+    /// 当前玄女副本，调用方紧接着 `set_xuannv(new_id)` 把新副本接上。
+    ///
+    /// **不要在别处调用**：玄女豁免是核心防御（GC / 误 kill 不该误伤她）。本路径
+    /// 是用户**显式**主动交接（写了 handoff），等价于「我自己要换副本」。
+    pub async fn shutdown_xuannv_for_handoff(&self, id: AgentId, reason: String) -> Result<()> {
+        info!(agent = %id, reason = %reason, "shutdown_xuannv_for_handoff: 用户主动交接，绕过豁免");
+        self.shutdown_agent_inner(id, reason).await
+    }
+
+    async fn shutdown_agent_inner(&self, id: AgentId, reason: String) -> Result<()> {
         let Some(entry) = self.shelf.take(id).await else {
             // 已被清走（并发 GC / 手动 shutdown）——noop，外层不用特判。
             debug!(agent = %id, "shutdown_agent: 门客不在 shelf，跳过");
