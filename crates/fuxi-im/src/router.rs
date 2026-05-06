@@ -134,6 +134,10 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
+        // v1-session17 task #9 「更多」hub 三个新页：策府事实 / 角色卡 / 更漏 trigger
+        .route("/api/memory", get(handlers::memory::list))
+        .route("/api/roles", get(handlers::roles::list))
+        .route("/api/cron", get(handlers::cron::list))
         // v1-session16 通知 tab：bug 收集器 + 系统通知（玄女 / handoff offer）
         .route("/api/notifications", get(handlers::notifications::list))
         .route(

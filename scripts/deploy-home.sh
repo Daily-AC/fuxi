@@ -60,6 +60,8 @@ if [[ "$DO_PWA" == "1" ]]; then
   cat <<'PWA' | ssh home 'bash -s'
 set -eo pipefail
 cd /home/e0-7/fuxi/crates/fuxi-im/web
+# CI=true 让 pnpm 跳过 modules 删除确认（无 TTY 下默认会 abort）
+export CI=true
 corepack pnpm install --prefer-offline 2>&1 | tail -3
 corepack pnpm build 2>&1 | tail -5
 mkdir -p $HOME/.local/share/fuxi/im-web

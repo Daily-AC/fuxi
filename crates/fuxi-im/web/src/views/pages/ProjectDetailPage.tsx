@@ -221,7 +221,8 @@ const DeliverableSummaryRow: Component<{ entry: DeliverableEntry }> = (props) =>
     props.entry.task.length > 8 ? props.entry.task.slice(0, 8) : props.entry.task;
   const fileCount = (): number => props.entry.files.length;
   const open = (): void => {
-    // 跨 tab 跳到「交付」详情——navTo 原子化 setActiveTab(3) + navPush。
+    // 跨 tab 跳到「交付」详情——v1-session17 task #9 后 navTo 原子化
+    // setActiveTab(3 更多) + setMoreSub("deliverables") + navPush(deliverable)。
     navTo({
       kind: "deliverable",
       project_id: props.entry.project,

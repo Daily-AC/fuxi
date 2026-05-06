@@ -187,6 +187,69 @@ export interface NotificationsResponse {
   unread_count: number;
 }
 
+// ---------- v1-session17 task #9 · 「更多」hub 三个新页 ----------
+
+/** 单条策府事实（/api/memory）。 */
+export interface MemoryFactView {
+  id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  source: string;
+  /** 0..1 置信度。前端按 0.6 / 0.8 阈值选 chip 颜色。 */
+  confidence: number;
+  /** ISO 8601 UTC。 */
+  updated_at: string;
+}
+
+/** 同 subject 的事实分组——前端按组列卡片。 */
+export interface MemorySubjectGroup {
+  subject: string;
+  facts: MemoryFactView[];
+}
+
+export interface MemoryResponse {
+  groups: MemorySubjectGroup[];
+  total: number;
+}
+
+/** 单张角色卡（/api/roles）。 */
+export interface RoleCardView {
+  id: string;
+  name: string;
+  description: string;
+  tier?: string | null;
+  cli?: string | null;
+  allowed_tools?: string | null;
+  has_instructions: boolean;
+  has_examples: boolean;
+  has_resources: boolean;
+}
+
+export interface RolesResponse {
+  roles: RoleCardView[];
+}
+
+/** 单条 trigger（/api/cron）。 */
+export interface CronEntryView {
+  id: string;
+  /** "cron" / "once" / "fs_watch" / "webhook"。 */
+  kind: string;
+  enabled: boolean;
+  intent: string;
+  /** kind-specific 一行摘要（cron expr / 时间点 / fs path / webhook 提示）。 */
+  summary: string;
+  tz?: string | null;
+  consecutive_failures: number;
+  max_failures: number;
+  last_fired_at?: string | null;
+  created_at: string;
+}
+
+export interface CronResponse {
+  triggers: CronEntryView[];
+}
+
 /** POST /api/projects 请求体——PWA「+ 注册项目」表单序列化目标。 */
 export interface AddProjectRequest {
   canonical_path: string;

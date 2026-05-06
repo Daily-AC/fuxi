@@ -1,0 +1,63 @@
+/* SettingsPage · 「更多 → 设置」· stub 起步 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius-card);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.label {
+  font-size: var(--size-body);
+  color: var(--text-primary);
+}
+
+.value {
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.btn {
+  margin-top: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  font-size: var(--size-aux);
+  font-weight: var(--weight-medium);
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+}
+
+.btn:active,
+.btn:focus-visible {
+  background: var(--accent-subtle);
+  outline: none;
+}
+
+.btn:disabled {
+  color: var(--text-muted);
+  border-color: var(--surface-elevated);
+  cursor: default;
+}
+
+.hint {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}

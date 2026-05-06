@@ -1,0 +1,80 @@
+/* MemoryPage · 「更多 → 记忆」· 策府事实分组列表 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.summary {
+  margin: 0;
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.groupHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}
+
+.subject {
+  font-size: var(--size-heading);
+  font-weight: var(--weight-medium);
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.count {
+  font-variant-numeric: tabular-nums;
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius-card);
+}
+
+.predicate {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+}
+
+.object {
+  font-size: var(--size-body);
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.meta {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}
+
+.confHigh {
+  color: #87b574;
+}
+.confLow {
+  color: var(--text-muted);
+}
+
+.empty {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  padding: var(--space-4) 0;
+  text-align: center;
+}

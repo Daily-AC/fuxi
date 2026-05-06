@@ -13,13 +13,16 @@ import type {
   AddProjectRequest,
   AddProjectResponse,
   ConversationHistoryResponse,
+  CronResponse,
   DeliverablesResponse,
   EphemeralResponse,
   InterveneRequestV2,
+  MemoryResponse,
   NodesResponse,
   NotificationsResponse,
   ProjectsResponse,
   RejectDeliverableRequest,
+  RolesResponse,
   SandboxesResponse,
   TasksOverview,
   Upload,
@@ -119,6 +122,12 @@ export interface ApiClient {
   closeNotification(id: string): Promise<{ ok: true }>;
   /** 一键全部标已读——进入「通知」tab 时调，红点清零。 */
   readAllNotifications(): Promise<{ ok: true; updated: number }>;
+  /** v1-session17 task #9 · 「更多 → 记忆」· GET /api/memory · 策府现行事实分组。 */
+  fetchMemory(opts?: { limit?: number }): Promise<MemoryResponse>;
+  /** v1-session17 task #9 · 「更多 → 角色」· GET /api/roles · roles 目录扫描结果。 */
+  fetchRoles(): Promise<RolesResponse>;
+  /** v1-session17 task #9 · 「更多 → 更漏」· GET /api/cron · scheduler trigger 列表。 */
+  fetchCron(): Promise<CronResponse>;
 }
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -274,6 +283,12 @@ export function createHttpClient(): ApiClient {
       jsonFetch<{ ok: true; updated: number }>(`/api/notifications/read-all`, {
         method: "POST",
       }),
+    fetchMemory: (opts) => {
+      const qs = opts?.limit ? `?limit=${opts.limit}` : "";
+      return jsonFetch<MemoryResponse>(`/api/memory${qs}`);
+    },
+    fetchRoles: () => jsonFetch<RolesResponse>(`/api/roles`),
+    fetchCron: () => jsonFetch<CronResponse>(`/api/cron`),
   };
 }
 

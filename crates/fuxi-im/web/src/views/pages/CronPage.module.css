@@ -1,0 +1,66 @@
+/* CronPage · 「更多 → 更漏」· trigger 列表 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius-card);
+}
+
+.cardDisabled {
+  opacity: 0.55;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.kind {
+  font-size: var(--size-meta);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.intent {
+  font-size: var(--size-body);
+  color: var(--text-primary);
+}
+
+.summary {
+  font-family: var(--font-mono, "SFMono-Regular", monospace);
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}
+
+.fail {
+  color: #c87a6b;
+}
+
+.empty {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  padding: var(--space-4) 0;
+  text-align: center;
+}

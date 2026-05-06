@@ -12,7 +12,7 @@ function setup(nodes?: NodesResponse) {
   const api = createMockApi({ nodes });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={2}>
+    <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
       <NodesPage />
     </ApiProvider>
   ));
@@ -154,7 +154,7 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
       return null;
     };
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={2}>
+      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
         <NodesPage />
         <Probe />
       </ApiProvider>
@@ -199,7 +199,7 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
     const api = createMockApi({ nodes: initial });
     setApiOverride(api);
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={2}>
+      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
         <NodesPage />
       </ApiProvider>
     ));

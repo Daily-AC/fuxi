@@ -14,7 +14,7 @@ function setup(
   const api = createMockApi({ projects, sandboxesByProject });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={2}>
+    <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="projects">
       <ProjectsPage />
     </ApiProvider>
   ));

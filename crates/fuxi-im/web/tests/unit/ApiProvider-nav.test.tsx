@@ -4,6 +4,7 @@ import {
   ApiProvider,
   setApiOverride,
   useApi,
+  type MoreSubRoute,
   type NavRoute,
   type TabIndex,
 } from "~/components/ApiProvider";
@@ -12,10 +13,10 @@ import { type Component, createSignal, onMount } from "solid-js";
 
 afterEach(() => setApiOverride(null));
 
-const Probe: Component<{ onState: (s: { tab: TabIndex; nav: NavRoute }) => void }> = (
-  props,
-) => {
-  const { activeTab, navRoute } = useApi();
+const Probe: Component<{
+  onState: (s: { tab: TabIndex; sub: MoreSubRoute; nav: NavRoute }) => void;
+}> = (props) => {
+  const { activeTab, moreSub, navRoute } = useApi();
   const [_t, setT] = createSignal(0);
   onMount(() => {
     setT(1);
@@ -24,17 +25,17 @@ const Probe: Component<{ onState: (s: { tab: TabIndex; nav: NavRoute }) => void 
     <div
       data-testid="probe"
       ref={() => {
-        props.onState({ tab: activeTab(), nav: navRoute() });
+        props.onState({ tab: activeTab(), sub: moreSub(), nav: navRoute() });
         void _t();
       }}
     />
   );
 };
 
-describe("ApiProvider · nav state (v3)", () => {
-  it("默认 activeTab=0（玄女）", () => {
+describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)", () => {
+  it("默认 activeTab=0（玄女）+ moreSub=null", () => {
     setApiOverride(createMockApi());
-    let captured: { tab: TabIndex; nav: NavRoute } | null = null;
+    let captured: { tab: TabIndex; sub: MoreSubRoute; nav: NavRoute } | null = null;
     const { unmount } = render(() => (
       <ApiProvider initialAuth="in">
         <Probe onState={(s) => (captured = s)} />
@@ -42,19 +43,21 @@ describe("ApiProvider · nav state (v3)", () => {
     ));
     expect(captured).not.toBeNull();
     expect(captured!.tab).toBe(0);
+    expect(captured!.sub).toBeNull();
     expect(captured!.nav).toBeNull();
     unmount();
   });
 
-  it("initialTab prop 钉死起始 tab", () => {
+  it("initialTab + initialMoreSub prop 钉死起始位置", () => {
     setApiOverride(createMockApi());
-    let captured: { tab: TabIndex; nav: NavRoute } | null = null;
+    let captured: { tab: TabIndex; sub: MoreSubRoute; nav: NavRoute } | null = null;
     const { unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={1}>
+      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="memory">
         <Probe onState={(s) => (captured = s)} />
       </ApiProvider>
     ));
-    expect(captured!.tab).toBe(1);
+    expect(captured!.tab).toBe(3);
+    expect(captured!.sub).toBe("memory");
     unmount();
   });
 
@@ -97,7 +100,7 @@ describe("ApiProvider · nav state (v3)", () => {
     unmount();
   });
 
-  it("navPush 在非任务 tab 下 noop（防御 misuse）", () => {
+  it("navPush 在非任务 tab 下且 sub 不允许时 noop（防御 misuse）", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
       const { setActiveTab, navPush, navRoute } = useApi();
@@ -124,17 +127,12 @@ describe("ApiProvider · nav state (v3)", () => {
     unmount();
   });
 
-  it("navTo · 跨 tab 跳转：从 0 跳到 deliverable detail (tab 3)", () => {
+  it("navTo · deliverable 路由解析到 tab 3 + sub=deliverables", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
-      const { setActiveTab, navTo, activeTab, navRoute } = useApi();
+      const { navTo, activeTab, moreSub, navRoute } = useApi();
       onMount(() => {
-        setActiveTab(0); // 玄女 tab
-        navTo({
-          kind: "deliverable",
-          project_id: "erp",
-          task_id: "t-uuid",
-        });
+        navTo({ kind: "deliverable", project_id: "erp", task_id: "t-uuid" });
       });
       const navTask = (): string => {
         const r = navRoute();
@@ -144,6 +142,7 @@ describe("ApiProvider · nav state (v3)", () => {
       return (
         <div>
           <span data-testid="tab-now">{String(activeTab())}</span>
+          <span data-testid="sub-now">{String(moreSub())}</span>
           <span data-testid="nav-now">{navTask()}</span>
         </div>
       );
@@ -154,14 +153,15 @@ describe("ApiProvider · nav state (v3)", () => {
       </ApiProvider>
     ));
     expect(getByTestId("tab-now").textContent).toBe("3");
+    expect(getByTestId("sub-now").textContent).toBe("deliverables");
     expect(getByTestId("nav-now").textContent).toBe("t-uuid");
     unmount();
   });
 
-  it("navTo · project 路由解析到 tab 2", () => {
+  it("navTo · project 路由解析到 tab 3 + sub=projects", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
-      const { navTo, activeTab, navRoute } = useApi();
+      const { navTo, activeTab, moreSub, navRoute } = useApi();
       onMount(() => {
         navTo({ kind: "project", project_id: "erp" });
       });
@@ -173,6 +173,7 @@ describe("ApiProvider · nav state (v3)", () => {
       return (
         <div>
           <span data-testid="tab-now">{String(activeTab())}</span>
+          <span data-testid="sub-now">{String(moreSub())}</span>
           <span data-testid="nav-now">{navProj()}</span>
         </div>
       );
@@ -182,35 +183,81 @@ describe("ApiProvider · nav state (v3)", () => {
         <Wired />
       </ApiProvider>
     ));
-    expect(getByTestId("tab-now").textContent).toBe("2");
+    expect(getByTestId("tab-now").textContent).toBe("3");
+    expect(getByTestId("sub-now").textContent).toBe("projects");
     expect(getByTestId("nav-now").textContent).toBe("erp");
     unmount();
   });
 
-  it("切 tab 自动清 navRoute（避免跨 tab 残留二层 push）", () => {
+  it("setMoreSub · 仅在 tab 3 下生效；其他 tab 静默 noop", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
-      const { setActiveTab, navPush, navRoute } = useApi();
+      const { setActiveTab, setMoreSub, moreSub } = useApi();
       onMount(() => {
-        setActiveTab(1);
-        navPush({ kind: "task", task_id: "t-1" });
-        setActiveTab(0); // 切到玄女 tab → 应清 nav
+        setActiveTab(0);
+        setMoreSub("memory"); // 不在 3 tab 下，应被 noop
       });
-      const id = (): string => {
-        const r = navRoute();
-        if (!r) return "null";
-        if (r.kind === "task") return r.task_id;
-        if (r.kind === "worker") return r.agent_id;
-        if (r.kind === "project") return r.project_id;
-        return r.task_id;
-      };
-      return <span data-testid="nav-now">{id()}</span>;
+      return <span data-testid="sub-now">{String(moreSub())}</span>;
     };
     const { getByTestId, unmount } = render(() => (
       <ApiProvider initialAuth="in">
         <Wired />
       </ApiProvider>
     ));
+    expect(getByTestId("sub-now").textContent).toBe("null");
+    unmount();
+  });
+
+  it("setMoreSub · tab 3 下生效；切 sub 自动清 navRoute", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { setActiveTab, setMoreSub, moreSub, navPush, navRoute } = useApi();
+      onMount(() => {
+        setActiveTab(3);
+        setMoreSub("projects");
+        navPush({ kind: "project", project_id: "erp" });
+        setMoreSub("memory"); // 切 sub → 清 navRoute
+      });
+      return (
+        <div>
+          <span data-testid="sub-now">{String(moreSub())}</span>
+          <span data-testid="nav-now">{navRoute() === null ? "null" : "set"}</span>
+        </div>
+      );
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("sub-now").textContent).toBe("memory");
+    expect(getByTestId("nav-now").textContent).toBe("null");
+    unmount();
+  });
+
+  it("切 tab 离开「更多」时清 moreSub + navRoute", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { setActiveTab, setMoreSub, navPush, moreSub, navRoute } = useApi();
+      onMount(() => {
+        setActiveTab(3);
+        setMoreSub("projects");
+        navPush({ kind: "project", project_id: "erp" });
+        setActiveTab(0); // 离开更多
+      });
+      return (
+        <div>
+          <span data-testid="sub-now">{String(moreSub())}</span>
+          <span data-testid="nav-now">{navRoute() === null ? "null" : "set"}</span>
+        </div>
+      );
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("sub-now").textContent).toBe("null");
     expect(getByTestId("nav-now").textContent).toBe("null");
     unmount();
   });

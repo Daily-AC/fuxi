@@ -11,7 +11,7 @@ function setup(deliverables?: DeliverablesResponse) {
   const api = createMockApi({ deliverables });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={3}>
+    <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="deliverables">
       <DeliverablesPage />
     </ApiProvider>
   ));

@@ -1,0 +1,64 @@
+/* RolesPage · 「更多 → 角色」· role 卡列表 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface);
+  border-radius: var(--radius-card);
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.name {
+  font-size: var(--size-heading);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.tier {
+  font-size: var(--size-meta);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.desc {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}
+
+.chip {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--surface-elevated);
+  border-radius: var(--radius-pill);
+}
+
+.empty {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  padding: var(--space-4) 0;
+  text-align: center;
+}

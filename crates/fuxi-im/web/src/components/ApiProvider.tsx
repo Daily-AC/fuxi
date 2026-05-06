@@ -12,28 +12,32 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
-/** Bottom tab bar 当前 tab：0=玄女 / 1=任务 / 2=项目 / 3=交付 / 4=节点 / 5=通知。
- *  设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §A
- *  v2 的 PageIndex 已淘汰（horizontal pager 路线被 supersede）。
- *  Decision 21/22 phase 1 加 项目 / 交付 两个 tab。
- *  v1-session16 加 通知 tab（bug 收集器 + 后续 handoff offer / review request）。
- *  通知挂尾位是临时的——task #9 计划把 4 tab 收成 玄女/任务/通知/更多，
- *  把 项目/交付/节点 收进 hub；这里先保留索引兼容不动现有页面。 */
-export type TabIndex = 0 | 1 | 2 | 3 | 4 | 5;
+/** Bottom tab bar 当前 tab：v1-session17 task #9 起 4 tab：
+ *  0=玄女 / 1=任务 / 2=通知 / 3=更多。
+ *  「项目」「交付」「节点」等全部进 tab 3「更多」hub 二级。 */
+export type TabIndex = 0 | 1 | 2 | 3;
 
-/** NavigationStack 顶部的 push 路由。
+/** 「更多」hub 内的二级 sub-page。null = hub 首页（tile grid）。
+ *  - nodes / projects / workers / deliverables：原一级 tab 沉到 hub 内
+ *  - memory / roles / cron / settings：v1-session17 task #9 新加
+ *  workers 复用 v2 残留的 worker 入口（per-agent 私聊）；正常使用从 NodesPage
+ *  card tap 进，hub 二级直达入口仅留作 future。 */
+export type MoreSubRoute =
+  | "nodes"
+  | "projects"
+  | "workers"
+  | "deliverables"
+  | "memory"
+  | "roles"
+  | "cron"
+  | "settings"
+  | null;
+
+/** NavigationStack 顶部的 push 路由——L2 详情页推 base 之上。
  *  - 任务 tab (1) · kind="task"|"worker"
- *  - 项目 tab (2) · kind="project" · Decision 21 phase 3 项目详情页
- *  - 交付 tab (3) · kind="deliverable" · Decision 22 phase 3 交付详情页
- *  null = 没 push，base 直接见底。
- *
- *  类型说明：
- *    - kind: "task" · v3 主路：任务卡片 → 任务 thread (#38/#N3' 落)
- *    - kind: "worker" · v2 残留 · per-worker 私聊（#40/#N5' 推 v3 时移除）
- *      保留只是为了让 TasksPage v2 member-row tap 不立即编译错；
- *      App.tsx renderTaskTop 仅渲染 kind==="task"，其他 kind 视作 noop。
- *    - kind: "project" · 项目 detail 页：sandboxes / L2 active+archive / 交付汇总
- *    - kind: "deliverable" · 交付 detail 页：manifest 全文 + 文件预览 + accept/reject 入口 */
+ *  - 更多 → 项目 (3 + sub="projects") · kind="project"
+ *  - 更多 → 交付 (3 + sub="deliverables") · kind="deliverable"
+ *  null = 没 push，base 直接见底（base 在更多 hub 下 = 当前 sub-page）。 */
 export type NavRoute =
   | { kind: "task"; task_id: string; title?: string }
   | { kind: "worker"; agent_id: string; role_display?: string }
@@ -51,20 +55,25 @@ export interface ApiContextValue {
   /** 标记登出（401 自动触发 / 未来"切换设备"用）。*/
   markLoggedOut(): void;
 
-  /** 当前 tab（0=玄女, 1=任务, 2=节点）。*/
+  /** 当前 tab。*/
   activeTab: Accessor<TabIndex>;
   setActiveTab(i: TabIndex): void;
 
-  /** 任务 tab 的 NavigationStack 路由。其他 tab 下读到 null。
-   *  navPush/navPop 仅在任务 tab 下生效；玄女/节点 tab 下调用是 noop。*/
+  /** 「更多」hub 内的二级 sub-page。仅 activeTab===3 时生效；其他 tab 下 setter 是 noop。*/
+  moreSub: Accessor<MoreSubRoute>;
+  setMoreSub(s: MoreSubRoute): void;
+
+  /** L2 详情页栈：任务 thread / 项目 detail / 交付 detail。*/
   navRoute: Accessor<NavRoute>;
   navPush(route: NonNullable<NavRoute>): void;
   navPop(): void;
-  /** 跨 tab 跳转 helper · Decision 21/22 phase 3 polish。
+  /** 跨 tab 跳转 helper。
    *
-   *  按 route.kind 解析目标 tab（task/worker → 1，project → 2，deliverable → 3）
-   *  然后 setActiveTab + navPush 一步到位。比调用方手写 setActiveTab(3) + navPush
-   *  少一次重渲染，且不会被 setActiveTab 的"切到无 nav tab 时清栈"逻辑误清。*/
+   *  按 route.kind 解析目标：
+   *  - task / worker → tab 1（任务）
+   *  - project → tab 3（更多） + moreSub="projects"
+   *  - deliverable → tab 3（更多） + moreSub="deliverables"
+   *  原子化设置，避免调用方手写 setActiveTab + setMoreSub + navPush 多步 race。 */
   navTo(route: NonNullable<NavRoute>): void;
 }
 
@@ -82,6 +91,8 @@ export interface ApiProviderProps {
   initialAuth?: AuthState;
   /** 测试入口：钉死起始 tab（默认 0=玄女）。*/
   initialTab?: TabIndex;
+  /** 测试入口：钉死起始 moreSub（默认 null = hub 首页）。*/
+  initialMoreSub?: MoreSubRoute;
 }
 
 export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
@@ -91,15 +102,34 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
   );
   const [auth, setAuth] = createSignal<AuthState>(props.initialAuth ?? "unknown");
   const [activeTab, _setActiveTab] = createSignal<TabIndex>(props.initialTab ?? 0);
+  const [moreSub, _setMoreSub] = createSignal<MoreSubRoute>(props.initialMoreSub ?? null);
   const [navRoute, setNavRoute] = createSignal<NavRoute>(null);
 
-  // tab 切换时清空 navRoute · 跨 tab 不保留二层 push（spec §A "navPush 仅任务 tab 下生效"）。
-  // Decision 21/22 phase 3：项目 / 交付 tab 也开二层 push（项目详情 / 交付详情）。
-  // 切到 0 (玄女) / 4 (节点) 这类无二层的 tab 时强制清栈避免幽灵 top 渲染。
-  const TABS_WITH_NAV: ReadonlyArray<TabIndex> = [1, 2, 3];
+  // 哪些 (tab, sub) 组合允许 navPush 二层 detail。
+  // 任务 tab 默认开（kind=task / worker）；更多 hub 下仅 projects / deliverables 子页开。
+  const navAllowed = (tab: TabIndex, sub: MoreSubRoute): boolean => {
+    if (tab === 1) return true; // 任务 tab：kind=task / worker
+    if (tab === 3 && (sub === "projects" || sub === "deliverables")) return true;
+    return false;
+  };
+
+  // tab 切换 / sub 切换时清栈——避免幽灵 top 跨 tab/sub 渲染。
   const setActiveTab = (i: TabIndex): void => {
-    if (!TABS_WITH_NAV.includes(i)) setNavRoute(null);
+    if (i !== activeTab()) {
+      setNavRoute(null);
+      // 离开「更多」tab 时也清 sub，回到 hub 首页比"记住上次 sub-page"更符合
+      // 移动端用户预期（再次点 tab 是回首页，二次切回手势只是 tab 切换，不该
+      // 跳到上次深处）。
+      if (i !== 3) _setMoreSub(null);
+    }
     _setActiveTab(i);
+  };
+
+  const setMoreSub = (s: MoreSubRoute): void => {
+    // 仅在「更多」tab 下生效；其他 tab 下静默 noop（防误操作）。
+    if (activeTab() !== 3) return;
+    if (s !== moreSub()) setNavRoute(null);
+    _setMoreSub(s);
   };
 
   // 探测登入态：试拉一次 fetchTasks（开销小、走 cookie middleware）。
@@ -139,28 +169,38 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         markLoggedOut: () => setAuth("out"),
         activeTab,
         setActiveTab,
+        moreSub,
+        setMoreSub,
         navRoute,
-        // navPush 仅允许在有二层栈的 tab 下；其他 tab 调用静默 noop（防御 misuse）。
-        // 同时按 kind 校验 tab 匹配 —— 防止 task push 跑到项目 tab 上让 App.Switch 渲染错位。
+        // navPush 仅允许 (tab, sub) 组合开启 nav 时；不匹配静默 noop（防 misuse）。
+        // 同时按 kind 校验位置匹配——防止 task push 跑到项目子页等错位。
         navPush: (route) => {
           const tab = activeTab();
-          if (!TABS_WITH_NAV.includes(tab)) return;
-          if ((route.kind === "task" || route.kind === "worker") && tab !== 1) return;
-          if (route.kind === "project" && tab !== 2) return;
-          if (route.kind === "deliverable" && tab !== 3) return;
+          const sub = moreSub();
+          if (!navAllowed(tab, sub)) return;
+          if (route.kind === "task" || route.kind === "worker") {
+            if (tab !== 1) return;
+          } else if (route.kind === "project") {
+            if (tab !== 3 || sub !== "projects") return;
+          } else if (route.kind === "deliverable") {
+            if (tab !== 3 || sub !== "deliverables") return;
+          }
           setNavRoute(route);
         },
         navPop: () => setNavRoute(null),
-        // 跨 tab 跳转 · setActiveTab + navPush 原子化。绕过 setActiveTab 的清栈
-        // 逻辑（直接走内部 _setActiveTab）避免 race。
+        // 跨 tab 跳转——绕过 setActiveTab / setMoreSub 的清栈逻辑，直接钉
+        // 内部 _setActiveTab + _setMoreSub + setNavRoute 一次到位避免 race。
         navTo: (route) => {
-          const targetTab: TabIndex =
-            route.kind === "task" || route.kind === "worker"
-              ? 1
-              : route.kind === "project"
-                ? 2
-                : 3;
-          _setActiveTab(targetTab);
+          if (route.kind === "task" || route.kind === "worker") {
+            _setActiveTab(1);
+            _setMoreSub(null);
+          } else if (route.kind === "project") {
+            _setActiveTab(3);
+            _setMoreSub("projects");
+          } else if (route.kind === "deliverable") {
+            _setActiveTab(3);
+            _setMoreSub("deliverables");
+          }
           setNavRoute(route);
         },
       }}
