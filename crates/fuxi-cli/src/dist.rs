@@ -2108,6 +2108,91 @@ pub(crate) async fn try_fetch_default_branch(canonical: &std::path::Path, branch
     true
 }
 
+/// 跨节点真协作 push back：worker 跑完 task 后把 worktree 当前 branch 推回 origin。
+///
+/// 没这一步 home 端永远看不到 mac 改的代码——L2 archive 只 rename + prune，
+/// L3 sandbox 根本没 task-done hook，跨节点协作就成了"派出去就丢"。
+///
+/// **不 fail-fast**：push 失败只 warn 继续。理由跟 fetch 对称——worker 短暂掉线
+/// （VPN 飘 / ssh tunnel 断）让 dispatch 整挂比"这次没 push 上"代价大；commit
+/// 还在 worker 本地，用户可 `ssh worker 'git push'` 手动兜底。
+///
+/// `FUXI_DISABLE_PUSHBACK=1` 完全禁用（CI / 本地开发时偶尔需要）。
+pub(crate) async fn try_push_back_branch(worktree_path: &std::path::Path) -> bool {
+    if std::env::var_os("FUXI_DISABLE_PUSHBACK").is_some() {
+        tracing::debug!(
+            path = %worktree_path.display(),
+            "FUXI_DISABLE_PUSHBACK set, skip post-job push back"
+        );
+        return false;
+    }
+    let head_out = match tokio::process::Command::new("git")
+        .current_dir(worktree_path)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                path = %worktree_path.display(),
+                error = %e,
+                "post-job push back：git rev-parse 启动失败（git binary 缺？）"
+            );
+            return false;
+        }
+    };
+    if !head_out.status.success() {
+        tracing::warn!(
+            path = %worktree_path.display(),
+            stderr = %String::from_utf8_lossy(&head_out.stderr).trim(),
+            "post-job push back：解 HEAD 分支失败，跳过 push"
+        );
+        return false;
+    }
+    let branch = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        tracing::warn!(
+            path = %worktree_path.display(),
+            branch = %branch,
+            "post-job push back：detached HEAD 或空 branch，跳过 push"
+        );
+        return false;
+    }
+    let out = match tokio::process::Command::new("git")
+        .current_dir(worktree_path)
+        .args(["push", "origin", &branch])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(
+                path = %worktree_path.display(),
+                branch = %branch,
+                error = %e,
+                "post-job push back：git push 启动失败"
+            );
+            return false;
+        }
+    };
+    if !out.status.success() {
+        tracing::warn!(
+            path = %worktree_path.display(),
+            branch = %branch,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "post-job push back：失败（远端不可达 / no remote / 权限），用户可手动 ssh + git push 兜底"
+        );
+        return false;
+    }
+    tracing::info!(
+        path = %worktree_path.display(),
+        branch = %branch,
+        "post-job push back origin/{} 完成", branch
+    );
+    true
+}
+
 /// Decision 21 phase 3 跨节点 sandbox · worker 端按 `job.project` 解出
 /// cc/codex 应该 spawn 进哪个目录。
 ///
@@ -2610,6 +2695,14 @@ async fn run_codex_job(
         // 兜底：既没 AgentMessage 也没 stderr，留个 status 线索
         format!("codex exited with {status}")
     };
+
+    // v2 跨节点 push back：worker 跑完把 worktree 当前 branch 推回 home，否则
+    // home 端永远看不到 mac 改的代码（L2 archive 只 rename + prune；L3 无 hook）。
+    // 失败 best-effort log warn，不影响 task 报告。无 project_cwd（裸派）跳过。
+    if let Some(cwd) = project_cwd.as_ref() {
+        let _ = try_push_back_branch(cwd).await;
+    }
+
     Ok((ok, output))
 }
 
@@ -2929,6 +3022,12 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
             task = %t,
             "worker-side always-nudge：cc 未输出 sentinel，兜底发 AgentRequestReview"
         );
+    }
+
+    // v2 跨节点 push back：与 codex 路径同——把 worktree 当前 branch 推回 home，
+    // 让 home 端 task 终态后能 `git log origin/task/<uuid>` 看到 worker 推的 commit。
+    if let Some(cwd) = project_cwd.as_ref() {
+        let _ = try_push_back_branch(cwd).await;
     }
 
     Ok((ok, output))
@@ -6516,6 +6615,179 @@ mod tests {
         unsafe { std::env::set_var("FUXI_DISABLE_PRESPAWN_FETCH", "1") };
         let ok = try_fetch_default_branch(dir.path(), "main").await;
         unsafe { std::env::remove_var("FUXI_DISABLE_PRESPAWN_FETCH") };
+        assert!(!ok);
+    }
+
+    // ── v2 跨节点 sandbox · post-job git push back ───────────────────────
+
+    /// worker 端在 task 分支上 commit + push back 后，home（origin）应能看到
+    /// `task/<uuid>` 分支与该 commit。
+    #[tokio::test]
+    async fn push_back_branch_advances_origin_ref() {
+        // home 端用 bare repo 当 origin——non-bare 推 currently-checked-out 会被
+        // receive.denyCurrentBranch=warn 默认拒；但本测推的是新 branch 不撞 main，
+        // 仍用 bare 更稳：清晰是 "home 收 branch ref" 的语义。
+        let home_td = tempfile::tempdir().unwrap();
+        let home_path = home_td.path().join("home.git");
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                home_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .unwrap();
+
+        // home 先有一条 main commit——bare 不能 commit，借 seed 仓库 push 进去
+        let (_seed_td, seed_path, _) = make_seed_repo_with_two_commits().await;
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&seed_path)
+            .args([
+                "remote",
+                "add",
+                "origin",
+                home_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&seed_path)
+            .args(["push", "-q", "origin", "main"])
+            .output()
+            .await
+            .unwrap();
+
+        // worker clone home
+        let worker_td = tempfile::tempdir().unwrap();
+        let worker_path = worker_td.path().join("worker");
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                home_path.to_string_lossy().as_ref(),
+                worker_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        for args in [
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&worker_path)
+                .args(&args)
+                .output()
+                .await;
+        }
+
+        // worker 在新 branch 上写一条 commit（模拟 cc/codex 跑完留下 commit）
+        let task_branch = format!("task/{}", uuid::Uuid::new_v4());
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&worker_path)
+            .args(["switch", "-q", "-c", &task_branch])
+            .output()
+            .await
+            .unwrap();
+        tokio::fs::write(worker_path.join("CHANGED.md"), "from worker")
+            .await
+            .unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "worker work"]] {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&worker_path)
+                .args(&args)
+                .output()
+                .await;
+        }
+        let out = tokio::process::Command::new("git")
+            .current_dir(&worker_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await
+            .unwrap();
+        let worker_head = String::from_utf8(out.stdout).unwrap().trim().to_string();
+
+        // call try_push_back_branch
+        let ok = try_push_back_branch(&worker_path).await;
+        assert!(ok, "push back 应成功");
+
+        // home 端应能看到这个 branch + commit
+        let out = tokio::process::Command::new("git")
+            .current_dir(&home_path)
+            .args(["rev-parse", &task_branch])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "home 应有 {task_branch}");
+        let home_head = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert_eq!(
+            home_head, worker_head,
+            "push back 后 home 端 task branch HEAD 应等于 worker HEAD"
+        );
+    }
+
+    /// 没有 origin remote 时 push back 应 best-effort 失败返 false，不 panic。
+    #[tokio::test]
+    async fn push_back_branch_returns_false_when_no_remote() {
+        let (_td, path, _head) = make_seed_repo_with_two_commits().await;
+        // seed 仓库自己——无 origin remote
+        let ok = try_push_back_branch(&path).await;
+        assert!(!ok, "无 remote 应返 false 而不是 panic");
+    }
+
+    /// detached HEAD 时不 push（避免推 anonymous ref）。
+    #[tokio::test]
+    async fn push_back_branch_skips_detached_head() {
+        let (_td, path, head) = make_seed_repo_with_two_commits().await;
+        // 加 origin 让 push 路径"理论上能通"；但 detached HEAD 应早返
+        let remote_td = tempfile::tempdir().unwrap();
+        let remote_path = remote_td.path().join("origin.git");
+        let _ = tokio::process::Command::new("git")
+            .args([
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&path)
+            .args([
+                "remote",
+                "add",
+                "origin",
+                remote_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+            .unwrap();
+        // detach
+        let _ = tokio::process::Command::new("git")
+            .current_dir(&path)
+            .args(["checkout", "-q", "--detach", &head])
+            .output()
+            .await;
+
+        let ok = try_push_back_branch(&path).await;
+        assert!(!ok, "detached HEAD 应跳过 push");
+    }
+
+    /// FUXI_DISABLE_PUSHBACK=1 时直接跳过——返 false 不 spawn git。
+    #[tokio::test]
+    async fn push_back_branch_respects_disable_env() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("FUXI_DISABLE_PUSHBACK", "1") };
+        let ok = try_push_back_branch(dir.path()).await;
+        unsafe { std::env::remove_var("FUXI_DISABLE_PUSHBACK") };
         assert!(!ok);
     }
 
