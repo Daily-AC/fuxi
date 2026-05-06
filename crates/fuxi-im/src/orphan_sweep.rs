@@ -74,11 +74,7 @@ pub async fn sweep_orphan_tasks(bus: &EventBus) -> usize {
         }
     }
 
-    tracing::info!(
-        cancelled,
-        cutoff_minutes,
-        "orphan sweep 完成"
-    );
+    tracing::info!(cancelled, cutoff_minutes, "orphan sweep 完成");
     cancelled
 }
 
@@ -89,8 +85,8 @@ async fn sweep_one(
     raw_id: &str,
     cutoff: chrono::DateTime<Utc>,
 ) -> anyhow::Result<bool> {
-    let task_id = parse_task_id(raw_id)
-        .ok_or_else(|| anyhow::anyhow!("非法 task id 格式: {raw_id}"))?;
+    let task_id =
+        parse_task_id(raw_id).ok_or_else(|| anyhow::anyhow!("非法 task id 格式: {raw_id}"))?;
     let events = store.history_for_task(task_id).await?;
     if events.is_empty() {
         return Ok(false);
@@ -252,7 +248,10 @@ mod tests {
             }
         })
         .await;
-        assert!(saw.is_ok() && saw.unwrap().is_some(), "应订阅到 TaskCancelled");
+        assert!(
+            saw.is_ok() && saw.unwrap().is_some(),
+            "应订阅到 TaskCancelled"
+        );
     }
 
     #[tokio::test]

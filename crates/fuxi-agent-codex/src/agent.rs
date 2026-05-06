@@ -227,9 +227,7 @@ impl Agent for CodexAgent {
                 let exit_str = exit_code
                     .map(|c| format!("exit={c}"))
                     .unwrap_or_else(|| "exit=?".to_string());
-                let mut msg = format!(
-                    "codex 子进程异常退出（{exit_str}），未产出任何事件。{hint}"
-                );
+                let mut msg = format!("codex 子进程异常退出（{exit_str}），未产出任何事件。{hint}");
                 if !stderr_tail.is_empty() {
                     msg.push_str("\n\nstderr 末尾：\n");
                     msg.push_str(&stderr_tail);
@@ -455,10 +453,7 @@ mod tests {
         let agent = CodexAgent::launch_with_id(AgentId::new(), profile(), cfg)
             .await
             .expect("launch");
-        let mut rx = agent
-            .dispatch(Task::new("t", "d"))
-            .await
-            .expect("dispatch");
+        let mut rx = agent.dispatch(Task::new("t", "d")).await.expect("dispatch");
 
         // 收齐所有 events（rx 关闭后跳出）
         let mut events = Vec::new();
@@ -515,10 +510,7 @@ mod tests {
         let agent = CodexAgent::launch_with_id(AgentId::new(), profile(), cfg)
             .await
             .expect("launch");
-        let mut rx = agent
-            .dispatch(Task::new("t", "d"))
-            .await
-            .expect("dispatch");
+        let mut rx = agent.dispatch(Task::new("t", "d")).await.expect("dispatch");
 
         let mut events = Vec::new();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
