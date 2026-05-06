@@ -101,6 +101,11 @@ pub async fn run(args: StartArgs) -> Result<()> {
         .with_context(|| format!("打开事件库 {}", events_db_path.display()))?;
     let bus = EventBus::new(store, Default::default());
 
+    // v2-session13 收尾：启动期扫 events.db，对"非终态 + 长期无活跃"的 task
+    // 兜底发 TaskCancelled——补 Bug 3（commit 8a2e03e）pump 兜底只对新 task
+    // 生效的盲点。详见 fuxi_im::orphan_sweep。FUXI_DISABLE_ORPHAN_SWEEP=1 关。
+    let _ = fuxi_im::orphan_sweep::sweep_orphan_tasks(&bus).await;
+
     // 2. Workspace + Fuxi
     let workspace_root = args
         .workspace_root
