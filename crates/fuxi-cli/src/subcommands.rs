@@ -683,6 +683,25 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
             mime,
             body,
         } => format!("{task} ← {from} {filename} ({mime}, {} bytes)", body.len()),
+        UsageReport {
+            total_tokens,
+            window_size,
+            pct,
+            ..
+        } => format!(
+            "usage {} / {} ({:.1}%)",
+            total_tokens,
+            window_size,
+            pct * 100.0
+        ),
+        XuannvContextWatermark {
+            threshold_pct,
+            action,
+            ..
+        } => format!("玄女 ctx⚠ {threshold_pct}% [{action}]"),
+        XuannvHandoffWritten { length_chars, .. } => {
+            format!("玄女 handoff ↓ {length_chars} chars")
+        }
     }
 }
 

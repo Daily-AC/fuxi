@@ -569,6 +569,25 @@ fn summarize(k: &EventKind) -> String {
             filename,
             body.len()
         ),
+        UsageReport {
+            total_tokens,
+            window_size,
+            pct,
+            ..
+        } => format!(
+            "usage {} / {} ({:.1}%)",
+            total_tokens,
+            window_size,
+            pct * 100.0
+        ),
+        XuannvContextWatermark {
+            threshold_pct,
+            action,
+            ..
+        } => format!("xuannv ctx⚠ {threshold_pct}% [{action}]"),
+        XuannvHandoffWritten { length_chars, .. } => {
+            format!("xuannv handoff ↓ {length_chars} chars")
+        }
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -664,6 +683,14 @@ fn color_for(k: &EventKind) -> Color {
         // 但更轻（无文件落地、不进收件箱），用 LightCyan 与 deliverable
         // 家族（LightYellow）区分。
         AgentInlineMessagePushed { .. } => Color::LightCyan,
+
+        // task #8 上下文管理一族 —— UsageReport 是平凡审计走 DarkGray 不抢
+        // 眼；Watermark 是高 attention（玄女自己将"长话短说"或"问要不要换
+        // 副本"）走 Yellow；HandoffWritten 是稀有里程碑事件走 LightMagenta
+        // 与 platform 一族同色（"我自己生命周期"）。
+        UsageReport { .. } => Color::DarkGray,
+        XuannvContextWatermark { .. } => Color::Yellow,
+        XuannvHandoffWritten { .. } => Color::LightMagenta,
 
         Custom { .. } => Color::DarkGray,
     }

@@ -27,9 +27,28 @@
 //! 这是单次成本：教学更新频率应远低于对话连续性需求。
 
 use anyhow::{Context, Result};
+use clap::Args;
+use fuxi_core::event::{Event, EventKind, EventMeta};
+use fuxi_events::EventStore;
 use fuxi_memory::OracleStore;
+use std::io::Read;
+use std::path::PathBuf;
 
 use crate::session;
+
+/// 玄女上下文交接落档绝对路径。**与后端 fuxi-im::xuannv_handoff 看的同一份**。
+/// 路径走 `~/.fuxi/xuannv-handoff.md`——跟其他 fuxi 家产同目录，systemd 服务
+/// 进程也读得到。
+fn handoff_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".fuxi").join("xuannv-handoff.md"))
+        .unwrap_or_else(|| PathBuf::from(".fuxi/xuannv-handoff.md"))
+}
+
+/// 上限：500 字 = 大约 1500-2000 chars（中文每字 1 char）。500 字数中文还能塞下
+/// 「当前活跃 task + 待用户拍板事项 + 用户近期偏好」三段，超出说明玄女写跑题
+/// 了——拒并提示她精简。
+const HANDOFF_MAX_CHARS: usize = 2000;
 
 /// daemon / IM 默认 events.db 路径——跟 `fuxi im start` 用同一份
 /// (`im.rs::default_events_db_path` SoT：`$HOME/.fuxi/events.db`)。
@@ -37,6 +56,92 @@ fn default_events_db_path() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(|h| std::path::PathBuf::from(h).join(".fuxi").join("events.db"))
         .unwrap_or_else(|| std::path::PathBuf::from(".fuxi/events.db"))
+}
+
+#[derive(Debug, Args)]
+pub struct HandoffWriteArgs {
+    /// handoff 内容（≤500 字 markdown）；传 `-` 从 stdin 读。
+    pub body: String,
+}
+
+pub async fn run_handoff_write(args: HandoffWriteArgs) -> Result<()> {
+    let body = if args.body == "-" {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .context("读 stdin 失败")?;
+        s
+    } else {
+        args.body
+    };
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("handoff 内容为空——必须 ≤500 字 markdown 实际内容");
+    }
+    let len = trimmed.chars().count();
+    if len > HANDOFF_MAX_CHARS {
+        anyhow::bail!(
+            "handoff 超长：{len} chars > {HANDOFF_MAX_CHARS} chars。500 字应足够 \
+             摘要「活跃 task + 待用户拍板事项 + 用户偏好」——精简后再写"
+        );
+    }
+
+    let path = handoff_path();
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建父目录 {} 失败", parent.display()))?;
+    }
+    std::fs::write(&path, trimmed.as_bytes())
+        .with_context(|| format!("写 handoff 文件 {} 失败", path.display()))?;
+    println!("✓ handoff 已落档：{} ({} chars)", path.display(), len);
+
+    // emit 事件——后端 fuxi-im 长跑进程订阅 EventBus 看 XuannvHandoffWritten
+    // 即触发 idle kill + spawn 新副本。CLI 用 EventStore 直写而非走 daemon
+    // socket：CLI 短命，连 socket 拉 IPC 重；EventStore append-only 安全。
+    let events_db = std::env::var("FUXI_EVENTS_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_events_db_path());
+    if events_db.exists() {
+        let store = EventStore::connect_file(&events_db)
+            .await
+            .context("打开 events.db 失败")?;
+        let mut meta = EventMeta::now();
+        meta.session = None;
+        let ev = Event {
+            meta,
+            kind: EventKind::XuannvHandoffWritten {
+                path: path.clone(),
+                length_chars: len.min(u32::MAX as usize) as u32,
+            },
+        };
+        store
+            .append(&ev)
+            .await
+            .context("XuannvHandoffWritten 事件入库失败")?;
+        println!("✓ XuannvHandoffWritten 事件已 publish");
+    } else {
+        println!(
+            "⚠ events.db 不存在（{}）——跳过事件发布",
+            events_db.display()
+        );
+        println!("  fuxi-im 启动时会自动检测落档，不影响交接流程。");
+    }
+    Ok(())
+}
+
+pub async fn run_handoff_read() -> Result<()> {
+    let path = handoff_path();
+    if !path.exists() {
+        println!("尚无 handoff 文件：{}", path.display());
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("读 handoff 文件 {} 失败", path.display()))?;
+    println!("=== handoff @ {} ===", path.display());
+    println!("{}", body);
+    Ok(())
 }
 
 pub async fn run_refresh() -> Result<()> {

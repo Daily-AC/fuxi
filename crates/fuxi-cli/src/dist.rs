@@ -2788,7 +2788,7 @@ fn cc_event_to_push(ev: &fuxi_agent_cc::CcEvent) -> Option<ProgressPush> {
                 },
             })
         }
-        CcEvent::ResultError { reason } => Some(ProgressPush {
+        CcEvent::ResultError { reason, .. } => Some(ProgressPush {
             kind: ProgressKind::Error,
             text: reason.clone(),
         }),
@@ -4218,6 +4218,7 @@ mod tests {
         // 不能重复 push 否则 TUI 看到两份相同文本。
         let ev = fuxi_agent_cc::CcEvent::ResultSuccess {
             text: "hello".into(),
+            usage: None,
         };
         assert!(super::cc_event_to_push(&ev).is_none());
     }
@@ -4226,6 +4227,7 @@ mod tests {
     fn cc_event_result_error_maps_to_error_kind() {
         let ev = fuxi_agent_cc::CcEvent::ResultError {
             reason: "rate limited".into(),
+            usage: None,
         };
         let p = super::cc_event_to_push(&ev).unwrap();
         assert_eq!(p.kind, ProgressKind::Error);

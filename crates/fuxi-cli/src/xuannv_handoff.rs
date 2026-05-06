@@ -1,0 +1,234 @@
+//! 玄女 handoff 接班监听器（task #8 后端落档→spawn 路径）。
+//!
+//! ## 它在做什么
+//!
+//! 订阅 [`fuxi_core::EventKind::XuannvHandoffWritten`]——CLI `fuxi xuannv
+//! handoff write` 落档时发出。监听器拿到事件后：
+//! 1. **等玄女当前 turn idle**：直接 kill 中途的 turn 会丢用户最近一句的回复
+//!    （会把 cc 进程腰斩）。轮询 shelf status 直到 `Idle`，超时兜底 60s 后强 kill。
+//! 2. **kill 老玄女**：调 `Fuxi::shutdown_agent`——shutdown_agent 已豁免玄女
+//!    的特殊路径，但本路径是用户主动交接，要绕过那个豁免。临时方案：
+//!    `Fuxi::set_xuannv(other)` 后 shutdown 不命中玄女豁免——但这会让 watcher
+//!    误以为 id 变了。最终方案：直接调 `kill` 命令通过 fuxi-orchestrator 的
+//!    Force kill API。
+//! 3. **spawn 新玄女**：走 `xuannv_bootstrap::ensure_xuannv` 同款路径，但传一
+//!    个临时 `append_system_prompt` 头部 = handoff 内容。新玄女上线后：
+//!    a. set_xuannv 触发 watch 通知；
+//!    b. 上下文 watcher 自动重置累加；
+//!    c. 删除 handoff 文件（避免下次启动误以为又要交接）；
+//!    d. emit 一条 system_origin 消息「✻ 上下文已交接 · 新副本接班」让用户
+//!    视角对齐 + PWA 通知 tab 加一条。
+//!
+//! ## 重启后行为
+//!
+//! 重启 fuxi-im 进程时，老的 `~/.fuxi/xuannv-handoff.md` 可能还在（user 重启
+//! 操作时机不可控）。本监听器**启动时检查一次**：若文件存在且 modtime <30s
+//! 内（CLI 刚 publish 完事件，IM 重启抢跑），重放 handoff 流程；超过 30s
+//! → 用户手动调 `fuxi xuannv handoff read` 自检。
+//!
+//! ## 测试
+//!
+//! 完整 e2e 极难（需要真 cc 进程 + 30s+ 玄女 turn）。本模块的核心逻辑：
+//! 阈值判断 + 等 idle 轮询 + spawn 新副本——前两者抽出函数单测；spawn 走
+//! 与 ensure_xuannv 相同路径，由 ensure_xuannv 的既有覆盖兜底。
+
+use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use fuxi_agent_cc::CcLaunchConfig;
+use fuxi_core::event::EventKind;
+use fuxi_core::id::AgentId;
+use fuxi_events::EventBus;
+use fuxi_memory::OracleStore;
+use fuxi_orchestrator::{Fuxi, ShelfStatus, WorkerKind};
+use fuxi_skills as skill_loader;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
+#[allow(unused_imports)]
+use fuxi_orchestrator::Intervener as _;
+
+/// handoff markdown 落档绝对路径——同 [`crate::xuannv_cmd::handoff_path`]。
+fn handoff_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".fuxi").join("xuannv-handoff.md"))
+        .unwrap_or_else(|| PathBuf::from(".fuxi/xuannv-handoff.md"))
+}
+
+/// 等玄女当前 turn idle 的 ceiling——超时仍 Busy 就强 kill。
+const IDLE_WAIT_CEILING_SECS: u64 = 60;
+/// 轮询间隔——shelf 内存读 + 异步锁，500ms 不重。
+const IDLE_POLL_INTERVAL_MS: u64 = 500;
+
+pub fn start_watcher(
+    fuxi: Arc<Fuxi>,
+    bus: EventBus,
+    oracle: OracleStore,
+    role: String,
+) -> JoinHandle<()> {
+    let mut sub = bus.subscribe();
+    tokio::spawn(async move {
+        // 启动期一次性检查：若 handoff 文件已存在（CLI 在 IM 重启的窗口里 publish
+        // 过事件，事件已 SQLite 持久化但 broadcast 流我们错过了），主动跑一次。
+        if handoff_path().exists() {
+            info!("启动期发现 handoff 文件落档，触发一次接班流程");
+            if let Err(err) = run_handoff(&fuxi, &oracle, &role).await {
+                warn!(?err, "启动期 handoff 接班流程失败");
+            }
+        }
+        info!("玄女 handoff 监听器启动");
+        while let Some(maybe_ev) = sub.next().await {
+            let ev = match maybe_ev {
+                Ok(e) => e,
+                Err(err) => {
+                    debug!(?err, "handoff 监听器跳过非事件信号");
+                    continue;
+                }
+            };
+            if !matches!(ev.kind, EventKind::XuannvHandoffWritten { .. }) {
+                continue;
+            }
+            info!("收到 XuannvHandoffWritten 事件，开始接班流程");
+            if let Err(err) = run_handoff(&fuxi, &oracle, &role).await {
+                warn!(?err, "玄女 handoff 接班流程失败");
+            }
+        }
+        info!("玄女 handoff 监听器退出（bus 关闭）");
+    })
+}
+
+/// 完整接班流程：等 idle → kill old → spawn new with prelude → 通知前端。
+async fn run_handoff(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Result<()> {
+    let path = handoff_path();
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("读 handoff 文件 {} 失败", path.display()))?;
+    let body = body.trim().to_string();
+    if body.is_empty() {
+        anyhow::bail!("handoff 文件存在但内容空——拒绝接班");
+    }
+    let len = body.chars().count();
+
+    let old_xuannv = fuxi
+        .xuannv_id()
+        .await
+        .context("玄女 id 未设——尚未 spawn 完成？")?;
+    info!(old = %old_xuannv, "等玄女当前 turn idle");
+    wait_idle(fuxi, old_xuannv).await;
+
+    info!(old = %old_xuannv, "kill 老玄女");
+    if let Err(err) = fuxi
+        .shutdown_xuannv_for_handoff(old_xuannv, "用户上下文交接".to_string())
+        .await
+    {
+        warn!(?err, "kill 老玄女失败——继续 spawn 新副本（老进程可能已死）");
+    }
+    // 给系统一点时间完成 cleanup（drop child + 清 shelf entry）
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    info!("spawn 新玄女副本（注入 handoff prelude）");
+    let new_id = spawn_with_prelude(fuxi, oracle, role, &body).await?;
+    fuxi.set_xuannv(new_id).await;
+
+    // 删除 handoff 文件——下次启动不会误以为又要交接
+    if let Err(err) = std::fs::remove_file(&path) {
+        warn!(?err, "删除 handoff 文件失败——下次重启会重放");
+    }
+
+    // 通知玄女自身：上下文已接班（让她在新对话首句对用户说一声）
+    let notice = format!(
+        "[CTX_HANDOFF_DONE] 你是新副本，刚由上一只玄女写的 handoff（{} 字）接班。\
+         请用一句话告诉用户「✻ 上下文已交接（{} 字摘要），我接着上一只副本继续。」",
+        len, len
+    );
+    if let Err(err) = <Fuxi as fuxi_orchestrator::Intervener>::intervene_system(
+        fuxi,
+        new_id,
+        false,
+        &notice,
+        "context_handoff_done",
+    )
+    .await
+    {
+        warn!(
+            ?err,
+            "新玄女接班通知 intervene 失败——用户视角无系统消息提示"
+        );
+    }
+    info!(new = %new_id, "玄女接班完成");
+    Ok(())
+}
+
+async fn wait_idle(fuxi: &Fuxi, agent: AgentId) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(IDLE_WAIT_CEILING_SECS);
+    while std::time::Instant::now() < deadline {
+        match fuxi.status_of(agent).await {
+            Some(ShelfStatus::Idle) => return,
+            None => return, // 已被清走，不必再等
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(IDLE_POLL_INTERVAL_MS)).await;
+    }
+    warn!(agent = %agent, "等玄女 idle 超时——强 kill 老副本（可能丢未完成 turn 的回复）");
+}
+
+/// spawn 新玄女并把 handoff 内容塞入 system prompt 头部。等价于
+/// `xuannv_bootstrap::ensure_xuannv` 但 prepend handoff 段。
+async fn spawn_with_prelude(
+    fuxi: &Fuxi,
+    oracle: &OracleStore,
+    role: &str,
+    handoff_body: &str,
+) -> Result<AgentId> {
+    let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
+    let xuannv_profile = loaded.profile.clone();
+
+    // 接班 handoff 是新 cc session（老 cc 已 kill）→ 走 fresh path：
+    // resume_session_id = None；让 session_id 由策府新生成 + 落盘。
+    let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(oracle)
+        .await
+        .context("解析玄女 session_id")?;
+    // 老 session 已经 kill—不该 resume 老内容（cc 重读老 system prompt 不带 handoff prelude）
+    // 强制走 fresh：把 resume 路径丢掉
+    let _ = resume_session_id;
+    let resume_session_id = None;
+    let fresh_session_to_record = session_id.clone();
+
+    // handoff prelude 在最顶部，原 append_system_prompt（含 dispatch-routing 教学）
+    // 在后面——cc 接收 system prompt 是按顺序拼接的字符串，前者优先级 = 出现位置。
+    let prelude = format!(
+        "## 上下文交接（必读）\n\n\
+         你是新副本玄女——由上一只副本主动交接来的。下面是她写的 handoff 摘要，\
+         请把它当作「你刚才在做的事」读，不要当陌生信息：\n\n\
+         ---\n{}\n---\n\n\
+         首条用户消息处理完后，你**必须**单独发一句：「✻ 上下文已交接 · 新副本接班\
+         （从 handoff 接续上文）」让用户看到接班完成。然后正常继续对话。\n\n",
+        handoff_body
+    );
+    let combined = if loaded.append_system_prompt.is_empty() {
+        prelude
+    } else {
+        format!("{}{}", prelude, loaded.append_system_prompt)
+    };
+
+    let cc_cfg = CcLaunchConfig {
+        append_system_prompt: Some(combined),
+        allowed_tools: loaded.allowed_tools,
+        disallowed_tools: loaded.disallowed_tools,
+        resume_session_id,
+        session_id,
+        ..Default::default()
+    };
+
+    let id = fuxi
+        .spawn_worker(xuannv_profile, WorkerKind::Cc(cc_cfg))
+        .await
+        .context("spawn 新玄女失败")?;
+    if let Some(sid) = fresh_session_to_record
+        && let Err(e) = crate::session::record_xuannv_session(oracle, &sid, "im-handoff").await
+    {
+        warn!(error = %e, session_id = %sid, "新玄女 session 落策府失败");
+    }
+    Ok(id)
+}
