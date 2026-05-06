@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, onCleanup, onMount, type Component } from "solid-js";
 import { colorForRole } from "~/tokens";
-import { NODE_CHIP_COLOR, type MentionCandidate } from "~/lib/mentions";
+import { NODE_CHIP_COLOR, PROJECT_CHIP_COLOR, type MentionCandidate } from "~/lib/mentions";
 import styles from "./MentionAutocomplete.module.css";
 
 // MentionAutocomplete · v3 #N2' / #37
@@ -69,13 +69,19 @@ export const MentionAutocomplete: Component<MentionAutocompleteProps> = (props) 
     }
   });
 
-  // #60：worker 候选在前，node 候选在后；保留原 props.candidates 顺序但分两段排
+  // #60 + v2 跨节点：三段排序——worker → project → node。保留原 props.candidates
+  // 顺序但分三段，三段交界处渲染 separator label（"项目" / "节点"）。
   const ordered = createMemo<MentionCandidate[]>(() => {
-    const workers = props.candidates.filter((c) => c.kind !== "node");
+    const workers = props.candidates.filter((c) => c.kind !== "node" && c.kind !== "project");
+    const projects = props.candidates.filter((c) => c.kind === "project");
     const nodes = props.candidates.filter((c) => c.kind === "node");
-    return [...workers, ...nodes];
+    return [...workers, ...projects, ...nodes];
   });
-  // node 段的起始 index，用于渲染 separator
+  // project / node 段的起始 index，用于渲染 separator
+  const firstProjectIdx = createMemo<number>(() => {
+    const list = ordered();
+    return list.findIndex((c) => c.kind === "project");
+  });
   const firstNodeIdx = createMemo<number>(() => {
     const list = ordered();
     return list.findIndex((c) => c.kind === "node");
@@ -102,15 +108,34 @@ export const MentionAutocomplete: Component<MentionAutocompleteProps> = (props) 
             {(c, i) => {
               const isActive = (): boolean => i() === props.highlightedIndex;
               const isNode = (): boolean => c.kind === "node";
+              const isProject = (): boolean => c.kind === "project";
               const dotStyle = (): { background: string } => ({
-                background: isNode() ? NODE_CHIP_COLOR : colorForRole(c.role),
+                background: isNode()
+                  ? NODE_CHIP_COLOR
+                  : isProject()
+                    ? PROJECT_CHIP_COLOR
+                    : colorForRole(c.role),
               });
-              const itemTestId = (): string =>
-                isNode() ? `mention-item-node-${c.agent_id}` : `mention-item-${c.agent_id}`;
-              const showSep = (): boolean => isNode() && i() === firstNodeIdx() && i() > 0;
+              const itemTestId = (): string => {
+                if (isNode()) return `mention-item-node-${c.agent_id}`;
+                if (isProject()) return `mention-item-project-${c.agent_id}`;
+                return `mention-item-${c.agent_id}`;
+              };
+              const showProjectSep = (): boolean =>
+                isProject() && i() === firstProjectIdx() && i() > 0;
+              const showNodeSep = (): boolean => isNode() && i() === firstNodeIdx() && i() > 0;
               return (
                 <>
-                  <Show when={showSep()}>
+                  <Show when={showProjectSep()}>
+                    <div
+                      class={styles.separator}
+                      data-testid="mention-popup-project-sep"
+                      aria-hidden="true"
+                    >
+                      项目
+                    </div>
+                  </Show>
+                  <Show when={showNodeSep()}>
                     <div
                       class={styles.separator}
                       data-testid="mention-popup-node-sep"

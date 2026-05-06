@@ -95,7 +95,7 @@ pub async fn intervene(
 
     // target 解析：body 显式 → 用之；否则 fallback 玄女。
     // bug #77：接受 `agent-<uuid>` 前缀（前端 AgentId Display 形式）+ 裸 uuid。
-    let target = match body
+    let mut target = match body
         .target
         .as_deref()
         .map(str::trim)
@@ -107,6 +107,23 @@ pub async fn intervene(
             Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
         })?,
     };
+
+    // bug fix（v1-session15+）：用户 @ 已 dead 的门客 → shelf 查不到 → 旧代码
+    // bubble Orchestrator(AgentNotFound) 被 IntoResponse 映射成 503 "玄女不在"。
+    // 用户视角："这个鲁班咋回事" 这类话通常是想问玄女关于该门客，不是真跟 dead 门客说。
+    // 自动 fallback 到玄女 + prepend 一行提示让她知道用户原本 @ 谁，由她接续答复。
+    let xuannv_for_fallback = state.fuxi.xuannv_id().await;
+    let target_is_xuannv_pre = xuannv_for_fallback == Some(target);
+    let mut dead_target_hint: Option<String> = None;
+    if !target_is_xuannv_pre && state.fuxi.status_of(target).await.is_none() {
+        let xn = xuannv_for_fallback.ok_or_else(|| {
+            Error::Unavailable("玄女尚未就绪——目标门客已下线，无法 fallback".into())
+        })?;
+        dead_target_hint = Some(format!(
+            "[用户原本 @ 了门客 {target}，但该门客已下线（可走 `fuxi spawn --recall-task <id>` 召回 session）。请你接续答复用户。]"
+        ));
+        target = xn;
+    }
     // mentions 同样兼容前缀
     let mentions = body
         .mentions
@@ -161,7 +178,7 @@ pub async fn intervene(
     //
     // target 是 worker 时（PWA 任务 thread @ 门客）保持原行为：pinned_node 直接
     // 走 idle-degrade 退化 dispatch 时注入 task.pinned_node，命中 dist 决策树。
-    let xuannv_id = state.fuxi.xuannv_id().await;
+    let xuannv_id = xuannv_for_fallback;
     let target_is_xuannv = xuannv_id == Some(target);
     let (mut effective_text, effective_pinned_node): (String, Option<String>) =
         match (target_is_xuannv, body.pinned_node.as_deref()) {
@@ -171,6 +188,9 @@ pub async fn intervene(
             ),
             _ => (text.to_string(), body.pinned_node.clone()),
         };
+    if let Some(hint) = dead_target_hint {
+        effective_text = format!("{hint}\n\n{effective_text}");
+    }
     if !attachment_block.is_empty() {
         effective_text.push_str(&attachment_block);
     }
