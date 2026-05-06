@@ -15,11 +15,12 @@ use crate::parser::{self, TranslateState, parse_line, translate};
 use crate::spawn::{SpawnedCodex, spawn_codex};
 use async_trait::async_trait;
 use fuxi_core::agent::{Agent, AgentCard, AgentProfile, AgentStatus};
-use fuxi_core::event::Event;
+use fuxi_core::event::{Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::Task;
 use fuxi_core::{CoreError, Result};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdout};
 use tokio::sync::{Mutex, mpsc};
@@ -133,13 +134,23 @@ impl Agent for CodexAgent {
 
     async fn dispatch(&self, task: Task) -> Result<mpsc::Receiver<Event>> {
         let prompt = self.task_to_prompt(&task);
-        let SpawnedCodex { child, stdout, pid } =
-            spawn_codex(&self.cfg, &prompt).map_err(CodexError::Io)?;
+        let SpawnedCodex {
+            child,
+            stdout,
+            stderr,
+            pid,
+        } = spawn_codex(&self.cfg, &prompt).map_err(CodexError::Io)?;
 
+        // v2-session13：dispatch 时只持 stderr handle 给 collector，child
+        // 由 spawn task 独占（reader_loop 退出后 wait child 拿 exit code）。
+        // 之前 child 寄存在 inner——但 wait child 必须独占所有权，需要 take
+        // 出来。Cancel 路径（user-driven SIGINT）现在依赖 last_pid + libc kill
+        // 而非 inner.child，因此 child 不放回 inner 也不影响 cancel 语义。
+        let pre_model = self.cfg.model.clone();
         {
             let mut inner = self.inner.lock().await;
-            // 若之前还有 child，先 drop 掉——kill_on_drop 会兜底清理。
-            inner.child = Some(child);
+            // 之前残留的 child 直接 drop——kill_on_drop 兜底清理。
+            inner.child = None;
             inner.last_pid = pid;
             inner.status = AgentStatus::Busy;
         }
@@ -149,8 +160,108 @@ impl Agent for CodexAgent {
         let task_id = Some(task.id);
         let inner_weak = Arc::downgrade(&self.inner);
 
+        // stderr collector：异步追读，缓冲到 Vec<String>。reader_loop 退出后
+        // 上层从这取末尾几行作为诊断信息。
+        let stderr_buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf_for_loop = stderr_buf.clone();
         tokio::spawn(async move {
-            reader_loop(stdout, tx, agent_id, task_id, pid).await;
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut g = stderr_buf_for_loop.lock().await;
+                if g.len() >= 64 {
+                    g.remove(0);
+                }
+                g.push(line);
+            }
+        });
+
+        let emit_count = Arc::new(AtomicUsize::new(0));
+        let emit_count_for_reader = emit_count.clone();
+        let mut child = child;
+
+        tokio::spawn(async move {
+            reader_loop(
+                stdout,
+                tx.clone(),
+                agent_id,
+                task_id,
+                pid,
+                emit_count_for_reader,
+            )
+            .await;
+
+            // reader_loop 已结束（终态/EOF/错误其一）→ 等 child 真死拿 exit code
+            let exit_status = match child.wait().await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, agent = %agent_id, "codex wait child 失败");
+                    None
+                }
+            };
+            let exit_ok = exit_status.map(|s| s.success()).unwrap_or(false);
+            let exit_code = exit_status.and_then(|s| s.code());
+            let emitted = emit_count.load(Ordering::SeqCst);
+
+            // 异常退出诊断：codex 进程没翻译出任何事件且非 0 退出。原因常见：
+            // - 未设 FUXI_CODEX_MODEL（API key 账号 codex 拒绝默认模型）
+            // - codex auth 失效（chatgpt/api key 过期）
+            // - codex binary 不在 PATH（spawn 阶段已挂，本路径不会走到）
+            // 翻译成 AgentResponded 让玄女在对话流里看到、能给用户复述。
+            if emitted == 0 && !exit_ok {
+                let stderr_tail = {
+                    let g = stderr_buf.lock().await;
+                    g.iter()
+                        .rev()
+                        .take(8)
+                        .rev()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                let hint = if pre_model.is_empty() {
+                    "可能原因：未设 FUXI_CODEX_MODEL（API key 账号需要显式指定，\
+                     如 `export FUXI_CODEX_MODEL=gpt-5.1-mini`），或 codex auth 失效。"
+                } else {
+                    "可能原因：FUXI_CODEX_MODEL 当前值不被账号支持，或 codex auth 失效。"
+                };
+                let exit_str = exit_code
+                    .map(|c| format!("exit={c}"))
+                    .unwrap_or_else(|| "exit=?".to_string());
+                let mut msg = format!(
+                    "codex 子进程异常退出（{exit_str}），未产出任何事件。{hint}"
+                );
+                if !stderr_tail.is_empty() {
+                    msg.push_str("\n\nstderr 末尾：\n");
+                    msg.push_str(&stderr_tail);
+                }
+                tracing::warn!(
+                    agent = %agent_id,
+                    exit = ?exit_code,
+                    "codex 静默失败兜底诊断"
+                );
+                let mut meta = EventMeta::now();
+                meta.agent = Some(agent_id);
+                meta.task = task_id;
+                let _ = tx
+                    .send(Event {
+                        meta,
+                        kind: EventKind::AgentResponded { text: msg },
+                    })
+                    .await;
+                let mut meta = EventMeta::now();
+                meta.agent = Some(agent_id);
+                meta.task = task_id;
+                let cause = exit_code
+                    .map(|c| format!("codex exit {c}"))
+                    .unwrap_or_else(|| "codex exit unknown".to_string());
+                let _ = tx
+                    .send(Event {
+                        meta,
+                        kind: EventKind::AgentDead { cause },
+                    })
+                    .await;
+            }
+
             if let Some(inner) = inner_weak.upgrade() {
                 let mut guard = inner.lock().await;
                 guard.status = AgentStatus::Idle;
@@ -171,19 +282,16 @@ impl Agent for CodexAgent {
 
     async fn cancel(&self, _task_id: TaskId) -> Result<()> {
         let mut inner = self.inner.lock().await;
-        if let Some(child) = inner.child.as_mut() {
+        // v2-session13：child 现由 dispatch spawn task 独占（reader_loop 退出后
+        // wait 它），inner 不再持。改用 last_pid + libc kill 信号路径——对已退
+        // 进程 ESRCH 是 noop，不会误伤。
+        if let Some(pid) = inner.last_pid {
             #[cfg(unix)]
             {
-                if let Some(pid) = child.id() {
-                    // SAFETY: `kill(2)` 接收 raw pid + signo；对已退出进程返回 ESRCH。
-                    unsafe {
-                        libc_kill(pid as i32, SIGINT);
-                    }
+                // SAFETY: `kill(2)` 接收 raw pid + signo；对已退出进程返回 ESRCH。
+                unsafe {
+                    libc_kill(pid as i32, SIGINT);
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = child.start_kill();
             }
         }
         inner.status = AgentStatus::Stopping;
@@ -194,27 +302,34 @@ impl Agent for CodexAgent {
     async fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.status = AgentStatus::Stopping;
-        if let Some(mut child) = inner.child.take() {
-            let wait = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
-            if wait.is_err() {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+        // child 已被 spawn task 拿走；shutdown 走 SIGINT 信号 + 信赖 spawn task
+        // 的 kill_on_drop 兜底。无 wait（spawn task 自己会 wait）。
+        if let Some(pid) = inner.last_pid {
+            #[cfg(unix)]
+            {
+                unsafe {
+                    libc_kill(pid as i32, SIGINT);
+                }
             }
         }
         inner.status = AgentStatus::Dead;
-        tracing::info!(agent = %self.card.id, "codex agent shutdown complete");
+        tracing::info!(agent = %self.card.id, "codex agent shutdown signaled");
         Ok(())
     }
 }
 
 /// stdout 按行读 → parse → translate → tx。
 /// 终止条件：`turn.completed` / `turn.failed` / EOF。
+///
+/// `emit_count`：每条成功 send 的事件 +1。dispatch task 退出时若仍为 0 + child
+/// exit != 0，emit 兜底诊断（避免 codex 异常退出"静默失败"）。
 async fn reader_loop(
     stdout: ChildStdout,
     tx: mpsc::Sender<Event>,
     agent_id: AgentId,
     task_id: Option<TaskId>,
     pid_hint: Option<u32>,
+    emit_count: Arc<AtomicUsize>,
 ) {
     let mut state = TranslateState::new();
     let mut reader = BufReader::new(stdout).lines();
@@ -247,6 +362,7 @@ async fn reader_loop(
                 tracing::debug!("codex agent event channel closed by subscriber");
                 return;
             }
+            emit_count.fetch_add(1, Ordering::SeqCst);
         }
         if is_terminal {
             // codex 会紧接着 close stdout；我们不继续读，避免拖尾。
@@ -314,6 +430,120 @@ mod tests {
             "got: {prompt}"
         );
         assert!(prompt.contains("第一步\n\n把任务拆成三段"), "got: {prompt}");
+    }
+
+    /// v2-session13: codex 异常退出（exit 非 0 + 0 事件）应兜底 emit 一条
+    /// AgentResponded（含 FUXI_CODEX_MODEL 提示）+ 一条 AgentDead。
+    /// 用 `/bin/sh -c "echo ... >&2; exit 1"` 模拟 codex auth 失败场景。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatch_emits_diagnostic_when_codex_exits_silently() {
+        let cfg = CodexLaunchConfig {
+            binary: "/bin/sh".into(),
+            // sh -c "..." 会忽略后续 argv（codex 的 build_args + prompt），
+            // 等于跑这条 script 然后 exit 1。stderr 一行让我们能验诊断里带 stderr。
+            argv_prefix: vec![
+                "-c".into(),
+                "echo 'simulated codex auth failure: invalid_request_error' >&2; exit 1".into(),
+                "_unused_argv0".into(),
+            ],
+            model: String::new(),
+            full_auto: false,
+            bypass_approvals: false,
+            ..Default::default()
+        };
+        let agent = CodexAgent::launch_with_id(AgentId::new(), profile(), cfg)
+            .await
+            .expect("launch");
+        let mut rx = agent
+            .dispatch(Task::new("t", "d"))
+            .await
+            .expect("dispatch");
+
+        // 收齐所有 events（rx 关闭后跳出）
+        let mut events = Vec::new();
+        let collect = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(ev) = rx.recv().await {
+                events.push(ev);
+            }
+        })
+        .await;
+        assert!(collect.is_ok(), "rx 应在 5s 内关闭（codex sh exit 1）");
+
+        // 兜底诊断 AgentResponded：必含 FUXI_CODEX_MODEL 提示 + stderr 那行
+        let diag = events.iter().find_map(|e| match &e.kind {
+            fuxi_core::EventKind::AgentResponded { text } => Some(text.clone()),
+            _ => None,
+        });
+        let diag = diag.expect("应 emit 兜底 AgentResponded");
+        assert!(
+            diag.contains("FUXI_CODEX_MODEL"),
+            "诊断应提示 FUXI_CODEX_MODEL，实得: {diag}"
+        );
+        assert!(
+            diag.contains("simulated codex auth failure"),
+            "诊断应含 stderr 末尾，实得: {diag}"
+        );
+
+        // 兜底 AgentDead
+        let dead = events
+            .iter()
+            .any(|e| matches!(&e.kind, fuxi_core::EventKind::AgentDead { .. }));
+        assert!(dead, "应 emit 兜底 AgentDead");
+    }
+
+    /// 反向回归：codex 正常退出（exit 0 + 至少 1 个事件）不应 emit 兜底。
+    /// 用一段 jsonl mock：合法的 turn.completed 让 reader_loop emit 一条事件。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatch_does_not_emit_diagnostic_on_normal_exit() {
+        // 用 sh -c 输出一行 codex jsonl 然后正常退出。
+        // turn.completed 是终态——reader_loop 看到它会 return（不读 EOF）。
+        let line = r#"{"type":"turn.completed","cost":0.0}"#;
+        let cfg = CodexLaunchConfig {
+            binary: "/bin/sh".into(),
+            argv_prefix: vec![
+                "-c".into(),
+                format!("echo '{line}'; exit 0"),
+                "_unused".into(),
+            ],
+            model: String::new(),
+            full_auto: false,
+            bypass_approvals: false,
+            ..Default::default()
+        };
+        let agent = CodexAgent::launch_with_id(AgentId::new(), profile(), cfg)
+            .await
+            .expect("launch");
+        let mut rx = agent
+            .dispatch(Task::new("t", "d"))
+            .await
+            .expect("dispatch");
+
+        let mut events = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(ev) = rx.recv().await {
+                events.push(ev);
+            }
+        })
+        .await;
+
+        // 不应 emit 含 "FUXI_CODEX_MODEL" 的 AgentResponded
+        let bogus_diag = events.iter().find_map(|e| match &e.kind {
+            fuxi_core::EventKind::AgentResponded { text } if text.contains("FUXI_CODEX_MODEL") => {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+        assert!(
+            bogus_diag.is_none(),
+            "正常退出不该 emit 兜底诊断，实得: {bogus_diag:?}"
+        );
+        // 也不应 emit AgentDead（正常退出由 spawn task 默默清状态）
+        let dead = events
+            .iter()
+            .any(|e| matches!(&e.kind, fuxi_core::EventKind::AgentDead { .. }));
+        assert!(!dead, "正常退出不该 emit AgentDead");
     }
 
     #[test]

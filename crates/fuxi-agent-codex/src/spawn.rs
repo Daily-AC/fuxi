@@ -10,13 +10,18 @@
 
 use crate::config::CodexLaunchConfig;
 use std::process::Stdio;
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
-/// `spawn_codex` 的返回值。child 正在后台跑，stdout 已 pipe。
+/// `spawn_codex` 的返回值。child 正在后台跑，stdout/stderr 已 pipe。
 /// 不暴露 stdin——codex exec 不接受追加消息。
+///
+/// stderr 暴露：v2-session13 收尾——codex 异常退出（model 错 / auth 错）时
+/// 整段失败信息**只**在 stderr，不在 stdout JSONL。 caller 持 stderr handle
+/// 单独 spawn 一个 collector loop 缓存，给 reader_loop 退出后的诊断信使用。
 pub struct SpawnedCodex {
     pub child: Child,
     pub stdout: ChildStdout,
+    pub stderr: ChildStderr,
     pub pid: Option<u32>,
 }
 
@@ -44,9 +49,12 @@ pub fn spawn_codex(cfg: &CodexLaunchConfig, prompt: &str) -> std::io::Result<Spa
         // 无尽等待的假死。
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        // codex 往 stderr 吐 warning（"Reading additional input from stdin..." 等），
-        // 继承到父进程方便人肉排障；真正的事件流在 stdout 的 JSONL 里。
-        .stderr(Stdio::inherit())
+        // v2-session13：stderr 改 piped 让上层抓诊断。曾是 inherit 让用户人肉
+        // 排障——但 home 上 systemd 跑 fuxi-im 时 stderr 进 journal，玄女完全
+        // 看不到，codex 异常退出（model 错 / auth 错）→ 上层"静默失败"。
+        // piped 后 caller 必须 spawn 读 task 否则 pipe 满会阻塞 codex；
+        // agent.rs::dispatch 同时起 stderr collector 解决。
+        .stderr(Stdio::piped())
         // kill_on_drop 防止测试进程退出后 codex 变孤儿进程。
         .kill_on_drop(true);
 
@@ -67,8 +75,17 @@ pub fn spawn_codex(cfg: &CodexLaunchConfig, prompt: &str) -> std::io::Result<Spa
         .stdout
         .take()
         .ok_or_else(|| std::io::Error::other("codex child missing stdout pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("codex child missing stderr pipe"))?;
 
-    Ok(SpawnedCodex { child, stdout, pid })
+    Ok(SpawnedCodex {
+        child,
+        stdout,
+        stderr,
+        pid,
+    })
 }
 
 #[cfg(test)]
