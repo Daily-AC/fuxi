@@ -95,6 +95,15 @@ pub async fn add_project(
             }
             other => Error::BadRequest(format!("注册失败: {other}")),
         })?;
+    // v2 跨节点 sandbox：home 端 add 项目时自动登记 "home" 进 host_nodes。
+    // 否则 dispatch auto-pin 看到 host_nodes=[] 直接 short-circuit 返 None，
+    // home 端永远不被路由（必须 mac 后续 join 才有候选——错：home 本身就是
+    // 合法 host）。dist controller 自注册的 home node_id 恒为 "home"
+    // （fuxi-cli/im_dist.rs::build_dist_layer 写死）。
+    let project = registry
+        .add_host_node(&project.id, "home")
+        .await
+        .map_err(|e| Error::Internal(format!("登记 home host_node 失败: {e}")))?;
     Ok((StatusCode::CREATED, Json(ProjectView::from(project))))
 }
 
@@ -480,6 +489,14 @@ mod tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+        // v2: add_project 应自动登记 "home" 到 host_nodes
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["host_nodes"].as_array().unwrap(),
+            &vec![serde_json::json!("home")],
+            "add_project 应自动加 home 到 host_nodes（v2 跨节点 auto-pin 候选）"
+        );
 
         // GET 应能看到
         let req2 = Request::builder()
