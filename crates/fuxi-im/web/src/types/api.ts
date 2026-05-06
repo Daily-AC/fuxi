@@ -157,6 +157,36 @@ export interface ProjectsResponse {
   projects: ProjectView[];
 }
 
+// ---------- v1-session16 · 通知 tab（bug 收集器 + handoff offer + review 请求） ----------
+
+/** 单条通知。kind 决定渲染样式 + 图标 + 是否带 task/agent 跳转链接。
+ *  目前用到的 kind：
+ *   - "bug"：玄女自报 fuxi 平台 bug / 改进建议
+ *   - "review_request"（task #8 后通用化）：门客交付等审阅
+ *   - "context_handoff_offer"（task #8）：玄女 context 达 45% 时的"要换新副本吗"询问
+ *   - "system"：平台级提示 */
+export interface NotificationView {
+  id: string;
+  kind: string;
+  /** "info" | "warn" | "error"——前端按级别选色（绿/黄/红）。 */
+  severity: string;
+  title: string;
+  body: string;
+  task_id?: string | null;
+  agent_id?: string | null;
+  /** kind 特定 JSON 字符串（前端按 kind 自行 parse）。 */
+  metadata?: string | null;
+  created_at: string;
+  read_at?: string | null;
+  closed_at?: string | null;
+}
+
+export interface NotificationsResponse {
+  notifications: NotificationView[];
+  /** 未读数（read_at IS NULL AND closed_at IS NULL）—— tab badge 用。 */
+  unread_count: number;
+}
+
 /** POST /api/projects 请求体——PWA「+ 注册项目」表单序列化目标。 */
 export interface AddProjectRequest {
   canonical_path: string;

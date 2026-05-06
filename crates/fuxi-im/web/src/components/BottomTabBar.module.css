@@ -55,3 +55,25 @@
   letter-spacing: 0.4px;
   line-height: 1;
 }
+
+/* tab 红点 badge —— 右上角小标，未读数 / 「99+」溢出 */
+.tab {
+  position: relative;
+}
+.badge {
+  position: absolute;
+  top: 4px;
+  right: 50%;
+  margin-right: -22px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--danger, #e54a4a);
+  color: #fff;
+  font-size: 10px;
+  font-weight: var(--weight-semibold, 600);
+  line-height: 16px;
+  text-align: center;
+  letter-spacing: 0;
+}

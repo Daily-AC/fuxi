@@ -13,8 +13,8 @@
 
 use clap::{Parser, Subcommand};
 use fuxi_cli::{
-    banner, demo, dist, insight_cmd, memory_cmd, note_cmd, profile_cmd, project_cmd, repl, skill,
-    subcommands, theme, up, watch, xuannv_cmd,
+    banner, bug_cmd, demo, dist, insight_cmd, memory_cmd, note_cmd, profile_cmd, project_cmd, repl,
+    skill, subcommands, theme, up, watch, xuannv_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -89,6 +89,8 @@ enum Command {
     /// 玄女控制——刷新教学（让她下次 fresh session 加载 dispatch-routing 最新版）。
     #[command(subcommand)]
     Xuannv(XuannvCmd),
+    /// 【玄女工具】上报 fuxi 平台 bug / 改进建议——落 PWA 通知 tab。
+    Bug(bug_cmd::BugArgs),
     /// 【调试】打印启动 banner 后退出——给主人挑样式用。
     #[command(hide = true)]
     Banner,
@@ -255,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Xuannv(x)) => match x {
             XuannvCmd::Refresh => xuannv_cmd::run_refresh().await,
         },
+        Some(Command::Bug(args)) => bug_cmd::run(args).await,
     }
 }
 

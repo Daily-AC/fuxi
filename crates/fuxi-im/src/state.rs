@@ -12,6 +12,7 @@ use crate::conv_store::ConvStore;
 use crate::devices::DeviceStore;
 use crate::lockout::LoginGuard;
 use crate::nodes_provider::NodesProvider;
+use crate::notifications::NotificationStore;
 use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
 use crate::uploads::UploadStore;
@@ -48,6 +49,10 @@ pub struct AppState {
     /// `Option`：smoke / 单测默认 None；handler 返 503。production
     /// `fuxi im start` 用 `FileSystemProjectRegistry::with_default_root()` 注入。
     pub project_registry: Option<Arc<FileSystemProjectRegistry>>,
+    /// v1-session16 通知 tab：bug 收集器 + 系统通知 + 后续 context handoff offer
+    /// 都进同一张 notifications 表。production 注入 NotificationStore；smoke /
+    /// 测试默认 None，handler 返 503。
+    pub notifications: Option<NotificationStore>,
 }
 
 /// β · #56 dist worker onboarding 派给本地 macOS 节点的三件套。
@@ -103,6 +108,7 @@ impl AppState {
             nodes_provider: None,
             dist_secrets: None,
             project_registry: None,
+            notifications: None,
         }
     }
 
@@ -147,6 +153,12 @@ impl AppState {
     /// Decision 21 phase 1：注入 Project 注册表，激活 `/api/projects` 端点。
     pub fn with_project_registry(mut self, registry: FileSystemProjectRegistry) -> Self {
         self.project_registry = Some(Arc::new(registry));
+        self
+    }
+
+    /// v1-session16：注入通知存储，激活 `/api/notifications`。
+    pub fn with_notifications(mut self, store: NotificationStore) -> Self {
+        self.notifications = Some(store);
         self
     }
 }

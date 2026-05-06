@@ -17,6 +17,7 @@
 pub mod autocomplete;
 pub mod banner;
 pub mod bench_support;
+pub mod bug_cmd;
 pub mod click_registry;
 pub mod client;
 pub mod clipboard;

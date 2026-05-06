@@ -338,13 +338,20 @@ pub async fn run(args: StartArgs) -> Result<()> {
         tracing::info!("Fuxi.project_registry 已注入——spawn_worker_in_project_sandbox 启用");
     }
 
+    // v1-session16 通知 tab：复用 im.db pool，跟 push_subscriptions / device_tokens
+    // 同库不同表（migration 0005_notifications.sql 创建）。store 廉价 clone（持
+    // SqlitePool Arc 克隆）— AppState 持一份给 PWA 端点，玄女 / orchestrator
+    // 后续要写 system 通知时再单独拿一份（task #8）。
+    let notification_store = fuxi_im::notifications::NotificationStore::new(im_pool.clone());
+
     let app_state_base = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
         .with_im_push(im_push)
         .with_conv_store(conv_store.clone())
         .with_upload_store(upload_store)
         .with_nodes_provider(nodes_provider)
-        .with_dist_secrets(dist_secrets);
+        .with_dist_secrets(dist_secrets)
+        .with_notifications(notification_store);
     let app_state = match project_registry {
         Ok(reg) => app_state_base.with_project_registry(reg),
         Err(e) => {
