@@ -158,14 +158,15 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("登入后 main shell · BottomTabBar 3 tab + 玄女默认 + Composer 空态 (v3)", async ({ page }) => {
+test("登入后 main shell · BottomTabBar 4 tab + 玄女默认 + Composer 空态 (v1-session17 task #9)", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible({ timeout: 5_000 });
-  // tab bar 渲 3 项
+  // tab bar 渲 4 项：玄女 / 任务 / 通知 / 更多
   await expect(page.getByTestId("tab-bar")).toBeVisible();
   await expect(page.getByTestId("tab-xuannv")).toBeVisible();
   await expect(page.getByTestId("tab-tasks")).toBeVisible();
-  await expect(page.getByTestId("tab-nodes")).toBeVisible();
+  await expect(page.getByTestId("tab-notifications")).toBeVisible();
+  await expect(page.getByTestId("tab-more")).toBeVisible();
   // 玄女 默认 active
   await expect(page.getByTestId("tab-xuannv")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
@@ -173,12 +174,22 @@ test("登入后 main shell · BottomTabBar 3 tab + 玄女默认 + Composer 空�
   await expect(page.getByTestId("mention-editor")).toBeVisible();
 });
 
-test("BottomTabBar · 点 tab-nodes 切节点页 / 点 tab-tasks 切任务页 (v3)", async ({ page }) => {
+test("BottomTabBar · 点 tab-more 进 hub · 点 tile-nodes 沉到节点页 / 返回回 hub", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.getByTestId("tab-nodes").click();
-  await expect(page.getByTestId("tab-nodes")).toHaveAttribute("aria-selected", "true");
+  await page.getByTestId("tab-more").click();
+  await expect(page.getByTestId("tab-more")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("page-more")).toBeVisible();
+  await page.getByTestId("more-tile-nodes").click();
   await expect(page.getByTestId("page-nodes")).toBeVisible();
+  // 返回 hub
+  await page.getByTestId("more-sub-back").click();
+  await expect(page.getByTestId("page-more")).toBeVisible();
+});
+
+test("BottomTabBar · 点 tab-tasks 切任务页 (v1-session17 任务 tab 仍在 1)", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("main-shell")).toBeVisible();
   await page.getByTestId("tab-tasks").click();
   await expect(page.getByTestId("tab-tasks")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByTestId("page-tasks")).toBeVisible();
@@ -454,7 +465,8 @@ test("#58 · 节点 tab 切真 /api/nodes · 显 home + mac-local + workers", as
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.getByTestId("tab-nodes").click();
+  await page.getByTestId("tab-more").click();
+  await page.getByTestId("more-tile-nodes").click();
   await expect(page.getByTestId("page-nodes")).toBeVisible();
   // home 节点：显 worker
   const home = page.getByTestId("node-home");
@@ -476,14 +488,16 @@ test("#58 · 节点空 · 显空态提示加节点", async ({ page }) => {
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.getByTestId("tab-nodes").click();
+  await page.getByTestId("tab-more").click();
+  await page.getByTestId("more-tile-nodes").click();
   await expect(page.getByTestId("nodes-empty")).toContainText("暂无节点");
 });
 
 test("#58 · 添加节点按钮 · 弹 modal 显 install command", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  await page.getByTestId("tab-nodes").click();
+  await page.getByTestId("tab-more").click();
+  await page.getByTestId("more-tile-nodes").click();
   await page.getByTestId("nodes-add-btn").click();
   const modal = page.getByTestId("nodes-add-modal");
   await expect(modal).toBeVisible();
@@ -498,7 +512,8 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
   await expect(page.getByTestId("main-shell")).toBeVisible();
   await page.getByTestId("tab-tasks").click();
   await expect(page.getByTestId("page-tasks")).toBeVisible();
-  await page.getByTestId("tab-nodes").click();
+  await page.getByTestId("tab-more").click();
+  await page.getByTestId("more-tile-nodes").click();
   await expect(page.getByTestId("page-nodes")).toBeVisible();
   await page.getByTestId("tab-xuannv").click();
   await expect(page.getByTestId("page-xuannv")).toBeVisible();

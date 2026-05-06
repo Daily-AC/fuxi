@@ -165,6 +165,22 @@ impl OracleStore {
         row.map(row_to_fact).transpose()
     }
 
+    /// 跨 subject 列**仍生效**的事实，按 `updated_at` 倒序。PWA「记忆」tab 用——
+    /// 用户视角想一屏看全策府现况，按 subject 分组在前端展示。
+    pub async fn list_active(&self, limit: i64) -> Result<Vec<OracleFact>> {
+        let rows = sqlx::query(
+            "SELECT id, subject, predicate, object, source, confidence, \
+                    created_at, updated_at, valid_until \
+             FROM oracle_facts \
+             WHERE valid_until IS NULL \
+             ORDER BY updated_at DESC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_fact).collect()
+    }
+
     /// 按 subject 查**仍生效**（valid_until IS NULL）的事实，倒序按 `updated_at`。
     pub async fn query(&self, subject: &str, limit: i64) -> Result<Vec<OracleFact>> {
         let rows = sqlx::query(

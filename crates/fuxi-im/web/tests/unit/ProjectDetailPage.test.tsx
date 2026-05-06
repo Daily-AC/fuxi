@@ -18,7 +18,7 @@ function setup(args: {
 } = {}) {
   setApiOverride(createMockApi(args));
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={2}>
+    <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="projects">
       <ProjectDetailPage project_id="erp" />
     </ApiProvider>
   ));

@@ -16,7 +16,9 @@ use crate::notifications::NotificationStore;
 use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
 use crate::uploads::UploadStore;
+use fuxi_memory::OracleStore;
 use fuxi_orchestrator::Fuxi;
+use fuxi_scheduler::TriggerStore;
 use fuxi_workspace::FileSystemProjectRegistry;
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -53,6 +55,16 @@ pub struct AppState {
     /// 都进同一张 notifications 表。production 注入 NotificationStore；smoke /
     /// 测试默认 None，handler 返 503。
     pub notifications: Option<NotificationStore>,
+    /// v1-session17 task #9 「更多 → 记忆」：玄女策府 oracle 句柄。
+    /// production 走 `~/.fuxi/events.db` 同库（同 fuxi-cli `im.rs` 的 `OracleStore::connect_file`）；
+    /// `Option`：smoke / 单测默认 None；handler 返 503。
+    pub oracle: Option<OracleStore>,
+    /// v1-session17 task #9 「更多 → 更漏」：scheduler trigger 注册表。
+    /// production 共用 events.db 上的 triggers 表；`Option` None 时 handler 返 503。
+    pub triggers: Option<TriggerStore>,
+    /// v1-session17 task #9 「更多 → 角色」：roles 目录根（含 `<role>/ROLE.md`）。
+    /// production = 项目根 `roles/`；`Option` None 时 handler 返 503。
+    pub roles_root: Option<PathBuf>,
 }
 
 /// β · #56 dist worker onboarding 派给本地 macOS 节点的三件套。
@@ -109,6 +121,9 @@ impl AppState {
             dist_secrets: None,
             project_registry: None,
             notifications: None,
+            oracle: None,
+            triggers: None,
+            roles_root: None,
         }
     }
 
@@ -159,6 +174,24 @@ impl AppState {
     /// v1-session16：注入通知存储，激活 `/api/notifications`。
     pub fn with_notifications(mut self, store: NotificationStore) -> Self {
         self.notifications = Some(store);
+        self
+    }
+
+    /// v1-session17 task #9：注入策府 oracle 句柄，激活 `/api/memory`。
+    pub fn with_oracle(mut self, oracle: OracleStore) -> Self {
+        self.oracle = Some(oracle);
+        self
+    }
+
+    /// v1-session17 task #9：注入更漏 trigger 注册表，激活 `/api/cron`。
+    pub fn with_triggers(mut self, triggers: TriggerStore) -> Self {
+        self.triggers = Some(triggers);
+        self
+    }
+
+    /// v1-session17 task #9：声明 roles 目录根（`<role>/ROLE.md`），激活 `/api/roles`。
+    pub fn with_roles_root(mut self, root: PathBuf) -> Self {
+        self.roles_root = Some(root);
         self
     }
 }

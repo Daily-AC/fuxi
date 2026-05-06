@@ -1,0 +1,87 @@
+/* MorePage · v1-session17 task #9 · 「更多」hub
+ * 8 tile grid（2 × 4）—— 节点 / 项目 / 工作者 / 交付物 / 记忆 / 角色 / 更漏 / 设置
+ * 设计语言：每张 tile 是 #2A2925 surface 卡，圆角 12px，最少 ≥88px 高让标题
+ * + 描述各占一行不挤；tap 高亮 #3F2E26 accent-subtle。
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.header {
+  flex-shrink: 0;
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--size-title);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.subtitle {
+  margin: var(--space-1) 0 0;
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-3);
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-height: 92px;
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--transition-fast, 150ms ease),
+    border-color var(--transition-fast, 150ms ease);
+}
+
+.tile:active,
+.tile:focus-visible {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.tileLabel {
+  font-size: var(--size-heading);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.tileDesc {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.tileBadge {
+  margin-top: auto;
+  font-size: var(--size-meta);
+  color: var(--accent);
+  font-weight: var(--weight-medium);
+}

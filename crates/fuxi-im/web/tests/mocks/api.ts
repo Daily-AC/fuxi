@@ -12,11 +12,14 @@ import type {
 } from "~/types/events";
 import type {
   ConversationHistoryResponse,
+  CronResponse,
   DeliverablesResponse,
   EphemeralResponse,
   InterveneRequestV2,
+  MemoryResponse,
   NodesResponse,
   ProjectsResponse,
+  RolesResponse,
   SandboxView,
   StoredMessage,
   TasksOverview,
@@ -59,6 +62,12 @@ export interface MockState {
   sandboxesByProject?: Record<string, SandboxView[]>;
   /** Decision 21 phase 3 · /api/projects/{id}/ephemeral 数据按 project_id 索引。 */
   ephemeralByProject?: Record<string, EphemeralResponse>;
+  /** v1-session17 task #9 · /api/memory · 默认空 groups（前端走空态）。 */
+  memory?: MemoryResponse;
+  /** v1-session17 task #9 · /api/roles · 默认空 roles。 */
+  roles?: RolesResponse;
+  /** v1-session17 task #9 · /api/cron · 默认空 triggers。 */
+  cron?: CronResponse;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -153,6 +162,9 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     deliverables: initial?.deliverables,
     sandboxesByProject: initial?.sandboxesByProject,
     ephemeralByProject: initial?.ephemeralByProject,
+    memory: initial?.memory,
+    roles: initial?.roles,
+    cron: initial?.cron,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -332,6 +344,9 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     markNotificationRead: async () => ({ ok: true as const }),
     closeNotification: async () => ({ ok: true as const }),
     readAllNotifications: async () => ({ ok: true as const, updated: 0 }),
+    fetchMemory: async () => state.memory ?? { groups: [], total: 0 },
+    fetchRoles: async () => state.roles ?? { roles: [] },
+    fetchCron: async () => state.cron ?? { triggers: [] },
   };
 }
 

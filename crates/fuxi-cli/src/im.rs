@@ -344,6 +344,25 @@ pub async fn run(args: StartArgs) -> Result<()> {
     // 后续要写 system 通知时再单独拿一份（task #8）。
     let notification_store = fuxi_im::notifications::NotificationStore::new(im_pool.clone());
 
+    // v1-session17 task #9 「更多」hub 三个新页：
+    //   - 策府事实：跟 `fuxi up` 同套路，把 events.db 当 oracle 库（init_schema 幂等）。
+    //     section 6 还会再用 oracle.clone() 装 recall_sink，这里提前打开是因为
+    //     AppState 装配在 section 4，需要现成 OracleStore 注入。
+    //   - 更漏 trigger：上面 step 3 已建 sched_store，clone 一份给 AppState。
+    //   - roles 目录：项目根 `roles/` 是 build-time 资产，运行期由 FUXI_ROLES_ROOT
+    //     env 覆盖；缺则按 cwd 推 `./roles`，不存在时 with_roles_root 拿到空目录会
+    //     扫出空数组（handler 仍 200，前端空态）。
+    let oracle = OracleStore::connect_file(&events_db_path)
+        .await
+        .with_context(|| format!("打开策府 SQLite {}", events_db_path.display()))?;
+    let roles_root = std::env::var_os("FUXI_ROLES_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.join("roles"))
+                .unwrap_or_else(|_| PathBuf::from("roles"))
+        });
+
     let app_state_base = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
         .with_im_push(im_push)
@@ -351,7 +370,10 @@ pub async fn run(args: StartArgs) -> Result<()> {
         .with_upload_store(upload_store)
         .with_nodes_provider(nodes_provider)
         .with_dist_secrets(dist_secrets)
-        .with_notifications(notification_store);
+        .with_notifications(notification_store)
+        .with_oracle(oracle.clone())
+        .with_triggers(sched_store.clone())
+        .with_roles_root(roles_root);
     let app_state = match project_registry {
         Ok(reg) => app_state_base.with_project_registry(reg),
         Err(e) => {
@@ -402,10 +424,8 @@ pub async fn run(args: StartArgs) -> Result<()> {
     }
 
     // 6. Daemon socket + 策府（与 up.rs 同步逻辑；home 也要 daemon 让 TUI /pair 等
-    //    工具可用）
-    let oracle = OracleStore::connect_file(&events_db_path)
-        .await
-        .with_context(|| format!("打开策府 SQLite {}", events_db_path.display()))?;
+    //    工具可用）。oracle 在 step 4 已 connect_file 一次（PWA「记忆」用），这里
+    //    继续 clone 同一份做 recall_sink——SqlitePool 是 Arc，clone 廉价。
     let sock_path = args.sock_path.clone().unwrap_or_else(ipc::socket_path);
     fuxi.set_recall_sink(Arc::new(crate::recall_sink::OracleRecallSink::new(
         oracle.clone(),

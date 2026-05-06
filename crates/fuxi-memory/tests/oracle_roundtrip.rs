@@ -30,6 +30,37 @@ async fn insert_then_query_returns_the_fact() {
 }
 
 #[tokio::test]
+async fn list_active_returns_all_subjects_excluding_superseded() {
+    // PWA「记忆」tab · 跨 subject 列现行事实。supersede 走掉的不应该出现。
+    let s = store().await;
+    s.insert(NewFact::new("user", "prefers", "冰美式"))
+        .await
+        .unwrap();
+    s.insert(NewFact::new("luban", "role", "工匠"))
+        .await
+        .unwrap();
+    let stale = s
+        .insert(NewFact::new("xuannv", "session_id", "old"))
+        .await
+        .unwrap();
+    s.supersede(
+        stale.id,
+        NewFact::new("xuannv", "session_id", "new").with_source("agent"),
+    )
+    .await
+    .unwrap();
+
+    let all = s.list_active(50).await.expect("list_active");
+    let subjects: Vec<&str> = all.iter().map(|f| f.subject.as_str()).collect();
+    assert_eq!(all.len(), 3, "user + luban + xuannv 各一现行");
+    assert!(subjects.contains(&"user"));
+    assert!(subjects.contains(&"luban"));
+    assert!(subjects.contains(&"xuannv"));
+    let xuannv = all.iter().find(|f| f.subject == "xuannv").unwrap();
+    assert_eq!(xuannv.object, "new");
+}
+
+#[tokio::test]
 async fn query_ignores_superseded_facts() {
     // 公理：query 只返现行（valid_until IS NULL）。
     let s = store().await;
