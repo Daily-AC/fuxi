@@ -120,9 +120,28 @@ handoff 是用户主动交接，新口子专门绕豁免，命名带 `_for_hando
 
 ## 5 · 下 session 推荐起点
 
-### 5.1 真测验收（必做）
+### 5.0 部署 + e2e 已验证（本 session 完成）
 
-本 session 全 unit 测过但 e2e 没在 home 实机跑过。下 session 建议：
+本 session 已 deploy home + 真测 3 轮接班全成功（启动期检查 + 30s polling tick）。
+md5 = `5114c037804c2abc6d6c5617df073548`。日志关键路径：
+
+```
+fs poll 命中 handoff 文件落档
+→ shutdown_xuannv_for_handoff: 用户主动交接，绕过豁免
+→ spawn 新玄女副本（注入 handoff prelude）
+→ 玄女接班完成 new=agent-...
+→ 玄女 id 变化，重置上下文累加状态
+```
+
+handoff 文件检测 → kill → spawn → delete file 全跑通；ctx_watcher 新副本归零成功。
+
+### 5.1 还可以做的真测
+
+- **35% / 45% 真触发**：让玄女做几轮长 task 累到 ~350k tokens，看 [CTX_ADDENDUM]
+  系统消息出不出来。需要真 cc 跑活，本 session 没造样本。
+- **优化 wait_idle 60s ceiling**：见 §6。
+
+### 5.2 真测验收（重复跑）
 
 ```bash
 # 1. macOS 本地编 release + codesign（v1-session15 §4 坑）
@@ -177,11 +196,19 @@ PWA「通知」tab 也亮红点提醒用户视角对齐，可加一个小 hook�
   实测够用就行，不强制时序。
 - **handoff e2e 长 turn 等 idle 60s ceiling**：玄女单 turn 跑超 60s 时（罕见
   长复杂 task）会被强 kill。代价 = 那 turn 的回复丢失。可调 `IDLE_WAIT_CEILING_SECS`。
+  **本 session 实测**：polling 路径 + 新 spawn 副本仍在跑 init turn 时，wait_idle
+  会等满 60s ceiling 后强 kill 接班——结果正确但延迟大。下 session 可优化：
+  排除"刚 spawn 起来 < N 秒"的 Busy 视为可立即 kill。
 - **prelude 长度上限 2000 chars**：CLI 校验拒 > 2000；500 字中文 ≈ 500 chars
   足够。超出说明玄女写跑题。
 - **未做：cumulative 持久化**。fuxi-im 重启后 `WatcherState.cumulative_total` 归零
   ——cc session 仍然继续（resume），但水位监控会等下一轮 UsageReport 再起算。这意
   味着重启正好夹在 40% 时不会立刻触发 addendum，要再过 35k tokens 才会。可接受。
+- **跨进程 broadcast 不通**（本 session 实测踩过）：CLI `fuxi xuannv handoff write`
+  直写 SQLite events.db，**不**经过 fuxi-im 进程内 EventBus broadcast——后端 watcher
+  靠 30s fs polling tick 兜底检测落档（同时保留 bus.subscribe() 给同进程内事件用）。
+  延迟 ≤ 30s 加 60s ceiling = 极端最坏 90s。下 session 可考虑用 `notify` crate
+  inotify watch 文件实时检测，或者 daemon socket IPC 通知。
 
 ---
 
