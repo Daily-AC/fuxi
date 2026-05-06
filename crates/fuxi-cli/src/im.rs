@@ -252,6 +252,44 @@ pub async fn run(args: StartArgs) -> Result<()> {
     crate::im_dist::spawn_home_heartbeat_task(dist_ctrl.clone(), Some(fuxi.clone()));
     let hmac_secret_plain = dist_layer.hmac_secret_plain.clone();
     let dist_token_plain = dist_layer.dist_token_plain.clone();
+    // β · #56 dist_secrets 给 /api/dist/setup-worker 派发用。
+    // controller_url：用 FUXI_DIST_CONTROLLER_URL env（部署侧 nginx 反代时
+    // 指向 https://im.qmledmq.cn:8443/dist），缺则推算 http://<bind>/dist
+    // 仅适合 dev——生产部署 ζ 必须设 env。
+    let controller_url = std::env::var("FUXI_DIST_CONTROLLER_URL")
+        .unwrap_or_else(|_| format!("http://{}/dist", args.bind));
+
+    // P1：home 被自注册为可接活节点后，也必须在 fuxi-im 同进程内起一个
+    // 真 worker 消费 pinned_node=home 的 dist job；否则 auto-pin 选 home 时
+    // queue 永远无人 pull。用同进程 task，复用 dist worker adapter/事件桥，
+    // 不引入额外 systemd 进程。
+    crate::dist::spawn_embedded_worker(
+        dist_ctrl.clone(),
+        crate::dist::DistWorkerArgs {
+            controller: controller_url.clone(),
+            node: crate::im_dist::HOME_NODE_ID.to_string(),
+            token: Some(dist_token_plain.clone()),
+            codex_bin: std::env::var("FUXI_HOME_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            cc_bin: crate::im_dist::resolve_home_cc_bin(),
+            poll_ms: std::env::var("FUXI_HOME_WORKER_POLL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
+            tags: crate::im_dist::HOME_NODE_TAGS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            max_concurrency: crate::im_dist::HOME_NODE_MAX_CONCURRENCY,
+            projects_root: None,
+        },
+        dist_token_plain.clone(),
+        Arc::new(crate::dist_auth::HmacSecret::new(hmac_secret_plain.clone())),
+    );
+    tracing::info!(
+        node_id = crate::im_dist::HOME_NODE_ID,
+        controller = %controller_url,
+        "home embedded dist worker 已启动"
+    );
     // β · #55 NodesProvider 包 Arc<DistController>，注入 AppState 让
     // /api/nodes handler 能查 dist topology
     let nodes_provider: Arc<dyn fuxi_im::nodes_provider::NodesProvider> = Arc::new(
@@ -275,12 +313,6 @@ pub async fn run(args: StartArgs) -> Result<()> {
     .await;
     tracing::info!("Fuxi.node_load_provider 已注入——v2 跨节点 sandbox auto-pin 启用");
 
-    // β · #56 dist_secrets 给 /api/dist/setup-worker 派发用。
-    // controller_url：用 FUXI_DIST_CONTROLLER_URL env（部署侧 nginx 反代时
-    // 指向 https://im.qmledmq.cn:8443/dist），缺则推算 http://<bind>/dist
-    // 仅适合 dev——生产部署 ζ 必须设 env。
-    let controller_url = std::env::var("FUXI_DIST_CONTROLLER_URL")
-        .unwrap_or_else(|_| format!("http://{}/dist", args.bind));
     let dist_secrets = fuxi_im::state::DistSecrets {
         hmac_secret: hmac_secret_plain,
         dist_token: dist_token_plain,
