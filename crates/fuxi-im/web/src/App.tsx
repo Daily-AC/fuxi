@@ -2,6 +2,9 @@ import {
   Show,
   Switch,
   Match,
+  createMemo,
+  createResource,
+  onCleanup,
   onMount,
   type Component,
   type JSX,
@@ -14,6 +17,7 @@ import { Toast } from "./components/Toast";
 import { DeliverableDetailPage } from "./views/pages/DeliverableDetailPage";
 import { DeliverablesPage } from "./views/pages/DeliverablesPage";
 import { NodesPage } from "./views/pages/NodesPage";
+import { NotificationsPage } from "./views/pages/NotificationsPage";
 import { ProjectDetailPage } from "./views/pages/ProjectDetailPage";
 import { ProjectsPage } from "./views/pages/ProjectsPage";
 import { XuannvPage } from "./views/pages/XuannvPage";
@@ -65,16 +69,35 @@ const AuthGate: Component = () => {
   );
 };
 
-const TABS: TabSpec[] = [
+const BASE_TABS: ReadonlyArray<TabSpec> = [
   { key: "xuannv", label: "玄女" },
   { key: "tasks", label: "任务" },
   { key: "projects", label: "项目" },
   { key: "deliverables", label: "交付" },
   { key: "nodes", label: "节点" },
+  { key: "notifications", label: "通知" },
 ];
 
 const MainShell: Component = () => {
-  const { activeTab, setActiveTab, navRoute, navPop } = useApi();
+  const { client, activeTab, setActiveTab, navRoute, navPop } = useApi();
+
+  // v1-session16 通知红点 · 后台轮询 GET /api/notifications 拿 unread_count。
+  // 简单起步不接 WS——15s 间隔够用（bug / handoff offer 是分钟级事件，不抢秒级）。
+  const [notif, { refetch: refetchNotif }] = createResource(() =>
+    client.fetchNotifications({ limit: 1 }),
+  );
+  onMount(() => {
+    const t = setInterval(() => {
+      void refetchNotif();
+    }, 15000);
+    onCleanup(() => clearInterval(t));
+  });
+  const tabs = createMemo<TabSpec[]>(() => {
+    const unread = notif()?.unread_count ?? 0;
+    return BASE_TABS.map((t) =>
+      t.key === "notifications" ? { ...t, badge: unread } : t,
+    );
+  });
 
   // 任务 tab Layer 2 · v3 真 TaskThreadPage（#39 已落）
   // kind === "worker"（v2 残留）保留兜底 stub，正常 v3 流不应触发
@@ -163,12 +186,24 @@ const MainShell: Component = () => {
           <Match when={activeTab() === 4}>
             <NodesPage />
           </Match>
+          <Match when={activeTab() === 5}>
+            <NotificationsPage />
+          </Match>
         </Switch>
       </main>
       <BottomTabBar
-        tabs={TABS}
+        tabs={tabs()}
         active={activeTab()}
-        onChange={(i: TabIndex) => setActiveTab(i)}
+        onChange={(i: TabIndex) => {
+          setActiveTab(i);
+          // 进入「通知」tab 后立即刷新一次 unread_count（NotificationsPage 自己
+          // 会调 readAllNotifications 清零；我们 refetch 让 badge 跟着消失）。
+          if (i === 5) {
+            setTimeout(() => {
+              void refetchNotif();
+            }, 200);
+          }
+        }}
       />
     </div>
   );

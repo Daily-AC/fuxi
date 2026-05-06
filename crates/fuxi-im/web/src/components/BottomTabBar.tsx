@@ -9,12 +9,14 @@ import styles from "./BottomTabBar.module.css";
 // [玄女][任务][项目][交付][节点]，不允许 tab 间手势切换。
 // Decision 21/22 phase 1 加 项目 / 交付 两个 tab。
 
-export type TabIndex = 0 | 1 | 2 | 3 | 4;
+export type TabIndex = 0 | 1 | 2 | 3 | 4 | 5;
 
 export interface TabSpec {
   /** 内部 tab 标签，仅 testid + aria 用，不渲染。*/
-  key: "xuannv" | "tasks" | "projects" | "deliverables" | "nodes";
+  key: "xuannv" | "tasks" | "projects" | "deliverables" | "nodes" | "notifications";
   label: string;
+  /** 红点 badge 数（>0 显，==0 不显）。任务 #9 hub 重构时通用化到所有 tab。 */
+  badge?: number;
 }
 
 export interface BottomTabBarProps {
@@ -30,18 +32,28 @@ export const BottomTabBar: Component<BottomTabBarProps> = (props) => {
         {(t, i) => {
           const idx = (): TabIndex => i() as TabIndex;
           const isActive = (): boolean => idx() === props.active;
+          const badge = (): number => t.badge ?? 0;
           return (
             <button
               type="button"
               class={styles.tab}
               role="tab"
               aria-selected={isActive()}
-              aria-label={t.label}
+              aria-label={badge() > 0 ? `${t.label}（${badge()} 条未读）` : t.label}
               data-testid={`tab-${t.key}`}
               onClick={() => props.onChange(idx())}
             >
               <span class={styles.dot} aria-hidden="true" />
               <span class={styles.label}>{t.label}</span>
+              {badge() > 0 && (
+                <span
+                  class={styles.badge}
+                  data-testid={`tab-${t.key}-badge`}
+                  aria-hidden="true"
+                >
+                  {badge() > 99 ? "99+" : badge()}
+                </span>
+              )}
             </button>
           );
         }}

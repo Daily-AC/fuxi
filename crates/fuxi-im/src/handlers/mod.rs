@@ -13,6 +13,8 @@ pub mod health;
 pub mod intervene;
 // β · #55 dist topology 节点 tab 数据源
 pub mod nodes;
+// v1-session16：「通知」tab 数据源（bug 收集器 / 系统通知 / handoff offer）
+pub mod notifications;
 // Decision 21 phase 1：Project 注册表读视图
 pub mod projects;
 pub mod push;

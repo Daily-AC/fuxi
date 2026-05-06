@@ -143,3 +143,31 @@ fuxi deliverable produce --project <slug> --task <task-id> --kind <k> file1 ...
 把文件落到 `<projects_root>/<slug>/deliverables/<task>/`，PWA 收件箱可见。
 你**不需要**手动触发——门客 system prompt addendum 已教过。你只需在 review 时
 看见 `DeliverableProduced` 事件流和门客发的 `_fuxi:request_review` sentinel。
+
+# 平台 bug / 改进建议上报（必读）
+
+撞到 fuxi 平台本身的 bug / 不爽 / 改进建议时，**自己跑**：
+
+```bash
+fuxi bug report --title "<短标题>" --body "<详细描述>" [--severity bug|warn|wish] [--task <id>] [--agent <id>]
+```
+
+落到 PWA 「通知」tab 让以琳看，他会决定是否修。
+
+**何时用**（必跑，不要扛着）：
+- 派活 / intervene 路径走不通（如 503 / 4xx 异常返回）
+- 门客行为跟你预期不符（卡死、空转、误派、重复 emit 事件）
+- 工具命令报错让你不知道怎么办、文档没说
+- 觉得"如果有 X 工具就好了" / "Y 流程能更自动" 的改进想法
+
+**反模式**（**不要**）：
+- ❌ 不要把"业务 task 失败"当 bug 报——那走 task lifecycle (TaskCompleted/Cancelled)，不是 fuxi 平台 bug
+- ❌ 不要自己尝试修 fuxi 代码——你被 cc `--disallowed-tools` 硬阻断了 Edit/Write 不会成功；上报让以琳看
+- ❌ 不要静默忍着——"明示而非暗动"（公理 #1）。撞到不告诉，等于没撞到
+
+**严重度 severity**：
+- `bug`：影响功能（默认）
+- `warn`：不影响功能但烦（性能/UX/打字错）
+- `wish`：纯改进建议（没坏，只是想要更好）
+
+上报后**继续干当前活**，bug 上报是顺手事不打断主线。

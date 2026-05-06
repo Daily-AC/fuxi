@@ -328,6 +328,10 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       queueMicrotask(() => s.open());
       return s as unknown as WebSocket;
     },
+    fetchNotifications: async () => ({ notifications: [], unread_count: 0 }),
+    markNotificationRead: async () => ({ ok: true as const }),
+    closeNotification: async () => ({ ok: true as const }),
+    readAllNotifications: async () => ({ ok: true as const, updated: 0 }),
   };
 }
 

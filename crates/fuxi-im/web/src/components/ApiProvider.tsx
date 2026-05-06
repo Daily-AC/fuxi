@@ -12,11 +12,14 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
-/** Bottom tab bar 当前 tab：0=玄女 / 1=任务 / 2=项目 / 3=交付 / 4=节点。
+/** Bottom tab bar 当前 tab：0=玄女 / 1=任务 / 2=项目 / 3=交付 / 4=节点 / 5=通知。
  *  设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §A
  *  v2 的 PageIndex 已淘汰（horizontal pager 路线被 supersede）。
- *  Decision 21/22 phase 1 加 项目 / 交付 两个 tab。*/
-export type TabIndex = 0 | 1 | 2 | 3 | 4;
+ *  Decision 21/22 phase 1 加 项目 / 交付 两个 tab。
+ *  v1-session16 加 通知 tab（bug 收集器 + 后续 handoff offer / review request）。
+ *  通知挂尾位是临时的——task #9 计划把 4 tab 收成 玄女/任务/通知/更多，
+ *  把 项目/交付/节点 收进 hub；这里先保留索引兼容不动现有页面。 */
+export type TabIndex = 0 | 1 | 2 | 3 | 4 | 5;
 
 /** NavigationStack 顶部的 push 路由。
  *  - 任务 tab (1) · kind="task"|"worker"

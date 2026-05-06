@@ -17,6 +17,7 @@ import type {
   EphemeralResponse,
   InterveneRequestV2,
   NodesResponse,
+  NotificationsResponse,
   ProjectsResponse,
   RejectDeliverableRequest,
   SandboxesResponse,
@@ -106,6 +107,18 @@ export interface ApiClient {
   /** dist topology 实时变更流——节点 tab 订阅，每条 push 触发 fetchNodes refetch。
    *  filter：WorkerRegistered / WorkerHeartbeatStateChanged / WorkerStaleSwept 三类。 */
   openNodesStreamSocket(): WebSocket;
+  /** v1-session16 · 通知 tab · GET /api/notifications · bug + handoff offer + review。 */
+  fetchNotifications(opts?: {
+    kind?: string;
+    include_closed?: boolean;
+    limit?: number;
+  }): Promise<NotificationsResponse>;
+  /** 标已读（仅清红点，仍在列表里）。 */
+  markNotificationRead(id: string): Promise<{ ok: true }>;
+  /** 关闭（默认列表隐藏）。 */
+  closeNotification(id: string): Promise<{ ok: true }>;
+  /** 一键全部标已读——进入「通知」tab 时调，红点清零。 */
+  readAllNotifications(): Promise<{ ok: true; updated: number }>;
 }
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -241,6 +254,26 @@ export function createHttpClient(): ApiClient {
     openWorkerSocket: (agentId) =>
       new WebSocket(wsUrl(`/api/workers/${encodeURIComponent(agentId)}/conv`)),
     openNodesStreamSocket: () => new WebSocket(wsUrl("/api/nodes/stream")),
+    fetchNotifications: (opts) => {
+      const q: string[] = [];
+      if (opts?.kind) q.push(`kind=${encodeURIComponent(opts.kind)}`);
+      if (opts?.include_closed) q.push("include_closed=true");
+      if (opts?.limit) q.push(`limit=${opts.limit}`);
+      const qs = q.length > 0 ? `?${q.join("&")}` : "";
+      return jsonFetch<NotificationsResponse>(`/api/notifications${qs}`);
+    },
+    markNotificationRead: (id) =>
+      jsonFetch<{ ok: true }>(`/api/notifications/${encodeURIComponent(id)}/read`, {
+        method: "POST",
+      }),
+    closeNotification: (id) =>
+      jsonFetch<{ ok: true }>(`/api/notifications/${encodeURIComponent(id)}/close`, {
+        method: "POST",
+      }),
+    readAllNotifications: () =>
+      jsonFetch<{ ok: true; updated: number }>(`/api/notifications/read-all`, {
+        method: "POST",
+      }),
   };
 }
 

@@ -134,6 +134,20 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
+        // v1-session16 通知 tab：bug 收集器 + 系统通知（玄女 / handoff offer）
+        .route("/api/notifications", get(handlers::notifications::list))
+        .route(
+            "/api/notifications/read-all",
+            post(handlers::notifications::read_all),
+        )
+        .route(
+            "/api/notifications/{id}/read",
+            post(handlers::notifications::mark_read),
+        )
+        .route(
+            "/api/notifications/{id}/close",
+            post(handlers::notifications::close),
+        )
         // β · #17 文件上传 / 下载
         // #49 修：DefaultBodyLimit 必须显式拉到 UPLOAD_BODY_LIMIT_BYTES——axum
         // 默认只 2MB，iOS Safari 中等图片就超，multer 报 failed to read stream。
