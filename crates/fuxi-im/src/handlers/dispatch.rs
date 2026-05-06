@@ -54,7 +54,12 @@ pub async fn dispatch(
         })?;
 
     let mut task = Task::new(title, description);
-    if let Some(slug) = body.project.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(slug) = body
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let pid = ProjectId::new(slug.to_string())
             .map_err(|e| Error::BadRequest(format!("非法 project slug {slug:?}: {e}")))?;
         task = task.with_project_id(pid);

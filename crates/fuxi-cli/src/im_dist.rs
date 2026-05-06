@@ -68,6 +68,24 @@ pub const HOME_NODE_MAX_CONCURRENCY: u32 = 4;
 /// 内必有 ≥3 次心跳成功才掉线，给瞬时锁竞争留余量。
 pub const HOME_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// home 内嵌 worker 的 claude binary 解析。服务器 systemd 的 PATH 往往比交互
+/// shell 窄，`~/.local/bin/claude` 是当前部署已验证的真实落点；保留 env 覆盖
+/// 方便未来换 wrapper。
+pub fn resolve_home_cc_bin() -> String {
+    if let Ok(path) = std::env::var("FUXI_HOME_CC_BIN")
+        && !path.trim().is_empty()
+    {
+        return path;
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = std::path::Path::new(&home).join(".local/bin/claude");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    "claude".into()
+}
+
 /// 装配 dist controller + HMAC router。返回 `(controller, router)` 给 caller
 /// merge 进 axum app。
 ///
@@ -192,6 +210,23 @@ pub fn spawn_home_heartbeat_task(
                 }
                 None => Vec::new(),
             };
+            // P1 home 内嵌 worker 同样向 controller 维护 home.inflight。这里是
+            // shelf 心跳路径，不能用 shelf ids 覆盖掉正在跑的 dist job，否则
+            // pinned home 长任务会被错误释放 capacity。取 controller 当前 home
+            // inflight 与 shelf inflight 做并集，再作为本次权威心跳。
+            let mut inflight = inflight;
+            if let Some(home) = ctrl
+                .nodes_snapshot()
+                .await
+                .into_iter()
+                .find(|n| n.node_id == HOME_NODE_ID)
+            {
+                for job_id in home.inflight {
+                    if !inflight.contains(&job_id) {
+                        inflight.push(job_id);
+                    }
+                }
+            }
             ctrl.heartbeat(HOME_NODE_ID, inflight).await;
         }
     });

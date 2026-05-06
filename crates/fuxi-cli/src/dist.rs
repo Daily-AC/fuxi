@@ -1654,6 +1654,182 @@ pub async fn run_worker(args: DistWorkerArgs) -> Result<()> {
     run_worker_with(args, token, secret, factory, HEARTBEAT_INTERVAL).await
 }
 
+pub(crate) fn spawn_embedded_worker(
+    ctrl: Arc<DistController>,
+    args: DistWorkerArgs,
+    token: String,
+    secret: std::sync::Arc<crate::dist_auth::HmacSecret>,
+) -> tokio::task::JoinHandle<()> {
+    let factory: AdapterFactory =
+        Arc::new(|cli, args| select_adapter(cli, args).map(|a| a as Box<dyn CliAdapter>));
+    spawn_embedded_worker_with(ctrl, args, token, secret, factory, HEARTBEAT_INTERVAL)
+}
+
+pub(crate) fn spawn_embedded_worker_with(
+    ctrl: Arc<DistController>,
+    args: DistWorkerArgs,
+    token: String,
+    secret: std::sync::Arc<crate::dist_auth::HmacSecret>,
+    adapter_factory: AdapterFactory,
+    heartbeat_interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(e) = run_embedded_worker_with(
+            ctrl,
+            args,
+            token,
+            secret,
+            adapter_factory,
+            heartbeat_interval,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "embedded dist worker exited");
+        }
+    })
+}
+
+async fn run_embedded_worker_with(
+    ctrl: Arc<DistController>,
+    args: DistWorkerArgs,
+    token: String,
+    secret: std::sync::Arc<crate::dist_auth::HmacSecret>,
+    adapter_factory: AdapterFactory,
+    heartbeat_interval: Duration,
+) -> Result<()> {
+    let controller = normalize_controller_base(&args.controller);
+    let client = Client::new();
+    ctrl.register(
+        args.node.clone(),
+        args.tags.clone(),
+        args.max_concurrency.max(1),
+    )
+    .await;
+
+    let inflight: Arc<Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let bus_client = Arc::new(NetworkBusClient::new(
+        client.clone(),
+        controller.clone(),
+        token.clone(),
+        secret.clone(),
+        args.node.clone(),
+    ));
+    let _bus_flush_handle = bus_client.clone().spawn_flush_loop();
+    let bus_client = Some(bus_client);
+
+    let mut jobs: JoinSet<()> = JoinSet::new();
+    let max_concurrency = args.max_concurrency.max(1) as usize;
+
+    loop {
+        while jobs.len() >= max_concurrency {
+            tokio::select! {
+                _ = tokio::time::sleep(heartbeat_interval) => {
+                    embedded_worker_heartbeat(&ctrl, &args.node, &inflight).await;
+                }
+                _ = jobs.join_next() => {}
+            }
+        }
+
+        let Some(job) = ctrl.pull(&args.node).await else {
+            tokio::time::sleep(Duration::from_millis(args.poll_ms)).await;
+            embedded_worker_heartbeat(&ctrl, &args.node, &inflight).await;
+            continue;
+        };
+
+        let job_id = job.id.clone();
+        let cancel_tok = CancellationToken::new();
+        inflight
+            .lock()
+            .await
+            .insert(job_id.clone(), cancel_tok.clone());
+
+        let client_c = client.clone();
+        let controller_c = controller.clone();
+        let token_c = token.clone();
+        let secret_c = secret.clone();
+        let node_c = args.node.clone();
+        let inflight_c = inflight.clone();
+        let factory_c = adapter_factory.clone();
+        let args_for_factory = args.clone();
+        let projects_root_c = args.projects_root.clone();
+        let ctrl_c = ctrl.clone();
+        let bus_c = bus_client.clone();
+        let started = Instant::now();
+
+        jobs.spawn(async move {
+            let ctx = WorkerCtx {
+                client: &client_c,
+                controller: &controller_c,
+                secret: &secret_c,
+                token: &token_c,
+                node_id: &node_c,
+                bus_client: bus_c.as_ref(),
+                projects_root: projects_root_c.as_deref(),
+            };
+            let run_result = match factory_c(&job.cli, &args_for_factory) {
+                Ok(adapter) => {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_tok.cancelled() => {
+                            Ok((false, "cancelled by controller (heartbeat)".to_string()))
+                        }
+                        r = adapter.run(&ctx, &job) => r,
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            let (ok, output) = match run_result {
+                Ok(pair) => pair,
+                Err(e) => (false, format!("worker run error: {e}")),
+            };
+            inflight_c.lock().await.remove(&job.id);
+            ctrl_c
+                .report(DistReportReq {
+                    node_id: node_c,
+                    job_id: job.id.clone(),
+                    ok,
+                    output,
+                    duration_ms: started.elapsed().as_millis(),
+                })
+                .await;
+        });
+    }
+}
+
+async fn embedded_worker_heartbeat(
+    ctrl: &DistController,
+    node_id: &str,
+    inflight: &Arc<Mutex<HashMap<String, CancellationToken>>>,
+) {
+    let mut snapshot: Vec<String> = {
+        let g = inflight.lock().await;
+        g.keys().cloned().collect()
+    };
+    if let Some(node) = ctrl
+        .nodes_snapshot()
+        .await
+        .into_iter()
+        .find(|n| n.node_id == node_id)
+    {
+        for id in node.inflight {
+            if !snapshot.contains(&id) {
+                snapshot.push(id);
+            }
+        }
+    }
+    let cancel_pending = ctrl.heartbeat(node_id, snapshot).await;
+    if cancel_pending.is_empty() {
+        return;
+    }
+    let g = inflight.lock().await;
+    for jid in cancel_pending {
+        if let Some(tok) = g.get(&jid) {
+            tok.cancel();
+        }
+    }
+}
+
 /// worker 主循环（Decision 12 真并发版）。
 ///
 /// 与旧版本最大不同：每个 in-flight job 走 `tokio::spawn` + `JoinSet`，
@@ -4140,6 +4316,8 @@ mod tests {
 
     #[derive(Clone)]
     enum StubBehavior {
+        /// 立即 ok 返回——验证 worker pickup/report 用。
+        Immediate,
         /// sleep 后 ok 返回——验证并发用。
         Sleep(Duration),
         /// 长 sleep 但响应外部 cancel（adapter.run 自身**不**消费 token——
@@ -4164,6 +4342,7 @@ mod tests {
             }
             let _g = Guard(&self.active);
             match self.behavior {
+                StubBehavior::Immediate => Ok((true, "stub done".into())),
                 StubBehavior::Sleep(d) => {
                     tokio::time::sleep(d).await;
                     Ok((true, "stub done".into()))
@@ -4213,6 +4392,77 @@ mod tests {
             };
             Ok(Box::new(cloned) as Box<dyn CliAdapter>)
         })
+    }
+
+    /// P1 回归：home 节点被 controller 自注册后，必须有同进程 worker
+    /// 真正消费 pinned 到 home 的队列项。否则 auto-pin 选 home 时 job 会永远
+    /// 停在 queued/assignee=""。
+    #[tokio::test]
+    async fn embedded_worker_pulls_and_reports_home_pinned_job() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let ctrl = Arc::new(DistController::new("tok".into(), bus));
+        let active = Arc::new(AtomicUsize::new(0));
+        let stub = Arc::new(StubAdapter {
+            behavior: StubBehavior::Immediate,
+            active: active.clone(),
+        });
+
+        let args = DistWorkerArgs {
+            controller: "http://127.0.0.1:9".into(),
+            node: "home".into(),
+            token: Some("tok".into()),
+            codex_bin: "codex".into(),
+            cc_bin: "claude".into(),
+            poll_ms: 10,
+            tags: vec!["home".into(), "linux".into()],
+            max_concurrency: 4,
+            projects_root: None,
+        };
+        let worker = spawn_embedded_worker_with(
+            ctrl.clone(),
+            args,
+            "tok".into(),
+            test_secret(),
+            make_factory(stub),
+            Duration::from_millis(50),
+        );
+
+        let job_id = ctrl
+            .enqueue_with_project(
+                String::new(),
+                "home job".into(),
+                "run here".into(),
+                None,
+                Vec::new(),
+                Some("home".into()),
+                "codex".into(),
+                Vec::new(),
+                None,
+                Some("luban".into()),
+                None,
+                None,
+            )
+            .await;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let progress = ctrl.pull_progress_after(&job_id, 0).await;
+            if progress.done {
+                assert_eq!(
+                    progress.final_ok,
+                    Some(true),
+                    "embedded worker 应 report ok=true"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "embedded worker 未在 2s 内消费并完成 home job"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        worker.abort();
     }
 
     /// max_concurrency=2 时，两个慢 job 应**并行**而非串行：wall clock < 1.5s
