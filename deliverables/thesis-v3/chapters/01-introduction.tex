@@ -6,6 +6,13 @@
 
 伏羲是一套以 Rust 实现的本地优先 AI Agent 编排平台。它把用户的自然语言意图、顶层 Agent 玄女的对话决策、多个并发执行的门客（基于 Claude Code 与 Codex 等 headless agent CLI 启动的工作进程）以及它们之间的协作消息，统一视作可观测、可回放、可审计的事件序列；通过单一 SQLite WAL 真相源、Tokio broadcast 实时分发与 Google A2A v1.0 协议互通三套基础设施，把多 Agent 系统从「演示脚本」推到「日用平台」。本章梳理伏羲所处的技术语境、相关研究与同类系统现状，明确论文要解决的问题与五条具体贡献，并给出全文的章节安排。
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\textwidth]{gpt-image/fig-1-1-overview.png}
+\caption{伏羲平台总体示意（顶层玄女统一调度多个并发门客，事件流统一落到事件总线后向多订阅者扇出，仅作概念辅助）}
+\label{fig:overview-hero}
+\end{figure}
+
 \subsection{研究背景及意义}
 
 AI Agent 在 2023 年之后再度成为系统层面的研究焦点。Wooldridge 在多 Agent 系统教材中给出的「自治、社会能力、反应性、主动性」四属性定义~\parencite{wooldridge2009mas}，与 Stone 和 Veloso 在多 Agent 综述中关于协调机制与学习适应的系统梳理~\parencite{stone2000multiagent}，为 Agent 这一抽象提供了长期稳定的理论基础；Russell 与 Norvig 在《人工智能：现代方法》中把 Agent 进一步抽象为「感知—决策—行动」闭环~\parencite{russell2020aima}，让 Agent 具备明确的工程实现路径；Jennings 在 21 世纪初指出，Agent 视角的根本价值在于「以自治实体为单元的高级抽象」可以管理复杂软件系统的不确定性~\parencite{jennings2001agentbased}。这一脉理论工作奠定的语义层次，使得在大语言模型成熟之后，Agent 概念能够迅速被工程化。
