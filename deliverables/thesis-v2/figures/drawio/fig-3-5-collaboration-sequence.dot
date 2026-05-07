@@ -1,0 +1,92 @@
+// 图 3.5 玄女门客协作时序
+// 6 条泳道：用户 / 玄女 / Orchestrator / 门客 / EventBus / SystemEventBridge
+// 时间从上到下；横向箭头 = 消息
+digraph seq {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=line,
+    nodesep=0.18,
+    ranksep=0.32,
+    pad=0.3,
+    margin=0.2,
+    newrank=true
+  ];
+  node [
+    fontname="PingFang SC",
+    fontsize=11,
+    color="#9aa5b4",
+    penwidth=1.0
+  ];
+  edge [
+    fontname="PingFang SC",
+    fontsize=10,
+    fontcolor="#3b4a5c",
+    color="#5c6b7d",
+    arrowsize=0.6,
+    penwidth=1.0
+  ];
+
+  // 头部 actor
+  { rank=same;
+    h_user  [label="用户",            shape=box, style="rounded,filled", fillcolor="#fef4e6"];
+    h_xn    [label="玄女",            shape=box, style="rounded,filled", fillcolor="#fef4e6"];
+    h_orch  [label="Orchestrator",    shape=box, style="rounded,filled", fillcolor="#eef3fb"];
+    h_men   [label="门客\n(cc/codex)", shape=box, style="rounded,filled", fillcolor="#eaf4ee"];
+    h_bus   [label="EventBus",        shape=box, style="rounded,filled", fillcolor="#fbeaea"];
+    h_seb   [label="SystemEventBridge", shape=box, style="rounded,filled", fillcolor="#f1ecf7"];
+  }
+
+  // 时间步骤节点（每泳道每步一个小点）
+  // 9 个时间步 t1..t9
+  node [shape=point, width=0.05, color="#bcc4d0"];
+
+  // 用户泳道
+  u1 [label=""]; u9 [label=""];
+  // 玄女
+  xn1[label=""]; xn2[label=""]; xn7[label=""]; xn8[label=""]; xn9[label=""];
+  // orch
+  o2 [label=""]; o3 [label=""]; o4 [label=""];
+  // 门客
+  m4 [label=""]; m5 [label=""]; m8 [label=""];
+  // bus
+  b3 [label=""]; b5 [label=""]; b6 [label=""]; b8 [label=""];
+  // SystemEventBridge
+  s6 [label=""]; s7 [label=""];
+
+  // 各泳道 lifeline（虚线竖向）
+  edge [arrowhead=none, style=dashed, color="#bcc4d0", fontsize=1];
+  h_user -> u1 -> u9;
+  h_xn   -> xn1 -> xn2 -> xn7 -> xn8 -> xn9;
+  h_orch -> o2 -> o3 -> o4;
+  h_men  -> m4 -> m5 -> m8;
+  h_bus  -> b3 -> b5 -> b6 -> b8;
+  h_seb  -> s6 -> s7;
+
+  // 时间步对齐（每行一个时刻）
+  { rank=same; u1; xn1; }
+  { rank=same; xn2; o2; }
+  { rank=same; o3; b3; }
+  { rank=same; o4; m4; }
+  { rank=same; m5; b5; }
+  { rank=same; b6; s6; }
+  { rank=same; s7; xn7; }
+  { rank=same; xn8; m8; b8; }
+  { rank=same; xn9; u9; }
+
+  // 横向消息箭头
+  edge [arrowhead=normal, style=solid, color="#3b4a5c", fontsize=10];
+
+  u1  -> xn1 [label="①  自然语言任务"];
+  xn2 -> o2  [label="②  dispatch_task"];
+  o3  -> b3  [label="③  publish TaskCreated"];
+  o4  -> m4  [label="④  assign"];
+  m5  -> b5  [label="⑤  publish AgentResponded /\n      ToolCallStarted"];
+  b6  -> s6  [label="⑥  forward 关键事件"];
+  s7  -> xn7 [label="⑦  抄送系统提示"];
+  m8  -> b8  [label="⑧  publish TaskStateChanged(Done)", constraint=false];
+  b8  -> xn8 [label="     (玄女订阅 → 知情)", style=dotted, constraint=false];
+  xn9 -> u9  [label="⑨  汇报结果"];
+}
