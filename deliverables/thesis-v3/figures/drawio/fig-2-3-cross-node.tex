@@ -1,4 +1,4 @@
-% 图 2.3 跨节点部署 — home node + worker nodes + dist controller + ssh tunnel
+% 图 2-3 跨节点部署 v2 — 修：auto-pin 公式移到右下角小注释 / ② 气泡远离 worker box 边缘
 \documentclass[border=4pt]{standalone}
 \usepackage{xeCJK}
 \setCJKmainfont{Songti SC}
@@ -9,58 +9,62 @@
 \input{_style.tex}
 
 \begin{document}
-\begin{tikzpicture}[font=\sffamily, node distance=8mm and 12mm]
+\begin{tikzpicture}[font=\sffamily, node distance=8mm and 16mm]
 
-% ── Home 节点（左）──────────────────────────────────
-\node[highlightBox, minimum width=30mm] (home_xuannv) {玄女 + 编排器};
-\node[modBox, below=of home_xuannv, minimum width=30mm] (home_dist) {dist controller\\\scriptsize axum /api + /dist};
-\node[modBox, below=of home_dist, minimum width=30mm] (home_sqlite) {SQLite WAL};
-\node[modBox, below=of home_sqlite, minimum width=30mm] (home_im) {IM 后端};
+% ── Home 节点（左）──
+\node[highlightBox, minimum width=32mm] (home_xuannv) {玄女 + 编排器};
+\node[modBox, below=of home_xuannv, minimum width=32mm] (home_dist) {dist controller\\\scriptsize axum /api + /dist};
+\node[modBox, below=of home_dist, minimum width=32mm] (home_sqlite) {SQLite WAL};
+\node[modBox, below=of home_sqlite, minimum width=32mm] (home_im) {IM 后端};
 
-% ── Worker 节点（右上）──────────────────────────────
-\node[modBox, right=42mm of home_xuannv, minimum width=28mm] (worker1_cc) {cc 门客};
-\node[modBox, below=2mm of worker1_cc, minimum width=28mm] (worker1_sandbox) {git worktree\\\scriptsize 隔离工作区};
-\node[modBox, below=2mm of worker1_sandbox, minimum width=28mm] (worker1_relay) {fuxi-cli worker\\\scriptsize relay 进程};
+% ── Worker A（右上）──
+\node[modBox, right=46mm of home_xuannv, minimum width=30mm] (worker1_cc) {cc 门客};
+\node[modBox, below=2mm of worker1_cc, minimum width=30mm] (worker1_sandbox) {git worktree\\\scriptsize 隔离工作区};
+\node[modBox, below=2mm of worker1_sandbox, minimum width=30mm] (worker1_relay) {fuxi-cli worker\\\scriptsize relay 进程};
 
-% ── Worker 节点（右下，第二台）─────────────────────
-\node[modBox, below=14mm of worker1_relay, minimum width=28mm] (worker2_cc) {codex 门客};
-\node[modBox, below=2mm of worker2_cc, minimum width=28mm] (worker2_relay) {fuxi-cli worker};
+% ── Worker B（右下）──
+\node[modBox, below=18mm of worker1_relay, minimum width=30mm] (worker2_cc) {codex 门客};
+\node[modBox, below=2mm of worker2_cc, minimum width=30mm] (worker2_relay) {fuxi-cli worker};
 
-% ── 节点边界（虚线圈）───────────────────────────────
+% ── 节点边界（虚线圈 + 节点标题）──
 \begin{scope}[on background layer]
-  \node[externalBoundary, fit=(home_xuannv) (home_dist) (home_sqlite) (home_im), inner sep=6pt,
-    label={[font=\small\bfseries, text=fuxiBlue]above:{Home 节点}}] (home_box) {};
-  \node[externalBoundary, fit=(worker1_cc) (worker1_sandbox) (worker1_relay), inner sep=6pt,
-    label={[font=\small\bfseries, text=fuxiBlue]above:{Worker A（笔记本）}}] (worker1_box) {};
-  \node[externalBoundary, fit=(worker2_cc) (worker2_relay), inner sep=6pt,
-    label={[font=\small\bfseries, text=fuxiBlue]below:{Worker B（家用台式机）}}] (worker2_box) {};
+  \node[externalBoundary, fit=(home_xuannv) (home_dist) (home_sqlite) (home_im), inner sep=7pt,
+    label={[font=\small\bfseries, text=fuxiBlue, yshift=1pt]above:{Home 节点}}] (home_box) {};
+  \node[externalBoundary, fit=(worker1_cc) (worker1_sandbox) (worker1_relay), inner sep=7pt,
+    label={[font=\small\bfseries, text=fuxiBlue, yshift=1pt]above:{Worker A（笔记本）}}] (worker1_box) {};
+  \node[externalBoundary, fit=(worker2_cc) (worker2_relay), inner sep=7pt,
+    label={[font=\small\bfseries, text=fuxiBlue, yshift=-1pt]below:{Worker B（家用台式机）}}] (worker2_box) {};
 \end{scope}
 
-% ── 内部连线 ────────────────────────────────────────
+% ── Home 节点内部连线 ──
 \draw[flow] (home_xuannv) -- (home_dist);
 \draw[flow] (home_dist) -- (home_sqlite);
 \draw[flow] (home_im) -- (home_dist);
 
+% ── Worker 内部连线 ──
 \draw[flow] (worker1_cc) -- (worker1_sandbox);
 \draw[flow] (worker1_sandbox) -- (worker1_relay);
 \draw[flow] (worker2_cc) -- (worker2_relay);
 
-% ── 跨节点通道（粗虚线 + HMAC 标签）─────────────────
+% ── 跨节点通道（粗虚线 + HMAC 标签）──
+% 编号气泡放在 home_dist 右侧紧贴出口，远离 worker box
+\node[numBubble] at ($(home_dist.east)+(4mm,2mm)$) {1};
 \draw[flowEvent, very thick, dash pattern=on 3pt off 2pt]
-  (home_dist.east) -- node[above, font=\scriptsize, color=fuxiBlue] {HMAC + ssh tunnel} (worker1_relay.west);
+  (home_dist.east) -- node[above=2pt, font=\scriptsize, color=fuxiBlue, sloped, midway] {HMAC + ssh tunnel}
+  (worker1_relay.west);
+
+\node[numBubble] at ($(home_dist.east)+(4mm,-2mm)$) {2};
 \draw[flowEvent, very thick, dash pattern=on 3pt off 2pt]
-  (home_dist.east) to[bend right=20] node[below, font=\scriptsize, color=fuxiBlue] {/dist/* HMAC} (worker2_relay.west);
+  (home_dist.east) to[bend right=15] node[below=2pt, font=\scriptsize, color=fuxiBlue, sloped, pos=0.4] {/dist/* HMAC}
+  (worker2_relay.west);
 
-% 编号气泡：分布式调度三步
-\node[numBubble] at ($(home_dist.east)!0.3!(worker1_relay.west)+(0,3mm)$) {1};
-\node[numBubble, anchor=center] at ($(worker1_sandbox.center)+(15mm,0)$) (n2) {2};
-\draw[->, color=fuxiBlue, thick, dashed] (n2) -- ($(worker1_sandbox.east)+(1mm,0)$);
-
-% 节点选择规则注释
-\node[anchor=south, font=\scriptsize\itshape, text=fuxiGrayDark, align=left] at ($(home_xuannv.north)+(0,8mm)$) {
-auto-pin: $\arg\min_{n\in\mathcal{N}_p}\frac{n.\text{inflight}}{n.\max\_concurrency}$\\
-显式 @node 优先 / 守 task.pinned\_node
-};
+% ── auto-pin 注释（右下角小框）──
+\node[anchor=north west, font=\scriptsize\itshape, text=fuxiGrayDark, align=left,
+      draw=fuxiGrayLine!40, fill=fuxiGrayBox!30, inner sep=5pt, line width=0.3pt]
+  at ($(worker2_box.south west)+(0,-9mm)$) {
+    auto-pin: $\arg\min_{n\in\mathcal{N}_p}\dfrac{n.\,\mathrm{inflight}}{n.\,\mathrm{max\_concurrency}}$\\
+    用户显式 \texttt{@<node>} 优先 / 守 \texttt{task.pinned\_node}
+  };
 
 \end{tikzpicture}
 \end{document}

@@ -89,6 +89,10 @@
 }
 \renewcommand{\figurename}{图}
 \renewcommand{\tablename}{表}
+% 让图表计数器在每个 section 起点重置——否则全局累加会让 ch2 的第一张图被编为 2.2
+% \numberwithin 必须先于 \renewcommand{\thefigure}（前者会重置后者的格式）
+\numberwithin{figure}{section}
+\numberwithin{table}{section}
 \renewcommand{\thefigure}{\thesection.\arabic{figure}}
 \renewcommand{\thetable}{\thesection.\arabic{table}}
 
