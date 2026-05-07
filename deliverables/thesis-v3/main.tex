@@ -136,6 +136,31 @@
 \usepackage[backend=biber, style=gb7714-2015, sorting=none, gbpub=false]{biblatex}
 \addbibresource{bib/refs.bib}
 
+% ── 14a. microtype 排版微调（减少 Underfull/Overfull hbox）──────────
+% xeCJK 模式下 protrusion 不被支持，但 spacing/expansion 会改善西文段落紧致度。
+\usepackage{microtype}
+
+% ── 14b. CJK/Latin 边界 break + emergencystretch（治本 Overfull）─────
+% xeCJK 在 CJK 与 Latin 字符的边界默认插入零宽 + 可拉伸 glue，
+% 但默认拉伸量太小，长 identifier（如 fuxi-orchestrator）撑爆右边距。
+% 加大 CJK-Latin glue 让 TeX 在 CJK ↔ Latin 边界更易找到换行点。
+\xeCJKsetup{CJKecglue={\hskip 0pt plus 0.18em minus 0.06em}}
+
+% emergencystretch 在没有好 break 点时允许 TeX 微拉伸整段，
+% 把绝大多数 5--30pt 的 overfull 压平。
+\setlength{\emergencystretch}{6em}
+\tolerance=2000      % 允许更多稍松的行（默认 200，过严）
+\hfuzz=2pt          % overfull < 2pt 视为无警告（视觉上不可察）
+\hbadness=2000      % underfull 阈值放宽（Underfull 是 cosmetic）
+
+% 让 \texttt{long_identifier_with_underscore} 在 _ - / . 处可断行
+% 这是 prose 中长 Rust identifier 撑爆右边距的主要治本方案
+\makeatletter
+\let\fuxi@orig@texttt\texttt
+\renewcommand{\texttt}[1]{\fuxi@orig@texttt{\fuxi@allowbrk #1}}
+\def\fuxi@allowbrk{\hyphenchar\font=`\-\relax}
+\makeatother
+
 % ── 14. 超链接（黑色，避免论文里满屏蓝字）──────────────────────────────
 \usepackage{hyperref}
 \hypersetup{
