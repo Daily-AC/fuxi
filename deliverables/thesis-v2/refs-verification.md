@@ -225,3 +225,50 @@
 - 验证 URL（Google Research）：https://research.google/pubs/spanner-googles-globally-distributed-database-2/
 - 验证证据：USENIX + Google Research + ACM DL（10.5555/2387880.2387905）三处一致。荣获 OSDI 2012 Jay Lepreau Best Paper Award。TrueTime API 是伏羲跨节点时间一致性思路的对照参考。
 - 引用位置预估：§2.5 全球分布式数据库；§3.6 跨节点时间一致性
+
+## E 桶：工程实现/工具/标准（6 篇）
+
+### E.1 [tokio2024broadcast]
+- 标题：Module broadcast（tokio::sync::broadcast）
+- 维护：Tokio Project（tokio-rs）
+- 验证 URL：https://docs.rs/tokio/latest/tokio/sync/broadcast/
+- 验证证据：WebFetch 返回页面标题「Module broadcast」与首段「A multi-producer, multi-consumer broadcast queue. Each sent value is seen by all consumers.」与候选清单完全对齐。docs.rs 是 Rust 官方稳定文档站。伏羲 fuxi-events crate 的 EventBus 直接基于该 broadcast 通道。
+- 引用位置预估：§3.3 EventBus 实现；§4 工程实现细节
+
+### E.2 [sqlite2024wal]
+- 标题：Write-Ahead Logging
+- 维护：SQLite Consortium（D. Richard Hipp 等）
+- 验证 URL：https://www.sqlite.org/wal.html
+- 验证证据：WebFetch 返回页面标题「Write-Ahead Logging」与首段确认「version 3.7.0 (2010-07-21)」起 WAL 可用、「PRAGMA journal_mode=WAL」开启。伏羲事件存储依赖 WAL 模式实现读不阻写。
+- 引用位置预估：§3.3 事件持久化；§4 SQLite WAL 选型论证
+
+### E.3 [axum2024docs]
+- 标题：axum: An Ergonomic and Modular Web Framework for Rust
+- 维护：Tokio Project（crate owners 含 carllerche、davidpdrsn）
+- 验证 URL：https://docs.rs/axum/latest/axum/
+- 验证证据：WebFetch 返回「axum is an HTTP routing and request-handling library that focuses on ergonomics and modularity.」owners 列表含 github:tokio-rs:core / github:tokio-rs:axum-release。伏羲 fuxi-a2a 的 server 端使用 axum 实现 A2A 协议 endpoint。
+- 引用位置预估：§3.3 fuxi-a2a server 实现；§4 框架选型
+
+### E.4 [git2024worktree]
+- 标题：git-worktree - Manage Multiple Working Trees
+- 维护：Git Project（git-scm.com 官方文档）
+- 验证 URL：https://git-scm.com/docs/git-worktree
+- 验证证据：WebFetch 返回标题「git-worktree - Manage multiple working trees」+ description「Manage multiple working trees attached to the same repository.」与候选完全对齐。伏羲 worker pre-spawn 机制依赖 git worktree 实现并发任务隔离。
+- 引用位置预估：§3.4 门客并发执行；§4 worktree sandbox 实现
+
+### E.5 [fette2011websocket]
+- 标题：The WebSocket Protocol（RFC 6455）
+- 作者：Ian Fette (Google), Alexey Melnikov (Isode)
+- 出版：IETF, December 2011
+- DOI：10.17487/RFC6455
+- 验证 URL：https://www.rfc-editor.org/rfc/rfc6455
+- 验证证据：WebFetch 返回标题「The WebSocket Protocol」、作者「I. Fette (Google, Inc.) and A. Melnikov (Isode Ltd.)」、日期「December 2011」、abstract 首段与候选完全一致。伏羲 firehose 与 sia 反连均使用 WebSocket。
+- 引用位置预估：§3.5 实时通讯协议；§4 firehose 实现
+
+### E.6 [whatwg2024sse]（替换记录）
+- [REPLACED hickson2024sse → whatwg2024sse]：原候选 key 为 `hickson2024sse`，标注作者 Ian Hickson。WHATWG HTML Living Standard 的 Server-Sent Events 章节（§9.2）由 WHATWG 集体维护、不署个人编辑名（Hickson 是 HTML5 早期长期主编与 SSE 原作者，但当前 living standard 不再以个人署名）。为对齐验证证据，BibTeX key 改为 `whatwg2024sse`，author 字段使用机构作者 `{WHATWG}`，避免审稿时被指为虚假个人署名。
+- 标题：HTML Living Standard — Server-Sent Events
+- 维护：WHATWG（Web Hypertext Application Technology Working Group）
+- 验证 URL：https://html.spec.whatwg.org/multipage/server-sent-events.html
+- 验证证据：WebFetch 返回章节标题「9.2 Server-sent events」与首段「To enable servers to push data to web pages over HTTP or using dedicated server-push protocols, this specification introduces the EventSource interface.」页面顶部 WHATWG 品牌标识确认机构归属。
+- 引用位置预估：§3.5 实时通讯协议；§4 PWA 推送渠道选型
