@@ -1,0 +1,59 @@
+% 共享 TikZ 风格 — Aegaeon (SOSP'25) inspired，对标顶刊系统论文
+% 使用：\input{_style.tex} 在 standalone preamble 内
+% 调色：Okabe-Ito（与 matplotlib 图一致）
+
+\definecolor{fuxiBlue}{HTML}{0072B2}    % 自家系统主色
+\definecolor{fuxiOrange}{HTML}{E69F00}  % 第一对照
+\definecolor{fuxiGreen}{HTML}{009E73}
+\definecolor{fuxiPurple}{HTML}{CC79A7}
+\definecolor{fuxiSky}{HTML}{56B4E9}
+\definecolor{fuxiGrayBox}{HTML}{F2F2F2} % 浅灰底
+\definecolor{fuxiGrayLine}{HTML}{808080}
+\definecolor{fuxiGrayDark}{HTML}{555555}
+
+\tikzset{
+  % ── 通用节点 ────────────────────────────────────────
+  modBox/.style = {
+    draw=fuxiGrayLine, thick, fill=white,
+    rounded corners=2pt, inner sep=4pt,
+    minimum height=8mm, minimum width=20mm,
+    align=center, font=\small
+  },
+  highlightBox/.style = {
+    modBox, draw=fuxiBlue, fill=fuxiBlue!8,
+    text=fuxiBlue, font=\small\bfseries
+  },
+  ghostBox/.style = {
+    modBox, draw=fuxiGrayLine!50, fill=fuxiGrayBox,
+    text=fuxiGrayDark, font=\small\itshape
+  },
+  layerBg/.style = {
+    draw=fuxiGrayLine!40, dashed, fill=fuxiGrayBox!40,
+    rounded corners=4pt, inner sep=8pt
+  },
+  externalBoundary/.style = {
+    draw=fuxiGrayLine, dashed, dash pattern=on 4pt off 3pt,
+    rounded corners=6pt, inner sep=10pt
+  },
+  % ── 箭头 ─────────────────────────────────────────────
+  flow/.style = {
+    -{Stealth[length=4pt, width=4pt]},
+    line width=0.7pt, color=fuxiGrayDark
+  },
+  flowEvent/.style = {
+    flow, color=fuxiBlue, line width=0.9pt
+  },
+  flowDup/.style = {
+    flow, color=fuxiBlue!70, line width=0.7pt, dotted
+  },
+  bidir/.style = {
+    {Stealth[length=4pt]}-{Stealth[length=4pt]},
+    line width=0.7pt, color=fuxiGrayDark
+  },
+  % ── 编号气泡 ① ② ③ ────────────────────────────────
+  numBubble/.style = {
+    circle, draw=fuxiBlue, fill=white, text=fuxiBlue,
+    font=\scriptsize\bfseries, inner sep=0pt,
+    minimum size=4mm, line width=0.6pt
+  },
+}

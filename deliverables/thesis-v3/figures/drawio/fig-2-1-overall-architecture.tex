@@ -1,0 +1,70 @@
+% 图 2.1 顶层架构 — 玄女 + 门客 + EventBus + Shelf + A2A + Firehose + IM/PWA
+\documentclass[border=4pt]{standalone}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric, fit, backgrounds}
+\input{_style.tex}
+
+\begin{document}
+\begin{tikzpicture}[node distance=6mm and 8mm, font=\sffamily]
+
+% ── 用户面（最左）───────────────────────────────────────
+\node[modBox, minimum width=22mm] (im) {IM/PWA\\\scriptsize 浏览器/手机};
+\node[modBox, below=4mm of im, minimum width=22mm] (tui) {Firehose TUI\\\scriptsize 终端实时观察};
+
+% ── 编排层（中间，三层堆叠）────────────────────────────
+\node[highlightBox, right=14mm of im, minimum width=28mm] (xuannv) {玄女 (xuannv)\\\scriptsize 顶层 agent};
+\node[modBox, below=4mm of xuannv, minimum width=28mm] (shelf) {Shelf 橱柜\\\scriptsize 门客注册表};
+\node[modBox, below=4mm of shelf, minimum width=28mm] (bus) {EventBus\\\scriptsize broadcast + WAL};
+
+% ── 门客（右侧三只）─────────────────────────────────
+\node[modBox, right=14mm of xuannv, minimum width=24mm] (cc1) {cc 门客 \#1\\\scriptsize claude-code};
+\node[modBox, below=2mm of cc1, minimum width=24mm] (cc2) {cc 门客 \#2\\\scriptsize claude-code};
+\node[modBox, below=2mm of cc2, minimum width=24mm] (codex) {codex 门客\\\scriptsize OpenAI codex};
+
+% ── 持久化层（最下）────────────────────────────────
+\node[ghostBox, below=10mm of bus, minimum width=28mm] (sqlite) {SQLite WAL\\\scriptsize 单一真相源};
+
+% ── 跨进程边界（虚线圈）─────────────────────────────
+\begin{scope}[on background layer]
+  \node[externalBoundary, fit=(cc1) (cc2) (codex), inner sep=4pt, label={[font=\scriptsize\itshape, text=fuxiGrayDark]above:{子进程（CLI 头无 GUI）}}] (subprocs) {};
+  \node[externalBoundary, fit=(im) (tui), inner sep=4pt, label={[font=\scriptsize\itshape, text=fuxiGrayDark]above:{用户终端/浏览器}}] (clients) {};
+\end{scope}
+
+% ── 数据流箭头 ──────────────────────────────────────
+% 用户 → 玄女
+\draw[flow] (im.east) -- node[above, font=\scriptsize, pos=0.5] {REST/WS} (xuannv.west);
+\draw[flow] (tui.east) -- (bus.west);
+
+% 玄女 → 门客（A2A）
+\draw[bidir] (xuannv.east) -- node[above, font=\scriptsize] {A2A} (cc1.west);
+\draw[bidir] (xuannv.east) -| ($(cc2.west)+(-3mm,0)$) -- (cc2.west);
+\draw[bidir] (xuannv.east) -| ($(codex.west)+(-3mm,0)$) -- (codex.west);
+
+% 玄女 ↔ Shelf
+\draw[bidir] (xuannv.south) -- (shelf.north);
+
+% 门客 → EventBus（事件流）
+\draw[flowEvent] (cc1.south) |- ($(bus.east)+(0,2mm)$);
+\draw[flowEvent] (cc2.south) |- (bus.east);
+\draw[flowEvent] (codex.south) |- ($(bus.east)+(0,-2mm)$);
+
+% Shelf ↔ EventBus
+\draw[bidir] (shelf.south) -- (bus.north);
+
+% EventBus → SQLite（持久化）
+\draw[flowEvent] (bus.south) -- (sqlite.north);
+
+% EventBus → IM/TUI（订阅）
+\draw[flowDup] (bus.west) -| ($(im.south)+(0mm,-3mm)$) |- (im.east);
+
+% 编号气泡 ①②③④（数据流主线）
+\node[numBubble] at ($(im.east)!0.5!(xuannv.west)+(0,3mm)$) {1};
+\node[numBubble] at ($(xuannv.east)!0.5!(cc1.west)+(0,2mm)$) {2};
+\node[numBubble] at ($(cc1.south)!0.5!(bus.east)+(2mm,0)$) {3};
+\node[numBubble] at ($(bus.south)!0.4!(sqlite.north)+(3mm,0)$) {4};
+
+\end{tikzpicture}
+\end{document}

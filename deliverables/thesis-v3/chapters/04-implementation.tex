@@ -196,7 +196,7 @@ pub async fn append(&self, ev: &Event) -> Result<()> {
 
 \subsection{任务派发流程实现}
 
-任务派发是编排层（\texttt{fuxi-orchestrator}）最核心的代码路径。当用户在 IM 端或 TUI 输入一句话后，玄女判断是否需要派单，若需要则调用 \texttt{Fuxi::dispatch} 或 \texttt{Fuxi::dispatch\_to\_any}。派发的核心责任有四项：（1）按 \texttt{pinned\_node} / \texttt{required\_tags} / \texttt{project.host\_nodes} 决策本地或分布式路径；（2）对本地路径，调 \texttt{Agent::dispatch} 拿到 \texttt{mpsc::Receiver<Event>}；（3）启动 dispatch pump 把私有 receiver 中的事件 republish 到全局 EventBus；（4）在 pump 终止时清理状态、发 \texttt{TaskCompleted}/\texttt{TaskCancelled} 事件。整体流程见图~\ref{fig:dispatch-flow}。
+任务派发是编排层（\texttt{fuxi-orchestrator}）最核心的代码路径。当用户在 IM 端或 TUI 输入一句话后，玄女判断是否需要派单，若需要则调用 \texttt{Fuxi::dispatch} 或 \texttt{Fuxi::dispatch\_to\_any}。派发的核心责任有四项：（1）按 \texttt{pinned\_node} / \texttt{required\_tags} / \texttt{project.host\_nodes} 决策本地或分布式路径；（2）对本地路径，调 \texttt{Agent::dispatch} 拿到 \texttt{mpsc::Receiver<Event>}；（3）启动 dispatch pump 把私有 receiver 中的事件 republish 到全局 EventBus；（4）在 pump 终止时清理状态、发 \texttt{TaskCompleted}/\texttt{TaskCancelled} 事件。整体流程见后文 \autoref{lst:dispatch-main} 与代码内注释。
 
 代码~\ref{lst:claim-idle} 是 \texttt{Shelf} 的 \texttt{claim\_idle\_by\_role}——一个原子的"找空闲门客并占用"操作，是规避 TOCTOU 双派 bug 的关键。
 
@@ -232,7 +232,7 @@ pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
         task.pinned_node = Some(picked);
     }
 
-    // 2. 路由决策：pinned_node 或 required_tags 非空 → 走 dist enqueue。
+    // 2. 路由决策：pinned_node 或 required_tags 非空 -> 走 dist enqueue。
     let needs_dist = task.pinned_node.is_some()
                      || !task.required_tags.is_empty();
     if needs_dist {
@@ -267,7 +267,7 @@ pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
         let mut saw_terminal = false;
         loop {
             // 终态后给 50ms grace window，让晚到的 deliverable 事件
-            // 也能 republish；超时再退。这是 M2.1 修过的尾包丢失 bug。
+            // 也能 republish; 超时再退。这是 M2.1 修过的尾包丢失 bug。
             let next = tokio::time::timeout(
                 Duration::from_millis(50),
                 stream.next(),

@@ -1,0 +1,75 @@
+% ============================================================================
+% 第 1 章 绪论
+% ============================================================================
+
+\section{绪论}
+
+伏羲是一套以 Rust 实现的本地优先 AI Agent 编排平台。它把用户的自然语言意图、顶层 Agent 玄女的对话决策、多个并发执行的门客（基于 Claude Code 与 Codex 等 headless agent CLI 启动的工作进程）以及它们之间的协作消息，统一视作可观测、可回放、可审计的事件序列；通过单一 SQLite WAL 真相源、Tokio broadcast 实时分发与 Google A2A v1.0 协议互通三套基础设施，把多 Agent 系统从「演示脚本」推到「日用平台」。本章梳理伏羲所处的技术语境、相关研究与同类系统现状，明确论文要解决的问题与五条具体贡献，并给出全文的章节安排。
+
+\subsection{研究背景及意义}
+
+AI Agent 在 2023 年之后再度成为系统层面的研究焦点。Wooldridge 在多 Agent 系统教材中给出的「自治、社会能力、反应性、主动性」四属性定义~\parencite{wooldridge2009mas}，与 Stone 和 Veloso 在多 Agent 综述中关于协调机制与学习适应的系统梳理~\parencite{stone2000multiagent}，为 Agent 这一抽象提供了长期稳定的理论基础；Russell 与 Norvig 在《人工智能：现代方法》中把 Agent 进一步抽象为「感知—决策—行动」闭环~\parencite{russell2020aima}，让 Agent 具备明确的工程实现路径；Jennings 在 21 世纪初指出，Agent 视角的根本价值在于「以自治实体为单元的高级抽象」可以管理复杂软件系统的不确定性~\parencite{jennings2001agentbased}。这一脉理论工作奠定的语义层次，使得在大语言模型成熟之后，Agent 概念能够迅速被工程化。
+
+大模型让 Agent 具备了过去十年没有的能力——以自然语言理解任务、以工具调用改变环境、以记忆模块累积经验。Wang 等人对 LLM-based 自治 Agent 的综述把现代 Agent 抽象为「规划、记忆、工具使用与行动反馈」四个组件~\parencite{wang2023llmagentsurvey}；Yao 等人提出的 ReAct 框架把推理轨迹与外部行动交替生成，使模型能在过程中根据观察修正计划~\parencite{yao2022react}；Schick 等人的 Toolformer 让模型自主学习工具调用~\parencite{schick2023toolformer}；Karpas 等人的 MRKL 系统把语言模型作为协调者、外部模块作为执行器组合到一起~\parencite{karpas2022mrkl}。在这一系列工作之后，AI Agent 的研究对象不再是单模型推理效果，而是「模型、工具、协议、运行时与观测系统共同构成的工程平台」。Voyager 在开放世界游戏中通过 skill library 持续积累与重用经验~\parencite{wang2023voyager}，进一步表明 Agent 的能力可以跨任务沉淀；SWE-agent 在软件工程任务上指出，面向 Agent 设计的接口与沙箱环境会显著影响最终完成质量~\parencite{yang2024sweagent}；OpenHands 把 Agent 的执行环境视为通用平台问题~\parencite{wang2024openhands}。这些工作共同表明，要让 Agent 真正承担起复杂任务的执行责任，必须把工具接口、执行隔离与持续记忆当成一等公民设计，而不是把它们作为对话循环的附属物。
+
+在工程使用场景中，单个 Agent 难以同时承担需求澄清、计划拆解、代码实现、测试验证与结果交付等所有职责，这一观察推动了多 Agent 协作工作的兴起。CAMEL 通过角色扮演研究 Agent 之间的对话演化~\parencite{li2023camel}；AutoGen 把多 Agent 对话抽象为可编程框架~\parencite{wu2023autogen}；MetaGPT 把软件工程的标准作业流程编码为多角色协作~\parencite{hong2023metagpt}；AutoGPT 探索完全自主的目标分解与执行~\parencite{significantgravitas2023autogpt}。这些系统证明了多 Agent 协作能够提高任务分解能力与过程可解释性，但也暴露出三类共性工程问题：通信协议不统一，每个框架自定义对话或消息格式，跨框架复用门客困难；任务生命周期不清晰，许多框架只在 Python 进程内维护状态，进程一退出全部上下文丢失；状态难以追踪，运行时的轮询逻辑、消息分发与工具调用混在同一进程内，外部观察者只能从最终输出反推过程，无法独立审计或回放历史。
+
+对一个本地化运行、要被日用的多 Agent 平台而言，高性能分布式通讯不是可选锦上添花，而是平台能否成立的前提。第一，Agent 在执行过程中会产生密集的工具调用、文件读写、命令执行与中间消息。系统必须用低延迟通道把这些状态及时反馈给用户，否则用户无从判断 Agent 是在工作还是已经卡死——伏羲实测的事件流端到端 p99 延迟为 0.15 ms（见第 5 章表 5-2），任务派发链路 p99 为 37.32 ms，正是这一约束的工程兑现。第二，多个 Agent 并发执行时，任务调度与消息回传必须避免轮询造成的延迟与资源浪费——这条原则在伏羲被升级成「公理 3：真实时不轮询」，所有观察组件必须订阅事件总线而不是周期性查询数据库；早期版本中 CLI 子进程对玄女 ID 做 5 分钟一次轮询的设计被改成 \texttt{tokio::sync::watch}，感知延迟从分钟级压到毫秒级。第三，AI Agent 的输出具有概率性，工程系统需要通过事件日志、会话恢复与执行隔离来降低不可追溯风险。这一点与 Lamport 在 1978 年提出的「分布式系统中事件因果序」思想~\parencite{lamport1978time} 在工程上对应：一个看不到事件历史的多 Agent 系统，等同于一个没有时钟的分布式系统，任何调试与验收都失去基础。
+
+需要在此明确「工具」与「平台」的边界。一个 Agent 工具——例如某个支持工具调用的 LLM 客户端、某个 prompt 链式调用框架——通常解决「让单个 Agent 完成更复杂任务」的问题；而一个 Agent 平台需要解决「让多个 Agent 长期协作并被人类持续观察」的问题。前者关心模型与工具如何在一次会话内拼装；后者关心多 Agent 如何在数小时甚至数天的时间跨度上协调任务、共享上下文、对外报告进度。这两类问题的解空间并不一样：工具层可以容忍状态在内存里、可以容忍消息在控制台输出，但平台层必须把状态写到持久化日志、必须让消息可以被多个订阅者并发消费、必须让任意时刻的系统截面可以被外部观察者重建。本文把伏羲明确定位为「平台」，因此设计目标里写入了「事件可回放」「观测不轮询」「跨节点可扩展」等约束，这些约束在「工具」层级的研究里通常不被讨论。
+
+2024 年以来，headless agent CLI 的兴起进一步把上述需求具象化。Anthropic 的 Claude Code、OpenAI 的 Codex CLI、Google 的 Gemini CLI 等工具以 \texttt{claude -p}、\texttt{codex exec} 这类「把整段任务作为一次性提示送入、把过程事件流式输出」的形态投入实际生产；它们不再是 Web 界面上的对话框，而是可以被 shell 脚本、CI 流水线、定时任务或上层 Agent 调用的标准化执行单元。这一形态的兴起改变了「多 Agent 协作」的工程定义——协作不再是同一进程内多个对象的相互调用，而是多个独立子进程之间通过结构化消息相互调度。这恰好与分布式系统中「以消息为契约、以进程为隔离单元」的传统工程范式重合，意味着多 Agent 平台的设计可以也应该参考过去四十年分布式系统积累的工程智慧——而不是把所有协调逻辑都重新塞进单个 Python 进程里。
+
+综合上述背景可以得出本文研究的工程意义：在多 Agent 概念已经具备充分理论铺垫、且 LLM agent CLI（Claude Code、Codex、Gemini CLI）已经成为工程世界的客观存在的当下，缺的不是「下一个 prompt 框架」，而是一个把 Agent 协作的通讯底座作为一等公民设计、能在普通笔记本电脑上稳定承载日常工作流、并在多节点之间可信扩展的平台。本文设计与实现的伏羲系统正是面向这一空白展开，并通过吞吐、延迟与压力测试给出可量化的性能边界。
+
+\subsection{国内外研究现状}
+
+围绕 AI Agent 编排已经形成了几条互相平行的研究路线。第一条线是以 ReAct~\parencite{yao2022react}、Toolformer~\parencite{schick2023toolformer}、MRKL~\parencite{karpas2022mrkl} 为代表的 Agent 行为模式，关注单 Agent 在「推理—行动—观察」闭环中的能力上限；这条线的代表工作把 Agent 从一次性脚本推进为具备规划与工具使用能力的自治执行单元，但通讯层一般退化为 Python 函数调用，不涉及跨进程协作。Voyager 通过 skill library 把单 Agent 的能力沉淀到长期记忆中~\parencite{wang2023voyager}，伏羲的角色玉牒（\texttt{fuxi-skills}）借鉴了这一「技能沉淀」思路，但加入了 staging 与 ledger 双轨审阅以适配多用户场景。
+
+第二条线是多 Agent 协作框架。AutoGen~\parencite{wu2023autogen} 强调可编程的对话抽象，让轮次、回合与终止条件能被显式描述；MetaGPT~\parencite{hong2023metagpt} 把软件工程角色与流程编码进协作机制；CAMEL~\parencite{li2023camel} 关注 Agent 间角色扮演与对话演化；AutoGPT~\parencite{significantgravitas2023autogpt} 探索完全自主的任务分解。这些系统证明了角色分工与任务链路的有效性，但绝大多数以 Python 框架或云端 SaaS 为主要形态，通讯层通常是协作流程的副产物：消息在同一 Python 进程内通过函数调用传递，状态保存在进程内的对象图中，进程退出意味着会话结束。这种设计使框架本身无法独立审计、无法跨节点扩展、也无法承载长期任务（比如一个跑数小时的代码迁移）。SWE-agent~\parencite{yang2024sweagent} 与 OpenHands~\parencite{wang2024openhands} 把 Agent 的执行环境提升为研究对象，明确了沙箱与接口设计的重要性，但它们的执行模型仍是单 Agent 单进程，没有处理多门客并发、跨进程通讯与本地多节点这类工程问题。
+
+第三条线是 Agent 协议与编排标准。Anthropic 在 2024 年提出的 Model Context Protocol~\parencite{anthropic2024mcp} 试图标准化模型与外部工具、数据源之间的连接接口；Google 主导的 Agent2Agent 协议~\parencite{a2aproject2025a2a} 用 \texttt{AgentCard}、\texttt{Task}、\texttt{Message} 与 \texttt{Artifact} 等概念描述独立 Agent 之间的互操作语义。两类协议解决的是不同层次的问题：MCP 关注模型与工具的接口规范，A2A 关注 Agent 与 Agent 之间的协作语义。MCP 已经有官方 SDK 与生态，但 A2A 在本论文写作时（2026 年 5 月）的 Rust 生态中没有任何官方或社区的完整实现——这一空白正是本文的核心切入点。
+
+第四条线是分布式系统与消息中间件领域的经典工作。Lamport 关于逻辑时钟与事件因果序的开创性论文~\parencite{lamport1978time} 至今仍是事件溯源、消息中间件与共识算法的理论起点；Dean 与 Ghemawat 提出的 MapReduce~\parencite{dean2004mapreduce} 证明了把任务分解、调度与故障恢复封装到运行时的工程价值；Ghemawat 等人的 Google File System~\parencite{ghemawat2003gfs} 强调在廉价硬件上构建高吞吐、高可用存储系统的设计哲学；Kafka 以追加式日志为核心实现高吞吐消息处理~\parencite{kreps2011kafka}，「日志即一切」的思想直接影响了后续事件驱动系统的设计；Raft 通过更易理解的一致性协议降低了分布式状态复制的实现复杂度~\parencite{ongaro2014raft}；ZooKeeper 与 Spanner 分别在协调服务与全球一致性事务上提供了工业级实践~\parencite{hunt2010zookeeper, corbett2012spanner}。这些工作虽然不针对 AI Agent，但其关于追加式日志、事件因果序、push 式消息分发与故障恢复的思想，在伏羲的事件总线设计中被反复借鉴——伏羲的 \texttt{EventBus} 同时承担「实时分发、持久化、历史回放」三件事，其底层正是「broadcast push 通道 + WAL append-only 日志」的组合，对应于 Kafka 的 push 模式和 SQLite 的 WAL 实现~\parencite{sqlite2024wal}。
+
+工程实现层面的可用工具构成了本系统的技术基础：Tokio 提供了 Rust 异步运行时与 broadcast、mpsc 等 channel 原语~\parencite{tokio2024broadcast}；Axum 提供了基于 \texttt{tower}/\texttt{hyper} 的 Web 框架，支持 WebSocket 与 SSE~\parencite{axum2024docs}；Git worktree 支持同一仓库下多个工作树并存，为门客任务隔离提供了轻量级方案~\parencite{git2024worktree}；WebSocket 协议~\parencite{fette2011websocket} 与 Server-Sent Events 规范~\parencite{whatwg2024sse} 共同支撑了浏览器与服务端之间的实时双向/单向通讯。这一技术栈的组合，使得在 Rust 上构建一个多 Agent 通讯平台不需要从最底层重新发明 IO 框架。
+
+在 Rust 生态内部，与 Agent 编排相邻的工作主要集中在异步运行时、消息中间件与 Web 框架等基础设施层——例如 Tokio 异步运行时与 \texttt{sync::broadcast} 多生产者多消费者通道~\parencite{tokio2024broadcast}、Axum 模块化 Web 框架~\parencite{axum2024docs}——但它们都是通用基础设施而非 Agent 平台。围绕 LLM 的 Rust 库（如 \texttt{llm-chain}、\texttt{rig}、\texttt{kalosm}）数量有限，绝大多数停留在「单 Agent 调模型 + 工具调用」层级，没有覆盖多 Agent 协作、跨节点调度或事件溯源这类系统级议题。换言之，Rust 中已有可靠的「积木」可拿来即用，但缺一个把这些积木组装成真正多 Agent 平台的「图纸」——本文的设计正面向这一空白。
+
+从横向比较来看，AutoGen、MetaGPT、CAMEL、AutoGPT、OpenHands 这一组同类工作并不是「不好」——它们各自在自己的研究问题上做出了扎实贡献。但从「把通讯底座作为一等公民」的视角来看，这些系统普遍存在三个共性盲区：其一，Python 中心带来的运行时局限——Python 的 GIL 与同步异步混合模型让单进程无法充分利用多核，多 Agent 并发本质上仍是协程切换，跨进程通讯几乎全部回退到子进程 stdio 的非结构化文本交互；其二，单进程状态丢失——上下文存在 Python 对象图里，进程崩溃意味着所有对话历史与中间状态消失，没有持久化的事件序列可以重放；其三，没有跨节点能力——这些系统假定运行在单台机器或单个云端实例，没有在「家庭多机部署」「跨节点调度」「负载均衡」这些场景中进行设计。伏羲选择 Rust 工作区 + 多进程门客 + 跨节点 A2A 这一组合是有意识地避开上述盲区：用 Rust 拿到无 GIL 的多核并发与可预测的内存布局，用多进程门客获得故障隔离与跨工作区调度的灵活度，用 A2A 协议的 wire 形态把 Agent 间通讯标准化以便未来与第三方实现互通。这套组合并不是要替代上述工作，而是在它们划定的语义层之下，补一层缺失的工程基础设施。
+
+\subsection{研究目标与贡献}
+
+本文的研究目标是：在 Rust 工作区中实现一个本地优先、事件驱动、可观测、可跨节点扩展的多 AI Agent 协作平台，把通讯底座作为一等公民设计，并通过吞吐、延迟与压力测试给出可量化的性能边界。围绕这一目标，本文做出以下五项可独立审视的工程贡献。
+
+\textbf{贡献一：A2A v1.0 协议的 Rust 从零实现}。Agent2Agent 协议是 Google 主导、Linux Foundation 维护的 Agent 间协作开放标准~\parencite{a2aproject2025a2a}，至本文撰写时其官方 SDK 仅覆盖 Go 与 Python，Rust 生态中无任何完整实现。本文从零实现了 \texttt{fuxi-a2a} crate，共 1321 行代码（其中核心实现 1063 行、端到端测试 258 行），完整覆盖 A2A 规范的 5 个 RPC 方法（\texttt{agent/getCard}、\texttt{tasks/send}、\texttt{tasks/sendSubscribe}、\texttt{tasks/get}、\texttt{tasks/cancel}）、6 种 \texttt{TaskState} 状态、3 种 \texttt{Part} 类型与完整的 \texttt{Artifact} 分块语义。在此基础上，本文做了两项相对规范的扩展：一是新增 \texttt{TaskState::InputRequired} 中间状态，把「门客需要人工介入」从隐式的 \texttt{metadata} 字段提升为协议级公开承诺，让玄女这一顶层编排器能在任意 A2A 兼容客户端面前感知人工介入需求；二是采用单端点 HTTP+SSE 设计——所有 RPC 方法共用 \texttt{POST /a2a} 端点，\texttt{tasks/sendSubscribe} 在响应阶段升级为 \texttt{text/event-stream}，避免客户端管理两条独立连接的复杂度。这一实现既是 Rust 生态的空白填补，也是论文的核心差异化贡献。
+
+\textbf{贡献二：非阻塞事件总线与 lag 哨兵机制}。\texttt{fuxi-events} crate 实现了一个把「实时分发、持久化、历史回放」三件事统一在同一抽象内的事件总线。其核心创新点是\texttt{publish()} 路径上的「\texttt{try\_send} + 后台转交 + 哨兵告警」三步组合：广播路径用 Tokio broadcast 零拷贝扇出给所有订阅者；持久化路径用 \texttt{try\_send} 投递到 mpsc 队列，拥塞时不阻塞调用方而是后台 spawn 任务承担等待；当 writer 待处理数超过 \texttt{lag\_threshold = 512} 阈值时，发出一条可观测的 \texttt{Custom \{ "event\_store\_lagged" \}} 哨兵事件，让运维侧把背压从「不可见的死锁」看成「可见的告警」。该设计兼顾了「调用方永不阻塞」与「事件不丢」这两个看似矛盾的约束，是对 Kafka 经典 push 模式~\parencite{kreps2011kafka} 在本地优先场景下的工程化适配。
+
+\textbf{贡献三：三层沙箱与 WS 反连门客模式}。多 Agent 并发执行的两个核心工程难题分别是文件系统隔离与进程间双向通讯。本文针对前者提出 L1/L2/L3 三层沙箱模型（\texttt{WorkspaceLayer::L1ReadOnly}、\texttt{L2Ephemeral}、\texttt{L3Persistent}）：L1 是项目源码与依赖的只读视图，所有门客共享；L2 是任务级临时 worktree，每次 \texttt{dispatch} 创建独立分支、任务结束自动清理，依赖 git 原生的 \texttt{worktree} 机制~\parencite{git2024worktree} 提供互不干扰的工作树；L3 是角色级持久沙箱，让同一角色跨任务复用 \texttt{target/}、\texttt{node\_modules/} 等编译产物。三层根据「读频率—写隔离—状态保留」三个维度组合，覆盖了从轻量只读到重型持久的全部场景。针对后者，本文提出 WS 反连模式——编排层在本机启动 WebSocket 服务器，子进程启动时通过 \texttt{--sdk-url ws://127.0.0.1:<port>/ws/cli/<sid>} 反向连接回来，使编排层在任意时刻都可以主动推送 \texttt{send\_message} 或 \texttt{cancel}，而不必等门客 poll stdio。这两项设计共同把「多 Agent CLI 适配」收敛到一个统一框架中，已成功支持 Claude Code 与 Codex 两套差异极大的 headless agent CLI。
+
+\textbf{贡献四：跨节点项目分布与负载感知调度}。伏羲在 v2 引入了多节点能力。\texttt{Project} 数据结构新增 \texttt{host\_nodes: Vec<String>} 字段，标记某个项目可在哪些节点上执行；调度器根据节点的 \texttt{NodeLoadProvider} 自动 pin 到最闲节点，但任何用户显式 \texttt{@<node>} 钉死决策必须立即跳过自动逻辑、直接服从——这条「用户显式 > 系统启发」的优先级规则在 \texttt{auto\_pin\_from\_project} 入口与调用方处加双保险守卫。worker 节点收到任务前先 best-effort \texttt{git fetch} 默认分支保证基线代码不过期，失败只 warn 不阻断 dispatch 以避免「网络抖动 → 任务无故消失」的体验问题。新增字段统一标注 \texttt{\#[serde(default)]}，搭配 \texttt{fuxi-core} 中的 \texttt{project\_meta\_deserializes\_legacy\_without\_host\_nodes} 反回归测试，保证跨版本持久化的兼容性。这一组设计让伏羲从单机平台演化为「家用多节点」平台，覆盖了用户自有的多台机器（如笔记本 + 台式机 + 家庭服务器）协同工作的真实使用场景。
+
+\textbf{贡献五：完整可用的工程平台}。伏羲并非纸面方案——本文交付的是一个 13 crate、共 82,515 行 Rust 代码的可执行工作区，配套 1363 个单元测试与 27 个集成测试文件，分布在通讯（\texttt{fuxi-a2a}）、事件（\texttt{fuxi-events}）、编排（\texttt{fuxi-orchestrator}）、执行（\texttt{fuxi-agent-cc}/\texttt{-codex}）、隔离（\texttt{fuxi-workspace}）、观测（\texttt{fuxi-firehose}）、记忆（\texttt{fuxi-memory}）、角色（\texttt{fuxi-skills}）、触发（\texttt{fuxi-scheduler}）、IM 接入（\texttt{fuxi-im}）等模块中；CI 门禁要求 \texttt{cargo fmt --check}、\texttt{cargo clippy -D warnings} 与 \texttt{cargo test --workspace} 三项全绿才能合并。系统已经在用户自有的真实业务（一个 ERP 项目代码库）上跑通端到端工作流——从用户在手机端 PWA 发起需求、玄女接收并拆解、门客分派到合适角色、多门客并发执行、产物交付回 IM 通知，全链路无人工介入即可完成。这一「从协议到平台、从 demo 到日用」的完整性，是本文相对学界已有工作的实质性区分。
+
+上述五项贡献并非互相独立的孤岛，而是围绕同一核心命题——「把 Agent 间通讯的契约、事实流与执行隔离同时做对」——从协议层到平台层逐级展开的工程承担。贡献一在协议层把 Agent 间的契约语义标准化；贡献二在事实层把系统内部状态以可观测、可回放的事件流忠实记录；贡献三在执行层把多门客并发执行所需的隔离与控制范式抽象为可复用的工程模式；贡献四在部署层把单机能力扩展到多节点协作；贡献五是这四项设计在真实代码与真实业务上的同时成立。换言之，这五项贡献是同一套工程方案的不同切面，共同构成本文相对已有工作的差异化定位。
+
+\subsection{论文组织结构}
+
+全文按「问题—方案—实现—验证—回顾」五段式展开，共分六章。
+
+\textbf{第一章 绪论}（本章）。阐述 AI Agent 分布式通讯系统的研究背景、国内外研究现状、研究目标与五项工程贡献，并给出全文的章节安排。
+
+\textbf{第二章 系统总体设计}。从功能性需求与非功能性需求出发，给出伏羲的整体分层架构与通讯模型形式化定义，明确事件驱动、单一真相源、不可绕过编排三条系统级公理，并定义吞吐量、端到端延迟与调度损耗等性能指标的形式化表达，为后续模块设计与实验评估提供统一参照。
+
+\textbf{第三章 系统核心模块设计}。沿依赖自下而上的顺序，把 13 个 crate 的内部设计逐一展开，覆盖通讯协议（A2A wire 层与 \texttt{InputRequired} 状态扩展）、事件总线（broadcast 与 WAL 双路径架构）、编排调度（玄女—门客分层与 worker 选择函数）、执行适配器（cc/codex 差异与 WS 反连）、工作区隔离（L1/L2/L3 三层沙箱）、观测与 IM 接入、记忆与角色玉牒等七大设计单元；每个模块附带「关键设计决策与取舍」段落，把当时讨论过却未采用的备选方案与放弃理由一并记录。
+
+\textbf{第四章 系统实现}。从 daemon 启动开始，沿事件流走完一次完整的「玄女接收任务 → 分派给门客 → 门客通过 A2A 回报 → 事件总线持久化 → IM 端实时刷新」的全链路执行轨迹，把第三章的接口在实际调用栈上一一对应，并展开 \texttt{fuxi-a2a} crate 从 wire 层到 SSE 流的全部实现细节。
+
+\textbf{第五章 系统测试与结果分析}。沿正确性、实时性、吞吐扩展性、参数敏感性、通信层压力承受五个维度组织实验，覆盖单元测试与集成测试覆盖、基础吞吐量、延迟分布与尾部、\texttt{poll\_ms} 参数敏感性、事件总线纯压测等多组测量；所有数据基于 Apple Silicon、macOS 25.0、Rust stable、Tokio 多线程运行时之上完成，吞吐采用 5-run median、延迟采用 500 样本统计 p50/p99；并对每组数字给出物理意义层面的解释，避免实验章退化为单纯数据登记。
+
+\textbf{第六章 总结与展望}。回顾全文工作并讨论分布式一致性、记忆机制语义召回、Agent 适配器横向扩展、安全模型与用户界面五个方向的不足与后续优化路径。
+
+\subsection{本章小结}
+
+本章从 Agent 理论与 LLM 工程化两条历史线索出发，明确了「把通讯底座作为一等公民」这一论文核心立场；横向考察了行为模式、协作框架、协议标准与分布式系统经典工作四条相关研究路线，指出现有同类系统在 Python 中心、单进程状态、跨节点缺失三个方面的共性盲区；给出本文的研究目标与五项工程贡献——A2A v1.0 Rust 从零实现、非阻塞事件总线与 lag 哨兵、三层沙箱与 WS 反连、跨节点项目分布、完整可用的 82515 行 Rust 平台；最后概述全文的六章结构。下一章将从功能与非功能需求出发，把上述贡献映射到具体的系统模块边界与形式化指标定义，为后续章节的展开提供统一参照。
