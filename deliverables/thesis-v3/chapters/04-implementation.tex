@@ -325,9 +325,9 @@ fn spawn_inner(
 
 bridge 内部还有一处关键工程细节：\texttt{handle\_event} 把 \texttt{EventKind} 翻译成「系统提示文本」时会做去重与节流。例如 worker 节点 inflight 较高时会高频发出 \texttt{WorkerHeartbeat}，若每条都翻译成 system prompt 喂给玄女，会让她被心跳事件刷屏而无法处理其他工作；bridge 内部维护一份「上次喂给玄女的同类事件时间戳」映射，只有跨过抑制窗口的事件才真正被翻译。\texttt{ReviewRequestTimeout} 这种关键事件还有 backoff 重试——首次翻译失败时按 \texttt{REVIEW\_RETRY\_BACKOFF\_MS}（默认 \texttt{[100, 300, 1000]} 三次）重试，避免玄女正在处理别的事时一次失败就丢掉重要通知。这种"事件路由 + 节流 + 重试"的组合在 fuxi 早期版本里散落在多处代码中，M2 重构后集中到 bridge crate 内单元测试覆盖率达 80\%，是降低系统运行复杂度的关键一步。
 
-\subsection{A2A 协议从零实现（论文核心贡献）}
+\subsection{面向 Fuxi 场景的 A2A 协议核心闭环实现（论文核心贡献）}
 
-A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托管的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。当前 A2A 生态已包含官方与第三方多语言 SDK，其中 Rust 生态已有 a2a-rs、a2a-client、a2a-types 等若干第三方 crate 提供独立的协议封装。本工作没有把贡献建立在「Rust 生态空白」之上，而是面向伏羲的本地优先编排场景，从零实现一份与事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进的 A2A 核心闭环，并在状态机层扩展 \texttt{InputRequired} 人工介入语义。这一节展开该实现的具体决策。
+A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托管的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。当前 A2A 生态已包含 Python、Go、Java、JavaScript、.NET 与 Rust（\texttt{a2a-rs}）六个语言的官方 SDK，Rust 生态内还有 \texttt{a2a-client}、\texttt{a2a-types} 等第三方 crate 提供独立的协议封装。本工作没有把贡献建立在「Rust 生态空白」之上，而是面向伏羲的本地优先编排场景，从零实现一份与事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进的 A2A 核心闭环，并在状态机层扩展 \texttt{InputRequired} 人工介入语义。这一节展开该实现的具体决策。
 
 需要先澄清一个常见误解：A2A 协议并不规定"agent 如何思考"或"agent 用什么模型"，它只规定 agent 之间如何握手、如何传递任务、如何回报结果。这种"协议关心通讯、不关心实现"的设计哲学跟 HTTP 类似——HTTP 规范不规定网页用什么框架渲染，只规定字节流的形态。A2A 这种设计让伏羲可以把 cc / codex / 未来的 gemini-cli 通通包装成 A2A endpoint 后由玄女统一调度，不必为每个 agent 实现单独的协议适配器。
 

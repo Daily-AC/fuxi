@@ -27,7 +27,7 @@
 \subsection{Agent 通讯协议模块}
 \label{subsec:a2a}
 
-通讯协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。Rust 生态内已有 a2a-rs、a2a-client、a2a-types 等若干第三方 A2A crate~\parencite{a2aproject2025a2a}，但它们均以独立 SDK 的形态存在，未与本地优先编排层、事件总线或 \texttt{InputRequired} 人工介入语义做深度集成；伏羲选择从零实现 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试，与 \texttt{fuxi-events} 和 \texttt{fuxi-orchestrator} 同源演进。本节先讨论协议设计的总体取舍，再展开 wire 层从零实现的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
+通讯协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。Rust 生态已有 \texttt{a2a-rs}（A2A 项目官方 SDK）以及 \texttt{a2a-client}、\texttt{a2a-types} 等第三方 crate~\parencite{a2aproject2025a2a}，但它们均以独立 SDK 的形态存在，未与本地优先编排层、事件总线或 \texttt{InputRequired} 人工介入语义做深度集成；伏羲选择从零实现 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试，与 \texttt{fuxi-events} 和 \texttt{fuxi-orchestrator} 同源演进。本节先讨论协议设计的总体取舍，再展开 wire 层的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
 
 \subsubsection{协议设计的总体取舍：A2A 与 MCP 的层次区分}
 
