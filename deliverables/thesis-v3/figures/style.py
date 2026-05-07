@@ -53,11 +53,15 @@ def apply():
 
         # ── 字体 + CJK fallback ──
         "font.family": "sans-serif",
+        # CJK-capable 字体放前——matplotlib 不会跨族 fallback，
+        # 只挑第一个能渲染当前字符的字体。PingFang SC 同时包含拉丁与汉字。
         "font.sans-serif": [
-            "Helvetica",
-            "Arial",
             "PingFang SC",
             "Heiti SC",
+            "Hiragino Sans GB",
+            "Source Han Sans SC",
+            "Helvetica",
+            "Arial",
             "DejaVu Sans",
         ],
         "axes.unicode_minus": False,

@@ -1,0 +1,78 @@
+% 图 3.1 模块依赖 DAG — 13 个 fuxi-* crate 分层依赖图
+\documentclass[border=4pt]{standalone}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric, fit, backgrounds}
+\input{_style.tex}
+
+\begin{document}
+\begin{tikzpicture}[font=\sffamily, node distance=4mm and 8mm]
+
+% L1 基础类型（最底层）
+\node[modBox, minimum width=22mm] (core) {fuxi-core\\\scriptsize trait + 基础类型};
+
+% L2 基础设施
+\node[modBox, above left=12mm and 10mm of core, minimum width=22mm] (events) {fuxi-events\\\scriptsize EventBus + WAL};
+\node[modBox, above right=12mm and 10mm of core, minimum width=22mm] (a2a) {fuxi-a2a\\\scriptsize A2A v1.0};
+\node[modBox, above=12mm of core, minimum width=22mm] (memory) {fuxi-memory\\\scriptsize 抽取/召回};
+
+% L3 编排
+\node[highlightBox, above=12mm of events, minimum width=24mm] (orch) {fuxi-orchestrator\\\scriptsize Fuxi + Shelf};
+\node[modBox, above right=12mm and 6mm of orch, minimum width=22mm] (sched) {fuxi-scheduler\\\scriptsize cron};
+\node[modBox, above=12mm of memory, minimum width=22mm] (firehose) {fuxi-firehose\\\scriptsize WS hub + TUI};
+\node[modBox, above=12mm of a2a, minimum width=22mm] (im) {fuxi-im\\\scriptsize PWA 后端};
+
+% L4 适配器
+\node[modBox, above=10mm of orch, minimum width=22mm] (cc) {fuxi-agent-cc};
+\node[modBox, above right=10mm and 0mm of cc, minimum width=22mm] (codex) {fuxi-agent-codex};
+
+% L5 顶层
+\node[highlightBox, above=10mm of im, minimum width=24mm] (cli) {fuxi-cli\\\scriptsize daemon + binaries};
+
+% ── 依赖箭头 ────────────────────────────────────────
+\draw[flow] (events) -- (core);
+\draw[flow] (a2a) -- (core);
+\draw[flow] (memory) -- (core);
+\draw[flow] (memory) -- (events);
+
+\draw[flow] (orch) -- (events);
+\draw[flow] (orch) -- (core);
+\draw[flow] (orch) -- (a2a);
+\draw[flow] (sched) -- (events);
+\draw[flow] (sched) -- (orch);
+\draw[flow] (firehose) -- (events);
+\draw[flow] (im) -- (events);
+\draw[flow] (im) -- (orch);
+
+\draw[flow] (cc) -- (a2a);
+\draw[flow] (cc) -- (orch);
+\draw[flow] (codex) -- (a2a);
+\draw[flow] (codex) -- (orch);
+
+\draw[flow] (cli) -- (orch);
+\draw[flow] (cli) -- (firehose);
+\draw[flow] (cli) -- (im);
+\draw[flow] (cli) -- (sched);
+\draw[flow] (cli) -- (memory);
+\draw[flow] (cli) -- (cc);
+\draw[flow] (cli) -- (codex);
+
+% ── 层带标注（左侧）─────────────────────────────────
+\node[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark] at ($(core.west)+(-15mm,0)$) {L1 核心};
+\node[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark] at ($(events.west)+(-3mm,0)$) {L2 基础设施};
+\node[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark] at ($(orch.west)+(-1mm,0)$) {L3 编排};
+\node[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark] at ($(cc.west)+(-1mm,0)$) {L4 适配器};
+\node[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark] at ($(cli.west)+(-1mm,0)$) {L5 顶层};
+
+% 反公理标注
+\node[anchor=west, font=\scriptsize\itshape, text=fuxiOrange, align=left] at ($(memory.east)+(35mm,0)$) {
+反公理：fuxi-memory\\
+$\not\to$ fuxi-orchestrator\\
+（adapter 在 cli 层）
+};
+
+\end{tikzpicture}
+\end{document}

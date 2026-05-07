@@ -48,7 +48,7 @@ fuxi-workspace & \texttt{integration.rs} & 工作区创建与隔离 \\
 
 值得指出的是，集成测试的覆盖广度并不等价于行覆盖率指标，本章未对行覆盖率做硬性指标，因为 Rust 异步生态下行覆盖工具（\texttt{cargo-llvm-cov}）对 \texttt{tokio::select!}、\texttt{tokio::spawn} 内部分支的归因尚不完整，强行追求百分数易诱导写「为覆盖而覆盖」的低价值测试。本章选择以「关键路径必有 e2e」「关键 wire 必有 round-trip」「关键 FSM 必有状态迁移枚举」三项硬规则替代覆盖率门槛。在最近一次提交中 \texttt{cargo test --workspace --all-targets} 完整通过，IM PWA 前端的 \texttt{pnpm test}、typecheck 与 lint 也已通过，构成系统迭代过程中的最小回归基线。
 
-集成测试之外，Fuxi 还使用了三类辅助验证手段。其一，\textbf{property-based testing}：fuxi-events 与 fuxi-a2a 中部分 wire 编解码使用了 \texttt{proptest} 进行随机生成测试，对任意合法输入验证编码—解码 round-trip 不变，这一手段比固定 fixture 更能发现边界情况。其二，\textbf{回归 fixture 沉淀}：每次发现新 bug 时优先沉淀一条 fixture 测试，例如「mock fixture 必须跟 backend 实际 wire 形式对齐」（CLAUDE.md 中记录的 #45 历史 bug）固化为 \texttt{fromStoredMessage} 的 fixture，确保同类问题不会无声重现。其三，\textbf{smoke 测试}：\texttt{smoke-p0.sh} 脚本汇总了系统启动—对话—门客派发—回收的完整链路，每次发布前必跑——它的角色不是覆盖深度而是「last line of defense」，确保改动没有破坏已 ship 的关键交互。
+集成测试之外，Fuxi 还使用了三类辅助验证手段。其一，\textbf{property-based testing}：fuxi-events 与 fuxi-a2a 中部分 wire 编解码使用了 \texttt{proptest} 进行随机生成测试，对任意合法输入验证编码—解码 round-trip 不变，这一手段比固定 fixture 更能发现边界情况。其二，\textbf{回归 fixture 沉淀}：每次发现新 bug 时优先沉淀一条 fixture 测试，例如「mock fixture 必须跟 backend 实际 wire 形式对齐」（CLAUDE.md 中记录的 \#45 历史 bug）固化为 \texttt{fromStoredMessage} 的 fixture，确保同类问题不会无声重现。其三，\textbf{smoke 测试}：\texttt{smoke-p0.sh} 脚本汇总了系统启动—对话—门客派发—回收的完整链路，每次发布前必跑——它的角色不是覆盖深度而是「last line of defense」，确保改动没有破坏已 ship 的关键交互。
 
 \subsection{基础吞吐量分析}
 

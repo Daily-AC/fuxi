@@ -64,6 +64,8 @@
 
 % ── 7. 公式编号 (X-Y) 格式 ───────────────────────────────────────────────
 % 学校样例：(2-1) (3-2) — section.equation 但用横杠
+% amsmath 提前到这里加载，因为 \numberwithin 来自 amsmath
+\usepackage{amsmath, amssymb, amsthm, mathtools}
 \renewcommand{\theequation}{\thesection-\arabic{equation}}
 \numberwithin{equation}{section}
 
@@ -128,8 +130,7 @@
   belowcaptionskip=4pt
 }
 
-% ── 12. 数学 ────────────────────────────────────────────────────────────
-\usepackage{amsmath, amssymb, amsthm, mathtools}
+% ── 12. 数学（已在公式编号节预加载） ───────────────────────────────────
 
 % ── 13. 参考文献（GB/T 7714-2015 顺序编码制，学校硬要求）
 \usepackage[backend=biber, style=gb7714-2015, sorting=none, gbpub=false]{biblatex}

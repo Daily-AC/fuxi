@@ -1,0 +1,66 @@
+% 图 2.3 跨节点部署 — home node + worker nodes + dist controller + ssh tunnel
+\documentclass[border=4pt]{standalone}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric, fit, backgrounds}
+\input{_style.tex}
+
+\begin{document}
+\begin{tikzpicture}[font=\sffamily, node distance=8mm and 12mm]
+
+% ── Home 节点（左）──────────────────────────────────
+\node[highlightBox, minimum width=30mm] (home_xuannv) {玄女 + 编排器};
+\node[modBox, below=of home_xuannv, minimum width=30mm] (home_dist) {dist controller\\\scriptsize axum /api + /dist};
+\node[modBox, below=of home_dist, minimum width=30mm] (home_sqlite) {SQLite WAL};
+\node[modBox, below=of home_sqlite, minimum width=30mm] (home_im) {IM 后端};
+
+% ── Worker 节点（右上）──────────────────────────────
+\node[modBox, right=42mm of home_xuannv, minimum width=28mm] (worker1_cc) {cc 门客};
+\node[modBox, below=2mm of worker1_cc, minimum width=28mm] (worker1_sandbox) {git worktree\\\scriptsize 隔离工作区};
+\node[modBox, below=2mm of worker1_sandbox, minimum width=28mm] (worker1_relay) {fuxi-cli worker\\\scriptsize relay 进程};
+
+% ── Worker 节点（右下，第二台）─────────────────────
+\node[modBox, below=14mm of worker1_relay, minimum width=28mm] (worker2_cc) {codex 门客};
+\node[modBox, below=2mm of worker2_cc, minimum width=28mm] (worker2_relay) {fuxi-cli worker};
+
+% ── 节点边界（虚线圈）───────────────────────────────
+\begin{scope}[on background layer]
+  \node[externalBoundary, fit=(home_xuannv) (home_dist) (home_sqlite) (home_im), inner sep=6pt,
+    label={[font=\small\bfseries, text=fuxiBlue]above:{Home 节点}}] (home_box) {};
+  \node[externalBoundary, fit=(worker1_cc) (worker1_sandbox) (worker1_relay), inner sep=6pt,
+    label={[font=\small\bfseries, text=fuxiBlue]above:{Worker A（笔记本）}}] (worker1_box) {};
+  \node[externalBoundary, fit=(worker2_cc) (worker2_relay), inner sep=6pt,
+    label={[font=\small\bfseries, text=fuxiBlue]below:{Worker B（家用台式机）}}] (worker2_box) {};
+\end{scope}
+
+% ── 内部连线 ────────────────────────────────────────
+\draw[flow] (home_xuannv) -- (home_dist);
+\draw[flow] (home_dist) -- (home_sqlite);
+\draw[flow] (home_im) -- (home_dist);
+
+\draw[flow] (worker1_cc) -- (worker1_sandbox);
+\draw[flow] (worker1_sandbox) -- (worker1_relay);
+\draw[flow] (worker2_cc) -- (worker2_relay);
+
+% ── 跨节点通道（粗虚线 + HMAC 标签）─────────────────
+\draw[flowEvent, very thick, dash pattern=on 3pt off 2pt]
+  (home_dist.east) -- node[above, font=\scriptsize, color=fuxiBlue] {HMAC + ssh tunnel} (worker1_relay.west);
+\draw[flowEvent, very thick, dash pattern=on 3pt off 2pt]
+  (home_dist.east) to[bend right=20] node[below, font=\scriptsize, color=fuxiBlue] {/dist/* HMAC} (worker2_relay.west);
+
+% 编号气泡：分布式调度三步
+\node[numBubble] at ($(home_dist.east)!0.3!(worker1_relay.west)+(0,3mm)$) {1};
+\node[numBubble, anchor=center] at ($(worker1_sandbox.center)+(15mm,0)$) (n2) {2};
+\draw[->, color=fuxiBlue, thick, dashed] (n2) -- ($(worker1_sandbox.east)+(1mm,0)$);
+
+% 节点选择规则注释
+\node[anchor=south, font=\scriptsize\itshape, text=fuxiGrayDark, align=left] at ($(home_xuannv.north)+(0,8mm)$) {
+auto-pin: $\arg\min_{n\in\mathcal{N}_p}\frac{n.\text{inflight}}{n.\max\_concurrency}$\\
+显式 @node 优先 / 守 task.pinned\_node
+};
+
+\end{tikzpicture}
+\end{document}

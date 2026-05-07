@@ -13,7 +13,7 @@
 
 \begin{figure}[H]
   \centering
-  \includegraphics[width=0.85\textwidth]{drawio/fig-3-1-module-dependency.png}
+  \includegraphics[width=0.85\textwidth]{drawio/fig-3-1-module-dependency.pdf}
   \caption{伏羲模块依赖关系（13 crate，5 层架构）}
   \label{fig:module-dependency}
 \end{figure}
@@ -234,7 +234,7 @@ pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
 
 WS 反连的关键工程细节在代码片段~\ref{lst:cc-launch} 中。
 
-\begin{lstlisting}[language=Rust, caption=CcAgent::launch_with_id（fuxi-agent-cc/src/agent.rs:115-180）, label=lst:cc-launch]
+\begin{lstlisting}[language=Rust, caption={CcAgent::launch\_with\_id（fuxi-agent-cc/src/agent.rs:115-180）}, label=lst:cc-launch]
 pub async fn launch_with_id(
     id: AgentId,
     profile: AgentProfile,
@@ -244,12 +244,12 @@ pub async fn launch_with_id(
     let sid = Uuid::new_v4().to_string();
     let channel = Arc::new(WsChannel::bind(&sid).await?);
 
-    // 2. spawn cc 子进程，注入 --sdk-url 与 NO_PROXY（避开 Clash TUN）
+    // 2. spawn cc 子进程，注入 --sdk-url 与 NO_PROXY (避开 Clash TUN)
     let mut child = spawn_claude(&cfg)?;
 
-    // 3. 等子进程反连（30s 超时），同时 race 子进程崩溃
+    // 3. 等子进程反连 (30s 超时)，同时 race 子进程崩溃
     tokio::select! {
-        Ok(_) = channel.wait_connect(CONNECT_TIMEOUT) => { /* 反连成功 */ }
+        Ok(_) = channel.wait_connect(CONNECT_TIMEOUT) => { /* connected */ }
         Ok(_) = child.wait() => return Err(CcError::EarlyExit.into()),
     }
 
