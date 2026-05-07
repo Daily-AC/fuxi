@@ -77,6 +77,18 @@ const MATRIX: &[CellSpec] = &[
         sleep_ms: 1000,
         tasks: 80,
     },
+    // 2 / 16 workers · 仅 sleep=10ms 用于 scalability 扫描（表 5.4），保持
+    // 主 throughput 矩阵（表 5.2）只覆盖 1/4/8 ×（10/100/1000）9 cells 不变。
+    CellSpec {
+        workers: 2,
+        sleep_ms: 10,
+        tasks: 200,
+    },
+    CellSpec {
+        workers: 16,
+        sleep_ms: 10,
+        tasks: 1600,
+    },
 ];
 
 /// 跑 1 次 cell：spawn → enqueue → 等全部 done → 算 wall_ms。
