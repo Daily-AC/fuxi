@@ -1,0 +1,100 @@
+// 图 3.3 事件总线发布订阅拓扑
+// publisher → EventBus(broadcast + WAL) → subscriber
+digraph eventbus {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=spline,
+    nodesep=0.4,
+    ranksep=1.0,
+    pad=0.3,
+    margin=0.2,
+    compound=true
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=12,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.18,0.10"
+  ];
+  edge [
+    color="#5c6b7d",
+    arrowsize=0.7,
+    penwidth=1.0,
+    fontname="PingFang SC",
+    fontsize=10,
+    fontcolor="#3b4a5c"
+  ];
+
+  // Publishers
+  subgraph cluster_pub {
+    label="发布者";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+
+    xn  [label="玄女\nXuannv",        fillcolor="#fef4e6"];
+    cc  [label="cc 门客\nClaude Code", fillcolor="#eaf4ee"];
+    cdx [label="codex 门客",           fillcolor="#eaf4ee"];
+    sys [label="系统\nOrchestrator",   fillcolor="#eef3fb"];
+  }
+
+  // EventBus center
+  subgraph cluster_bus {
+    label="EventBus（fuxi-events）";
+    labeljust=c;
+    labelloc=t;
+    fontsize=13;
+    fontcolor="#3b4a5c";
+    color="#9aa5b4";
+    style="rounded";
+    bgcolor="#fdf6e3";
+
+    bcast [label="tokio::broadcast\n实时通道",  fillcolor="#fbeaea"];
+    wal   [label="SQLite · WAL\n持久化 append-only", fillcolor="#f1ecf7"];
+  }
+
+  // Subscribers
+  subgraph cluster_sub {
+    label="订阅者";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+
+    fh   [label="Firehose\nTUI / WS / SSE",     fillcolor="#eef3fb"];
+    im   [label="fuxi-im\nPWA · IM API",        fillcolor="#eef3fb"];
+    seb  [label="SystemEventBridge\n抄送玄女",  fillcolor="#fef4e6"];
+    mem  [label="Memory extractor",             fillcolor="#fdf6e3"];
+  }
+
+  // 发布
+  xn  -> bcast [label="publish"];
+  cc  -> bcast;
+  cdx -> bcast;
+  sys -> bcast;
+
+  // 内部双写
+  bcast -> wal [label="持久路径", style=dashed, color="#7a8699"];
+
+  // 订阅 · 实时
+  bcast -> fh  [label="实时 broadcast"];
+  bcast -> im;
+  bcast -> seb;
+  bcast -> mem;
+
+  // 订阅 · 回放
+  wal -> im   [label="回放 replay\nfrom cursor", style=dashed, color="#7a8699"];
+  wal -> fh   [style=dashed, color="#7a8699"];
+}
