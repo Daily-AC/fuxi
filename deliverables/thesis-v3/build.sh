@@ -52,6 +52,16 @@ ERRORS=$(awk -v n="$LASTRUN" 'NR>=n' build.log | grep -c "^! " || true)
 UNDEF_REF=$(awk -v n="$LASTRUN" 'NR>=n' build.log | grep -c "Reference.*undefined" || true)
 UNDEF_CITE=$(awk -v n="$LASTRUN" 'NR>=n' build.log | grep -c "Citation.*undefined" || true)
 echo ""
+echo "末轮警告：${ERRORS} 处 ! · ${UNDEF_REF} 个未定义 ref · ${UNDEF_CITE} 个未定义 cite"
+
+# 末轮门禁：致命错误或未定义引用一律 fail，避免 PDF 出来但内容残缺被当成成功。
+# `|| true` 在 run_xelatex 里只是为了让多轮里某轮非 0 退出不中断后续 biber/xelatex
+# 流水线（listings+xeCJK 偶发 nonstopmode-recoverable warning），但末轮检查必须严。
+if [ "$ERRORS" -gt 0 ] || [ "$UNDEF_REF" -gt 0 ] || [ "$UNDEF_CITE" -gt 0 ]; then
+  echo "❌ 末轮存在致命错误或未定义引用——构建判失败。"
+  echo "   详见 build.log（grep '^! ' 看错误，grep 'undefined' 看引用）"
+  exit 1
+fi
+
 echo "✅ 编译完成: $(pwd)/main.pdf  ($PAGES 页, $SIZE)"
-echo "   末轮警告：${ERRORS} 处 ! · ${UNDEF_REF} 个未定义 ref · ${UNDEF_CITE} 个未定义 cite"
 echo "   详见 build.log（grep '^! ' 看错误，grep 'undefined' 看引用）"
