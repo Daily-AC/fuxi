@@ -4,12 +4,12 @@
 
 \section{系统核心模块设计}
 
-第二章给出了伏羲的总体架构与通信模型形式化。本章把这套架构落到 Rust 实现，按从下到上的顺序拆解七个核心模块的内部设计。每个模块的展开遵循同一条主线：先讲它要解决的问题及外部约束，再列关键数据结构与接口签名，然后用一段 Rust 代码片段或公式呈现工程上不寻常的部分，最后追加「关键设计决策与取舍」段落，把当时考虑过却未采用的备选方案与放弃理由一并记录下来。这种写法的目的是把模块设计从「描述实现」推进到「论证实现」，避免读者只看到「做了什么」而看不到「为什么这样做」。本章重点突出的是事件总线的非阻塞发布与 lag 哨兵、A2A 协议从零实现的 wire 层与 \texttt{InputRequired} 状态创新、玄女—门客分层调度，以及 WS 反连这一打破传统 stdio 范式的执行通路设计。
+第二章给出了伏羲的总体架构与通讯模型形式化。本章把这套架构落到 Rust 实现，按从下到上的顺序拆解七个核心模块的内部设计。每个模块的展开遵循同一条主线：先讲它要解决的问题及外部约束，再列关键数据结构与接口签名，然后用一段 Rust 代码片段或公式呈现工程上不寻常的部分，最后追加「关键设计决策与取舍」段落，把当时考虑过却未采用的备选方案与放弃理由一并记录下来。这种写法的目的是把模块设计从「描述实现」推进到「论证实现」，避免读者只看到「做了什么」而看不到「为什么这样做」。本章重点突出的是事件总线的非阻塞发布与 lag 哨兵、A2A 协议从零实现的 wire 层与 \texttt{InputRequired} 状态创新、玄女—门客分层调度，以及 WS 反连这一打破传统 stdio 范式的执行通路设计。
 
 \subsection{模块划分}
 \label{subsec:module-division}
 
-伏羲在 crate 粒度上划分了 13 个模块，整体代码量约 7.27 万行，依赖方向严格自下而上，禁止循环引用。如图~\ref{fig:module-dependency} 所示，整个系统沿五个层次分组：核心类型层、通信层、编排层、执行层、观测与服务层。
+伏羲在 crate 粒度上划分了 13 个模块，整体代码量约 7.27 万行，依赖方向严格自下而上，禁止循环引用。如图~\ref{fig:module-dependency} 所示，整个系统沿五个层次分组：核心类型层、通讯层、编排层、执行层、观测与服务层。
 
 \begin{figure}[H]
   \centering
@@ -24,10 +24,10 @@
 
 依赖图中有一个被刻意打破的常规：\texttt{fuxi-memory} 的「召回结果回传」需要 \texttt{fuxi-orchestrator} 持有的事件总线，但若让 memory 反向依赖 orchestrator 会形成循环。本设计采用「trait 定义在低层、实现注入在高层」的反向依赖模式——在 \texttt{fuxi-orchestrator} 中定义 \texttt{RecallSink} trait，由顶层 \texttt{fuxi-cli} 提供实现并注入；这与依赖反转原则一致，也是后续多个跨 crate 钩子（分布式入队、节点负载提供者）共用的范式。
 
-\subsection{Agent 通信协议模块}
+\subsection{Agent 通讯协议模块}
 \label{subsec:a2a}
 
-通信协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。当前 Rust 生态尚无任何官方或社区 SDK 完整覆盖 A2A v1.0 规范~\parencite{a2aproject2025a2a}，伏羲从零实现了 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试。本节先讨论协议设计的总体取舍，再展开 wire 层从零实现的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
+通讯协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。当前 Rust 生态尚无任何官方或社区 SDK 完整覆盖 A2A v1.0 规范~\parencite{a2aproject2025a2a}，伏羲从零实现了 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试。本节先讨论协议设计的总体取舍，再展开 wire 层从零实现的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
 
 \subsubsection{协议设计的总体取舍：A2A 与 MCP 的层次区分}
 
@@ -168,7 +168,7 @@ L_{evt} \geq \max_{i \in \mathcal{S}} \left( T_{\text{serialize}} + T_{\text{bro
 
 \subsubsection{玄女—门客分层与角色解耦}
 
-伏羲采用「玄女顶层 Agent + 门客 worker Agent」的分层结构，与 MetaGPT 中「角色分工 + 显式协作」的思想一致~\parencite{hong2023metagpt}，但伏羲更强调编排层的不可绕过——所有门客之间的通信必须经过玄女知情，且任何调度决策都必须发出对应的事件让观测端透明可追。这条公理在 \texttt{Fuxi::shutdown\_agent} 这类敏感操作中被反复实施：一切 shutdown 路径必须比对玄女 ID，若命中则 warn 并 noop 返回，唯一例外是显式的 \texttt{shutdown\_xuannv\_for\_handoff}——这个名字本身就是约束，让 grep 能一眼看出「不要在别处调用」。
+伏羲采用「玄女顶层 Agent + 门客 worker Agent」的分层结构，与 MetaGPT 中「角色分工 + 显式协作」的思想一致~\parencite{hong2023metagpt}，但伏羲更强调编排层的不可绕过——所有门客之间的通讯必须经过玄女知情，且任何调度决策都必须发出对应的事件让观测端透明可追。这条公理在 \texttt{Fuxi::shutdown\_agent} 这类敏感操作中被反复实施：一切 shutdown 路径必须比对玄女 ID，若命中则 warn 并 noop 返回，唯一例外是显式的 \texttt{shutdown\_xuannv\_for\_handoff}——这个名字本身就是约束，让 grep 能一眼看出「不要在别处调用」。
 
 注册表 \texttt{Shelf} 用 \texttt{Arc<RwLock<HashMap<AgentId, ShelfEntry>>>} 实现。备选方案 \texttt{DashMap}（细粒度锁）和 \texttt{tokio::sync::RwLock<HashMap>}（允许 await）都被评估过：\texttt{DashMap} 的 entry API 在 \texttt{ShelfEntry} 包含 \texttt{Arc<dyn Agent>} 这类 trait 对象时生命周期复杂，不易写对；\texttt{tokio::RwLock} 允许在锁内 await，但实际操作都是同步内存读写，引入异步反而增加心智负担。最终采用 \texttt{std::sync::RwLock} 的同步版本，工作模式是「大量读（dispatch 时查 agent）+ 少量写（spawn/shutdown）」，符合 \texttt{RwLock} 的偏向读优化语义。
 
@@ -219,7 +219,7 @@ pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
 
 \subsubsection{WS 反连：从被动等待到主动控制}
 
-\texttt{Agent::dispatch} 与门客适配器的实现细节将在下一节展开，但 WS 反连这一架构决策属于编排层职责，需要在此先点明。传统的 stdin/stdout 通信范式中，编排层发指令必须等门客 \texttt{poll stdio}——若门客陷入工具循环（tool loop）就无法接收新指令，形成「消息黑洞」。伏羲的解决方案是反转连接方向：编排层在本机启 WebSocket 服务器~\parencite{fette2011websocket}，子进程启动时通过 \texttt{--sdk-url ws://127.0.0.1:<port>/...} 反连回来。WebSocket 的双向特性让编排层任何时候都能主动推送 \texttt{send\_message} 或 \texttt{cancel}，而不必等门客主动 poll。这是从「被动等待 → 主动控制」的范式升级，详细工程实现见 \autoref{subsec:adapter-workspace}。
+\texttt{Agent::dispatch} 与门客适配器的实现细节将在下一节展开，但 WS 反连这一架构决策属于编排层职责，需要在此先点明。传统的 stdin/stdout 通讯范式中，编排层发指令必须等门客 \texttt{poll stdio}——若门客陷入工具循环（tool loop）就无法接收新指令，形成「消息黑洞」。伏羲的解决方案是反转连接方向：编排层在本机启 WebSocket 服务器~\parencite{fette2011websocket}，子进程启动时通过 \texttt{--sdk-url ws://127.0.0.1:<port>/...} 反连回来。WebSocket 的双向特性让编排层任何时候都能主动推送 \texttt{send\_message} 或 \texttt{cancel}，而不必等门客主动 poll。这是从「被动等待 → 主动控制」的范式升级，详细工程实现见 \autoref{subsec:adapter-workspace}。
 
 编排层还承担一项容易被忽视的职责：\texttt{intervene} 入口的语义协调。当用户在玄女对话中插入新指令时，玄女若处于 \texttt{Idle} 状态没有活跃 \texttt{active\_tx}，直接 \texttt{send\_message} 会让消息悬空——WebSocket 上的回包没有 receiver 接住即被 drop。修复思路是 \texttt{Fuxi::intervene} 在入口处先查 \texttt{ShelfStatus}：若 \texttt{Idle} 则退化为 \texttt{dispatch} 起一轮新 turn（而非走 send\_message 路径），若 \texttt{Busy} 则把消息推入 \texttt{PendingOutbox} 等下次 turn 边界 drain。这条「Idle 退化为 dispatch」的规则避免了「玄女一忙就丢消息」的常见症状，是伏羲在多次实测调优后沉淀的重要规约。这条规约同样适用于 PWA 与 IM 端的所有干预入口——上层不需要为不同 ShelfStatus 写不同分支，统一调 \texttt{intervene} 即可。
 
@@ -310,7 +310,7 @@ pub async fn launch_with_id(
 
 本章按依赖自下而上的顺序，把伏羲 13 个 crate 的设计逐一展开。每个模块除了介绍它解决什么问题、用什么数据结构与接口实现，还专门展开了关键设计决策与取舍——把当时讨论过的备选方案与放弃理由一并记录，让读者看到本设计与可能的其他设计之间的权衡边界。其中最值得突出的是事件总线的非阻塞发布与 lag 哨兵设计、A2A 协议从零实现的 wire 层与 \texttt{InputRequired} 状态创新、玄女—门客分层与 worker 选择函数、WS 反连这一打破传统 stdio 范式的执行层升级。这四个工程亮点共同构成了伏羲在「单机本地优先 + 多门客并发 + 真实时观测」三个约束下的差异化贡献。
 
-回顾本章的整体逻辑：模块划分在最低层确立了「核心稳定、策略可变、依赖单向」的工程秩序；通信协议在该秩序之上为 Agent 间协作提供了从 Rust 类型到 wire JSON 一以贯之的契约；事件总线把系统内部所有事实流以「先广播后入库」的双路径忠实记录，并通过 lag 哨兵把背压暴露成可观测信号；编排层在事件流之上实施 worker 选择与生命周期管理，绝不轮询地把任意状态变化即时反映到全系统订阅者；执行层把抽象的 Agent trait 落到具体 CLI 进程，并通过三层沙箱把多门客并发的文件冲突彻底消除；观测与 IM 层把所有事件向多种端形态扇出，让用户在手机、桌面、TUI 都能用一致的语义观察到系统状态；横向支撑层提供长期记忆、角色玉牒与触发器，作为系统的「外部存储与事件源」与主链解耦协作。每一层都建立在其下层提供的抽象之上，每一层都为其上层留出可观测、可注入、可扩展的接口。
+回顾本章的整体逻辑：模块划分在最低层确立了「核心稳定、策略可变、依赖单向」的工程秩序；通讯协议在该秩序之上为 Agent 间协作提供了从 Rust 类型到 wire JSON 一以贯之的契约；事件总线把系统内部所有事实流以「先广播后入库」的双路径忠实记录，并通过 lag 哨兵把背压暴露成可观测信号；编排层在事件流之上实施 worker 选择与生命周期管理，绝不轮询地把任意状态变化即时反映到全系统订阅者；执行层把抽象的 Agent trait 落到具体 CLI 进程，并通过三层沙箱把多门客并发的文件冲突彻底消除；观测与 IM 层把所有事件向多种端形态扇出，让用户在手机、桌面、TUI 都能用一致的语义观察到系统状态；横向支撑层提供长期记忆、角色玉牒与触发器，作为系统的「外部存储与事件源」与主链解耦协作。每一层都建立在其下层提供的抽象之上，每一层都为其上层留出可观测、可注入、可扩展的接口。
 
 下一章将从代码实现层进入：从 daemon 启动开始，沿事件流走完一次完整的「玄女接收任务 → 分派给门客 → 门客通过 A2A 回报 → 事件总线持久化 → IM 端实时刷新」的全链路执行轨迹，并把本章中各模块的接口在实际调用栈上一一对应。
 

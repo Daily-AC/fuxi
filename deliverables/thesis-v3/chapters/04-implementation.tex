@@ -5,7 +5,7 @@
 
 \section{系统实现}
 
-第三章给出了伏羲（fuxi）的整体架构与各模块对外契约。本章把视角下沉到代码层，结合主仓 \texttt{/Users/e0\_7/fuxi}（HEAD: \texttt{04eb34c}）的真实实现，依次说明开发环境、Rust workspace 组织、事件数据结构与 Lamport 因果序、任务派发主循环、A2A 协议从零实现、跨节点分布式通信六个方面。本章的全部代码片段均直接节选自 \texttt{crates/} 下相应文件，必要时为版面做了行宽折断和无关路径省略，但不修改控制流；行号与文件路径在每段代码上方注明，便于读者回到源码核对。本章重点展示工程取舍而非简单复述协议规范——读者会看到许多"为什么不这样做"的对比讨论，这些反向论证比正向陈述更能体现实现工作的真实价值。
+第三章给出了伏羲（fuxi）的整体架构与各模块对外契约。本章把视角下沉到代码层，结合主仓 \texttt{/Users/e0\_7/fuxi}（HEAD: \texttt{04eb34c}）的真实实现，依次说明开发环境、Rust workspace 组织、事件数据结构与 Lamport 因果序、任务派发主循环、A2A 协议从零实现、跨节点分布式通讯六个方面。本章的全部代码片段均直接节选自 \texttt{crates/} 下相应文件，必要时为版面做了行宽折断和无关路径省略，但不修改控制流；行号与文件路径在每段代码上方注明，便于读者回到源码核对。本章重点展示工程取舍而非简单复述协议规范——读者会看到许多"为什么不这样做"的对比讨论，这些反向论证比正向陈述更能体现实现工作的真实价值。
 
 \subsection{开发环境与技术选型}
 
@@ -52,13 +52,13 @@ fuxi-skills & 791 & 角色玉牒加载器 + 招贤流程 \\
 
 依赖图的设计原则是"单向依赖、无循环"。最底层是 \texttt{fuxi-core}，只声明 trait 与基础类型（\texttt{Agent}、\texttt{Workspace}、\texttt{Event}、\texttt{Task}），不依赖任何其他 fuxi 内部 crate；中间层是 \texttt{fuxi-events}、\texttt{fuxi-a2a}、\texttt{fuxi-workspace} 等基础设施，单向依赖 \texttt{fuxi-core}；编排层 \texttt{fuxi-orchestrator} 依赖中间层，并定义 \texttt{RecallSink}、\texttt{DistEnqueuer} 等扩展点 trait；适配器层 \texttt{fuxi-agent-cc}、\texttt{fuxi-agent-codex} 实现 \texttt{fuxi-core::Agent}；最顶层是 \texttt{fuxi-cli}，把所有 crate 装配起来并实现各扩展点 trait。值得指出的是，\texttt{fuxi-memory} 需要在某些路径上调用编排层逻辑（例如在 deliverable 入库时触发 oracle 抽取），但它自身不依赖 \texttt{fuxi-orchestrator}——而是反向定义抽取器 trait 由 \texttt{fuxi-cli} 实现并注入。这种"trait 在低层、impl 在高层"的反向依赖模式是规避循环依赖的标准 Rust 工程惯用法，伏羲在 \texttt{RecallSink}、\texttt{DistEnqueuer}、\texttt{NodeLoadProvider} 等扩展点上反复使用了它。
 
-值得展开说明的是 \texttt{fuxi-cli} 占了整个 workspace 近 44\% 的代码量。这反映了一个工程现实：协议、抽象与基础设施虽然概念上是"重头戏"，但把它们装配成一个能跑起来、能被用户实测的产品需要大量的胶水代码。\texttt{fuxi-cli} 内部进一步分成 REPL 子模块（用户在终端的交互入口）、daemon 子模块（后台常驻服务）、dist 子模块（v2 跨节点 controller）、im 子模块（PWA 后端集成）、xuannv\_cmd 子模块（玄女生命周期管理）、ipc 子模块（REPL 与 daemon 之间的 Unix socket 通信）等十余个垂直功能。这种"集成层占大头"的代码分布在中大型 Rust 项目里很常见，它也解释了为什么单 binary crate 内的 lint 与测试覆盖反而需要更高的纪律——基础设施层的 bug 通常在编译期就能暴露，但集成层的 bug 往往要靠端到端测试才能复现。
+值得展开说明的是 \texttt{fuxi-cli} 占了整个 workspace 近 44\% 的代码量。这反映了一个工程现实：协议、抽象与基础设施虽然概念上是"重头戏"，但把它们装配成一个能跑起来、能被用户实测的产品需要大量的胶水代码。\texttt{fuxi-cli} 内部进一步分成 REPL 子模块（用户在终端的交互入口）、daemon 子模块（后台常驻服务）、dist 子模块（v2 跨节点 controller）、im 子模块（PWA 后端集成）、xuannv\_cmd 子模块（玄女生命周期管理）、ipc 子模块（REPL 与 daemon 之间的 Unix socket 通讯）等十余个垂直功能。这种"集成层占大头"的代码分布在中大型 Rust 项目里很常见，它也解释了为什么单 binary crate 内的 lint 与测试覆盖反而需要更高的纪律——基础设施层的 bug 通常在编译期就能暴露，但集成层的 bug 往往要靠端到端测试才能复现。
 
 13 个 crate 的命名遵循统一的 \texttt{fuxi-*} 前缀。早期项目曾用 \texttt{xihe-*} 前缀（"羲和"的拼写变体），在 2026-04-19 项目正名为伏羲后所有 crate 名都迁到了新前缀，旧路径通过文件系统软链接保持向后兼容（\texttt{/Users/e0\_7/xihe} 仍指向 \texttt{/Users/e0\_7/fuxi}）。这种"文件系统层兼容、代码层硬迁移"的做法在重命名重大模块时是个常见的折中——既不破坏已有终端会话与脚本，又强制新代码立即采用新约定，避免 \texttt{xihe-} 与 \texttt{fuxi-} 两套命名长期并存的认知负担。
 
 \subsection{事件数据结构与 Lamport 因果序}
 
-事件是伏羲所有跨模块、跨进程通信的统一载体。一个事件由两部分组成：\texttt{EventMeta} 携带通用元数据，\texttt{EventKind} 是带 50+ 变体的标签联合（tagged union），描述事件具体类型。代码~\ref{lst:event-types} 节选自 \texttt{crates/fuxi-core/src/event.rs}，给出 \texttt{Event} 与 \texttt{EventKind} 的核心定义。
+事件是伏羲所有跨模块、跨进程通讯的统一载体。一个事件由两部分组成：\texttt{EventMeta} 携带通用元数据，\texttt{EventKind} 是带 50+ 变体的标签联合（tagged union），描述事件具体类型。代码~\ref{lst:event-types} 节选自 \texttt{crates/fuxi-core/src/event.rs}，给出 \texttt{Event} 与 \texttt{EventKind} 的核心定义。
 
 \begin{lstlisting}[language=Rust, caption={Event 与 EventKind 核心定义（节选自 fuxi-core/src/event.rs）}, label={lst:event-types}]
 pub struct Event {
@@ -329,7 +329,7 @@ bridge 内部还藏着一个关键的工程细节：\texttt{handle\_event} 把 \
 
 A2A（Agent-to-Agent）是 Google 在 2025 年提出的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。然而截至本文写作时，A2A 在 Rust 生态没有任何官方或第三方实现——Google 仅发布了 Python 与 Go 参考实现，社区里另有 Java/TypeScript 民间移植，而其他企业级实现往往与具体框架（如 SWE-Agent\cite{yang2024sweagent}、OpenHands\cite{wang2024openhands}）深度耦合，不能直接拿来即用。伏羲为了让玄女能与未来的异构 agent（其他公司发布的、运行在其他主机上的 cc/gemini/codex 实例）互联，必须从零实现一个完整的 A2A 1.0 客户端与服务端。这一节是本文工程贡献的核心部分。
 
-需要先澄清一个常见误解：A2A 协议并不规定"agent 如何思考"或"agent 用什么模型"，它只规定 agent 之间如何握手、如何传递任务、如何回报结果。这种"协议关心通信、不关心实现"的设计哲学跟 HTTP 类似——HTTP 规范不规定网页用什么框架渲染，只规定字节流的形态。A2A 这种设计让伏羲可以把 cc / codex / 未来的 gemini-cli 通通包装成 A2A endpoint 后由玄女统一调度，不必为每个 agent 实现单独的协议适配器。
+需要先澄清一个常见误解：A2A 协议并不规定"agent 如何思考"或"agent 用什么模型"，它只规定 agent 之间如何握手、如何传递任务、如何回报结果。这种"协议关心通讯、不关心实现"的设计哲学跟 HTTP 类似——HTTP 规范不规定网页用什么框架渲染，只规定字节流的形态。A2A 这种设计让伏羲可以把 cc / codex / 未来的 gemini-cli 通通包装成 A2A endpoint 后由玄女统一调度，不必为每个 agent 实现单独的协议适配器。
 
 设计这个 crate 时面临的第一个根本问题是"实现到什么粒度"。A2A 1.0 规范涵盖了 agent 自描述、任务生命周期、流式推送、artifact 分块上传、push notification、双向 TLS、版本协商等若干主题，全部实现工程量巨大。我们采取了"覆盖核心闭环、明确简化项"的务实策略：完整实现 5 个 RPC 方法（\texttt{agent/getCard} / \texttt{tasks/send} / \texttt{tasks/sendSubscribe} / \texttt{tasks/get} / \texttt{tasks/cancel}）、完整的 \texttt{TaskState} 状态机（含 fuxi 自创的 \texttt{InputRequired}）、完整的 \texttt{Message} / \texttt{Part} / \texttt{Artifact} 层次以及 SSE 流式分块；明确简化掉 push notification（fuxi 内网部署，无 webhook 基础设施）、双向 TLS（信任边界在进程而非网络）、自动重连（上层 \texttt{A2ARouter} 负责）、版本协商（假设对端实现兼容 A2A 1.0）。这种粒度的覆盖既保证了与任意 A2A 1.0 兼容方的互通，又把 crate 体积控制在 1\,063 行核心代码——相比 Google 官方 Python SDK 的 4\,000+ 行精简了一半以上，更易审阅。
 
@@ -611,7 +611,7 @@ fn decode_sse_frame(frame: &str) -> Result<Option<ServerSentEventPayload>> {
 }
 \end{lstlisting}
 
-实现的关键是"增量缓冲 + 双换行分帧"。\texttt{reqwest::Response::bytes\_stream()} 返回的是 TCP chunk 级流，单条 SSE 消息（\texttt{event: status\textbackslash ndata: \{...\}\textbackslash n\textbackslash n}）可能跨越多个 chunk，也可能一个 chunk 内塞了好几条完整消息。\texttt{buf} 字符串持续累加，每次新 chunk 进来后用 \texttt{find("\textbackslash n\textbackslash n")} 切出所有完整帧，剩余不完整部分留待下次。SSE 规范\cite{whatwg2024sse}还要求兼容注释行（\texttt{:} 开头）与多行 \texttt{data:}（拼接），\texttt{decode\_sse\_frame} 严格按规范处理。这段代码乍看不长，但它是流式 agent 通信的"最后一公里"，TCP chunk 边界处理稍有疏忽就会出现"消息卡住直到下一条到来"的诡异行为。
+实现的关键是"增量缓冲 + 双换行分帧"。\texttt{reqwest::Response::bytes\_stream()} 返回的是 TCP chunk 级流，单条 SSE 消息（\texttt{event: status\textbackslash ndata: \{...\}\textbackslash n\textbackslash n}）可能跨越多个 chunk，也可能一个 chunk 内塞了好几条完整消息。\texttt{buf} 字符串持续累加，每次新 chunk 进来后用 \texttt{find("\textbackslash n\textbackslash n")} 切出所有完整帧，剩余不完整部分留待下次。SSE 规范\cite{whatwg2024sse}还要求兼容注释行（\texttt{:} 开头）与多行 \texttt{data:}（拼接），\texttt{decode\_sse\_frame} 严格按规范处理。这段代码乍看不长，但它是流式 agent 通讯的"最后一公里"，TCP chunk 边界处理稍有疏忽就会出现"消息卡住直到下一条到来"的诡异行为。
 
 性能上，本实现选了 \texttt{String} 增量缓冲 + \texttt{find("\textbackslash n\textbackslash n")} 这种 O(n) 重扫的朴素策略，而非 \texttt{tokio\_util::codec::FramedRead} 这类工业级 codec。原因是 SSE 帧体积通常很小（fuxi 的 status 事件 < 4KB，artifact 事件 < 64KB），单帧重扫开销可忽略；而 codec 路线需要引入 \texttt{tokio\_util} 整套依赖、定义 \texttt{Decoder} trait，代码量翻倍但收益微乎其微。这种"朴素够用就别搞工业级"的判断在伏羲实现里反复出现——A2A crate 不引入 hyper raw 而用 reqwest，不引入私有 HTTP 栈而完全依赖 axum，都是同一个工程哲学：协议层是产品的接口而非性能瓶颈，可维护性与互通性优先于极致性能。
 
@@ -625,7 +625,7 @@ fn decode_sse_frame(frame: &str) -> Result<Option<ServerSentEventPayload>> {
 
 回看整个 \texttt{fuxi-a2a} crate：1\,063 行核心库 + 258 行测试，覆盖 5 个 RPC 方法、6 种 \texttt{TaskState}、3 种 \texttt{Part} 类型；端到端测试 \texttt{roundtrip\_all\_methods} 验证完整的 client-server 调用闭环，\texttt{roundtrip\_subscribe\_stream} 专门验证 SSE 帧在 TCP chunk 边界上的正确切割。这是当前 Rust 生态唯一一个完整的 A2A 1.0 实现，是本工作的核心贡献之一。从工程量看，1\,321 行代码（含测试）相当于一个普通本科生 2 周左右的全职工作量；从复杂度看，它跨越了 wire format、JSON-RPC envelope、HTTP server、SSE streaming、reverse client 五个层次的协议工程；从生态价值看，它填补了 Rust 在 agent 互通这一关键领域的空白，未来想用 Rust 写 A2A-compatible agent 的所有人都可以直接 \texttt{cargo add fuxi-a2a} 接入。本 crate 的实现质量不仅体现在代码量上，还体现在它经受住了与多个真实 agent endpoint 的互通验证——伏羲的 cc 适配器、codex 适配器以及一个外部 Python 参考实现都通过它做端到端调用，证明本实现的协议合规性达到了规范级别。
 
-\subsection{分布式通信实现}
+\subsection{分布式通讯实现}
 
 伏羲 v2 引入了跨节点能力：用户的 home 机（玄女常驻处）可以把任务分发到 worker 节点（其他物理机或同机不同 user 沙箱）执行。这套分布式层并非重新发明轮子，而是借鉴了 Spanner 的"逻辑时间 + 一致快照"思路\cite{corbett2012spanner}与 ZooKeeper 的"会话 + watcher"心跳模型\cite{hunt2010zookeeper}，但实现上做了大幅简化——伏羲面向的是"个人开发者多机部署"，不是数据中心规模，因此没有引入 Raft\cite{ongaro2014raft} 等共识协议，而是接受"home 节点是单点协调者"的简化模型。这种简化在工程上非常重要：Raft 等协议需要至少三节点 quorum 才能保证可用性，但个人开发者大多只有一台 mac mini + 一台公司笔记本两个节点，启动 Raft 反而会因为 quorum 不足而完全不可用。fuxi 的设计场景明确是"home 是单点真相，worker 是任意数量的从节点"，这与传统数据中心需要的对称容错模型截然不同，因此简化后的架构反而更契合实际部署。
 
@@ -684,6 +684,6 @@ dist controller 还需处理一个分布式系统普遍头疼的问题：worker 
 
 \subsection{本章小结}
 
-本章把第三章的设计落到了代码。我们看到 fuxi-events 用"非阻塞 publish + lag 哨兵"调和了实时性与持久化的矛盾，看到 fuxi-orchestrator 用 publish-then-pump 模式把 agent 的私有 receiver 转换为全局事件流，看到 fuxi-a2a 从零实现了 Rust 生态尚不存在的 A2A 1.0 完整客户端与服务端、并通过 \texttt{InputRequired} 状态扩展了 Google 规范以支持人在回路场景，看到 dist controller 用 HMAC-SHA256 + nonce cache + 常量时间比较保证跨节点通信的安全性。所有代码片段均直接节选自 \texttt{crates/} 下的真实实现，可在主仓 HEAD \texttt{04eb34c} 处对位审阅。
+本章把第三章的设计落到了代码。我们看到 fuxi-events 用"非阻塞 publish + lag 哨兵"调和了实时性与持久化的矛盾，看到 fuxi-orchestrator 用 publish-then-pump 模式把 agent 的私有 receiver 转换为全局事件流，看到 fuxi-a2a 从零实现了 Rust 生态尚不存在的 A2A 1.0 完整客户端与服务端、并通过 \texttt{InputRequired} 状态扩展了 Google 规范以支持人在回路场景，看到 dist controller 用 HMAC-SHA256 + nonce cache + 常量时间比较保证跨节点通讯的安全性。所有代码片段均直接节选自 \texttt{crates/} 下的真实实现，可在主仓 HEAD \texttt{04eb34c} 处对位审阅。
 
 总结这一章的三条工程经验：第一，\textbf{协议层与业务层显式分离}——fuxi-a2a 只关心 wire 与 envelope，业务侧通过 \texttt{A2AService} trait 注入；fuxi-events 只关心持久化与扇出，业务事件类型由 fuxi-core 定义。这种分层让协议升级与业务演进互不干扰，每个 crate 都能独立测试与迭代。第二，\textbf{非阻塞 + 哨兵 > 阻塞 + 完美}——实时系统下，让 publisher 阻塞等待写库会拖垮整条调用链；用后台 spawn + lag 哨兵实现"原始 publisher 永远不阻塞、订阅者能感知 backpressure、事件永不丢失"三者兼顾。第三，\textbf{用户显式 \(>\) 系统智能}——\texttt{auto\_pin\_from\_project} 不能改写已 pin 的 task；\texttt{shutdown\_agent} 必须豁免玄女；这些"看起来多余的守卫"是用户信任系统的基础。下一章将给出在这套实现之上做的端到端实测——延迟、吞吐、错误恢复、跨节点协作场景的量化数据，验证设计目标是否达成。
