@@ -1,0 +1,89 @@
+// 图 4.1 跨节点 dist 任务流
+// home 节点 ↔ 远端节点
+digraph dist {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=spline,
+    nodesep=0.4,
+    ranksep=1.6,
+    pad=0.3,
+    margin=0.25
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=11,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.18,0.10"
+  ];
+  edge [
+    color="#5c6b7d",
+    arrowsize=0.7,
+    penwidth=1.0,
+    fontname="PingFang SC",
+    fontsize=10,
+    fontcolor="#3b4a5c"
+  ];
+
+  // ── home 节点 ───────────────────────
+  subgraph cluster_home {
+    label="home 节点（公网入口）";
+    labeljust=c;
+    labelloc=t;
+    fontsize=13;
+    fontcolor="#3b4a5c";
+    color="#7a8699";
+    style="rounded";
+    bgcolor="#fbfbfc";
+    penwidth=1.5;
+
+    h_im   [label="IM API\n/dist/* endpoints",                fillcolor="#eef3fb"];
+    h_ctrl [label="dist controller\nNodeRegistry · LoadProvider", fillcolor="#fef4e6"];
+    h_bus  [label="EventBus\n+ SQLite WAL",                   fillcolor="#fbeaea"];
+    h_w    [label="本地 worker\n(cc / codex)",               fillcolor="#eaf4ee"];
+
+    h_ctrl -> h_im   [style=invis];
+    h_im   -> h_bus  [style=invis];
+    h_bus  -> h_w    [style=invis];
+  }
+
+  // ── 远端节点 ─────────────────────────
+  subgraph cluster_remote {
+    label="远端节点（执行机）";
+    labeljust=c;
+    labelloc=t;
+    fontsize=13;
+    fontcolor="#3b4a5c";
+    color="#7a8699";
+    style="rounded";
+    bgcolor="#fbfbfc";
+    penwidth=1.5;
+
+    r_disp [label="dist client\nregister / pull / push", fillcolor="#fef4e6"];
+    r_bus  [label="本地 EventBus\n事件缓冲",             fillcolor="#fbeaea"];
+    r_w    [label="dist worker\n(cc / codex 进程)",      fillcolor="#eaf4ee"];
+
+    r_disp -> r_bus  [style=invis];
+    r_bus  -> r_w    [style=invis];
+  }
+
+  // 跨节点数据流（home ↔ remote）
+  edge [color="#3b4a5c", penwidth=1.2];
+
+  r_disp -> h_im [label="① register + heartbeat\n     (HMAC auth)", color="#6fa985"];
+  h_im   -> r_disp [label="② /dist/pull\n     拉任务",            color="#5c6b7d"];
+  r_disp -> h_im   [label="⑤ /dist/event\n     回传事件 (HMAC)",  color="#c98686"];
+  h_im   -> h_bus  [label="⑥ 注入 home 总线\n     下游订阅者无感", color="#5c6b7d"];
+
+  // 节点内部流（虚线，仅示意）
+  edge [style=dashed, color="#7a8699", penwidth=0.9];
+  r_disp -> r_w   [label="③ 派发本地 worker"];
+  r_w    -> r_bus [label="④ 事件本地缓冲"];
+  r_bus  -> r_disp [label="批量出队"];
+}
