@@ -1,0 +1,130 @@
+// 图 2.1 Fuxi 系统总体架构 — 5 层分层
+// 风格：扁平、淡色、白底、细线，类似论文图
+digraph fuxi_arch {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=ortho,
+    nodesep=0.35,
+    ranksep=0.55,
+    pad=0.3,
+    margin=0.15,
+    compound=true
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=11,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.15,0.08"
+  ];
+  edge [
+    color="#7a8699",
+    arrowsize=0.7,
+    penwidth=0.9,
+    fontname="PingFang SC",
+    fontsize=9
+  ];
+
+  // 第 5 层 · 观测
+  subgraph cluster_obs {
+    label="观测层";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+    firehose [label="fuxi-firehose\nTUI · WS · SSE · REST", fillcolor="#eef3fb"];
+    im [label="fuxi-im\nPWA · dist controller", fillcolor="#eef3fb"];
+  }
+
+  // 第 4 层 · 执行
+  subgraph cluster_exec {
+    label="执行层";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+    cc [label="fuxi-agent-cc\nClaude Code 门客", fillcolor="#eaf4ee"];
+    codex [label="fuxi-agent-codex\nCodex 门客", fillcolor="#eaf4ee"];
+    ws [label="fuxi-workspace\n沙盒 · 三层隔离", fillcolor="#eaf4ee"];
+  }
+
+  // 第 3 层 · 编排
+  subgraph cluster_orch {
+    label="编排层";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+    orch [label="fuxi-orchestrator\nFuxi · Shelf · Bridge · dispatch", fillcolor="#fef4e6"];
+  }
+
+  // 第 2 层 · 通信
+  subgraph cluster_comm {
+    label="通信层";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+    events [label="fuxi-events\nEventBus · WAL · replay", fillcolor="#fbeaea"];
+    a2a [label="fuxi-a2a\nA2A v1.0 协议", fillcolor="#fbeaea"];
+  }
+
+  // 第 1 层 · 核心
+  subgraph cluster_core {
+    label="核心层";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+    core [label="fuxi-core\nAgent · Task · Workspace · Event", fillcolor="#f1ecf7"];
+  }
+
+  // 横向支撑
+  subgraph cluster_support {
+    label="支撑模块";
+    labeljust=l;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+    mem [label="fuxi-memory\n长期记忆", fillcolor="#fdf6e3"];
+    skill [label="fuxi-skills\n技能库", fillcolor="#fdf6e3"];
+    sched [label="fuxi-scheduler\n触发器 · cron", fillcolor="#fdf6e3"];
+  }
+
+  // 层间依赖（自上而下）
+  firehose -> orch [style=dashed, label="订阅", fontcolor="#7a8699"];
+  im -> orch [style=dashed];
+  cc -> orch;
+  codex -> orch;
+  ws -> orch [style=dashed];
+  orch -> events;
+  orch -> a2a;
+  events -> core;
+  a2a -> core;
+  cc -> core;
+  codex -> core;
+  ws -> core;
+
+  // 支撑挂在编排层
+  mem -> orch [style=dotted, arrowhead=none];
+  skill -> orch [style=dotted, arrowhead=none];
+  sched -> orch [style=dotted, arrowhead=none];
+}
