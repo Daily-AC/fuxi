@@ -1,0 +1,57 @@
+// 图 3.2 任务生命周期状态机
+// Created → Dispatched → Running → Done / Cancelled / Failed
+digraph task_fsm {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=12,
+    splines=spline,
+    nodesep=0.7,
+    ranksep=0.9,
+    pad=0.3,
+    margin=0.2
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=13,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.22,0.14",
+    width=1.4
+  ];
+  edge [
+    color="#5c6b7d",
+    arrowsize=0.8,
+    penwidth=1.0,
+    fontname="PingFang SC",
+    fontsize=10,
+    fontcolor="#3b4a5c"
+  ];
+
+  // 起止
+  start [label="●", shape=circle, fillcolor="#3b4a5c", color="#3b4a5c", fontcolor="white", width=0.25, fixedsize=true];
+
+  // 主状态
+  created    [label="Created\n已创建",        fillcolor="#eef3fb"];
+  dispatched [label="Dispatched\n已派发",     fillcolor="#fef4e6"];
+  running    [label="Running\n运行中",        fillcolor="#eaf4ee"];
+
+  // 终态
+  done       [label="Done\n完成",             fillcolor="#d8ecdf", color="#6fa985"];
+  cancelled  [label="Cancelled\n取消",        fillcolor="#fbeaea", color="#c98686"];
+  failed     [label="Failed\n失败",           fillcolor="#fbeaea", color="#c98686"];
+
+  start      -> created    [label="Task::new"];
+  created    -> dispatched [label="select_worker"];
+  dispatched -> running    [label="agent.dispatch"];
+  running    -> done       [label="TaskStateChanged(Done)"];
+  running    -> cancelled  [label="user / system cancel"];
+  running    -> failed     [label="AgentDead"];
+
+  // 终态对齐
+  { rank=same; done; cancelled; failed; }
+}
