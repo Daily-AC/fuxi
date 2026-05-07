@@ -327,11 +327,11 @@ bridge 内部还有一处关键工程细节：\texttt{handle\_event} 把 \texttt
 
 \subsection{面向 Fuxi 场景的 A2A 协议核心闭环实现（论文核心贡献）}
 
-A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托管的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。当前 A2A 生态已包含 Python、Go、Java、JavaScript、.NET 与 Rust（\texttt{a2a-rs}）六个语言的官方 SDK，Rust 生态内还有 \texttt{a2a-client}、\texttt{a2a-types} 等第三方 crate 提供独立的协议封装。本工作没有把贡献建立在「Rust 生态空白」之上，而是面向伏羲的本地优先编排场景，从零实现一份与事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进的 A2A 核心闭环，并在状态机层扩展 \texttt{InputRequired} 人工介入语义。这一节展开该实现的具体决策。
+A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托管的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。当前 A2A 生态已包含 Python、Go、Java、JavaScript、.NET 与 Rust（\texttt{a2a-rs}）六个语言的官方 SDK，Rust 生态内还有 \texttt{a2a-client}、\texttt{a2a-types} 等第三方 crate 提供独立的协议封装。本工作没有把贡献建立在「Rust 生态空白」之上，而是面向伏羲的本地优先编排场景，从零实现一份与事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进的 A2A 风格核心 RPC 闭环，并把规范已有的 \texttt{input-required} 中间态映射到 Fuxi 平台级的人工介入信号上。这一节展开该实现的具体决策。
 
 需要先澄清一个常见误解：A2A 协议并不规定"agent 如何思考"或"agent 用什么模型"，它只规定 agent 之间如何握手、如何传递任务、如何回报结果。这种"协议关心通讯、不关心实现"的设计哲学跟 HTTP 类似——HTTP 规范不规定网页用什么框架渲染，只规定字节流的形态。A2A 这种设计让伏羲可以把 cc / codex / 未来的 gemini-cli 通通包装成 A2A endpoint 后由玄女统一调度，不必为每个 agent 实现单独的协议适配器。
 
-设计这个 crate 时面临的第一个根本问题是"实现到什么粒度"。A2A 1.0 规范涵盖了 agent 自描述、任务生命周期、流式推送、artifact 分块上传、push notification、双向 TLS、版本协商等若干主题，全部实现工程量巨大。我们采取了"覆盖 fuxi 场景所需闭环、明确简化项"的务实策略：覆盖 5 个核心 RPC 方法（\texttt{agent/getCard} / \texttt{tasks/send} / \texttt{tasks/sendSubscribe} / \texttt{tasks/get} / \texttt{tasks/cancel}）及对应的 \texttt{TaskState} 状态机（含 fuxi 自创的 \texttt{InputRequired}）、\texttt{Message} / \texttt{Part} / \texttt{Artifact} 层次结构以及 SSE 流式分块；明确简化掉 push notification（fuxi 内网部署，无 webhook 基础设施）、双向 TLS（信任边界在进程而非网络）、自动重连（上层 \texttt{A2ARouter} 负责）、版本协商（假设对端实现兼容 A2A 1.0）这四类位于 A2A v1.0 规范周边的能力。这一覆盖范围对应 A2A v1.0 的核心 RPC 闭环——足以与任意 A2A 1.0 兼容方完成 agent discovery、task send、task stream、task query、task cancel 五条主路径的互通；crate 体积也因此控制在 1\,063 行核心代码，便于审阅。
+设计这个 crate 时面临的第一个根本问题是"实现到什么粒度"。A2A 规范涵盖了 agent 自描述、任务生命周期、流式推送、artifact 分块上传、push notification、双向 TLS、版本协商等若干主题，全部实现工程量巨大。我们采取了"覆盖 fuxi 场景所需闭环、明确简化项"的务实策略：覆盖 5 条核心路径（\texttt{agent/getCard} / \texttt{tasks/send} / \texttt{tasks/sendSubscribe} / \texttt{tasks/get} / \texttt{tasks/cancel}）及对应的 \texttt{TaskState} 子集（\texttt{Submitted} / \texttt{Working} / \texttt{InputRequired} / \texttt{Completed} / \texttt{Failed} / \texttt{Canceled}，参照规范子集，\texttt{InputRequired} 是规范已有的 interrupted state）、\texttt{Message} / \texttt{Part} / \texttt{Artifact} 层次结构以及 SSE 流式分块；明确简化掉 push notification（fuxi 内网部署，无 webhook 基础设施）、双向 TLS（信任边界在进程而非网络）、自动重连（上层 \texttt{A2ARouter} 负责）、版本协商。这一覆盖范围对应 fuxi 平台所需的核心闭环——足以承载本工作所有的 agent discovery、task send、task stream、task query 与 task cancel 五条主路径；与当前官方规范的完整 wire-level 互通验证留待后续工作（详见 §6.2 局限）。crate 体积也因此控制在 1\,063 行核心代码，便于审阅。
 
 \subsubsection{Crate 模块拆分与协议规范差异}
 
@@ -356,7 +356,7 @@ A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托�
 \end{tabular}
 \end{table}
 
-\texttt{InputRequired} 是最重要的一项扩展。Google 规范中 \texttt{TaskState} 枚举只有 \texttt{Submitted/Working/Completed/Failed/Canceled} 五态，全部是"agent 自治"语义。但伏羲的工作模式是"人在回路"——门客在某些决策点必须等用户确认（例如 reviewer 看完代码后是否合并），因此显式增加 \texttt{InputRequired = "input-required"} 状态，让对端编排器（玄女）能感知"这个 task 不是失败，而是等人工"。代码~\ref{lst:taskstate} 给出最终定义。
+\texttt{InputRequired} 是 fuxi-a2a 中最重要的一个状态。本实现参照的早期 A2A draft 中 \texttt{TaskState} 只包含 \texttt{Submitted/Working/Completed/Failed/Canceled} 五个核心态，全部是"agent 自治"语义；当前官方规范已正式纳入 \texttt{InputRequired}、\texttt{AuthRequired}、\texttt{Rejected} 三个 interrupted/non-terminal 状态。伏羲的工作模式是"人在回路"——门客在某些决策点必须等用户确认（例如 reviewer 看完代码后是否合并），因此本实现提前显式建模了 \texttt{InputRequired = "input-required"} 状态，让对端编排器（玄女）能感知"这个 task 不是失败，而是等人工"。代码~\ref{lst:taskstate} 给出 fuxi-a2a 当前实现的状态枚举（仍未覆盖 \texttt{AuthRequired}、\texttt{Rejected}，详见 §6.2）。
 
 \begin{lstlisting}[language=Rust, caption={TaskState wire 形态（fuxi-a2a/src/wire.rs）}, label={lst:taskstate}]
 /// 状态机 on wire——kebab-case。
@@ -402,7 +402,7 @@ pub struct AgentCapabilities {
 
 \subsubsection{JSON-RPC 信封与方法分发}
 
-A2A 在传输层选择了 JSON-RPC 2.0 而非 REST。所有方法（\texttt{agent/getCard}、\texttt{tasks/send}、\texttt{tasks/get}、\texttt{tasks/cancel}、\texttt{tasks/sendSubscribe}）都通过同一个 \texttt{POST /a2a} 端点提交，靠请求体里的 \texttt{method} 字段路由。代码~\ref{lst:jsonrpc} 给出信封类型。
+本实现的传输层选择了 JSON-RPC 2.0 而非 REST。所有方法（沿用早期 A2A binding 命名 \texttt{agent/getCard}、\texttt{tasks/send}、\texttt{tasks/get}、\texttt{tasks/cancel}、\texttt{tasks/sendSubscribe}，对应当前规范的 \texttt{GetExtendedAgentCard}、\texttt{SendMessage}、\texttt{GetTask}、\texttt{CancelTask}、\texttt{SubscribeToTask}）都通过同一个 \texttt{POST /a2a} 端点提交，靠请求体里的 \texttt{method} 字段路由。代码~\ref{lst:jsonrpc} 给出信封类型。
 
 \begin{lstlisting}[language=Rust, caption={JSON-RPC 信封类型（fuxi-a2a/src/jsonrpc.rs）}, label={lst:jsonrpc}]
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -617,13 +617,13 @@ fn decode_sse_frame(frame: &str) -> Result<Option<ServerSentEventPayload>> {
 
 测试覆盖上，\texttt{tests/roundtrip.rs} 包含三组关键测试：\texttt{roundtrip\_all\_methods} 用一个内置 echo agent 跑完 5 个 RPC 方法的完整调用闭环，验证 client 与 server 的对称性；\texttt{roundtrip\_subscribe\_stream} 在 server 端故意把 SSE 帧切成 1 字节 chunks 发出，验证 client 端 \texttt{parse\_sse\_stream} 在最恶劣 chunk 边界下的正确性；\texttt{unknown\_method\_returns\_jsonrpc\_error} 验证 server 对未知方法返回 200 + \texttt{-32601} error 而非 HTTP 4xx——这条 invariant 是 JSON-RPC 规范要求的，违反它会让标准 JSON-RPC client 库困惑。\texttt{wire.rs} 内还有 6 个针对 wire 数据结构的 \texttt{roundtrip} 测试，重点是验证 \texttt{TaskState::InputRequired} 序列化成 \texttt{"input-required"}（而非 \texttt{"InputRequired"}）以及 \texttt{From<core::AgentCard>} 转换的字段映射正确性。三层测试加起来 358 行，相当于核心代码的 30\%——一个协议库应有的测试密度。
 
-\subsubsection{InputRequired 状态：fuxi 对 A2A 规范的扩展}
+\subsubsection{InputRequired 状态：A2A 规范语义在 Fuxi 平台的映射}
 
-如前所述，\texttt{InputRequired} 是伏羲对 A2A 1.0 的实质性扩展。其语义是：当 agent 在执行过程中遇到必须由人工决策的分支（典型例子是 reviewer 看完 PR 后不能自己 merge），不发 \texttt{Failed} 也不发 \texttt{Completed}，而是发一条 \texttt{TaskState::InputRequired} 状态事件并暂停推送，等外部编排器（玄女）通过 \texttt{tasks/send} 再发一条用户 message 才能继续。这一设计在 fuxi 内部对应 \texttt{Task::PendingApproval} 状态，在 wire 上映射成 \texttt{"input-required"}，对端编排器看到这个状态可以决策是否把对话权转交给真人用户、是否启动其他 agent 协作。这种"人在回路"显式建模在多 agent 协同系统中不是可有可无的奢侈品，而是工程必要——否则 agent 在等待人工时只能伪装成"超长 working"，与真正的死循环无法区分。
+如前所述，\texttt{InputRequired} 是 A2A 规范已有的 interrupted task state（与 \texttt{auth-required}、\texttt{rejected} 同属规范状态集中的非终态分支），伏羲在工程层面把它从协议字段提升为平台级人工介入信号。其语义是：当 agent 在执行过程中遇到必须由人工决策的分支（典型例子是 reviewer 看完 PR 后不能自己 merge），不发 \texttt{Failed} 也不发 \texttt{Completed}，而是发一条 \texttt{TaskState::InputRequired} 状态事件并暂停推送，等外部编排器（玄女）通过 task send 再发一条用户 message 才能继续。这一设计在 fuxi 内部对应 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，让整体调度器与多端观测能正确把「在等用户」的门客剥离出「在工作」的资源池。这种"人在回路"显式建模在多 agent 协同系统中不是可有可无的奢侈品，而是工程必要——否则 agent 在等待人工时只能伪装成"超长 working"，与真正的死循环无法区分。
 
-更深一层看，\texttt{InputRequired} 是 fuxi 整套设计哲学的微缩展示。Google 规范默认 agent 是自治闭环系统，要么成功要么失败；伏羲的核心立场是"agent 是工具不是替代品"，必须给人工决策点显式建模。这一立场延伸到伏羲的多个其它设计——玄女永远有知情权（公理 \#2）、deliverable 必须显式 produce 而非自动推断、跨节点任务的 \texttt{InputRequired} 会被 republish 到 home 节点的 EventBus 让玄女感知。\texttt{InputRequired} 既是协议层的扩展，也是产品价值观的表达。这种"协议形态承载产品哲学"的设计模式，在长寿协议（如 SMTP 的 RFC 5321 通过 EHLO 扩展机制让协议跟得上时代）里反复见过，A2A 作为 LLM 时代的新协议大概率也会沿着同样的轨迹演进；fuxi 在这条路径上的小步先行，可以为后续规范修订提供一个可工作的实证参考。
+更深一层看，伏羲选择把 \texttt{InputRequired} 提升为平台级人工介入信号是设计哲学的微缩展示。本工作所参考的早期 A2A draft 默认 agent 是自治闭环系统——要么成功要么失败；伏羲的核心立场是"agent 是工具不是替代品"，必须给人工决策点显式建模，因而在 fuxi-a2a 中提前显式实现了这一中间态。值得说明的是，A2A 当前官方规范也正式将 \texttt{InputRequired} 纳入 interrupted task state 集合，与本实现的工程动机一致——本工作的工程价值不在于为规范新增状态，而在于把这一规范状态从协议字段提升为 Fuxi 内部 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，使整体调度器、跨节点 \texttt{NodeLoadProvider} 与多端观测都能正确把"在等用户"的门客剥离出"在工作"的资源池。这一立场延伸到伏羲的多个其它设计——玄女永远有知情权（公理 \#2）、deliverable 必须显式 produce 而非自动推断、跨节点任务的 \texttt{InputRequired} 会被 republish 到 home 节点的 EventBus 让玄女感知。这种"协议形态承载产品哲学"的设计模式与 SMTP 通过 EHLO 扩展机制（RFC 5321）在长期协议演进中持续吸纳新语义类似——区别在于本工作做的是把已纳入规范的语义在工程层落地，不是为规范立法。
 
-回看整个 \texttt{fuxi-a2a} crate：1\,063 行核心库 + 258 行测试，覆盖 5 个 RPC 方法、6 种 \texttt{TaskState}、3 种 \texttt{Part} 类型；端到端测试 \texttt{roundtrip\_all\_methods} 验证完整的 client-server 调用闭环，\texttt{roundtrip\_subscribe\_stream} 专门验证 SSE 帧在 TCP chunk 边界上的正确切割。这是 \texttt{fuxi} 平台为本地优先 Agent 协作场景定制的一份 A2A 1.0 实现，是本工作的核心贡献之一。与生态内 a2a-rs、a2a-client、a2a-types 等第三方 crate 处在不同定位上：后者以独立 SDK 形态存在，提供通用协议封装；本 crate 则与 \texttt{fuxi-events} 事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进，并在协议层扩展了 \texttt{InputRequired} 人工介入语义。从复杂度看，它跨越了 wire format、JSON-RPC envelope、HTTP server、SSE streaming、reverse client 五个层次的协议工程；从平台价值看，它把 fuxi 的可观测性约束与编排层假设直接编码进协议实现。本 crate 的实现质量不仅体现在代码量上，还体现在它经受住了与多个真实 agent endpoint 的互通验证——伏羲的 cc 适配器、codex 适配器以及一个外部 Python 参考实现都通过它做端到端调用，证明本实现的协议合规性达到了规范级别。
+回看整个 \texttt{fuxi-a2a} crate：1\,063 行核心库 + 258 行测试，覆盖 5 条核心路径、6 种 \texttt{TaskState} 子集、3 种 \texttt{Part} 类型；端到端测试 \texttt{roundtrip\_all\_methods} 验证完整的 client-server 调用闭环，\texttt{roundtrip\_subscribe\_stream} 专门验证 SSE 帧在 TCP chunk 边界上的正确切割。这是 \texttt{fuxi} 平台为本地优先 Agent 协作场景定制的一份 A2A 风格协议适配层，是本工作的核心贡献之一。与生态内官方 SDK \texttt{a2a-rs} 以及 \texttt{a2a-client}、\texttt{a2a-types} 等第三方 crate 处在不同定位上：前者以通用 SDK 与协议封装为目标，本 crate 则与 \texttt{fuxi-events} 事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进，并把 A2A 规范已有的 \texttt{input-required} 中间态映射到平台级人工介入信号上。从复杂度看，它跨越了 wire format、JSON-RPC envelope、HTTP server、SSE streaming、reverse client 五个层次的协议工程；从平台价值看，它把 fuxi 的可观测性约束与编排层假设直接编码进协议实现。本 crate 当前的测试覆盖证明它在 Fuxi 所需的 5 条核心路径上形成了稳定闭环，并已在伏羲的 cc 适配器、codex 适配器以及一个作者维护的外部 Python 参考 endpoint 上做端到端互通；与官方 \texttt{a2a-rs} SDK 的完整 wire-level 互操作验证留待后续工作（详见 §6.2 局限）。
 
 \subsection{分布式通讯实现}
 
@@ -684,6 +684,6 @@ dist controller 还需处理一个分布式系统普遍头疼的问题：worker 
 
 \subsection{本章小结}
 
-本章把第三章的设计落到了代码。我们看到 fuxi-events 用"非阻塞 publish + lag 哨兵"调和了实时性与持久化的矛盾，看到 fuxi-orchestrator 用 publish-then-pump 模式把 agent 的私有 receiver 转换为全局事件流，看到 fuxi-a2a 并非以通用 SDK 为目标，而是把 A2A wire、JSON-RPC、SSE 流与伏羲的事件总线、玄女—门客编排层和反向 WebSocket sandbox 结合起来，形成面向本地优先协作场景的协议实现，并通过 \texttt{InputRequired} 状态扩展了 Google 规范以支持人在回路场景，看到 dist controller 用 HMAC-SHA256 + nonce cache + 常量时间比较保证跨节点通讯的安全性。所有代码片段均直接节选自 \texttt{crates/} 下的真实实现，可在主仓 HEAD \texttt{04eb34c} 处对位审阅。
+本章把第三章的设计落到了代码。我们看到 fuxi-events 用"非阻塞 publish + lag 哨兵"调和了实时性与持久化的矛盾，看到 fuxi-orchestrator 用 publish-then-pump 模式把 agent 的私有 receiver 转换为全局事件流，看到 fuxi-a2a 并非以通用 SDK 为目标，而是把 A2A wire、JSON-RPC、SSE 流与伏羲的事件总线、玄女—门客编排层和反向 WebSocket sandbox 结合起来，形成面向本地优先协作场景的协议实现，并把规范已有的 \texttt{InputRequired} 中间态在 Fuxi 平台层映射为人工介入信号，看到 dist controller 用 HMAC-SHA256 + nonce cache + 常量时间比较保证跨节点通讯的安全性。所有代码片段均直接节选自 \texttt{crates/} 下的真实实现，可在主仓 HEAD \texttt{04eb34c} 处对位审阅。
 
 总结这一章的三条工程经验：第一，\textbf{协议层与业务层显式分离}——fuxi-a2a 只关心 wire 与 envelope，业务侧通过 \texttt{A2AService} trait 注入；fuxi-events 只关心持久化与扇出，业务事件类型由 fuxi-core 定义。这种分层让协议升级与业务演进互不干扰，每个 crate 都能独立测试与迭代。第二，\textbf{非阻塞 + 哨兵 > 阻塞 + 完美}——实时系统下，让 publisher 阻塞等待写库会拖垮整条调用链；用后台 spawn + lag 哨兵实现"原始 publisher 永远不阻塞、订阅者能感知 backpressure、事件永不丢失"三者兼顾。第三，\textbf{用户显式 \(>\) 系统智能}——\texttt{auto\_pin\_from\_project} 不能改写已 pin 的 task；\texttt{shutdown\_agent} 必须豁免玄女；这些"看起来多余的守卫"是用户信任系统的基础。下一章将给出在这套实现之上做的端到端实测——延迟、吞吐、错误恢复、跨节点协作场景的量化数据，验证设计目标是否达成。
