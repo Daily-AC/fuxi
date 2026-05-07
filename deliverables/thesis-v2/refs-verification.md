@@ -45,3 +45,69 @@
 - 验证 URL（CACM 官页）：https://cacm.acm.org/research/an-agent-based-approach-for-building-complex-software-systems/
 - 验证证据：ACM Digital Library、CACM 官页、University of Southampton ePrints (eprints.soton.ac.uk/254229/) 三处一致。卷期页码 44(4):35-41 与候选清单完全对齐。Wikidata 收录 (Q57377532)。论文核心观点「以一组交互自治 agent 的视角分析、设计、实现复杂软件系统」是 §2.2 的引用动机。
 - 引用位置预估：§2.2 软件工程视角下的 agent 系统；§3.1 伏羲架构动机
+
+## B 桶：LLM Agent 综述与代表系统（8 篇）
+
+### B.1 [wang2023llmagentsurvey]
+- 标题：A Survey on Large Language Model based Autonomous Agents
+- 作者：Wang Lei, Ma Chen, Feng Xueyang 等（人大高瓴 AI 学院）
+- 平台：arXiv:2308.11432，2023-08-22 提交
+- 验证 URL：https://arxiv.org/abs/2308.11432
+- 验证证据：`curl https://arxiv.org/abs/2308.11432` 返回 `<title>[2308.11432] A Survey on Large Language Model based Autonomous Agents</title>`，citation_author 头三位 Wang Lei / Ma Chen / Feng Xueyang，与候选清单完全一致；citation_date 2023/08/22。
+- 引用位置预估：§1.2 LLM agent 现状综述；§2.2 LLM agent 范式分类
+
+### B.2 [yao2022react]
+- 标题：ReAct: Synergizing Reasoning and Acting in Language Models
+- 作者：Yao Shunyu, Zhao Jeffrey, Yu Dian, Du Nan, Shafran Izhak, Narasimhan Karthik, Cao Yuan
+- 平台：arXiv:2210.03629，2022-10-06 提交；ICLR 2023 接收
+- 验证 URL：https://arxiv.org/abs/2210.03629
+- 验证证据：arxiv 标题 `ReAct: Synergizing Reasoning and Acting in Language Models` 与候选完全一致；citation_date 2022/10/06。论文核心 reasoning + acting 交替范式正是伏羲玄女的「思考-调度-观察-反思」循环原型。
+- 引用位置预估：§2.3 LLM agent 推理-行动范式；§3.2 玄女状态机设计动机
+
+### B.3 [schick2023toolformer]
+- 标题：Toolformer: Language Models Can Teach Themselves to Use Tools
+- 作者：Schick Timo, Dwivedi-Yu Jane, Dessì Roberto 等（Meta AI）
+- 平台：arXiv:2302.04761，2023-02-09 提交；NeurIPS 2023 接收
+- 验证 URL：https://arxiv.org/abs/2302.04761
+- 验证证据：arxiv 标题完全一致；citation_date 2023/02/09。
+- 引用位置预估：§2.3 LLM 调工具范式；§3.4 门客 CLI 调用设计
+
+### B.4 [wu2023autogen]
+- 标题：AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation
+- 作者：Wu Qingyun, Bansal Gagan, Zhang Jieyu 等（Microsoft Research）
+- 平台：arXiv:2308.08155，2023-08-16 提交
+- 验证 URL：https://arxiv.org/abs/2308.08155
+- 验证证据：arxiv 标题完全一致；citation_date 2023/08/16。AutoGen 多 agent 对话框架是伏羲对比方案，差异点在于伏羲为分布式 + headless CLI。
+- 引用位置预估：§1.2 国内外现状（对比 AutoGen）；§2.4 多 agent 编排框架
+
+### B.5 [hong2023metagpt]
+- 标题：MetaGPT: Meta Programming for a Multi-Agent Collaborative Framework
+- 作者：Hong Sirui, Zhuge Mingchen, Chen Jiaqi 等
+- 平台：arXiv:2308.00352，2023-08-01 提交；ICLR 2024 spotlight
+- 验证 URL：https://arxiv.org/abs/2308.00352
+- 验证证据：arxiv 标题与候选清单完全一致；citation_date 2023/08/01。
+- 引用位置预估：§1.2 国内外现状（角色分工式 agent 团队）
+
+### B.6 [li2023camel]
+- 标题：CAMEL: Communicative Agents for "Mind" Exploration of Large Language Model Society
+- 作者：Li Guohao, Hammoud Hasan A. K., Itani Hani 等（KAUST）
+- 平台：arXiv:2303.17760，2023-03-31 提交；NeurIPS 2023 接收
+- 验证 URL：https://arxiv.org/abs/2303.17760
+- 验证证据：arxiv citation_title `CAMEL: Communicative Agents for "Mind" Exploration of Large Language Model Society` 与候选完全一致；citation_date 2023/03/31。
+- 引用位置预估：§2.4 角色扮演式 agent 协作
+
+### B.7 [wang2023voyager]
+- 标题：Voyager: An Open-Ended Embodied Agent with Large Language Models
+- 作者：Wang Guanzhi, Xie Yuqi, Jiang Yunfan, Mandlekar Ajay 等（NVIDIA / 多机构）
+- 平台：arXiv:2305.16291，2023-05-25 提交
+- 验证 URL：https://arxiv.org/abs/2305.16291
+- 验证证据：arxiv 标题与候选完全一致；citation_date 2023/05/25。Voyager 终生学习与技能库思路与伏羲门客复用机制有共鸣。
+- 引用位置预估：§2.3 终身学习 agent；§3.5 门客技能库（如有）
+
+### B.8 [wang2024openhands]
+- 标题：OpenHands: An Open Platform for AI Software Developers as Generalist Agents
+- 作者：Wang Xingyao, Li Boxuan, Song Yufan 等（UIUC + 多机构）
+- 平台：arXiv:2407.16741，2024-07-23 提交
+- 验证 URL：https://arxiv.org/abs/2407.16741
+- 验证证据：arxiv 标题与候选完全一致；citation_date 2024/07/23。OpenHands 即原 OpenDevin，是伏羲门客架构的对照组。
+- 引用位置预估：§1.2 国内外现状（软件工程 agent 平台）；§5 实验对比基线（如有）
