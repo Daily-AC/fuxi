@@ -147,7 +147,7 @@
 
 其二是\textbf{lag 哨兵}与背压可观测性。当 writer 拥塞超过阈值（默认 512 条），\texttt{publish()} 通过同一个 broadcast 路径发出 \texttt{Custom \{ "event\_store\_lagged", pending \}} 哨兵事件，订阅者据此感知到底层 writer 已经堆了多少未落库事件。哨兵自身有去重逻辑（同一拥塞窗口内只发一次），不会反向加剧拥塞。这一机制把背压（backpressure）从「不可见的死锁」变成「可见的告警」，为运维侧提供了介入窗口~\parencite{lamport1978time}。
 
-其三是 \textbf{input-required 状态在 Fuxi 平台的端到端流转}。当门客遇到歧义需要人工答复时，通过 A2A 协议发出 \texttt{state: input-required}~\parencite{a2aproject2025a2a}（这是 A2A 规范已有的 interrupted task state，与 \texttt{auth-required}、\texttt{rejected} 同属规范状态集中的非终态分支）。伏羲在编排层把这一状态映射为 \texttt{ShelfStatus::AwaitingInput}，让整体调度器（包括跨节点 \texttt{NodeLoadProvider}）能正确把「在等用户」的门客从「在工作」剥离出来。这条路径的端到端流转——用户回复 $\to$ task send 同 Task ID $\to$ 状态转回 Working $\to$ 门客继续——把规范层的 \texttt{input-required} 状态提升为平台级可观测事件流转，是伏羲在工程层面对 A2A 已有语义的具体落地。
+其三是 \textbf{input-required 状态在 Fuxi 平台的端到端流转}。当门客遇到歧义需要人工答复时，Fuxi 通过早期 A2A binding 在 wire 上发出 \texttt{state: "input-required"}~\parencite{a2aproject2025a2a}；该语义对应当前 A2A 规范 ProtoJSON 枚举 \texttt{TASK\_STATE\_INPUT\_REQUIRED}，是规范已有的 interrupted task state。当前规范还包含 \texttt{TASK\_STATE\_AUTH\_REQUIRED} 这一授权中断态，以及 \texttt{TASK\_STATE\_REJECTED} 这一拒绝执行终态——后者与 \texttt{Completed}、\texttt{Failed}、\texttt{Canceled} 一样属于不可恢复的终态，不再回到 \texttt{Working}。伏羲在编排层把这一状态映射为 \texttt{ShelfStatus::AwaitingInput}，让整体调度器（包括跨节点 \texttt{NodeLoadProvider}）能正确把「在等用户」的门客从「在工作」剥离出来。这条路径的端到端流转——用户回复 $\to$ task send 同 Task ID $\to$ 状态转回 Working $\to$ 门客继续——把规范层的 \texttt{input-required} 状态提升为平台级可观测事件流转，是伏羲在工程层面对 A2A 已有语义的具体落地。
 
 \subsection{跨节点扩展}
 \label{subsec:cross-node}

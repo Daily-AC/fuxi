@@ -67,7 +67,7 @@ pub struct FileContent {
 
 \subsubsection{InputRequired 状态：人工介入的协议化}
 
-A2A 当前规范定义的 \texttt{TaskState} 状态集合包括 \texttt{Submitted}、\texttt{Working}、\texttt{Completed}、\texttt{Failed}、\texttt{Canceled} 五个核心态，以及 \texttt{InputRequired}、\texttt{AuthRequired}、\texttt{Rejected} 三个 interrupted/non-terminal 状态。伏羲实现时所参考的早期 A2A draft 只列出前五个核心态，本工作在此基础上提前实现 \texttt{InputRequired} 状态——对应规范后续正式纳入的同名 interrupted state——让门客在产出物未完成、但又必须等待用户答复的场景下能显式暴露这一状态给上层编排器。\texttt{AuthRequired} 与 \texttt{Rejected} 当前实现暂未覆盖，已在 §6.2 局限段中明确。代码片段~\ref{lst:a2a-task-state} 展示了 fuxi-a2a 当前实现的状态枚举。
+A2A 当前规范定义的 \texttt{TaskState} 状态集合包括 \texttt{Submitted}、\texttt{Working} 两个进行态，\texttt{Completed}、\texttt{Failed}、\texttt{Canceled} 三个终态，以及当前规范在状态集合上的扩展：\texttt{InputRequired}、\texttt{AuthRequired} 两个 interrupted state（非终态、可恢复回 \texttt{Working}）和 \texttt{Rejected} 这一拒绝执行的终态。伏羲实现时所参考的早期 A2A draft 只列出 5 个进行态/终态，本工作在此基础上提前实现 \texttt{InputRequired} interrupted state——对应规范后续正式纳入的同名状态（ProtoJSON 枚举 \texttt{TASK\_STATE\_INPUT\_REQUIRED}）——让门客在产出物未完成、但又必须等待用户答复的场景下能显式暴露这一状态给上层编排器。\texttt{AuthRequired} 与 \texttt{Rejected} 当前实现暂未覆盖，已在 §6.2 局限段中明确。代码片段~\ref{lst:a2a-task-state} 展示了 fuxi-a2a 当前实现的状态枚举。
 
 \begin{lstlisting}[language=Rust, caption=fuxi-a2a 当前 TaskState 枚举（提前实现规范的 InputRequired 中间态）, label=lst:a2a-task-state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ pub enum TaskState {
 
 这一平台映射的工程价值在于把人工介入从「编排器内部隐式状态」提升为「可被协议字段承载、可被事件流观测的显式状态」。玄女（顶层 Agent）订阅门客的 SSE 流时，一旦看到 \texttt{state: input-required}，可以立即把对话权从该门客切换回用户，等用户回复后再走 \texttt{tasks/send} 把答复回传给同一 Task ID。在伏羲的实际使用中，这一机制覆盖了「门客对需求理解有歧义」「门客对工具调用授权犹豫」「门客遇到外部依赖问题」三类场景，全部都通过同一个状态语义统一处理，避免了为每类介入单独设计 ad-hoc 字段。
 
-替代方案是在 \texttt{Working} 状态下用 \texttt{metadata} 字段标记「需要回复」。这种方案被否决，因为 \texttt{metadata} 是非结构化字段，既不能在编译期检查、也无法被未参与设计的第三方客户端理解；显式状态枚举则可被任何兼容客户端识别——这一点也正是 A2A 当前官方规范选择把 \texttt{InputRequired} 纳入正式 \texttt{TaskState} 的原因。\texttt{InputRequired} 与终态（\texttt{Completed}/\texttt{Failed}/\texttt{Canceled}）的关键区别是：终态不可恢复，任务一旦终止就关闭事件流；\texttt{InputRequired} 是中间态，事件流保持打开，等待用户回复后转回 \texttt{Working}。这条「中间态可恢复」的设计让多轮对话与多回合协作能在同一 Task 上下文内完成，避免每次介入都要新建任务的语义混乱。
+替代方案是在 \texttt{Working} 状态下用 \texttt{metadata} 字段标记「需要回复」。这种方案被否决，因为 \texttt{metadata} 是非结构化字段，既不能在编译期检查、也无法被未参与设计的第三方客户端理解；显式状态枚举则可被支持该状态语义的客户端识别——这一点也正是 A2A 当前官方规范选择把 \texttt{TASK\_STATE\_INPUT\_REQUIRED} 纳入正式 \texttt{TaskState} 的原因。\texttt{InputRequired} 与终态（\texttt{Completed}/\texttt{Failed}/\texttt{Canceled}）的关键区别是：终态不可恢复，任务一旦终止就关闭事件流；\texttt{InputRequired} 是中间态，事件流保持打开，等待用户回复后转回 \texttt{Working}。这条「中间态可恢复」的设计让多轮对话与多回合协作能在同一 Task 上下文内完成，避免每次介入都要新建任务的语义混乱。
 
 进一步地，\texttt{InputRequired} 在系统层面与 \texttt{ShelfStatus::AwaitingInput}（编排层视角）形成一一对应——门客发出 \texttt{state: input-required} 的同时，编排层把对应 \texttt{ShelfEntry} 标为 \texttt{AwaitingInput}，使得整体调度器（包括跨节点的 \texttt{NodeLoadProvider}）能正确把该门客的负载从「在工作」剥离开，避免错把「在等用户」的门客算成饱和资源。这是协议级字段被复用为系统级状态的一例：A2A 的状态机不仅供外部客户端消费，也直接影响内部资源的可用性判断。
 

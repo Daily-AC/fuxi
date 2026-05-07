@@ -356,7 +356,7 @@ A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托�
 \end{tabular}
 \end{table}
 
-\texttt{InputRequired} 是 fuxi-a2a 中最重要的一个状态。本实现参照的早期 A2A draft 中 \texttt{TaskState} 只包含 \texttt{Submitted/Working/Completed/Failed/Canceled} 五个核心态，全部是"agent 自治"语义；当前官方规范已正式纳入 \texttt{InputRequired}、\texttt{AuthRequired}、\texttt{Rejected} 三个 interrupted/non-terminal 状态。伏羲的工作模式是"人在回路"——门客在某些决策点必须等用户确认（例如 reviewer 看完代码后是否合并），因此本实现提前显式建模了 \texttt{InputRequired = "input-required"} 状态，让对端编排器（玄女）能感知"这个 task 不是失败，而是等人工"。代码~\ref{lst:taskstate} 给出 fuxi-a2a 当前实现的状态枚举（仍未覆盖 \texttt{AuthRequired}、\texttt{Rejected}，详见 §6.2）。
+\texttt{InputRequired} 是 fuxi-a2a 中最重要的一个状态。本实现参照的早期 A2A draft 中 \texttt{TaskState} 只包含 \texttt{Submitted/Working/Completed/Failed/Canceled} 五个核心态，全部是"agent 自治"语义；当前官方规范在此基础上扩展了 \texttt{TASK\_STATE\_INPUT\_REQUIRED} 与 \texttt{TASK\_STATE\_AUTH\_REQUIRED} 两个 interrupted state（非终态、可恢复），并新增 \texttt{TASK\_STATE\_REJECTED} 这一拒绝执行的终态。伏羲的工作模式是"人在回路"——门客在某些决策点必须等用户确认（例如 reviewer 看完代码后是否合并），因此本实现提前显式建模了 \texttt{InputRequired = "input-required"} 状态，让对端编排器（玄女）能感知"这个 task 不是失败，而是等人工"。代码~\ref{lst:taskstate} 给出 fuxi-a2a 当前实现的状态枚举（仍未覆盖 \texttt{AuthRequired}、\texttt{Rejected}，详见 §6.2）。
 
 \begin{lstlisting}[language=Rust, caption={TaskState wire 形态（fuxi-a2a/src/wire.rs）}, label={lst:taskstate}]
 /// 状态机 on wire——kebab-case。
@@ -619,7 +619,7 @@ fn decode_sse_frame(frame: &str) -> Result<Option<ServerSentEventPayload>> {
 
 \subsubsection{InputRequired 状态：A2A 规范语义在 Fuxi 平台的映射}
 
-如前所述，\texttt{InputRequired} 是 A2A 规范已有的 interrupted task state（与 \texttt{auth-required}、\texttt{rejected} 同属规范状态集中的非终态分支），伏羲在工程层面把它从协议字段提升为平台级人工介入信号。其语义是：当 agent 在执行过程中遇到必须由人工决策的分支（典型例子是 reviewer 看完 PR 后不能自己 merge），不发 \texttt{Failed} 也不发 \texttt{Completed}，而是发一条 \texttt{TaskState::InputRequired} 状态事件并暂停推送，等外部编排器（玄女）通过 task send 再发一条用户 message 才能继续。这一设计在 fuxi 内部对应 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，让整体调度器与多端观测能正确把「在等用户」的门客剥离出「在工作」的资源池。这种"人在回路"显式建模在多 agent 协同系统中不是可有可无的奢侈品，而是工程必要——否则 agent 在等待人工时只能伪装成"超长 working"，与真正的死循环无法区分。
+如前所述，\texttt{InputRequired} 是 A2A 规范已有的 interrupted task state（对应当前规范 ProtoJSON 枚举 \texttt{TASK\_STATE\_INPUT\_REQUIRED}；规范同等级的 interrupted 分支还有 \texttt{TASK\_STATE\_AUTH\_REQUIRED}，而 \texttt{TASK\_STATE\_REJECTED} 是终态），伏羲在工程层面把它从协议字段提升为平台级人工介入信号。其语义是：当 agent 在执行过程中遇到必须由人工决策的分支（典型例子是 reviewer 看完 PR 后不能自己 merge），不发 \texttt{Failed} 也不发 \texttt{Completed}，而是发一条 \texttt{TaskState::InputRequired} 状态事件并暂停推送，等外部编排器（玄女）通过 task send 再发一条用户 message 才能继续。这一设计在 fuxi 内部对应 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，让整体调度器与多端观测能正确把「在等用户」的门客剥离出「在工作」的资源池。这种"人在回路"显式建模在多 agent 协同系统中不是可有可无的奢侈品，而是工程必要——否则 agent 在等待人工时只能伪装成"超长 working"，与真正的死循环无法区分。
 
 更深一层看，伏羲选择把 \texttt{InputRequired} 提升为平台级人工介入信号是设计哲学的微缩展示。本工作所参考的早期 A2A draft 默认 agent 是自治闭环系统——要么成功要么失败；伏羲的核心立场是"agent 是工具不是替代品"，必须给人工决策点显式建模，因而在 fuxi-a2a 中提前显式实现了这一中间态。值得说明的是，A2A 当前官方规范也正式将 \texttt{InputRequired} 纳入 interrupted task state 集合，与本实现的工程动机一致——本工作的工程价值不在于为规范新增状态，而在于把这一规范状态从协议字段提升为 Fuxi 内部 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，使整体调度器、跨节点 \texttt{NodeLoadProvider} 与多端观测都能正确把"在等用户"的门客剥离出"在工作"的资源池。这一立场延伸到伏羲的多个其它设计——玄女永远有知情权（公理 \#2）、deliverable 必须显式 produce 而非自动推断、跨节点任务的 \texttt{InputRequired} 会被 republish 到 home 节点的 EventBus 让玄女感知。这种"协议形态承载产品哲学"的设计模式与 SMTP 通过 EHLO 扩展机制（RFC 5321）在长期协议演进中持续吸纳新语义类似——区别在于本工作做的是把已纳入规范的语义在工程层落地，不是为规范立法。
 
