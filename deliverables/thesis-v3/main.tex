@@ -1,0 +1,204 @@
+% ============================================================================
+% 基于 AI Agent 的高性能分布式通讯系统  ·  毕业论文 v3
+% 作者：以琳   学校：湖南第一师范学院
+% 编译命令：xelatex main && biber main && xelatex main && xelatex main
+% ============================================================================
+
+\documentclass[12pt, a4paper, oneside, openany, UTF8, scheme=plain]{ctexart}
+
+% ── 1. 页面 ──────────────────────────────────────────────────────────────
+\usepackage[top=2.5cm, bottom=2cm, left=3cm, right=2cm]{geometry}
+
+% ── 2. 字体（学校规定：黑体 / 宋体 / Times New Roman + 小四正文）────────
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\setsansfont{Helvetica Neue}
+\setmonofont{Menlo}
+
+% macOS 自带中文字体；学校格式硬要求黑体 + 宋体
+\usepackage{xeCJK}
+\setCJKmainfont[BoldFont=Heiti SC]{Songti SC}
+\setCJKsansfont{Heiti SC}
+\setCJKmonofont{STSong}
+\setCJKfamilyfont{heiti}{Heiti SC}
+\setCJKfamilyfont{songti}{Songti SC}
+
+% ── 3. 行距 1.5x（学校硬要求）────────────────────────────────────────────
+\usepackage{setspace}
+\onehalfspacing
+
+% ── 4. 标题字号字体（学校硬要求：一级小三黑体 / 二级四号黑体 / 三级小四黑体）
+\usepackage{titlesec}
+\titleformat{\section}
+  {\CJKfamily{heiti}\zihao{-3}\bfseries\centering}
+  {\thesection}{1em}{}
+\titleformat{\subsection}
+  {\CJKfamily{heiti}\zihao{4}\bfseries}
+  {\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\CJKfamily{heiti}\zihao{-4}\bfseries}
+  {\thesubsubsection}{1em}{}
+
+\titlespacing*{\section}{0pt}{2ex}{1.5ex}
+\titlespacing*{\subsection}{0pt}{1.5ex}{1ex}
+\titlespacing*{\subsubsection}{0pt}{1ex}{0.5ex}
+
+% 章节编号格式：1 / 1.1 / 1.1.1（学校样例无"第 N 章"前缀）
+% ctexart 默认就是 1 / 1.1 / 1.1.1，无需重定义
+
+% ── 5. 正文小四宋体 ────────────────────────────────────────────────────
+\AtBeginDocument{\zihao{-4}}
+\setlength{\parindent}{2em}  % 段首缩进 2 字符
+
+% ── 6. 页眉页脚（学校硬要求：页眉论文题目黑体小五 + 页码宋体小五居中）
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\CJKfamily{heiti}\zihao{-5}基于 AI Agent 的高性能分布式通讯系统}
+\fancyfoot[C]{\CJKfamily{songti}\zihao{-5}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% 封面/扉页/摘要/目录用空白页样式（无页眉页码）
+\fancypagestyle{plain}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}}
+
+% ── 7. 公式编号 (X-Y) 格式 ───────────────────────────────────────────────
+% 学校样例：(2-1) (3-2) — section.equation 但用横杠
+\renewcommand{\theequation}{\thesection-\arabic{equation}}
+\numberwithin{equation}{section}
+
+% ── 8. 图表标题（学校硬要求：图 N.M 描述 / 表 N.M 描述）
+\usepackage{caption}
+\captionsetup[figure]{
+  labelformat=simple,
+  labelsep=quad,
+  font={small,sf},
+  labelfont={small,sf},
+  position=below,
+  justification=centering
+}
+\captionsetup[table]{
+  labelformat=simple,
+  labelsep=quad,
+  font={small,sf},
+  labelfont={small,sf},
+  position=above,
+  justification=centering
+}
+\renewcommand{\figurename}{图}
+\renewcommand{\tablename}{表}
+\renewcommand{\thefigure}{\thesection.\arabic{figure}}
+\renewcommand{\thetable}{\thesection.\arabic{table}}
+
+% ── 9. 三线表 + 长表 + 多列 ─────────────────────────────────────────────
+\usepackage{booktabs, longtable, multirow, array, tabularx}
+
+% ── 10. 图形 ────────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\graphicspath{{figures/drawio/}{figures/matplotlib/}{figures/gpt-image/}{figures/}}
+\usepackage{xcolor}
+\usepackage{float}     % 提供 H 修饰符强制浮动位置
+
+% ── 11. 代码片段（Rust 高亮）────────────────────────────────────────────
+\usepackage{listings}
+\lstdefinelanguage{Rust}{
+  morekeywords={fn,let,mut,pub,struct,enum,trait,impl,if,else,match,for,while,loop,async,await,return,use,mod,as,move,ref,where,Self,self,crate,super,Box,Vec,String,Option,Result,Some,None,Ok,Err,true,false,type,const,static,unsafe,extern,break,continue,in,dyn,union,abstract,become,box,do,final,macro,override,priv,typeof,unsized,virtual,yield},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+  morestring=[b]'
+}
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!75!black}\bfseries,
+  commentstyle=\color{green!45!black}\itshape,
+  stringstyle=\color{red!70!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=8pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  frame=single,
+  framesep=3pt,
+  rulecolor=\color{gray!50},
+  language=Rust,
+  showstringspaces=false,
+  tabsize=2,
+  captionpos=b,
+  belowcaptionskip=4pt
+}
+
+% ── 12. 数学 ────────────────────────────────────────────────────────────
+\usepackage{amsmath, amssymb, amsthm, mathtools}
+
+% ── 13. 参考文献（GB/T 7714-2015 顺序编码制，学校硬要求）
+\usepackage[backend=biber, style=gb7714-2015, sorting=none, gbpub=false]{biblatex}
+\addbibresource{bib/refs.bib}
+
+% ── 14. 超链接（黑色，避免论文里满屏蓝字）──────────────────────────────
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue!50!black,
+  bookmarksnumbered=true,
+  pdftitle={基于 AI Agent 的高性能分布式通讯系统},
+  pdfauthor={以琳}
+}
+
+% ── 15. 自定义命令 ──────────────────────────────────────────────────────
+\newcommand{\thesistitle}{基于 AI Agent 的高性能分布式通讯系统}
+\newcommand{\authorname}{以琳}
+\newcommand{\schoolname}{湖南第一师范学院}
+
+% Rust 代码引用助记
+\newcommand{\code}[1]{\texttt{#1}}
+
+% ============================================================================
+% 文档主体
+% ============================================================================
+\begin{document}
+
+% 封面、扉页、诚信声明、中英摘要 — 都不编页码
+\pagenumbering{gobble}
+
+\input{frontmatter/cover}
+\clearpage
+
+\input{frontmatter/title-page}
+\clearpage
+
+\input{frontmatter/honesty}
+\clearpage
+
+\input{frontmatter/abstract-cn}
+\clearpage
+
+\input{frontmatter/abstract-en}
+\clearpage
+
+% 目录（不编页码）
+\pagestyle{plain}
+\tableofcontents
+\clearpage
+
+% 正文起开始编页码（阿拉伯数字 from 1）
+\pagenumbering{arabic}
+\setcounter{page}{1}
+\pagestyle{fancy}
+
+\input{chapters/01-introduction}
+\input{chapters/02-overall-design}
+\input{chapters/03-modules}
+\input{chapters/04-implementation}
+\input{chapters/05-experiments}
+\input{chapters/06-conclusion}
+
+% 参考文献
+\printbibliography[title={参考文献}, heading=bibliography]
+
+% 致谢
+\input{chapters/99-acknowledgements}
+
+\end{document}
