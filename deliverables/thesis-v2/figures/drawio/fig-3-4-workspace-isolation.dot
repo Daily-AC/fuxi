@@ -1,0 +1,79 @@
+// 图 3.4 工作区隔离三层
+// repo (git) ── L1 read-only / L2 ephemeral / L3 persistent ── agents
+digraph workspace {
+  graph [
+    rankdir=BT,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=spline,
+    nodesep=0.45,
+    ranksep=0.85,
+    pad=0.3,
+    margin=0.25
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=12,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.18,0.10"
+  ];
+  edge [
+    color="#5c6b7d",
+    arrowsize=0.7,
+    penwidth=1.0,
+    fontname="PingFang SC",
+    fontsize=10,
+    fontcolor="#3b4a5c"
+  ];
+
+  // 底层 · repo
+  repo [label="主仓库 repo\n.git / 源代码", fillcolor="#f1ecf7", shape=cylinder, height=0.8];
+
+  // 中层 · 三沙盒
+  subgraph cluster_sandbox {
+    label="沙盒层（git worktree 隔离）";
+    labeljust=c;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+
+    l1 [label="L1 read-only\n只读分析\n（生命期 = 任务）",   fillcolor="#eef3fb"];
+    l2 [label="L2 ephemeral\n临时短任务\n（任务结束销毁）",  fillcolor="#fef4e6"];
+    l3 [label="L3 persistent\n长期任务\n（保留交付物）",     fillcolor="#eaf4ee"];
+  }
+
+  // 上层 · agents
+  subgraph cluster_agents {
+    label="门客层";
+    labeljust=c;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#cfd5de";
+    style="rounded,dashed";
+    bgcolor="#fbfbfc";
+
+    a1 [label="cc-1\n（read 任务）",       fillcolor="#fdf6e3"];
+    a2 [label="cc-2\n（短任务）",          fillcolor="#fdf6e3"];
+    a3 [label="codex-1\n（短任务）",       fillcolor="#fdf6e3"];
+    a4 [label="cc-3\n（长任务）",          fillcolor="#fdf6e3"];
+  }
+
+  // 沙盒挂在仓库上
+  repo -> l1 [label="git worktree", color="#7a8699"];
+  repo -> l2 [label="git worktree", color="#7a8699"];
+  repo -> l3 [label="git worktree", color="#7a8699"];
+
+  // agents 附在沙盒
+  l1 -> a1 [dir=back, label="只读 mount"];
+  l2 -> a2 [dir=back, label="独占 cwd"];
+  l2 -> a3 [dir=back, label="独占 cwd"];
+  l3 -> a4 [dir=back, label="独占 cwd"];
+
+}
