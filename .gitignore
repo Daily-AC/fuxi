@@ -22,3 +22,4 @@ data/
 # brainstorm visual companion mockups
 .superpowers/
 .fuxi-build-sha
+**/__pycache__/
