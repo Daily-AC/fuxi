@@ -27,7 +27,7 @@
 \subsection{Agent 通讯协议模块}
 \label{subsec:a2a}
 
-通讯协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。当前 Rust 生态尚无任何官方或社区 SDK 完整覆盖 A2A v1.0 规范~\parencite{a2aproject2025a2a}，伏羲从零实现了 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试。本节先讨论协议设计的总体取舍，再展开 wire 层从零实现的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
+通讯协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。Rust 生态内已有 a2a-rs、a2a-client、a2a-types 等若干第三方 A2A crate~\parencite{a2aproject2025a2a}，但它们均以独立 SDK 的形态存在，未与本地优先编排层、事件总线或 \texttt{InputRequired} 人工介入语义做深度集成；伏羲选择从零实现 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试，与 \texttt{fuxi-events} 和 \texttt{fuxi-orchestrator} 同源演进。本节先讨论协议设计的总体取舍，再展开 wire 层从零实现的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
 
 \subsubsection{协议设计的总体取舍：A2A 与 MCP 的层次区分}
 
@@ -94,7 +94,7 @@ A2A 协议的传输层在伏羲实现中只暴露一个 HTTP 端点 \texttt{POST
 
 SSE 帧的客户端解析需要处理 TCP chunk 边界上的不完整帧，伏羲的 \texttt{parse\_sse\_stream} 函数用增量缓冲在每次收到字节后查找 \texttt{\textbackslash n\textbackslash n} 分隔符，已确证能在跨包边界场景下正确切帧。SSE 协议本身允许多行 \texttt{data:} 前缀拼接为同一 payload，伏羲的 decoder 按行扫描时把所有 \texttt{data:} 段拼回 JSON，再按 \texttt{event:} 类型路由到 \texttt{Status} 或 \texttt{Artifact} 两类负载——这一切割逻辑在 258 行端到端测试中专门验证了 chunk 切在 \texttt{\textbackslash n\textbackslash n} 之间的边界用例。\texttt{reqwest::Client} 在 client new 时一次构造、所有 Task 共享，连接池由其内部管理，伏羲不再封装更高层的 client 缓存。
 
-至此，A2A 协议模块的设计已经完整覆盖：wire 层提供类型安全的数据结构，\texttt{InputRequired} 扩展让协议能表达人工介入，单连接 HTTP+SSE 让客户端实现简化为一个 \texttt{reqwest::Client}。整个 crate 共 1321 行（含测试），文档注释占 25\%，覆盖了 5 个 RPC 方法和 6 种 \texttt{TaskState}。本节展开的四个子设计——协议层次划分、wire 标签联合、\texttt{InputRequired} 扩展、单端点 SSE——共同构成了伏羲在 Rust 生态中独立可用的 A2A 实现，也是本论文最具差异化贡献的工程产出之一。
+至此，A2A 协议模块的设计已经覆盖了 fuxi 场景所需的核心闭环：wire 层提供类型安全的数据结构，\texttt{InputRequired} 扩展让协议能表达人工介入，单连接 HTTP+SSE 让客户端实现简化为一个 \texttt{reqwest::Client}。整个 crate 共 1321 行（含测试），文档注释占 25\%，覆盖 5 个 RPC 方法和 6 种 \texttt{TaskState}。本节展开的四个子设计——协议层次划分、wire 标签联合、\texttt{InputRequired} 扩展、单端点 SSE——共同构成了与 fuxi 平台同源演进的 A2A 核心子集实现，也是本论文最具差异化贡献的工程产出之一。
 
 \subsection{事件总线模块}
 \label{subsec:eventbus}
@@ -107,9 +107,9 @@ SSE 帧的客户端解析需要处理 TCP chunk 边界上的不完整帧，伏�
 
 \subsubsection{非阻塞发布与 lag 哨兵}
 
-发布路径的核心约束是「调用方永不阻塞」。原因有二：首先，\texttt{publish()} 经常在 dispatch pump 这种关键路径上被同步调用，一旦阻塞会拖慢整个调度链；其次，公理 \#5 要求事件不丢——即使 writer 后台拥塞，原始事件也不能被丢弃。这两个看似矛盾的约束（不阻塞但不丢消息），在伏羲的实现中通过「\texttt{try\_send} + 后台转交 + 哨兵告警」三步组合解决，见代码片段~\ref{lst:eventbus-publish}。
+发布路径的核心约束是「调用方永不阻塞」。原因有二：首先，\texttt{publish()} 经常在 dispatch pump 这种关键路径上被同步调用，一旦阻塞会拖慢整个调度链；其次，公理 \#5 要求事件不丢——即使 writer 后台拥塞，原始事件也不能被丢弃。这两个看似矛盾的约束（不阻塞但不丢消息），在伏羲的实现中通过「\texttt{try\_send} + 后台转交 + 哨兵告警」三步组合解决，见代码片段~\ref{lst:eventbus-publish-snippet}（更完整的版本及 fuxi-events 中的实际实现见 §4.2 代码~\ref{lst:eventbus-publish}）。
 
-\begin{lstlisting}[language=Rust, caption=EventBus::publish 非阻塞实现（节选自 bus.rs:118-155）, label=lst:eventbus-publish]
+\begin{lstlisting}[language=Rust, caption=EventBus::publish 非阻塞实现（节选自 bus.rs:118-155）, label=lst:eventbus-publish-snippet]
 pub fn publish(&self, ev: Event) -> Result<()> {
     // 路径 1：broadcast 零拷贝扇出，不影响 mpsc
     let _ = self.inner.broadcast_tx.send(ev.clone());

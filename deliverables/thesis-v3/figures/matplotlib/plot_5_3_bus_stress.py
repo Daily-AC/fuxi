@@ -36,13 +36,16 @@ def main():
         10000: ("-s", OKABE_ITO[1]),      # orange
         100000: ("-^", OKABE_ITO[0]),     # 主蓝（重点 rate）
     }
+    # p99 < 1 μs 的样本受 OS 时钟分辨率（macOS SystemTime ns→us 截断后 1 μs）限制，
+    # 在 log y 轴上无法表达。统一替换为 0.5 μs 绘图，并在图注 + 正文 §5.7 说明。
+    P99_FLOOR = 0.5
     for (rate, payload), pts in sorted(groups.items()):
         if payload != "small":
             continue  # large 与 small 数据近乎重合，只画 small 简化图
         pts.sort()
         xs = [p[0] for p in pts]
         ys_tps = [p[1] for p in pts]
-        ys_p99 = [p[2] for p in pts]
+        ys_p99 = [max(p[2], P99_FLOOR) for p in pts]
         ys_drops = [p[3] for p in pts]
         marker, color = rate_styles[rate]
         label = f"rate = {rate // 1000} k ev/s"
@@ -68,8 +71,12 @@ def main():
     ax1.set_ylabel("Publish 吞吐 (events/s)")
     ax1.legend(loc="lower right")
 
-    ax2.set_yscale("symlog", linthresh=1)
+    ax2.set_yscale("log")
     ax2.set_ylabel("Recv p99 (μs)")
+    # 标 1 μs 时钟精度下界，让读者看清「绝大多数 p99 落在分辨率以下」
+    ax2.axhline(1.0, color="#666666", linestyle=":", linewidth=0.8)
+    ax2.text(1.02, 1.05, "OS 时钟下界 1 μs", color="#666666", fontsize=6,
+             transform=ax2.get_yaxis_transform())
     ax2.legend(loc="upper left")
 
     fig.tight_layout()
