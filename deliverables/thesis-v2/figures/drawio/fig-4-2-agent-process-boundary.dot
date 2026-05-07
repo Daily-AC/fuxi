@@ -1,0 +1,84 @@
+// 图 4.2 Agent adapter 与 CLI 进程边界
+// 中间 trait Agent；左：Orchestrator dispatch；右：spawn 出 OS 子进程
+// 进程边界用虚线框区分（Rust runtime vs OS process）
+digraph adapter {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=spline,
+    nodesep=0.45,
+    ranksep=1.1,
+    pad=0.3,
+    margin=0.25
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=11,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.18,0.10"
+  ];
+  edge [
+    color="#5c6b7d",
+    arrowsize=0.7,
+    penwidth=1.0,
+    fontname="PingFang SC",
+    fontsize=10,
+    fontcolor="#3b4a5c"
+  ];
+
+  // ── Rust runtime（fuxi 进程内）─────
+  subgraph cluster_rust {
+    label="fuxi 进程（Rust runtime）";
+    labeljust=c;
+    labelloc=t;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#7a8699";
+    style="rounded";
+    bgcolor="#fbfbfc";
+    penwidth=1.4;
+
+    orch [label="Orchestrator\nFuxi · Shelf · dispatch", fillcolor="#fef4e6"];
+    trt  [label="trait Agent\nfn dispatch / fn shutdown", fillcolor="#f1ecf7", penwidth=1.4];
+    cca  [label="fuxi-agent-cc\nadapter",                 fillcolor="#eaf4ee"];
+    cda  [label="fuxi-agent-codex\nadapter",              fillcolor="#eaf4ee"];
+    parser [label="stream-json parser\n→ EventKind",      fillcolor="#fbeaea"];
+    bus  [label="EventBus",                               fillcolor="#fbeaea"];
+
+    orch -> trt    [label="dispatch(task)"];
+    trt  -> cca    [label="impl"];
+    trt  -> cda    [label="impl"];
+    parser -> bus  [label="publish"];
+  }
+
+  // ── OS 进程（独立子进程）─────────────
+  subgraph cluster_proc {
+    label="OS 进程（spawn 出来的子进程）";
+    labeljust=c;
+    labelloc=t;
+    fontsize=12;
+    fontcolor="#3b4a5c";
+    color="#7a8699";
+    style="rounded,dashed";
+    bgcolor="#fdf6e3";
+    penwidth=1.4;
+
+    cc_proc [label="claude-code\nstdout: stream-json", fillcolor="#eef3fb"];
+    cd_proc [label="codex\nstdout: stream-json",       fillcolor="#eef3fb"];
+  }
+
+  // 跨进程边界
+  edge [style=dashed, color="#c98686", penwidth=1.1, fontcolor="#c98686"];
+  cca -> cc_proc [label="spawn / stdin\n(Tokio Command)"];
+  cda -> cd_proc [label="spawn / stdin"];
+
+  edge [style=solid, color="#6fa985", penwidth=1.1, fontcolor="#3b4a5c"];
+  cc_proc -> parser [label="stdout 行流"];
+  cd_proc -> parser [label="stdout 行流"];
+}
