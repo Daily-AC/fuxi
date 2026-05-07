@@ -1,0 +1,316 @@
+% ============================================================================
+% 第 3 章 系统核心模块设计
+% ============================================================================
+
+\section{系统核心模块设计}
+
+第二章给出了伏羲的总体架构与通信模型形式化。本章把这套架构落到 Rust 实现，按从下到上的顺序拆解七个核心模块的内部设计。每个模块的展开遵循同一条主线：先讲它要解决的问题及外部约束，再列关键数据结构与接口签名，然后用一段 Rust 代码片段或公式呈现工程上不寻常的部分，最后追加「关键设计决策与取舍」段落，把当时考虑过却未采用的备选方案与放弃理由一并记录下来。这种写法的目的是把模块设计从「描述实现」推进到「论证实现」，避免读者只看到「做了什么」而看不到「为什么这样做」。本章重点突出的是事件总线的非阻塞发布与 lag 哨兵、A2A 协议从零实现的 wire 层与 \texttt{InputRequired} 状态创新、玄女—门客分层调度，以及 WS 反连这一打破传统 stdio 范式的执行通路设计。
+
+\subsection{模块划分}
+\label{subsec:module-division}
+
+伏羲在 crate 粒度上划分了 13 个模块，整体代码量约 7.27 万行，依赖方向严格自下而上，禁止循环引用。如图~\ref{fig:module-dependency} 所示，整个系统沿五个层次分组：核心类型层、通信层、编排层、执行层、观测与服务层。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.85\textwidth]{drawio/fig-3-1-module-dependency.png}
+  \caption{伏羲模块依赖关系（13 crate，5 层架构）}
+  \label{fig:module-dependency}
+\end{figure}
+
+最底层 \texttt{fuxi-core} 只暴露 \texttt{Agent}、\texttt{Workspace}、\texttt{Event}、\texttt{Task} 四个 trait 与对应的值对象，约 2100 行，是整个系统的语义基石。\texttt{fuxi-events} 与 \texttt{fuxi-a2a} 各自仅依赖 \texttt{fuxi-core}，相互之间没有引用关系——前者负责系统内部「已经发生了什么」的事实流，后者负责 Agent 之间「应当传递什么」的契约语义，二者在协议层与事件层是正交的。\texttt{fuxi-orchestrator} 是上层模块的汇聚点，在它之上是两个执行适配器 \texttt{fuxi-agent-cc}、\texttt{fuxi-agent-codex} 与隔离层 \texttt{fuxi-workspace}。再上一层是观测与服务模块——\texttt{fuxi-firehose} 提供 WebSocket、SSE、REST 与 TUI 四端事件输出，\texttt{fuxi-im} 是供前端消费的 axum 后端。横向支撑三件套 \texttt{fuxi-memory}、\texttt{fuxi-skills}、\texttt{fuxi-scheduler} 通过事件订阅与显式 API 而非紧耦合方式接入主链。最上层 \texttt{fuxi-cli} 把所有 crate 装配成一个可执行二进制 \texttt{fuxi}。
+
+模块边界的设计有一条隐含原则：把会高频变化的「策略」与会长期稳定的「机制」分开放在不同 crate。\texttt{fuxi-core} 中的 trait 与 \texttt{EventKind} 枚举属于稳定层，一旦发布就不轻易破坏二进制兼容；\texttt{fuxi-orchestrator} 内部的调度策略、\texttt{fuxi-agent-cc} 内的事件翻译规则属于策略层，迭代频率高但不影响其他 crate。这一划分让伏羲在快速演进 worker 适配器或调度策略时，不会触发整个工作区的重编译；也让审计层（事件总线、Firehose）可以稳定地观察任意策略层的运行效果。
+
+依赖图中有一个被刻意打破的常规：\texttt{fuxi-memory} 的「召回结果回传」需要 \texttt{fuxi-orchestrator} 持有的事件总线，但若让 memory 反向依赖 orchestrator 会形成循环。本设计采用「trait 定义在低层、实现注入在高层」的反向依赖模式——在 \texttt{fuxi-orchestrator} 中定义 \texttt{RecallSink} trait，由顶层 \texttt{fuxi-cli} 提供实现并注入；这与依赖反转原则一致，也是后续多个跨 crate 钩子（分布式入队、节点负载提供者）共用的范式。
+
+\subsection{Agent 通信协议模块}
+\label{subsec:a2a}
+
+通信协议模块由 \texttt{fuxi-a2a} 实现，是本论文最重要的工程贡献之一。当前 Rust 生态尚无任何官方或社区 SDK 完整覆盖 A2A v1.0 规范~\parencite{a2aproject2025a2a}，伏羲从零实现了 wire 层、JSON-RPC 信封、SSE 流抽象、axum 服务器与 reqwest 客户端，共计 1063 行核心代码加 258 行端到端测试。本节先讨论协议设计的总体取舍，再展开 wire 层从零实现的具体决策，然后剖析 \texttt{InputRequired} 状态机这一相对规范的扩展，最后说明单连接 HTTP+SSE 的端点设计。
+
+\subsubsection{协议设计的总体取舍：A2A 与 MCP 的层次区分}
+
+A2A 协议解决「Agent 与 Agent 之间的协作契约」问题，MCP 协议~\parencite{anthropic2024mcp} 解决「模型与外部工具的调用规范」问题，二者面向的语义层次不同，并不互斥。伏羲在系统中同时承载两类协议：内部门客之间使用 A2A 传递任务与结果；门客调用外部工具（文件读写、shell 命令、网络访问）则沿用其底层 CLI 自身的工具机制（Claude Code 与 Codex 都遵循 MCP 风格的工具声明与调用语义）。这个分工的好处在 SWE-agent 提出的 Agent-Computer Interface 思想中能找到对应~\parencite{yang2024sweagent}：Agent 与外部世界之间的接口必须显式表达而非隐含在调度逻辑里。伏羲把这层显式接口拆成两份——A2A 显式表达 Agent 之间的协作语义，工具调用层显式表达 Agent 与系统资源的交互语义，两份接口都被独立设计、独立测试、独立演进。
+
+替代方案曾考虑过把所有协议统一到 MCP，让门客之间通过虚拟工具相互调用。这种做法被否决的原因是 MCP 的工具语义偏「无状态、单次调用」，而 Agent 协作需要「状态机、流式响应、人工介入点」，强行套用会扭曲协议本意；另一个被讨论的方案是用 OpenAI 的 Function Calling 协议替代 A2A，但 Function Calling 没有对应的 \texttt{tasks/sendSubscribe} 流式语义，也缺少 \texttt{Artifact} 分块上传机制，不能满足门客返回长文档的需求。
+
+需要进一步澄清的是，A2A 描述的是「Agent 之间应当传递什么」，事件总线（\autoref{subsec:eventbus}）描述的是「系统内部已经发生了什么」。前者是动作语义，面向 Agent 间的契约；后者是事实语义，面向系统观察者。一旦把所有状态都塞进协议字段，协议本身会随业务演进无限膨胀，外部兼容性受损；反之，把所有协作语义都倒进事件总线，又会让协议失去存在意义、各 Agent 实现彼此心照不宣。伏羲明确划清这条边界——A2A 只承担 Agent 间显式协作的最小契约，其余一切系统状态都走事件总线——这一点在后续 wire 字段瘦身的多次评审中被反复重申。
+
+\subsubsection{A2A v1.0 wire 协议的 Rust 实现}
+
+wire 层是协议数据结构的载体，伏羲在这一层做了 458 行实现。核心数据结构包括 \texttt{AgentCard}（能力声明）、\texttt{Task}（任务对象）、\texttt{Message}（对话消息）、\texttt{Part}（消息原子）、\texttt{Artifact}（产出物）。这些结构都使用 \texttt{serde} 宏自动派生序列化与反序列化，并通过 \texttt{\#[serde(rename\_all = "kebab-case")]} 与 \texttt{\#[serde(tag = "type")]} 等属性精确控制 wire 上的 JSON 形态。代码片段~\ref{lst:a2a-part-tagged} 展示的是 \texttt{Part} 标签联合的写法。
+
+\begin{lstlisting}[language=Rust, caption=Part 类型的 serde 标签联合实现, label=lst:a2a-part-tagged]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum Part {
+    Text { text: String },
+    Data { data: serde_json::Value },
+    File { file: FileContent },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileContent {
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: Option<String>,  // base64 编码
+    pub uri: Option<String>,    // 与 bytes 互斥
+}
+\end{lstlisting}
+
+这里使用 \texttt{tag = "type"} 而非 \texttt{untagged} 是经过权衡的选择。\texttt{untagged} 让 serde 按字段形态依次尝试匹配，看似简洁，却在 \texttt{Text} 与 \texttt{Data} 这种字段近似的情况下产生反序列化优先级歧义——一个携带 \texttt{text} 字段的 JSON 对象可能被错误判为 \texttt{Data} 类型。显式标签强制每个 Part 在 wire 上携带 \texttt{"type": "text"} 之类的判别字段，反序列化结果稳定可预测。实际代码评审中曾因 \texttt{untagged} 的这种「看似合理实则不可控」陷阱反复踩坑，最终团队约定整个 \texttt{fuxi-core} 与 \texttt{fuxi-a2a} 中的所有联合类型都必须使用 \texttt{tag} 形式。
+
+边界转换是另一个值得展开的设计点。伏羲在 \texttt{fuxi-core} 中已经定义了一份内部使用的 \texttt{AgentCard}（带 \texttt{id}、\texttt{status} 等运行时字段），\texttt{fuxi-a2a::wire::AgentCard} 则是协议对外视图（不含 \texttt{id}/\texttt{status}）。两者之间的转换通过 \texttt{From<fuxi\_core::AgentCard> for wire::AgentCard} 实现，是一次有损映射：丢弃内部字段，把 \texttt{system\_prompt} 首行截 200 字作为 \texttt{description}，把 \texttt{tags} 平铺成 A2A 规范的 \texttt{skills} 列表。本设计禁止在任何业务路径中手抄字段——所有边界转换必须走 \texttt{From} trait，由编译器保证两种 \texttt{AgentCard} 的同步演进。这条规约在 commit 历史里有专门的反回归单测兜底。
+
+伏羲的 wire 实现相对 A2A v1.0 规范主动做了几处轻量化收紧：\texttt{capabilities.streaming} 总是 \texttt{true}（伏羲一律通过 SSE 推送）、\texttt{capabilities.push\_notifications} 总是 \texttt{false}（v1 暂无 webhook 基础设施）、\texttt{url} 字段从可选改为必需（伏羲需要立刻知道门客的反向连接端点）。这些收紧都不破坏规范的双向兼容性——任何符合 A2A v1.0 的客户端都能与伏羲服务器互通，反之亦然。
+
+\subsubsection{InputRequired 状态：人工介入的协议化}
+
+A2A v1.0 规范定义的 \texttt{TaskState} 状态机包括 \texttt{Submitted}、\texttt{Working}、\texttt{Completed}、\texttt{Failed}、\texttt{Canceled} 五态，覆盖了任务的提交、运行与终态，但无法表达「门客遇到歧义、需要人来判断」这一中间态。伏羲新增了 \texttt{InputRequired} 状态，让门客在产出物未完成、但又必须等待用户答复的场景下显式暴露这一状态给上层编排器。代码片段~\ref{lst:a2a-task-state} 展示了状态枚举的定义。
+
+\begin{lstlisting}[language=Rust, caption=TaskState 状态机（含 InputRequired 扩展）, label=lst:a2a-task-state]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskState {
+    Submitted,      // 刚入队
+    Working,        // 处理中
+    InputRequired,  // 需要人工输入（fuxi 扩展）
+    Completed,      // 成功终态
+    Failed,         // 失败终态
+    Canceled,       // 被取消终态
+}
+\end{lstlisting}
+
+这一扩展的工程价值在于把人工介入从「编排器内部隐式状态」提升为「协议级显式状态」。玄女（顶层 Agent）订阅门客的 SSE 流时，一旦看到 \texttt{state: input-required}，可以立即把对话权从该门客切换回用户，等用户回复后再走 \texttt{tasks/send} 把答复回传给同一 Task ID。在伏羲的实际使用中，这一机制覆盖了「门客对需求理解有歧义」「门客对工具调用授权犹豫」「门客遇到外部依赖问题」三类场景，全部都通过同一个状态语义统一处理，避免了为每类介入单独设计 ad-hoc 字段。
+
+替代方案是在 \texttt{Working} 状态下用 \texttt{metadata} 字段标记「需要回复」。这种方案被否决，因为 \texttt{metadata} 是非结构化字段，既不能在编译期检查、也无法被未参与设计的第三方客户端理解；状态机扩展则是协议级公开承诺，所有兼容客户端都能感知。\texttt{InputRequired} 与终态（\texttt{Completed}/\texttt{Failed}/\texttt{Canceled}）的关键区别是：终态不可恢复，任务一旦终止就关闭事件流；\texttt{InputRequired} 是中间态，事件流保持打开，等待用户回复后转回 \texttt{Working}。这条「中间态可恢复」的设计让多轮对话与多回合协作能在同一 Task 上下文内完成，避免每次介入都要新建任务的语义混乱。
+
+进一步地，\texttt{InputRequired} 在系统层面与 \texttt{ShelfStatus::AwaitingInput}（编排层视角）形成一一对应——门客发出 \texttt{state: input-required} 的同时，编排层把对应 \texttt{ShelfEntry} 标为 \texttt{AwaitingInput}，使得整体调度器（包括跨节点的 \texttt{NodeLoadProvider}）能正确把该门客的负载从「在工作」剥离开，避免错把「在等用户」的门客算成饱和资源。这是协议级字段被复用为系统级状态的一例：A2A 的状态机不仅供外部客户端消费，也直接影响内部资源的可用性判断。
+
+\subsubsection{单连接 HTTP+SSE 设计}
+
+A2A 协议的传输层在伏羲实现中只暴露一个 HTTP 端点 \texttt{POST /a2a}，所有 RPC 方法（共五个：\texttt{agent/getCard}、\texttt{tasks/send}、\texttt{tasks/sendSubscribe}、\texttt{tasks/get}、\texttt{tasks/cancel}）通过 JSON-RPC 2.0 信封的 \texttt{method} 字段分发。\texttt{tasks/sendSubscribe} 是流式方法——对它的响应被升级为 \texttt{text/event-stream}~\parencite{whatwg2024sse}，在同一个 TCP 连接上回传任务进展。这一设计的反方案是为流式方法另开一条端点（如 \texttt{GET /a2a/stream/<task-id>}），优点是路由清晰，缺点是客户端需要管理两条连接，引入连接同步问题——客户端可能因 RPC 已返回但 SSE 尚未连上而错过早期事件。同端点升级 SSE 的方案在 axum 中只需要少量胶水代码，让 \texttt{tasks/sendSubscribe} 的 handler 返回 \texttt{Sse<Stream>} 即可，整体结构反而更收敛。
+
+SSE 帧的客户端解析需要处理 TCP chunk 边界上的不完整帧，伏羲的 \texttt{parse\_sse\_stream} 函数用增量缓冲在每次收到字节后查找 \texttt{\textbackslash n\textbackslash n} 分隔符，已确证能在跨包边界场景下正确切帧。SSE 协议本身允许多行 \texttt{data:} 前缀拼接为同一 payload，伏羲的 decoder 按行扫描时把所有 \texttt{data:} 段拼回 JSON，再按 \texttt{event:} 类型路由到 \texttt{Status} 或 \texttt{Artifact} 两类负载——这一切割逻辑在 258 行端到端测试中专门验证了 chunk 切在 \texttt{\textbackslash n\textbackslash n} 之间的边界用例。\texttt{reqwest::Client} 在 client new 时一次构造、所有 Task 共享，连接池由其内部管理，伏羲不再封装更高层的 client 缓存。
+
+至此，A2A 协议模块的设计已经完整覆盖：wire 层提供类型安全的数据结构，\texttt{InputRequired} 扩展让协议能表达人工介入，单连接 HTTP+SSE 让客户端实现简化为一个 \texttt{reqwest::Client}。整个 crate 共 1321 行（含测试），文档注释占 25\%，覆盖了 5 个 RPC 方法和 6 种 \texttt{TaskState}。本节展开的四个子设计——协议层次划分、wire 标签联合、\texttt{InputRequired} 扩展、单端点 SSE——共同构成了伏羲在 Rust 生态中独立可用的 A2A 实现，也是本论文最具差异化贡献的工程产出之一。
+
+\subsection{事件总线模块}
+\label{subsec:eventbus}
+
+事件总线由 \texttt{fuxi-events} 实现，是公理 \#3「真实时不轮询」与公理 \#5「SQLite 是单一真相源」的工程落地。该模块同时承担三件事：实时分发、持久化、历史回放——三件事在传统消息系统中往往由不同组件分开承担（如 Kafka 处理持久化与回放~\parencite{kreps2011kafka}，订阅式队列处理实时分发），伏羲在本地优先场景下把三者合并到一个抽象 \texttt{EventBus} 内部，以降低工程复杂度。
+
+\subsubsection{broadcast 与 WAL 双路径架构}
+
+\texttt{EventBus::publish()} 在每次调用时同时把事件投递到两条独立路径：第一条是 Tokio 提供的 \texttt{broadcast} channel~\parencite{tokio2024broadcast}，零拷贝扇出给所有订阅者实现实时推送；第二条是异步 \texttt{mpsc} 队列，由后台 writer task 串行落库到 SQLite，启用 WAL 模式~\parencite{sqlite2024wal} 让读写并发不互斥。两条路径各自走最优形态——broadcast 不阻塞、零拷贝；mpsc 串行、保证 FIFO 写库——从而避免了「单条通道既当广播又当持久化」的拥塞 anti-pattern。
+
+\subsubsection{非阻塞发布与 lag 哨兵}
+
+发布路径的核心约束是「调用方永不阻塞」。原因有二：首先，\texttt{publish()} 经常在 dispatch pump 这种关键路径上被同步调用，一旦阻塞会拖慢整个调度链；其次，公理 \#5 要求事件不丢——即使 writer 后台拥塞，原始事件也不能被丢弃。这两个看似矛盾的约束（不阻塞但不丢消息），在伏羲的实现中通过「\texttt{try\_send} + 后台转交 + 哨兵告警」三步组合解决，见代码片段~\ref{lst:eventbus-publish}。
+
+\begin{lstlisting}[language=Rust, caption=EventBus::publish 非阻塞实现（节选自 bus.rs:118-155）, label=lst:eventbus-publish]
+pub fn publish(&self, ev: Event) -> Result<()> {
+    // 路径 1：broadcast 零拷贝扇出，不影响 mpsc
+    let _ = self.inner.broadcast_tx.send(ev.clone());
+
+    // 路径 2：try_send 入 mpsc（非阻塞）
+    match self.inner.writer_tx.try_send(ev) {
+        Ok(_) => {
+            self.inner.writer_pending.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(mpsc::error::TrySendError::Full(dropped)) => {
+            // 拥塞：后台 spawn 任务等慢车位，但当前 publish 立即返回
+            let pending = self.inner.writer_pending.load(Ordering::Relaxed);
+            if pending >= self.inner.cfg.lag_threshold {
+                self.maybe_emit_lag_sentinel(pending);  // 哨兵告警
+            }
+            let writer_tx = self.inner.writer_tx.clone();
+            tokio::spawn(async move {
+                let _ = writer_tx.send(dropped).await;  // 阻塞由后台承担
+            });
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Err(Error::WriterClosed);
+        }
+    }
+    Ok(())
+}
+\end{lstlisting}
+
+这段代码的工程价值在于把「拥塞应对」做成一种可观测的事件——\texttt{maybe\_emit\_lag\_sentinel} 通过同一个 broadcast 路径发出一条 \texttt{Custom \{ "event\_store\_lagged", pending \}} 哨兵事件，订阅者据此感知到底层 writer 已经堆了多少未落库事件。哨兵自身有去重逻辑（同一拥塞窗口内只发一次），不会反向加剧拥塞。这一机制让背压（backpressure）从「不可见的死锁」变成「可见的告警」，为运维侧提供了介入窗口。
+
+替代方案有两个：一是直接丢消息，简单但违反公理 \#5（审计日志出现黑洞，无法重放历史）；二是让 \texttt{publish()} 阻塞等待 mpsc 容量，简单但会让上层编排在偶发拥塞下卡死。两种简单方案都被否决，最终采用上述三步法。
+
+\subsubsection{广播延迟下界与因果序}
+
+事件从产生到抵达所有订阅者的端到端延迟有形式化下界：
+
+\begin{equation}
+L_{evt} \geq \max_{i \in \mathcal{S}} \left( T_{\text{serialize}} + T_{\text{broadcast}} + T_{\text{consume},i} \right)
+\label{eq:evt-latency}
+\end{equation}
+
+式~\eqref{eq:evt-latency} 中 $\mathcal{S}$ 为订阅者集合，$T_{\text{serialize}}$ 为事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 为 channel 内部分发耗时，$T_{\text{consume},i}$ 为第 $i$ 个订阅者的消费耗时。该不等式表明，端到端延迟受最慢订阅者制约。伏羲采取的应对策略是：广播路径上设置 lag 容忍阈值（默认 256 条），超过则丢弃该订阅者的旧事件并发出 \texttt{RecvError::Lagged}——业务侧的全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
+
+事件之间的因果序遵循 Lamport 提出的逻辑时钟模型~\parencite{lamport1978time}。伏羲在每条事件的 \texttt{meta} 字段中记录 Agent ID、Task ID、墙钟时间戳与 SQLite \texttt{rowid}（单调递增），订阅者在需要重建因果链时用 \texttt{rowid} 排序，跨节点场景下远端事件回传到主节点时也以主节点 \texttt{rowid} 重排，保证最终订阅顺序的可读性。这避免了引入 Lamport 时钟或向量时钟所需的时钟同步基础设施。
+
+\subsubsection{回放：cursor 推进与 history 切 live}
+
+历史回放是事件溯源模型的关键能力。\texttt{EventBus::replay(cursor, live\_tail)} 接受一个 \texttt{ReplayCursor}（可以是 \texttt{Beginning}、\texttt{FromId(uuid)} 或 \texttt{FromTime(ts)}），先从 SQLite 拉历史流，若 \texttt{live\_tail = true} 则在历史流末尾无缝拼接 broadcast 实时流。实现上必须先订阅 broadcast 再开始拉历史——反过来会留出窗口，期间产生的事件既未入历史快照、也未被订阅者收到，形成漏接。这条「先 subscribe 后 query」的顺序看似细节，却是回放正确性的关键。
+
+回放还有一处 SQLite 工程细节值得记录：\texttt{:memory:} 数据库在多连接场景下每条连接独立持有一份内存库，写入后从其他连接读不到。伏羲在单元测试中用 \texttt{:memory:} 库时强制 \texttt{max\_connections = 1}，生产环境用文件库不受此限。WAL 模式下高并发偶发 \texttt{SQLITE\_BUSY}，伏羲通过 \texttt{busy\_timeout=5s} 加三次指数退避（50ms / 100ms / 200ms）封装在 \texttt{EventStore::append} 内部，外层调用方完全感知不到这层重试。这些工程细节不构成论文的核心贡献，但它们是「事件总线在生产环境下不丢消息」承诺的具体兑现。整个 \texttt{fuxi-events} crate 共 1673 行（其中 \texttt{store.rs} 1024、\texttt{bus.rs} 649），是伏羲所有 crate 中代码与功能比最高的之一——从一个外观简单的 \texttt{publish/subscribe/replay} 接口背后挖出的工程取舍，构成了本节的主线。
+
+\subsection{编排与任务调度模块}
+\label{subsec:orchestrator}
+
+编排模块由 \texttt{fuxi-orchestrator} 实现，是整个系统的中枢。其核心职责包括三件事：维护门客的注册表与生命周期、把任务派给合适的门客、提供事件 republish 通路让门客私有的事件流进入公共事件总线。该模块代码量约 8039 行，是仅次于 \texttt{fuxi-cli} 的第二大 crate。
+
+\subsubsection{玄女—门客分层与角色解耦}
+
+伏羲采用「玄女顶层 Agent + 门客 worker Agent」的分层结构，与 MetaGPT 中「角色分工 + 显式协作」的思想一致~\parencite{hong2023metagpt}，但伏羲更强调编排层的不可绕过——所有门客之间的通信必须经过玄女知情，且任何调度决策都必须发出对应的事件让观测端透明可追。这条公理在 \texttt{Fuxi::shutdown\_agent} 这类敏感操作中被反复实施：一切 shutdown 路径必须比对玄女 ID，若命中则 warn 并 noop 返回，唯一例外是显式的 \texttt{shutdown\_xuannv\_for\_handoff}——这个名字本身就是约束，让 grep 能一眼看出「不要在别处调用」。
+
+注册表 \texttt{Shelf} 用 \texttt{Arc<RwLock<HashMap<AgentId, ShelfEntry>>>} 实现。备选方案 \texttt{DashMap}（细粒度锁）和 \texttt{tokio::sync::RwLock<HashMap>}（允许 await）都被评估过：\texttt{DashMap} 的 entry API 在 \texttt{ShelfEntry} 包含 \texttt{Arc<dyn Agent>} 这类 trait 对象时生命周期复杂，不易写对；\texttt{tokio::RwLock} 允许在锁内 await，但实际操作都是同步内存读写，引入异步反而增加心智负担。最终采用 \texttt{std::sync::RwLock} 的同步版本，工作模式是「大量读（dispatch 时查 agent）+ 少量写（spawn/shutdown）」，符合 \texttt{RwLock} 的偏向读优化语义。
+
+\subsubsection{Worker 选择函数}
+
+给定任务 $t$ 与门客集合 $\mathcal{W}$，伏羲的调度函数选择满足约束的最低负载者：
+
+\begin{equation}
+\text{select}(t) = \arg\min_{w \in \mathcal{W}} \left\{ \frac{w.\text{inflight}}{w.\text{max\_concurrency}} \;\middle|\; \text{tags}(t) \subseteq \text{tags}(w),\ \text{pin}(t) \in \{\emptyset,\ w.\text{node}\} \right\}
+\label{eq:select-worker}
+\end{equation}
+
+式~\eqref{eq:select-worker} 给出三层过滤：标签兼容性（任务要求的 tag 必须是门客 tag 的子集）、节点钉死约束（任务若指定 \texttt{pinned\_node} 则只能在该节点的门客上跑）、最低饱和度（在剩余候选中选 \texttt{inflight / max\_concurrency} 最小的）。\texttt{max\_concurrency = 0} 的边界情况归一化为 1，避免除零。这套规则与 MapReduce~\parencite{dean2004mapreduce} 调度中「数据本地性 + 负载均衡」的思路一致，但更轻量——伏羲单节点平均门客数不超过 10，无需大规模集群级调度算法。
+
+值得点出的是 \texttt{pinned\_node} 的优先级守卫：当用户在 IM 端显式 \texttt{@<node>} 钉死任务到某节点时，\texttt{NodeLoadProvider::auto\_pin\_from\_project} 必须立即返回 \texttt{None}——不能再悄悄改写 \texttt{pinned\_node} 字段。这条守卫在调用方处再加一层 \texttt{task.pinned\_node.is\_none()} 判断作为双保险。这是分布式自动负载均衡与用户显式意图之间的边界：自动逻辑只在用户未显式介入时才生效，用户的钉死决策不可被「负载更均匀」这种系统级理由覆盖。这个原则同样适用于其他自动化路径（自动 spawn、自动 GC），用户显式行为的优先级永远高于系统启发式。
+
+\subsubsection{SystemEventBridge：避免轮询的真实时原则}
+
+旧版本设计中，CLI 子进程查询「玄女当前 ID」需要 5 分钟一次轮询查 \texttt{RwLock<Option<AgentId>>}——这是公理 \#3「真实时不轮询」的反例。修复方案是改用 \texttt{tokio::sync::watch::channel}：玄女上线时发布新值，订阅者在 \texttt{changed().await} 上挂起，新值到达时立即唤醒。这一改动把感知延迟从分钟级压到毫秒级。同样的思路也用在 dispatch pump 的 republish 通路上——pump 用 \texttt{tokio::select!} 同时监听门客的 \texttt{mpsc::Receiver<Event>} 和外部取消信号，事件抵达即转发到事件总线，绝不轮询。代码片段~\ref{lst:dispatch-pump} 是 dispatch 与 pump 启动的核心逻辑。
+
+\begin{lstlisting}[language=Rust, caption=Fuxi::dispatch 与后台 pump（节选自 fuxi.rs）, label=lst:dispatch-pump]
+pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
+    let agent = self.shelf.get(&agent_id).await?;
+    let task_id = task.id;
+
+    // 1. 拿到门客的私有 receiver（事件流）
+    let rx = agent.dispatch(task.clone()).await?;
+
+    // 2. 起后台 pump，把私有事件 republish 到公共总线
+    let bus = self.bus.clone();
+    tokio::spawn(async move {
+        let mut stream = ReceiverStream::new(rx);
+        while let Some(mut ev) = stream.next().await {
+            ev.meta.task = Some(task_id);  // 补 task_id
+            ev.meta.agent = Some(agent_id);
+            bus.publish(ev)?;
+        }
+        // terminal 事件后给 500ms grace window 收尾包
+        Ok::<_, Error>(())
+    });
+    Ok(())
+}
+\end{lstlisting}
+
+\subsubsection{本地与分布式调度路径}
+
+伏羲在 v2 引入了跨节点调度能力。当任务需要在远端节点跑（项目的 \texttt{host\_nodes} 字段标记某些项目只能在特定节点处理），\texttt{Fuxi::dispatch} 会先调用注入的 \texttt{DistEnqueuer} 钩子把任务投递给分布式控制器，由控制器拉远端节点门客或在本地选可用门客。这条路径的「钩子化」设计让 \texttt{fuxi-orchestrator} 自身不感知分布式逻辑——\texttt{DistEnqueuer} 只是 \texttt{fuxi-cli} 在 daemon 启动时注入的一个 trait 对象，编排层只看到「任务被某个钩子接管了」。这与 ZooKeeper~\parencite{hunt2010zookeeper} 引入协调层来解耦应用与分布式状态的思路一致，伏羲把协调层做成可注入的 trait 而不是固定耦合，保留了未来替换协调实现（如换成 Raft~\parencite{ongaro2014raft} 共识层）的灵活性。
+
+\subsubsection{WS 反连：从被动等待到主动控制}
+
+\texttt{Agent::dispatch} 与门客适配器的实现细节将在下一节展开，但 WS 反连这一架构决策属于编排层职责，需要在此先点明。传统的 stdin/stdout 通信范式中，编排层发指令必须等门客 \texttt{poll stdio}——若门客陷入工具循环（tool loop）就无法接收新指令，形成「消息黑洞」。伏羲的解决方案是反转连接方向：编排层在本机启 WebSocket 服务器~\parencite{fette2011websocket}，子进程启动时通过 \texttt{--sdk-url ws://127.0.0.1:<port>/...} 反连回来。WebSocket 的双向特性让编排层任何时候都能主动推送 \texttt{send\_message} 或 \texttt{cancel}，而不必等门客主动 poll。这是从「被动等待 → 主动控制」的范式升级，详细工程实现见 \autoref{subsec:adapter-workspace}。
+
+编排层还承担一项容易被忽视的职责：\texttt{intervene} 入口的语义协调。当用户在玄女对话中插入新指令时，玄女若处于 \texttt{Idle} 状态没有活跃 \texttt{active\_tx}，直接 \texttt{send\_message} 会让消息悬空——WebSocket 上的回包没有 receiver 接住即被 drop。修复思路是 \texttt{Fuxi::intervene} 在入口处先查 \texttt{ShelfStatus}：若 \texttt{Idle} 则退化为 \texttt{dispatch} 起一轮新 turn（而非走 send\_message 路径），若 \texttt{Busy} 则把消息推入 \texttt{PendingOutbox} 等下次 turn 边界 drain。这条「Idle 退化为 dispatch」的规则避免了「玄女一忙就丢消息」的常见症状，是伏羲在多次实测调优后沉淀的重要规约。这条规约同样适用于 PWA 与 IM 端的所有干预入口——上层不需要为不同 ShelfStatus 写不同分支，统一调 \texttt{intervene} 即可。
+
+\subsection{执行适配器与工作区隔离模块}
+\label{subsec:adapter-workspace}
+
+执行层的职责是把抽象的 \texttt{Agent} trait 落地到具体的 CLI 进程上。伏羲实现了两个适配器（\texttt{fuxi-agent-cc} 与 \texttt{fuxi-agent-codex}），并通过 \texttt{fuxi-workspace} 的三层沙箱保证多门客并发时的文件系统隔离。
+
+\subsubsection{cc 与 codex 适配器的设计差异}
+
+\texttt{CcAgent} 包装 Claude Code CLI，采用「长连接 WS + 多轮 dispatch」模型：进程启动一次后通过 WebSocket 反连，多次 \texttt{dispatch} 复用同一进程。\texttt{CodexAgent} 包装 Codex CLI，采用「spawn-per-dispatch」模型：每次 \texttt{dispatch} 起一个新进程，prompt 作为位置参数传入，进程结束即销毁。这一差异源自两个 CLI 自身的能力差异——Claude Code 支持 SDK URL 与会话保持（\texttt{cli\_session\_id}），Codex 是 one-shot exec 模式无 stdin 输入。代码上的体现是：\texttt{CcAgent::send\_message} 会把消息推到 WebSocket，由门客在下一轮 turn 边界消费；\texttt{CodexAgent::send\_message} 直接返回错误（\texttt{CoreError::Other("codex 不支持 send\_message")}），上层在 idle 状态下退化成 \texttt{dispatch} 起新进程跑用户的话，用户视角无感。
+
+WS 反连的关键工程细节在代码片段~\ref{lst:cc-launch} 中。
+
+\begin{lstlisting}[language=Rust, caption=CcAgent::launch_with_id（fuxi-agent-cc/src/agent.rs:115-180）, label=lst:cc-launch]
+pub async fn launch_with_id(
+    id: AgentId,
+    profile: AgentProfile,
+    cfg: CcLaunchConfig,
+) -> Result<Self> {
+    // 1. 起本地 WS server，分配 sid 与端口
+    let sid = Uuid::new_v4().to_string();
+    let channel = Arc::new(WsChannel::bind(&sid).await?);
+
+    // 2. spawn cc 子进程，注入 --sdk-url 与 NO_PROXY（避开 Clash TUN）
+    let mut child = spawn_claude(&cfg)?;
+
+    // 3. 等子进程反连（30s 超时），同时 race 子进程崩溃
+    tokio::select! {
+        Ok(_) = channel.wait_connect(CONNECT_TIMEOUT) => { /* 反连成功 */ }
+        Ok(_) = child.wait() => return Err(CcError::EarlyExit.into()),
+    }
+
+    // 4. 起 message pump，持续消费 stream-json 事件
+    let pump = tokio::spawn(pump_loop(channel.clone(), /* ... */));
+
+    Ok(CcAgent {
+        card: AgentCard { id, profile, endpoint: channel.url(), .. },
+        inner: Arc::new(Mutex::new(Inner { channel, child, .. })),
+        _pump: pump,
+    })
+}
+\end{lstlisting}
+
+\texttt{launch\_with\_id} 是新版 API，相对旧的 \texttt{launch} 强制传入 \texttt{id} 参数——曾踩过的坑是编排层和适配器各自生成 \texttt{AgentId}，导致 \texttt{AgentSpawning} 与 \texttt{AgentReady} 事件挂在不同 ID 上，订阅者无法匹配。这条新规约现在是「新 agent 适配器三铁律」之一：必须接收外部传入的 ID，绝不自己生成。另外两条铁律是「事件 pump 无论怎么退出都要把 \texttt{ShelfStatus} 摊回 \texttt{Idle}」（避免 shelf 永久 Busy）和「find-then-act 类接口必须原子（如 \texttt{claim\_idle\_by\_role}），不能 find + set\_status 两步」（避免并发双派）。
+
+适配器内部最复杂的子模块是 \texttt{parser}——把 cc/codex 的 stream-json 输出翻译成伏羲的 \texttt{Event} 流。cc 的 stream-json 是 message-based（\texttt{system/init}、\texttt{user}、\texttt{assistant}、\texttt{tool\_use}、\texttt{tool\_result}、\texttt{result}），codex 是 turn-based（\texttt{ThreadStarted}、\texttt{TurnStarted}、\texttt{ItemStarted}、\texttt{ItemCompleted}、\texttt{TurnCompleted}）。两者的事件粒度差异之大，曾促使团队思考是否要抽出共同的 parser 抽象，最终决定保持两套 parser 各自独立——理由是过早抽象会被两种 schema 的「最大公因数」绑架，未来加入 gemini 或 opencode 时反而要破除抽象重写；短期重复优于长期僵化。
+
+\subsubsection{三层沙箱 L1/L2/L3}
+
+工作区隔离遵循三层架构（决策 21）：\texttt{L1ReadOnly} 是项目源码与依赖快照的只读视图，所有门客共享；\texttt{L2Ephemeral} 是任务级临时 worktree，每个 \texttt{dispatch} 创建一个独立分支，任务结束自动清理；\texttt{L3Persistent} 是角色级持久沙箱，同一角色（如 \texttt{dev-frontend}）跨任务复用同一目录与 build cache。
+
+三层中以 L2 最关键，落地依赖 git 的 \texttt{worktree} 机制~\parencite{git2024worktree}：\texttt{git worktree add -b agent/<id> <path> <base\_branch>} 在工作目录之外创建一份独立的工作树与分支，多个 worktree 之间文件互不影响、共享同一 \texttt{.git} 目录（节省磁盘）。这是为多门客并发文件操作设计的——若所有门客共用同一工作目录，会撞 git 锁、撞文件互相覆盖。L3 的持久沙箱面向构建缓存复用：编译型语言（Rust、TypeScript）的 \texttt{target/}、\texttt{node\_modules/} 在每次任务结束时清理代价巨大，L3 让同一角色跨任务复用这些状态，把 \texttt{cargo build} 从冷启动几分钟降到几秒。L1 只读层面向「门客只读取项目源码」的轻量场景，跳过 worktree 创建直接挂载，启动延迟从百毫秒级压到十毫秒级。
+
+\subsubsection{进程边界 env 清理}
+
+子进程继承父进程环境变量是 Unix 默认行为，但在 cc/codex 这类「自身就是 Claude Code agent」的 CLI 中会触发嵌套检测——父 cc 起子 cc 时子进程看到 \texttt{CLAUDECODE} 等 env 会静默退出。\texttt{spawn\_claude} 在启动子进程前显式 \texttt{env\_remove} 一组前缀（\texttt{CLAUDECODE}、\texttt{CLAUDE\_CODE\_*}、\texttt{CODEX\_*}），同时注入 \texttt{NO\_PROXY=127.0.0.1,localhost} 规避用户本地 Clash TUN 代理把 WebSocket 反连吞掉的常见环境陷阱。这些细节看似琐碎，却是实际部署中反复触发的工程坑——CLAUDE.md 项目记忆里专门记录了好几条「下次有人手起 cc 也要清这些 env」的提醒。
+
+\subsection{观测与 IM 接入模块}
+\label{subsec:firehose-im}
+
+观测层与 IM 接入由 \texttt{fuxi-firehose} 与 \texttt{fuxi-im} 两个 crate 共同提供，共计约 1.66 万行。两者都基于 axum 框架对外暴露 HTTP 服务，但分工互补：firehose 面向「事件流」做四端 fan-out，IM 面向「业务对象」做 REST + WebSocket。
+
+\texttt{fuxi-firehose} 内部通过一个 \texttt{Hub} 持有 \texttt{EventBus} 引用，对外提供四个端点：\texttt{/ws} 给 TUI 与 CLI 工具消费，\texttt{/sse} 给浏览器与 \texttt{curl} 用户消费，\texttt{/events} 是 REST JSON 历史查询（不做 live tail，回避公理 \#3 反例），还有进程内 broadcast channel 给同进程的 SystemEventBridge 等组件零拷贝消费。同一份事件经四种形态出口，每种形态共用底层的 \texttt{EventBus::replay} 接口，handler 自身只负责协议翻译。这种「内核统一、出口多样」的结构让新增协议（如 gRPC streaming）只需要再加一个二三十行的 handler。WS 与 SSE 两条路径在 axum 框架内的实现各只占二十几行胶水，二者共享同一份 \texttt{Event} JSON 序列化逻辑，而不同协议带来的差异（WebSocket 二进制帧 vs SSE 文本帧、连接保活策略等）由 axum 内部自动处理。同时支持两种协议而不强制统一的理由是：TUI 端需要双向（接收事件 + 上报取消信号），WebSocket 自然适配；浏览器与 \texttt{curl} 用户更适合单向 SSE，无需手动管理 ping/pong。复用 \texttt{Event} 类型的代价是写两个 handler，一次性、可控；强行统一到 WS 反而要求所有客户端处理协议升级，复杂度反而上升。
+
+\texttt{fuxi-im} 后端面向手机端 PWA 与桌面 IM 客户端，提供 REST 任务管理（\texttt{GET /api/tasks}、\texttt{POST /api/tasks/<id>/intervene}）、对话历史拉取（\texttt{GET /api/conversations/<id>}）、双向消息流（\texttt{WS /ws/messages}）与设备推送注册（\texttt{POST /api/push/register}）。后端业务调用都直接走 \texttt{Arc<Fuxi>} 句柄——例如 \texttt{intervene} 端点直接调 \texttt{Fuxi::intervene}，由编排层判断 idle 状态下退化为 dispatch 还是 busy 状态下入 pending 队列，IM 层不重复实现这套语义。这一分工让 IM 后端可以与编排层独立部署：未来若 IM 后端要做读副本扩容，只需保证它能与主节点的 EventBus 共享 SQLite 文件即可。\texttt{fuxi-im} 在路由装配上采用「skeleton 稳定、实现可填」的分工模式——\texttt{router.rs} 中所有 handler 签名一次定型，路由装配集中在 \texttt{build()} 函数内部；具体业务实现按 owner 分布在 \texttt{handlers/*.rs}，各 owner 独立填充。这种安排在多人并行开发时收益明显——任意路由变更只需改一处装配点，handler 实现彼此不互相阻塞。
+
+\texttt{fuxi-cli} 中的分布式控制器（\texttt{dist} 模块）也属于此层。它在多节点部署中负责把跨节点任务路由到正确节点，本质是一个跨进程的 \texttt{DistEnqueuer} 实现，通过节点间 RPC（基于 reqwest + JSON-RPC）把任务从 home 节点投递到 worker 节点，并把远端事件 republish 回 home 节点的 EventBus。这条路径的具体设计见第 4 章实现细节。值得在此点出的是分布式部分的工程铁律：跨节点的 \texttt{Project} 与 \texttt{Task} 在序列化时所有新增字段必须 \texttt{\#[serde(default)]} 兼容旧持久化，否则 \texttt{registry.list()} 会在老版本 \texttt{meta.json} 与老 \texttt{events.db} 上 deserialize 全炸；伏羲在 \texttt{fuxi-core} 中专门维护两个反回归单测兜底这条规约。这是从单机扩展到多节点过程中最容易被忽视、却影响最大的兼容性设计点。
+
+\subsection{记忆、角色与触发器模块}
+\label{subsec:memory-skills-scheduler}
+
+横向支撑模块通过事件订阅与显式 API 接入主链，自身不参与调度决策，只负责长期状态管理。
+
+\texttt{fuxi-memory} 基于 SQLite 与 FTS5 全文索引，维护三张核心表：\texttt{oracle\_facts}（甲骨，存「事实三元组」如 \texttt{用户 prefers 冰美式}）、\texttt{hetu\_patterns}（河图洛书，存「角色技能样本」如 \texttt{dev-frontend skill\_example <markdown>}）、\texttt{user\_profiles}（身份卡，存用户特征摘要）。三张表的写入策略统一为「只 ADD 不 UPDATE」——冲突时不覆盖旧行，而是把旧行的 \texttt{valid\_until} 标为 \texttt{now()}，再 INSERT 新行。这样的语义保证了完整审计追溯：任意时刻的事实库历史都可以通过 \texttt{WHERE valid\_until IS NULL OR valid\_until > <ts>} 重建。FTS5 用 \texttt{unicode61} 分词器（不用 porter stemmer，因为后者不适合中文），实测 1 万条事实下 p95 查询小于 10 毫秒，满足召回侧的实时性要求。
+
+\texttt{fuxi-skills} 是角色玉牒加载器，每个角色（如 \texttt{dev-frontend}、\texttt{pm-alpha}）以 \texttt{roles/<role>/ROLE.md} 文件形式存储，文件头是 YAML frontmatter（含 \texttt{cli}、\texttt{system\_prompt}、\texttt{tags}），文件体是自由 markdown 描述。这种「一份文件既是源代码也是人类可读文档」的形态借鉴了 Voyager~\parencite{wang2023voyager} 中持久技能库的思路，但伏羲增加了 staging 与 ledger 双轨——新角色先写入 \texttt{roles/<role>.staging/}，经审阅后才 \texttt{mv} 到 \texttt{roles/}，每次 approve/reject 都追加一条记录到 \texttt{\textasciitilde/.fuxi/ledger.json}。这套流程为未来「角色市场」开放外部贡献做了铺垫，避免 PR-based 流程的繁重。
+
+\texttt{fuxi-scheduler} 提供四类触发器：\texttt{Cron}（基于 croner 的标准 cron 表达式 + 时区）、\texttt{Once}（一次性定时任务）、\texttt{Webhook}（外部 HTTP 触发）、\texttt{FileWatch}（基于 \texttt{notify} 的文件变化）。Keeper（cron/once 的 tick 循环）每秒走一次 \texttt{tick\_once}，对所有 enabled cron 行计算是否到期；Watcher（webhook/fs 的响应式入口）则被动等事件。两类触发器统一通过发出 \texttt{EventKind::TriggerFired} 事件接入主链，编排层订阅这条事件再决定是否 dispatch——这条间接路径让 scheduler 自身不需要持有 \texttt{Fuxi} 句柄，避免了又一处潜在循环依赖。
+
+值得指出的是，\texttt{fuxi-memory} 的「自动事实抽取」（从 transcript 里提取候选 fact）默认是关闭的，需要用户在配置中显式打开。这一保守选择源于早期实测——抽取器在用户与玄女闲聊时容易把无关闲谈写进事实库，污染长期记忆。默认关闭让用户在显式知情时才打开抽取，符合「先做对，再做快」的工程节奏。打开抽取后，抽取器作为一个独立子门客被 spawn（进程隔离，与玄女不共享上下文），从指定 task 的 transcript 中筛候选事实，写库前还会过 \texttt{confidence} 阈值过滤（默认 0.7）。\texttt{fuxi-memory} 自身不依赖 \texttt{fuxi-orchestrator}，否则形成循环；它定义 \texttt{ExtractorSpawner} trait，由 \texttt{fuxi-cli} 中的 \texttt{FuxiExtractorSpawner} 实现并注入。这与 \autoref{subsec:module-division} 提到的「trait 在低层、impl 在高层」反向依赖模式一致。
+
+记忆模块未来的演进方向是引入向量检索做语义召回。当前 FTS5 关键词匹配在 1 万条规模下足够实用，但当事实库扩展到 10 万条以上、且查询语义偏「相似」而非「相同」时（例如「找用户的工作偏好」需要召回「prefers 早起编程」「avoid 长会议」等弱相关 fact），关键词匹配会失效。届时考虑引入 sqlite-vec 或独立向量库，在 FTS5 之上做混合检索——这一扩展点的预留通过 \texttt{OracleStore::fts\_search} 与新增的 \texttt{vector\_search} 接口并存的方式实现，老调用方不受影响。
+
+三类模块在事件总线上的订阅各自独立：\texttt{fuxi-memory} 订阅 \texttt{DeliverableProduced} 与 \texttt{TaskCompleted} 触发抽取；\texttt{fuxi-skills} 订阅 \texttt{Custom \{ "skill\_approve" \}} 等管理事件触发玉牒入册；\texttt{fuxi-scheduler} 自身不订阅事件，但通过发出 \texttt{TriggerFired} 事件让编排层订阅消费。这种「订阅 + 发布双向解耦」的结构，让任意支撑模块都可以在不影响编排层主链的前提下独立增强或替换。
+
+\subsection{本章小结}
+
+本章按依赖自下而上的顺序，把伏羲 13 个 crate 的设计逐一展开。每个模块除了介绍它解决什么问题、用什么数据结构与接口实现，还专门展开了关键设计决策与取舍——把当时讨论过的备选方案与放弃理由一并记录，让读者看到本设计与可能的其他设计之间的权衡边界。其中最值得突出的是事件总线的非阻塞发布与 lag 哨兵设计、A2A 协议从零实现的 wire 层与 \texttt{InputRequired} 状态创新、玄女—门客分层与 worker 选择函数、WS 反连这一打破传统 stdio 范式的执行层升级。这四个工程亮点共同构成了伏羲在「单机本地优先 + 多门客并发 + 真实时观测」三个约束下的差异化贡献。
+
+回顾本章的整体逻辑：模块划分在最低层确立了「核心稳定、策略可变、依赖单向」的工程秩序；通信协议在该秩序之上为 Agent 间协作提供了从 Rust 类型到 wire JSON 一以贯之的契约；事件总线把系统内部所有事实流以「先广播后入库」的双路径忠实记录，并通过 lag 哨兵把背压暴露成可观测信号；编排层在事件流之上实施 worker 选择与生命周期管理，绝不轮询地把任意状态变化即时反映到全系统订阅者；执行层把抽象的 Agent trait 落到具体 CLI 进程，并通过三层沙箱把多门客并发的文件冲突彻底消除；观测与 IM 层把所有事件向多种端形态扇出，让用户在手机、桌面、TUI 都能用一致的语义观察到系统状态；横向支撑层提供长期记忆、角色玉牒与触发器，作为系统的「外部存储与事件源」与主链解耦协作。每一层都建立在其下层提供的抽象之上，每一层都为其上层留出可观测、可注入、可扩展的接口。
+
+下一章将从代码实现层进入：从 daemon 启动开始，沿事件流走完一次完整的「玄女接收任务 → 分派给门客 → 门客通过 A2A 回报 → 事件总线持久化 → IM 端实时刷新」的全链路执行轨迹，并把本章中各模块的接口在实际调用栈上一一对应。
+
