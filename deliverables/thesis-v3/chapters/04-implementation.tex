@@ -327,7 +327,7 @@ bridge 内部还有一处关键工程细节：\texttt{handle\_event} 把 \texttt
 
 \subsection{A2A 协议从零实现（论文核心贡献）}
 
-A2A（Agent-to-Agent）是 Google 在 2025 年提出的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。然而截至本文写作时，A2A 在 Rust 生态没有任何官方或第三方实现——Google 仅发布了 Python 与 Go 参考实现，社区里另有 Java/TypeScript 民间移植，而其他企业级实现往往与具体框架（如 SWE-Agent\cite{yang2024sweagent}、OpenHands\cite{wang2024openhands}）深度耦合，不能直接拿来即用。伏羲为了让玄女能与未来的异构 agent（其他公司发布的、运行在其他主机上的 cc/gemini/codex 实例）互联，必须从零实现一个完整的 A2A 1.0 客户端与服务端。这一节是本文工程贡献的核心部分。
+A2A（Agent-to-Agent）是 Google 在 2025 年提出并由 Linux Foundation 托管的开放 agent 互通协议\cite{a2aproject2025a2a}，其规范级别等价于 MCP 在工具调用领域的位置\cite{anthropic2024mcp}。这两个协议构成了 LLM 时代 agent 生态的两条主轴：MCP 解决"agent 如何调用工具"，A2A 解决"agent 如何调用其他 agent"。当前 A2A 生态已包含官方与第三方多语言 SDK，其中 Rust 生态已有 a2a-rs、a2a-client、a2a-types 等若干第三方 crate 提供独立的协议封装。本工作没有把贡献建立在「Rust 生态空白」之上，而是面向伏羲的本地优先编排场景，从零实现一份与事件总线、玄女—门客编排层、反向 WebSocket sandbox 同源演进的 A2A 核心闭环，并在状态机层扩展 \texttt{InputRequired} 人工介入语义。这一节展开该实现的具体决策。
 
 需要先澄清一个常见误解：A2A 协议并不规定"agent 如何思考"或"agent 用什么模型"，它只规定 agent 之间如何握手、如何传递任务、如何回报结果。这种"协议关心通讯、不关心实现"的设计哲学跟 HTTP 类似——HTTP 规范不规定网页用什么框架渲染，只规定字节流的形态。A2A 这种设计让伏羲可以把 cc / codex / 未来的 gemini-cli 通通包装成 A2A endpoint 后由玄女统一调度，不必为每个 agent 实现单独的协议适配器。
 
@@ -684,6 +684,6 @@ dist controller 还需处理一个分布式系统普遍头疼的问题：worker 
 
 \subsection{本章小结}
 
-本章把第三章的设计落到了代码。我们看到 fuxi-events 用"非阻塞 publish + lag 哨兵"调和了实时性与持久化的矛盾，看到 fuxi-orchestrator 用 publish-then-pump 模式把 agent 的私有 receiver 转换为全局事件流，看到 fuxi-a2a 从零实现了 Rust 生态尚不存在的 A2A 1.0 完整客户端与服务端、并通过 \texttt{InputRequired} 状态扩展了 Google 规范以支持人在回路场景，看到 dist controller 用 HMAC-SHA256 + nonce cache + 常量时间比较保证跨节点通讯的安全性。所有代码片段均直接节选自 \texttt{crates/} 下的真实实现，可在主仓 HEAD \texttt{04eb34c} 处对位审阅。
+本章把第三章的设计落到了代码。我们看到 fuxi-events 用"非阻塞 publish + lag 哨兵"调和了实时性与持久化的矛盾，看到 fuxi-orchestrator 用 publish-then-pump 模式把 agent 的私有 receiver 转换为全局事件流，看到 fuxi-a2a 并非以通用 SDK 为目标，而是把 A2A wire、JSON-RPC、SSE 流与伏羲的事件总线、玄女—门客编排层和反向 WebSocket sandbox 结合起来，形成面向本地优先协作场景的协议实现，并通过 \texttt{InputRequired} 状态扩展了 Google 规范以支持人在回路场景，看到 dist controller 用 HMAC-SHA256 + nonce cache + 常量时间比较保证跨节点通讯的安全性。所有代码片段均直接节选自 \texttt{crates/} 下的真实实现，可在主仓 HEAD \texttt{04eb34c} 处对位审阅。
 
 总结这一章的三条工程经验：第一，\textbf{协议层与业务层显式分离}——fuxi-a2a 只关心 wire 与 envelope，业务侧通过 \texttt{A2AService} trait 注入；fuxi-events 只关心持久化与扇出，业务事件类型由 fuxi-core 定义。这种分层让协议升级与业务演进互不干扰，每个 crate 都能独立测试与迭代。第二，\textbf{非阻塞 + 哨兵 > 阻塞 + 完美}——实时系统下，让 publisher 阻塞等待写库会拖垮整条调用链；用后台 spawn + lag 哨兵实现"原始 publisher 永远不阻塞、订阅者能感知 backpressure、事件永不丢失"三者兼顾。第三，\textbf{用户显式 \(>\) 系统智能}——\texttt{auto\_pin\_from\_project} 不能改写已 pin 的 task；\texttt{shutdown\_agent} 必须豁免玄女；这些"看起来多余的守卫"是用户信任系统的基础。下一章将给出在这套实现之上做的端到端实测——延迟、吞吐、错误恢复、跨节点协作场景的量化数据，验证设计目标是否达成。

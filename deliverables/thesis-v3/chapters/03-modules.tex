@@ -219,7 +219,7 @@ pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
 
 \subsubsection{WS 反连：从被动等待到主动控制}
 
-\texttt{Agent::dispatch} 与门客适配器的实现细节将在下一节展开，但 WS 反连这一架构决策属于编排层职责，需要在此先点明。传统的 stdin/stdout 通讯范式中，编排层发指令必须等门客 \texttt{poll stdio}——若门客陷入工具循环（tool loop）就无法接收新指令，形成「消息黑洞」。伏羲的解决方案是反转连接方向：编排层在本机启 WebSocket 服务器~\parencite{fette2011websocket}，子进程启动时通过 \texttt{--sdk-url ws://127.0.0.1:<port>/...} 反连回来。WebSocket 的双向特性让编排层任何时候都能主动推送 \texttt{send\_message} 或 \texttt{cancel}，而不必等门客主动 poll。这是从「被动等待 → 主动控制」的范式升级，详细工程实现见 \autoref{subsec:adapter-workspace}。
+\texttt{Agent::dispatch} 与门客适配器的实现细节将在下一节展开，但 WS 反连这一架构决策属于编排层职责，需要在此先点明。传统的 stdin/stdout 通讯范式中，编排层发指令必须等门客 \texttt{poll stdio}——若门客陷入工具循环（tool loop）就无法接收新指令，形成「消息黑洞」。伏羲的解决方案是反转连接方向：编排层在本机启 WebSocket 服务器~\parencite{fette2011websocket}，子进程启动时通过 \texttt{--sdk-url ws://127.0.0.1:<port>/...} 反连回来。WebSocket 的双向特性让编排层任何时候都能主动推送 \texttt{send\_message} 或 \texttt{cancel}，而不必等门客主动 poll。这是从「被动等待 $\to$ 主动控制」的范式升级，详细工程实现见 \autoref{subsec:adapter-workspace}。
 
 编排层还承担一项容易被忽视的职责：\texttt{intervene} 入口的语义协调。当用户在玄女对话中插入新指令时，玄女若处于 \texttt{Idle} 状态没有活跃 \texttt{active\_tx}，直接 \texttt{send\_message} 会让消息悬空——WebSocket 上的回包没有 receiver 接住即被 drop。修复思路是 \texttt{Fuxi::intervene} 在入口处先查 \texttt{ShelfStatus}：若 \texttt{Idle} 则退化为 \texttt{dispatch} 起一轮新 turn（而非走 send\_message 路径），若 \texttt{Busy} 则把消息推入 \texttt{PendingOutbox} 等下次 turn 边界 drain。这条「Idle 退化为 dispatch」的规则避免了「玄女一忙就丢消息」的常见症状，是伏羲在多次实测调优后沉淀的重要规约。这条规约同样适用于 PWA 与 IM 端的所有干预入口——上层不需要为不同 ShelfStatus 写不同分支，统一调 \texttt{intervene} 即可。
 
@@ -312,5 +312,5 @@ pub async fn launch_with_id(
 
 回顾本章的整体逻辑：模块划分在最低层确立了「核心稳定、策略可变、依赖单向」的工程秩序；通讯协议在该秩序之上为 Agent 间协作提供了从 Rust 类型到 wire JSON 一以贯之的契约；事件总线把系统内部所有事实流以「先广播后入库」的双路径忠实记录，并通过 lag 哨兵把背压暴露成可观测信号；编排层在事件流之上实施 worker 选择与生命周期管理，绝不轮询地把任意状态变化即时反映到全系统订阅者；执行层把抽象的 Agent trait 落到具体 CLI 进程，并通过三层沙箱把多门客并发的文件冲突彻底消除；观测与 IM 层把所有事件向多种端形态扇出，让用户在手机、桌面、TUI 都能用一致的语义观察到系统状态；横向支撑层提供长期记忆、角色玉牒与触发器，作为系统的「外部存储与事件源」与主链解耦协作。每一层都建立在其下层提供的抽象之上，每一层都为其上层留出可观测、可注入、可扩展的接口。
 
-下一章将从代码实现层进入：从 daemon 启动开始，沿事件流走完一次完整的「玄女接收任务 → 分派给门客 → 门客通过 A2A 回报 → 事件总线持久化 → IM 端实时刷新」的全链路执行轨迹，并把本章中各模块的接口在实际调用栈上一一对应。
+下一章将从代码实现层进入：从 daemon 启动开始，沿事件流走完一次完整的「玄女接收任务 $\to$ 分派给门客 $\to$ 门客通过 A2A 回报 $\to$ 事件总线持久化 $\to$ IM 端实时刷新」的全链路执行轨迹，并把本章中各模块的接口在实际调用栈上一一对应。
 

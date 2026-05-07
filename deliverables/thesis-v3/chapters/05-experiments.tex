@@ -8,7 +8,7 @@
 
 正确性测试以 \texttt{cargo test --workspace --all-targets} 作为持续集成门禁，覆盖 27 个集成测试文件分布在 13 个 crate 中。性能测试以独立的 \texttt{cargo bench} 二进制执行，每项实验单独编译为 release profile，避免 dev profile 优化等级不足造成的偏差。所有性能数据由 bench 二进制直接写入 markdown 报告，论文中的图表均由 matplotlib 脚本基于该报告自动生成，确保数据—文档—图三者在版本控制下严格同步，规避「论文里数字与仓库里数字不一致」的常见问题。
 
-测量方法学方面，本章采用了五项工程上必要但容易在论文中被默认忽略的控制手段。其一，\textbf{warmup 与冷启动抑制}。Tokio 多线程运行时在首次启动后需要进行线程池预热、内存分配器（jemalloc 经测试在 Apple Silicon 上略快于系统 malloc，但本机用默认）的页对齐缓存填充以及 SQLite WAL 文件的首次创建。本章吞吐与扩展性实验全部采用「5 次重复取中位数」的策略，对应顶刊 systems 论文中的常见做法——中位数对单点冷启动（最差一次往往是首次）天然鲁棒。延迟实验则在采集 500 样本之前先丢弃前 50 个样本作为 warmup。其二，\textbf{系统噪声控制}。测试期间关闭了 Spotlight 索引、Time Machine 自动备份、浏览器后台 tab 与 IDE 索引等可能在不可预期时机消耗 CPU 的进程；并选取夜间安静时段进行测量，使背景 CPU 占用稳定在 5\% 以下。这一控制对纯延迟实验尤其重要——任意一次 Spotlight 触发均可能在 macOS 上引入数十毫秒的调度抖动。其三，\textbf{macOS 调度抖动的应对}。macOS 的 Grand Central Dispatch 调度器对前台与后台进程采用不同的优先级策略，bench 二进制以默认 user-initiated QoS 启动，避免被错误归入 background QoS 而遭到节流。其四，\textbf{Tokio runtime 线程数固定}。多线程运行时默认使用 \texttt{available\_parallelism}，在被测机上报告为 8 核——为避免不同实验之间因线程数变化导致结果不可比，本章 bench 二进制统一以 \texttt{Runtime::new\_multi\_thread().worker\_threads(8)} 显式固定。其五，\textbf{时钟精度}。延迟实验使用 \texttt{std::time::Instant} 作为时钟源，其底层在 macOS 上为 \texttt{mach\_absolute\_time}，分辨率约 1 纳秒。事件总线 p50/p99 实验中，记录值由 \texttt{SystemTime} 经 ns→us 的整数除法截断得到，因此凡 p50 报告为 0.0 us 处实际含义为「< 1 us」，已在表格脚注中显式说明。
+测量方法学方面，本章采用了五项工程上必要但容易在论文中被默认忽略的控制手段。其一，\textbf{warmup 与冷启动抑制}。Tokio 多线程运行时在首次启动后需要进行线程池预热、内存分配器（jemalloc 经测试在 Apple Silicon 上略快于系统 malloc，但本机用默认）的页对齐缓存填充以及 SQLite WAL 文件的首次创建。本章吞吐与扩展性实验全部采用「5 次重复取中位数」的策略，对应顶刊 systems 论文中的常见做法——中位数对单点冷启动（最差一次往往是首次）天然鲁棒。延迟实验则在采集 500 样本之前先丢弃前 50 个样本作为 warmup。其二，\textbf{系统噪声控制}。测试期间关闭了 Spotlight 索引、Time Machine 自动备份、浏览器后台 tab 与 IDE 索引等可能在不可预期时机消耗 CPU 的进程；并选取夜间安静时段进行测量，使背景 CPU 占用稳定在 5\% 以下。这一控制对纯延迟实验尤其重要——任意一次 Spotlight 触发均可能在 macOS 上引入数十毫秒的调度抖动。其三，\textbf{macOS 调度抖动的应对}。macOS 的 Grand Central Dispatch 调度器对前台与后台进程采用不同的优先级策略，bench 二进制以默认 user-initiated QoS 启动，避免被错误归入 background QoS 而遭到节流。其四，\textbf{Tokio runtime 线程数固定}。多线程运行时默认使用 \texttt{available\_parallelism}，在被测机上报告为 8 核——为避免不同实验之间因线程数变化导致结果不可比，本章 bench 二进制统一以 \texttt{Runtime::new\_multi\_thread().worker\_threads(8)} 显式固定。其五，\textbf{时钟精度}。延迟实验使用 \texttt{std::time::Instant} 作为时钟源，其底层在 macOS 上为 \texttt{mach\_absolute\_time}，分辨率约 1 纳秒。事件总线 p50/p99 实验中，记录值由 \texttt{SystemTime} 经 ns$\to$us 的整数除法截断得到，因此凡 p50 报告为 0.0 us 处实际含义为「< 1 us」，已在表格脚注中显式说明。
 
 样本量与统计稳健性方面，本章在不同实验中采用了与各自噪声特性匹配的策略。吞吐与扩展性实验每 cell 重复 5 次，取中位数；延迟实验单 cell 收集 500 个独立样本，统计 p50/p99/min/max；事件总线压测每 cell 持续 5 秒稳态、内部累计样本量在万级到百万级之间。中位数对长尾鲁棒，但牺牲了对均值的估计；考虑到本章关注的是稳态吞吐而非偶发尖峰，中位数是更合适的中心趋势度量。对延迟分布，本章同时报告 min（理论下界的逼近）、p50（典型情形）、p99（尾部）与 max（最差情形）四个分位点，使读者能够独立判断「典型」与「尾部」两类性质。基于 500 个独立样本，p99 的 95\% Wilson 置信区间在原值上下约 ±2\% 范围内，这一不确定度远小于本章关注的数量级差异，故未在表格中显式列出区间下限上限。
 
@@ -88,7 +88,7 @@ worker\_n & job\_sleep & tasks\_n & median\_wall\_ms & tasks/s & 理论上限 & 
 
 \subsection{延迟分布与尾部分析}
 
-延迟测试针对系统的两条关键通讯路径：任务派发链路（含 HTTP 往返、HMAC 验证、SQLite 写入、worker 选择与反序列化的端到端链路）与事件总线广播（即同进程内 Tokio broadcast publish→subscribe 的 fan-out 路径，不经过网络、不经过文件 I/O、不经过序列化）。需要明确的是，本节测量的事件总线广播延迟为 \emph{进程内} 路径——跨节点场景下事件流还需经过 dist controller 的 HMAC 验证与 axum HTTP 层，对应延迟约比进程内高三个数量级（毫秒级），但跨节点链路的端到端延迟未在本节实测，留待后续在多机部署中补测。结果如表 \ref{tab:latency} 所示。
+延迟测试针对系统的两条关键通讯路径：任务派发链路（含 HTTP 往返、HMAC 验证、SQLite 写入、worker 选择与反序列化的端到端链路）与事件总线广播（即同进程内 Tokio broadcast publish$\to$subscribe 的 fan-out 路径，不经过网络、不经过文件 I/O、不经过序列化）。需要明确的是，本节测量的事件总线广播延迟为 \emph{进程内} 路径——跨节点场景下事件流还需经过 dist controller 的 HMAC 验证与 axum HTTP 层，对应延迟约比进程内高三个数量级（毫秒级），但跨节点链路的端到端延迟未在本节实测，留待后续在多机部署中补测。结果如表 \ref{tab:latency} 所示。
 
 \begin{table}[H]
 \centering
@@ -120,7 +120,7 @@ event\_flow & 500 & 0.04 & 0.08 & 0.26 & 0.66 \\
 \label{fig:event-flow-latency}
 \end{figure}
 
-\textbf{尾部比与稳定性}。任务派发的 p99/p50 比值为 36.66/32.93 = 1.11，说明派发链路尾部抖动可控；事件总线广播 p99/p50 比值为 0.26/0.08 = 3.25，绝对差仅 0.18 ms。事件流的相对比值看上去更大，但这并非「事件流尾部更不稳定」的反例——在亚毫秒量级，OS 时钟分辨率（macOS 上 \texttt{Instant} 实测有效精度约 41 ns，但 \texttt{SystemTime} 经 ns→us 截断后是 1 us）即足以让相对比值放大；从绝对值看，0.18 ms 的尾部增量相对任何上层应用的反应时间都可忽略。
+\textbf{尾部比与稳定性}。任务派发的 p99/p50 比值为 36.66/32.93 = 1.11，说明派发链路尾部抖动可控；事件总线广播 p99/p50 比值为 0.26/0.08 = 3.25，绝对差仅 0.18 ms。事件流的相对比值看上去更大，但这并非「事件流尾部更不稳定」的反例——在亚毫秒量级，OS 时钟分辨率（macOS 上 \texttt{Instant} 实测有效精度约 41 ns，但 \texttt{SystemTime} 经 ns$\to$us 截断后是 1 us）即足以让相对比值放大；从绝对值看，0.18 ms 的尾部增量相对任何上层应用的反应时间都可忽略。
 
 \textbf{task\_dispatch p50=32.93 ms 的细分（工程估算，非 profiler 实测）}。下列分解基于第四章实现细节的工程估算，未经 \texttt{cargo flamegraph} 或 \texttt{perf} 类 profiler 独立验证，目的仅是让读者直观感受 32.93 ms 中各环节的相对量级，不应作为绝对数据使用：HTTP 往返（含 TCP keep-alive 复用、JSON 编解码与 axum 中间件栈）约 10 ms，HMAC-SHA256 签名与验证约 1 ms，Tokio 任务调度（提交到 dispatcher、线程切换、回调 future 唤醒）约 5 ms，SQLite 状态写（任务状态从 \texttt{Queued} 到 \texttt{Dispatched} 的两次写入加一次 fsync 合并）约 6 ms，dispatcher 内部任务匹配（按 role 与 capabilities 选择 worker）约 4 ms，剩余 7 ms 来自 worker 进程接收事件、反序列化任务体并 ack 回 dispatcher 的链路。把每段独立用 profiler 实测下来是后续工作的内容之一。
 
@@ -128,7 +128,7 @@ event\_flow & 500 & 0.04 & 0.08 & 0.26 & 0.66 \\
 
 \textbf{置信区间估计}。基于 500 个独立样本，对 p99 估计的 95\% Wilson 置信区间为约 ±0.74\%（即 99\% 分位的位置在 [99.26\%, 99.74\%] 之间），换算到延迟值上约为 ±0.5 ms（task\_dispatch）与 ±0.005 ms（event\_flow）。这一不确定度远小于本章关注的数量级差异（task\_dispatch 与 event\_flow 在 p50 上相差三个数量级），因此 500 样本对当前结论的支撑是充分的。若未来需要把 p999/p9999 纳入分析，则需将样本量提升到 10 万级，本机 bench 二进制已支持 \texttt{--samples} 参数显式指定，留待后续工作。对 p50 的不确定度更小，约 ±0.45\%，因此本章对 p50 的所有定量结论可视为「精确到一个百分点以内」。
 
-\textbf{event\_flow 与 task\_dispatch 三个数量级差异的工程意义}。事件流 p50 = 0.07 ms，任务派发 p50 = 32.93 ms，两者相差约 470 倍。这一差异并非偶然——它反映了 Fuxi 在系统层级上的明确设计意图：通讯层（事件总线）应当具备远低于业务层（任务派发）的延迟下界，使观测端能够在任务执行的同时近实时感知所有过程事件。如果事件流的 p50 与任务派发同量级（都是数十 ms），那么 Firehose、TUI、PWA 等观察端在显示进度时会出现明显滞后，用户对系统状态的感知会不可避免地落后于系统真实状态——这正是公理 3「真实时，不轮询」试图避免的体验缺陷。三个数量级的差异保证了观察端在所有合理的工作负载下都能给出无感延迟的实时呈现。
+\textbf{event\_flow 与 task\_dispatch 三个数量级差异的工程意义}。事件流 p50 = 0.08 ms，任务派发 p50 = 32.93 ms，两者相差约 410 倍。这一差异并非偶然——它反映了 Fuxi 在系统层级上的明确设计意图：通讯层（事件总线）应当具备远低于业务层（任务派发）的延迟下界，使观测端能够在任务执行的同时近实时感知所有过程事件。如果事件流的 p50 与任务派发同量级（都是数十 ms），那么 Firehose、TUI、PWA 等观察端在显示进度时会出现明显滞后，用户对系统状态的感知会不可避免地落后于系统真实状态——这正是公理 3「真实时，不轮询」试图避免的体验缺陷。三个数量级的差异保证了观察端在所有合理的工作负载下都能给出无感延迟的实时呈现。
 
 \textbf{长尾的实际影响}。task\_dispatch p99 = 36.66 ms 与 max = 37.43 ms 之间相差不到 1 ms，说明 500 样本中超过 p99 的 5 个样本均紧密分布在 36--37 ms 区间，未出现孤立长尾点。需要说明的是，该指标受测量期间系统噪声影响较大——前序实验在另一份相同配置的 run 中曾出现单个 227 ms 的极端长尾样本，归因于 macOS 后台调度突发（Spotlight 重索引、Time Machine 触发或类似系统级活动在不可预期时机短暂占用 CPU），相同测量条件下此类偶发长尾在 500 样本中可能出现 0--1 个。即便保守按 200 ms 量级估计，单次任务派发的最坏情形相对一次完整的玄女—门客交互（端到端用户感知延迟约 1--3 秒，含 LLM 推理）占比仍 < 23\%，且 LLM 推理本身的方差远大于此，因此 dispatch 长尾不会被用户感知到。p99 之内的派发延迟分布则远低于用户的感知阈值。
 
@@ -162,9 +162,9 @@ worker\_n & tasks\_n & median\_wall\_ms & tasks/s & 理论上限 & 扩展效率 
 
 图 \ref{fig:scalability} 采用顶刊系统论文常用的双子图范式：左面板报告吞吐量随 Worker 数变化的曲线，右面板独立报告扩展效率（实测吞吐除以理论上限），避免在同一坐标系内使用 dual y-axis 误导读者。理论上限以浅灰细虚线绘制于左面板，作为参照而不抢主角。
 
-\textbf{wall-clock 几乎不随 worker 数下降的真实原因}。一个值得先解释清楚的现象是：1 worker 跑 100 task 用时 1227 ms，16 worker 跑 1600 task 用时 1242 ms，wall-clock 几乎不变。这并非「水平扩展的理想线性放大」，而是实验设计本身使然——本节固定「每 worker 100 task」，因此 1 worker 与 16 worker 场景下，每个 worker 各自仍要串行跑完 100 task；总任务数随 worker 数线性增加，关键路径长度由单 worker 自己的 100 task 串行执行决定，而非由全部 1600 task 决定。换言之，本节扩展性实验衡量的是「dispatcher + 事件总线在 1→16 worker 范围内能否保持 per-worker 关键路径不被自身串行化拖累」——若 dispatcher 在 16 worker 下成为瓶颈，per-worker 关键路径会被拉长、wall-clock 会显著上升。实测 wall-clock 几乎不变，说明在被测机上 dispatcher 在 16 worker × 10 ms 任务粒度下尚未饱和，扩展效率指标在该未饱和区间内退化为「每 worker 任务总数 / 单 worker 串行长度」的比值。这一指标在小规模、未饱和场景下不能作为「Fuxi 在更大规模下也能线性扩展」的证据，但能作为「编排层与通讯层在该规模下不构成瓶颈」的证据。
+\textbf{wall-clock 几乎不随 worker 数下降的真实原因}。一个值得先解释清楚的现象是：1 worker 跑 100 task 用时 1227 ms，16 worker 跑 1600 task 用时 1242 ms，wall-clock 几乎不变。这并非「水平扩展的理想线性放大」，而是实验设计本身使然——本节固定「每 worker 100 task」，因此 1 worker 与 16 worker 场景下，每个 worker 各自仍要串行跑完 100 task；总任务数随 worker 数线性增加，关键路径长度由单 worker 自己的 100 task 串行执行决定，而非由全部 1600 task 决定。换言之，本节扩展性实验衡量的是「dispatcher + 事件总线在 1$\to$16 worker 范围内能否保持 per-worker 关键路径不被自身串行化拖累」——若 dispatcher 在 16 worker 下成为瓶颈，per-worker 关键路径会被拉长、wall-clock 会显著上升。实测 wall-clock 几乎不变，说明在被测机上 dispatcher 在 16 worker × 10 ms 任务粒度下尚未饱和，扩展效率指标在该未饱和区间内退化为「每 worker 任务总数 / 单 worker 串行长度」的比值。这一指标在小规模、未饱和场景下不能作为「Fuxi 在更大规模下也能线性扩展」的证据，但能作为「编排层与通讯层在该规模下不构成瓶颈」的证据。
 
-\textbf{扩展效率 80.5\%--83.1\% 的物理来源}。剩余的 17\%--20\% 损耗来源可结构化拆解为三层。其一，\textbf{P 核与 E 核的差异}。被测机为 Apple M4 Pro，10 个性能核（P 核）+ 4 个能效核（E 核），共 14 物理核；P 核单核吞吐显著高于 E 核。当 Worker 数超过 P 核数（10）时，新增的 Worker 部分被调度到 E 核上，E 核的单核吞吐约为 P 核的 50\%--70\%，因而单 Worker 视角的有效执行时间变长。其二，\textbf{L3 cache 与内存带宽竞争}。多 Worker 共享同一片 L3 cache，当 Worker 数增加时，每个 Worker 的有效 cache 容量下降，触发的 L2→L3、L3→DRAM miss 增加，引入约 5\%--8\% 的吞吐折损。其三，\textbf{dispatcher 单点的串行化代价}。所有 Worker 都通过单一 dispatcher（axum HTTP server + SQLite）领任务，dispatcher 的请求处理路径在锁与事务层面是串行的；当 Worker 数增加，dispatcher 自身 CPU 占用上升但本机仍未饱和（实测 16 worker 下约 35\% CPU），不构成瓶颈。
+\textbf{扩展效率 80.5\%--83.1\% 的物理来源}。剩余的 17\%--20\% 损耗来源可结构化拆解为三层。其一，\textbf{P 核与 E 核的差异}。被测机为 Apple M4 Pro，10 个性能核（P 核）+ 4 个能效核（E 核），共 14 物理核；P 核单核吞吐显著高于 E 核。当 Worker 数超过 P 核数（10）时，新增的 Worker 部分被调度到 E 核上，E 核的单核吞吐约为 P 核的 50\%--70\%，因而单 Worker 视角的有效执行时间变长。其二，\textbf{L3 cache 与内存带宽竞争}。多 Worker 共享同一片 L3 cache，当 Worker 数增加时，每个 Worker 的有效 cache 容量下降，触发的 L2$\to$L3、L3$\to$DRAM miss 增加，引入约 5\%--8\% 的吞吐折损。其三，\textbf{dispatcher 单点的串行化代价}。所有 Worker 都通过单一 dispatcher（axum HTTP server + SQLite）领任务，dispatcher 的请求处理路径在锁与事务层面是串行的；当 Worker 数增加，dispatcher 自身 CPU 占用上升但本机仍未饱和（实测 16 worker 下约 35\% CPU），不构成瓶颈。
 
 \textbf{32/64 worker 拐点的预估}。被测机有 14 物理核，32 worker 时已超过物理核数 2.3 倍，预期出现两个拐点：第一拐点是 worker 数等于物理核数（14），扩展效率开始受 CPU 时间片切换主导而下降；第二拐点是 dispatcher 自身饱和（实测可承担 1000+ TPS，对应每 worker 约 31 TPS），32 worker × 100 task/s = 3200 TPS 时 dispatcher 自身成为瓶颈。两个拐点位置的具体数值需要更高 worker 数的实验确认，留待后续工作。
 
@@ -196,13 +196,13 @@ poll\_ms & median\_wall\_ms & tasks/s & 理论上限 & Fuxi 损耗 \\
 \label{fig:poll-scan}
 \end{figure}
 
-\textbf{曲线接近水平的解释}。\texttt{poll\_ms} 从 5 ms 到 100 ms 区间内，吞吐与损耗的差异不超过 3.6 个百分点。这一现象在 sustained 与 burst 两类场景下应做差异化解读。在 \textbf{sustained 负载}下（即 queue 中始终有可领的任务），Worker 几乎不进入 idle 等待状态——每完成一个任务即可在下一个心跳前领到下一个任务，\texttt{poll\_ms} 的取值几乎不影响关键路径，吞吐损耗主要来自前文已分析的 HTTP/调度/SQLite 开销。在 \textbf{burst 负载}下（即任务到达呈尖峰、worker 在尖峰之间会进入 idle），\texttt{poll\_ms} 决定了从 idle 唤醒到拿到任务的期望延迟，期望值为 \texttt{poll\_ms}/2，对单个 burst 的响应时间影响显著。本节实验属于前者——400 个 10 ms 任务集中下发，4 个 worker 并行消费需 1 秒以上才能消化完，全程几乎无 idle，因此 \texttt{poll\_ms} 的 20 倍变化（5→100）只在吞吐上带来 3.6 个百分点的差异。
+\textbf{曲线接近水平的解释}。\texttt{poll\_ms} 从 5 ms 到 100 ms 区间内，吞吐与损耗的差异不超过 3.6 个百分点。这一现象在 sustained 与 burst 两类场景下应做差异化解读。在 \textbf{sustained 负载}下（即 queue 中始终有可领的任务），Worker 几乎不进入 idle 等待状态——每完成一个任务即可在下一个心跳前领到下一个任务，\texttt{poll\_ms} 的取值几乎不影响关键路径，吞吐损耗主要来自前文已分析的 HTTP/调度/SQLite 开销。在 \textbf{burst 负载}下（即任务到达呈尖峰、worker 在尖峰之间会进入 idle），\texttt{poll\_ms} 决定了从 idle 唤醒到拿到任务的期望延迟，期望值为 \texttt{poll\_ms}/2，对单个 burst 的响应时间影响显著。本节实验属于前者——400 个 10 ms 任务集中下发，4 个 worker 并行消费需 1 秒以上才能消化完，全程几乎无 idle，因此 \texttt{poll\_ms} 的 20 倍变化（5$\to$100）只在吞吐上带来 3.6 个百分点的差异。
 
 \textbf{poll\_ms=5 反而损耗更高}。表 \ref{tab:poll-scan} 中 \texttt{poll\_ms=5} 与 \texttt{poll\_ms=10} 的损耗（22.2\% 与 23.0\%）反而略高于 \texttt{poll\_ms=50} 的 18.4\%。其成因是过频 polling 在 sustained 负载下的副作用：每一次 poll 都是一次到 dispatcher 的 HTTP 询问，即使返回「无新任务」也消耗 dispatcher 的请求处理槽位与 worker 端的 CPU 上下文切换；在 worker 几乎不 idle 的场景下，这些 poll 全部是无效开销，反而拖累吞吐。
 
 \textbf{推荐默认值 25--50 ms 的合理化论证}。综合 sustained 场景的低 CPU 开销与 burst 场景的响应性两方面考量，本文推荐 Fuxi 默认 \texttt{poll\_ms} 取 25--50 ms。在该区间下，sustained 吞吐损耗最小（19.0\%--19.5\%），同时 burst 场景下 worker 从 idle 到拿到任务的期望延迟为 12.5--25 ms，与一次 HTTP 往返的延迟同量级——两个场景同时获得近似最优。当用户工作负载明确偏 burst 时，可调低至 10 ms；当用户工作负载明确偏 sustained 且追求极低 CPU 占用时，可调高至 100 ms，但收益有限。
 
-\textbf{Fuxi 内部「事件驱动 vs 轮询」的位置区分}。需要明确的是，Fuxi 当前实现中 \texttt{dispatch} 路径与 \texttt{observation} 路径采用了不同的协调模型：worker 主动 poll dispatcher 领任务（轮询模型，间隔由 \texttt{poll\_ms} 控制，见 \texttt{fuxi-cli/src/dist.rs:1760--1998}）；外部观察者（Firehose、TUI、PWA、IM）订阅事件总线（事件驱动模型，无 poll）。本节扫描验证的是前者——dispatch 路径采用 poll-only 设计在 sustained throughput 场景下的性能代价。从表 \ref{tab:poll-scan} 可读出，\texttt{poll\_ms} 在 5--100 ms 区间内吞吐损耗仅波动 3.6 pp，证明 poll-only 在 sustained 场景下不构成主要瓶颈；与此同时，§5.5 中 event\_flow p99 = 0.26 ms 显示事件总线的纯通知路径已可在亚毫秒级完成扇出。这两组数据给出了一个最小内部 baseline——若 dispatch 路径未来切换为「事件驱动 push」替代 worker poll（Tokio broadcast 通知 + 直接发任务体），单任务派发延迟下界理论上可压缩到与 event\_flow 同量级（约 0.3 ms），但 sustained 吞吐几乎不变（已被 \texttt{poll\_ms} 扫描间接证明 worker idle wait 不是损耗主导）。Fuxi 当前选择保留 poll-only dispatch 的理由是工程权衡：sustained throughput 是日用平台的主导工作负载，代码与故障模型也比双通道（push + 兜底）简单；为压低 burst 场景下的单任务派发延迟而引入 push 机制，需在跨节点心跳与网络分区下处理通知丢失的复杂度，与本工作的「单机优先、本地优先」定位不匹配。这也回应了 §5.1 中关于「为什么不引入外部 baseline」的取舍——比 LangChain/AutoGen 跨语言竞速更有信息量的对照，是 Fuxi 自身两条路径在同一机器上的延迟分布对比。
+\textbf{Fuxi 内部「事件驱动 vs 轮询」的位置区分}。需要明确的是，Fuxi 当前实现中 \texttt{dispatch} 路径与 \texttt{observation} 路径采用了不同的协调模型：worker 主动 poll dispatcher 领任务（轮询模型，间隔由 \texttt{poll\_ms} 控制，见 \texttt{fuxi-cli/src/dist.rs:1760--1998}）；外部观察者（Firehose、TUI、PWA、IM）订阅事件总线（事件驱动模型，无 poll）。本节扫描验证的是前者——dispatch 路径采用 poll-only 设计在 sustained throughput 场景下的性能代价。从表 \ref{tab:poll-scan} 可读出，\texttt{poll\_ms} 在 5--100 ms 区间内吞吐损耗仅波动 3.6 pp，证明 poll-only 在 sustained 场景下不构成主要瓶颈；与此同时，§5.5 中 event\_flow p99 = 0.26 ms 显示事件总线的纯通知路径已可在亚毫秒级完成扇出。这两组数据提供了一个内部参照：当前 dispatch 路径采用 poll-only 模型，在 sustained throughput 场景下未表现为主要瓶颈；而 observation 路径的 EventBus 通知延迟已处于亚毫秒量级。需要明确的是，本文并未实现并实测「事件驱动 push dispatch 替代 worker poll」的对照版本，因此本节只能说明当前 poll-only dispatch 在 sustained 负载下可接受，不能用于证明 push-based dispatch 在所有场景下收益有限——「事件驱动派发能否降低 burst 场景延迟」属于后续工作。Fuxi 当前选择保留 poll-only dispatch 的理由是工程权衡：sustained throughput 是日用平台的主导工作负载，代码与故障模型也比双通道（push + 兜底）简单；为压低 burst 场景下的单任务派发延迟而引入 push 机制，需在跨节点心跳与网络分区下处理通知丢失的复杂度，与本工作的「单机优先、本地优先」定位不匹配。这一参照同时回应了 §5.1 中关于「为什么不引入外部 baseline」的取舍——相比 LangChain/AutoGen 等跨语言竞速，更有信息量的对照是 Fuxi 自身两条路径在同一机器上的延迟分布。
 
 \subsection{事件总线压力承受能力}
 
@@ -233,7 +233,7 @@ sub\_n & rate(ev/s) & payload & publish\_tps & p50\_us & p99\_us & drops \\
 \begin{figure}[H]
 \centering
 \includegraphics[width=0.85\linewidth]{fig-5-3-bus-stress.pdf}
-\caption{事件总线 publish 吞吐与丢帧率随订阅者数变化（右图 p99 为 log 轴；p99 < 1 μs 的样本受 macOS \texttt{SystemTime} ns→us 截断分辨率限制，统一显示为 0.5 μs）}
+\caption{事件总线 publish 吞吐与丢帧率随订阅者数变化（右图 p99 为 log 轴；p99 < 1 μs 的样本受 macOS \texttt{SystemTime} ns$\to$us 截断分辨率限制，统一显示为 0.5 μs）}
 \label{fig:bus-stress}
 \end{figure}
 
@@ -249,7 +249,7 @@ sub\_n & rate(ev/s) & payload & publish\_tps & p50\_us & p99\_us & drops \\
 
 \textbf{为什么留这么大余量}。一个常见质疑是：3 个数量级的余量是否过度设计、是否在内存与代码复杂度上付出了不必要的代价？这一选择的工程依据有三。其一，Fuxi 的工作负载并非单一稳态——LLM 推理的工具调用阶段会突发地产生十倍于稳态的事件率，例如 cc 门客在执行编辑工具时会产生 file\_read、grep、edit 等密集事件，单回合可瞬间达到数百 events/s。其二，未来扩展场景下事件率可能再提升一个数量级——如果支持多用户并发会话或分布式跨节点场景\cite{corbett2012spanner}，事件总线需要承担多路 Firehose 的合流，事件率自然倍增。其三，Tokio broadcast 32k slots 的内存代价（约 8 MB）相对于 Apple Silicon 16 GB+ 内存可忽略，复杂度上也只是构造时多传一个参数——这一设计的额外开销可忽略，而留出的余量可显著降低未来突发流量下的故障排查成本。这种「留出数量级余量」的工程哲学与 SQLite WAL 模式选择「page size = 4 KiB 而非贴合机械硬盘 sector 的 512 B」\cite{sqlite2024wal}的取舍思路一致：在不显著增加成本的前提下，留出未来兼容性的空间。
 
-\textbf{事件因果序的保留}。本节实验关注的是事件总线的吞吐与丢帧率，但事件总线的另一项关键性质是因果序保留——同一发布者的事件按发布顺序到达每个订阅者。这一性质虽未在本节定量测试，但已通过 \texttt{fuxi-events::integration.rs} 的回放一致性测试覆盖：测试用例发布 1000 条带递增 sequence 的事件，验证每个订阅者收到的事件序列单调递增。该性质对应 Lamport 关于因果时序的经典定义\cite{lamport1978time}——「在同一进程内的事件 a 早于 b」蕴含「在因果序下 a → b」。Fuxi 的事件总线保证了这一性质，因而 Firehose、回放引擎、玄女状态推断等下游消费者都能基于「先发先到」的语义构建逻辑，无需额外的乱序处理。
+\textbf{事件因果序的保留}。本节实验关注的是事件总线的吞吐与丢帧率，但事件总线的另一项关键性质是因果序保留——同一发布者的事件按发布顺序到达每个订阅者。这一性质虽未在本节定量测试，但已通过 \texttt{fuxi-events::integration.rs} 的回放一致性测试覆盖：测试用例发布 1000 条带递增 sequence 的事件，验证每个订阅者收到的事件序列单调递增。该性质对应 Lamport 关于因果时序的经典定义\cite{lamport1978time}——「在同一进程内的事件 a 早于 b」蕴含「在因果序下 a $\to$ b」。Fuxi 的事件总线保证了这一性质，因而 Firehose、回放引擎、玄女状态推断等下游消费者都能基于「先发先到」的语义构建逻辑，无需额外的乱序处理。
 
 \subsection{端到端延迟分解}
 
@@ -264,7 +264,7 @@ sub\_n & rate(ev/s) & payload & publish\_tps & p50\_us & p99\_us & drops \\
 
 按调研结论，本图采用 1×3 子图、各自 linear x 轴的 stacked bar 形式，避免 log + stacked 在视觉上让宽度不可加的反模式。三个子图分别对应 10 ms、100 ms 与 1000 ms 任务粒度，每个 stack 段标注其绝对值，便于读者直接读取数字。
 
-图 \ref{fig:e2e-breakdown} 中，$L_{enq}$（任务入队）与 $L_{disp}$（任务派发）由 task\_dispatch p50 = 32.93 ms 按经验比例 3:7 拆分（实测两者难以完全分离，因为 Fuxi 当前实现中入队与派发共享同一次 SQLite 事务），$L_{evt}$（事件流通知）由 event\_flow p50 = 0.07 ms 给出，$L_{exec}$（任务执行）由模拟任务的 sleep 时长直接给出。
+图 \ref{fig:e2e-breakdown} 中，$L_{enq}$（任务入队）与 $L_{disp}$（任务派发）由 task\_dispatch p50 = 32.93 ms 按经验比例 3:7 拆分（实测两者难以完全分离，因为 Fuxi 当前实现中入队与派发共享同一次 SQLite 事务），$L_{evt}$（事件流通知）由 event\_flow p50 = 0.08 ms 给出，$L_{exec}$（任务执行）由模拟任务的 sleep 时长直接给出。
 
 \textbf{三种工作负载下分量占比的变化}。在 10 ms 任务下，通讯与调度开销（约 33 ms）已超过执行开销（10 ms），通讯占比 77\%，是第 5.3 节 ~18\% 损耗的来源。在 100 ms 任务下，通讯开销不变但执行开销提升 10 倍，通讯占比降至 25\%，整体损耗 ~2\%。在 1000 ms 任务下，通讯占比仅 3.2\%，整体损耗 ~0.3\%。
 
@@ -272,7 +272,7 @@ sub\_n & rate(ev/s) & payload & publish\_tps & p50\_us & p99\_us & drops \\
 
 \textbf{反向工程：当任务粒度变细到何种程度时 Fuxi 不再适用}。本图也给出了一个反向的工程边界：如果未来某种 AI Agent 工作负载下任务粒度低于 10 ms（例如纯本地工具调用的批处理），Fuxi 的通讯占比将上升到 70\%--80\%，相对开销可观。但需要注意的是，10 ms 量级的工作负载本身已经突破了「任务级编排」的合理使用场景——这种粒度的工作更适合在单个 worker 内部以函数调用方式批处理，而非通过分布式任务派发链路。因此 Fuxi 在 10 ms 任务下损耗 18\% 不构成系统设计的真实缺陷，而是工作负载与系统层级的不匹配。
 
-\textbf{event\_flow 在端到端中的可见性}。$L_{evt} = 0.07$ ms 在三种任务粒度下的占比都极小（0.7\%、0.07\%、0.007\%），在图 \ref{fig:e2e-breakdown} 中视觉上几乎不可见。这一点表面上看似乎让 event\_flow 的优化「无意义」——既然占比如此小，把它从 0.07 ms 降到 0.01 ms 又有何工程价值？答案在于：event\_flow 的低延迟不是为了优化端到端用户感知延迟（用户感知由 $L_{exec}$ 主导），而是为了让事件流在所有任务粒度下都「看起来是实时的」，使观察端不需要对延迟做任何补偿处理。如果 event\_flow 与 task\_dispatch 同量级，观察端在显示进度时需要做 lookahead 缓冲与时间戳重排，UI 层复杂度将显著上升。Fuxi 选择把 event\_flow 优化到 0.07 ms 的根本动机是「让上层无需操心」——这正是基础设施工程价值的本质。
+\textbf{event\_flow 在端到端中的可见性}。$L_{evt} = 0.08$ ms 在三种任务粒度下的占比都极小（0.8\%、0.08\%、0.008\%），在图 \ref{fig:e2e-breakdown} 中视觉上几乎不可见。这一点表面上看似乎让 event\_flow 的优化「无意义」——既然占比如此小，把它从 0.08 ms 降到 0.01 ms 又有何工程价值？答案在于：event\_flow 的低延迟不是为了优化端到端用户感知延迟（用户感知由 $L_{exec}$ 主导），而是为了让事件流在所有任务粒度下都「看起来是实时的」，使观察端不需要对延迟做任何补偿处理。如果 event\_flow 与 task\_dispatch 同量级，观察端在显示进度时需要做 lookahead 缓冲与时间戳重排，UI 层复杂度将显著上升。Fuxi 选择把 event\_flow 优化到 0.08 ms 的根本动机是「让上层无需操心」——这正是基础设施工程价值的本质。
 
 \subsection{功能验收与历史问题修复}
 
@@ -286,6 +286,6 @@ sub\_n & rate(ev/s) & payload & publish\_tps & p50\_us & p99\_us & drops \\
 
 本章围绕测试覆盖、吞吐量、延迟分布、扩展性、参数消融、事件总线压测、端到端延迟分解与功能验收八条主线，对 Fuxi 进行了系统性的多维度测试与分析。在测量方法学层面，本章采用了 5-run median 抑制冷启动、500 样本统计 p50/p99、固定 Tokio worker 线程数与时钟精度声明等控制手段，确保数据可信度；在结果汇报层面，每一组数字均给出了物理意义层面的解释而不仅是登记。
 
-定量结果可以总结为五个数字。这里需要先明确口径：本章的吞吐与扩展性数字均建立在以 sleep 模拟任务的合成基准之上，衡量的是编排与通讯层在剥离 LLM 推理后的纯通讯吞吐上限；真实 LLM Agent 任务的端到端吞吐受单次推理（典型 1--30 s）主导，与本节数字相差两到三个数量级。在此口径下：第一，8 worker × 10 ms 合成任务条件下达到 \textbf{665.00 tasks/s} 的调度路径吞吐，工程损耗稳定在 17\% 量级，且在 100 ms 与 1000 ms 任务粒度下损耗降至 2\% 与 0.4\%；第二，Worker 数 1→16 范围内扩展效率始终保持在 \textbf{80.5\%--83.1\%} 之间，未出现明显衰减（dispatcher 在该区间未饱和）；第三，任务派发 p50 延迟为 \textbf{32.93 ms}、p99 为 36.66 ms，进程内事件总线广播 p50 仅 \textbf{0.08 ms}、p99 为 0.26 ms，两者相差三个数量级；第四，事件总线 sustainable 容量为 \textbf{1.6 M events/s}，超过 Fuxi 实际工作负载三个数量级；第五，端到端延迟在 1000 ms 任务粒度下，通讯开销占比仅 \textbf{3.2\%}，工程上可忽略。这些数据共同验证了第二章关于「事件驱动通讯底座可同时兼顾吞吐、实时性与可追溯性」的设计假设，也为第六章总结与展望提供了定量依据。
+定量结果可以总结为五个数字。这里需要先明确口径：本章的吞吐与扩展性数字均建立在以 sleep 模拟任务的合成基准之上，衡量的是编排与通讯层在剥离 LLM 推理后的纯通讯吞吐上限；真实 LLM Agent 任务的端到端吞吐受单次推理（典型 1--30 s）主导，与本节数字相差两到三个数量级。在此口径下：第一，8 worker × 10 ms 合成任务条件下达到 \textbf{665.00 tasks/s} 的调度路径吞吐，工程损耗稳定在 17\% 量级，且在 100 ms 与 1000 ms 任务粒度下损耗降至 2\% 与 0.4\%；第二，Worker 数 1$\to$16 范围内扩展效率始终保持在 \textbf{80.5\%--83.1\%} 之间，未出现明显衰减（dispatcher 在该区间未饱和）；第三，任务派发 p50 延迟为 \textbf{32.93 ms}、p99 为 36.66 ms，进程内事件总线广播 p50 仅 \textbf{0.08 ms}、p99 为 0.26 ms，两者相差三个数量级；第四，事件总线 sustainable 容量为 \textbf{1.6 M events/s}，超过 Fuxi 实际工作负载三个数量级；第五，端到端延迟在 1000 ms 任务粒度下，通讯开销占比仅 \textbf{3.2\%}，工程上可忽略。这些数据共同验证了第二章关于「事件驱动通讯底座可同时兼顾吞吐、实时性与可追溯性」的设计假设，也为第六章总结与展望提供了定量依据。
 
 定性层面，本章的分析揭示了 Fuxi 系统设计的三项核心取舍。其一，\textbf{事件驱动 vs 轮询}：§5.6 的 \texttt{poll\_ms} 消融在本系统的 sustained 负载下扫到的损耗差异仅 3.6 个百分点，说明事件驱动的关键路径已被吸收到调度器内部，worker 几乎不进入 idle 等待——这与 Kafka push 模式相对 poll-only 的设计取舍方向一致。其二，\textbf{广播 fan-out 的 O(1) 性质}：Tokio broadcast 让事件总线在 64 sub × 10k events/s 下零丢帧，让所有观察端可以「看似免费地」订阅，构成系统可观测性的基础。其三，\textbf{相对于 AI Agent 工作负载的工程余量}：通讯开销在 LLM 推理粒度下占比可忽略，意味着 Fuxi 不是一个为通讯极限设计的低延迟交易系统，而是为「让 AI Agent 之间的协作既实时又可追溯」量身定做的基础设施。这三项取舍共同回答了本论文反复追问的核心问题——「为何选择 Rust + Tokio + 事件驱动，而非 Python + 轮询 + REST」——本章的数字给出了工程层面的支撑。
