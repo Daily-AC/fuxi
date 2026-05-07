@@ -9,7 +9,7 @@
 \subsection{模块划分}
 \label{subsec:module-division}
 
-伏羲在 crate 粒度上划分了 13 个模块，整体代码量约 7.27 万行，依赖方向严格自下而上，禁止循环引用。如图~\ref{fig:module-dependency} 所示，整个系统沿五个层次分组：核心类型层、通讯层、编排层、执行层、观测与服务层。
+伏羲在 crate 粒度上划分了 13 个模块，整体代码量约 8.25 万行（82\,515 行 Rust 源），依赖方向严格自下而上，禁止循环引用。如图~\ref{fig:module-dependency} 所示，整个系统沿五个层次分组：核心类型层、通讯层、编排层、执行层、观测与服务层。
 
 \begin{figure}[H]
   \centering

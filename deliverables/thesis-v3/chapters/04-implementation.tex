@@ -21,7 +21,7 @@
 
 \subsection{Rust Workspace 结构}
 
-伏羲 workspace 共包含 13 个 crate，总代码规模约 72\,720 行（统计自 \texttt{tokei} 工具，仅计 Rust 源文件，不含测试 fixture 与生成代码）。各 crate 按职责分层组织，自底向上依次是核心类型层、基础设施层、协议层、编排层、适配器层与集成层。表~\ref{tab:crate-layout} 列出了各 crate 的代码规模与主要职责。
+伏羲 workspace 共包含 13 个 crate，总代码规模 82\,515 行（统计自 \texttt{find crates -name "*.rs" \textbar{} xargs wc -l}，仅计 Rust 源文件，含集成测试与单元测试）。各 crate 按职责分层组织，自底向上依次是核心类型层、基础设施层、协议层、编排层、适配器层与集成层。表~\ref{tab:crate-layout} 列出了各 crate 的代码规模与主要职责。
 
 \begin{table}[H]
 \centering
@@ -31,21 +31,21 @@
 \toprule
 \textbf{Crate} & \textbf{LOC} & \textbf{主要职责} \\
 \midrule
-fuxi-cli & 32\,004 & 二进制入口 + REPL + daemon + dist controller \\
-fuxi-im & 14\,852 & IM 后端 axum 服务（任务/对话/intervene 端点） \\
-fuxi-orchestrator & 8\,039 & 玄女编排 trait + dispatch pump + 门客注册表 \\
-fuxi-agent-cc & 3\,657 & Claude Code 门客适配器（WebSocket 反连） \\
-fuxi-workspace & 2\,851 & git worktree 隔离层 + L1/L2/L3 三层沙箱 \\
+fuxi-cli & 33\,408 & 二进制入口 + REPL + daemon + dist controller \\
+fuxi-im & 16\,149 & IM 后端 axum 服务（任务/对话/intervene 端点） \\
+fuxi-orchestrator & 10\,220 & 玄女编排 trait + dispatch pump + 门客注册表 \\
+fuxi-agent-cc & 3\,900 & Claude Code 门客适配器（WebSocket 反连） \\
+fuxi-workspace & 3\,043 & git worktree 隔离层 + L1/L2/L3 三层沙箱 \\
+fuxi-memory & 2\,643 & 长期记忆：甲骨 / 河图洛书 / 身份卡 \\
+fuxi-agent-codex & 2\,197 & Codex CLI 门客适配器（spawn-per-dispatch） \\
+fuxi-scheduler & 2\,146 & cron / once / fs / webhook 触发器调度 \\
+fuxi-events & 2\,135 & EventBus + SQLite WAL + 历史回放 \\
+fuxi-firehose & 2\,135 & WebSocket + SSE + REST + TUI 四端输出 \\
 fuxi-core & 2\,102 & 核心 trait：Agent / Event / Task / Workspace \\
-fuxi-scheduler & 2\,062 & cron / once / fs / webhook 触发器调度 \\
-fuxi-agent-codex & 1\,977 & Codex CLI 门客适配器（spawn-per-dispatch） \\
-fuxi-memory & 1\,901 & 长期记忆：甲骨 / 河图洛书 / 身份卡 \\
-fuxi-firehose & 1\,749 & WebSocket + SSE + REST + TUI 四端输出 \\
-fuxi-events & 1\,673 & EventBus + SQLite WAL + 历史回放 \\
-fuxi-a2a & 1\,063 & A2A v1.0 wire 协议 + JSON-RPC server \\
-fuxi-skills & 791 & 角色玉牒加载器 + 招贤流程 \\
+fuxi-a2a & 1\,321 & A2A v1.0 wire 协议 + JSON-RPC server + tests \\
+fuxi-skills & 1\,116 & 角色玉牒加载器 + 招贤流程 \\
 \midrule
-\textbf{总计} & \textbf{72\,720} & \\
+\textbf{总计} & \textbf{82\,515} & \\
 \bottomrule
 \end{tabular}
 \end{table}

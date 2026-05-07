@@ -31,7 +31,7 @@
 \midrule
 多 Agent 调度 & 玄女把任务派给合适门客；同角色多门客并发；异构 CLI（cc / codex）统一调度 & \autoref{subsec:overall-arch} 玄女—门客分层；\autoref{subsec:dataflow} dispatch pump；\texttt{Agent} trait 抽象 \\
 \addlinespace
-真实时观测 & 用户在 TUI / IM / PWA 看到任务进展无轮询；事件从产生到抵达 P99 $\le$ 50\,ms & \autoref{subsec:overall-arch} EventBus + Firehose；\autoref{subsec:sla} 公式 (2-2) \\
+真实时观测 & 用户在 TUI / IM / PWA 看到任务进展无轮询；事件从产生到抵达 P99 $\le$ 50\,ms & \autoref{subsec:overall-arch} EventBus + Firehose；\autoref{subsec:sla} 公式 (2-4) \\
 \addlinespace
 单一真相源 & 所有事件 append-only 落 SQLite；崩溃恢复后能完整重放历史 & \autoref{subsec:dataflow} 双路径架构；\texttt{ReplayCursor} 接口 \\
 \addlinespace
@@ -47,7 +47,7 @@
 \addlinespace
 轻量部署 & 单二进制；无外部数据库；单机离线可用 & \autoref{subsec:overall-arch} 选 SQLite + Tokio + Axum 自包含栈 \\
 \addlinespace
-可观测背压 & 拥塞不悄悄丢消息；运维侧能看到滞后趋势 & \autoref{subsec:dataflow} lag 哨兵事件；\autoref{subsec:sla} 公式 (2-3) \\
+可观测背压 & 拥塞不悄悄丢消息；运维侧能看到滞后趋势 & \autoref{subsec:dataflow} lag 哨兵事件；\autoref{subsec:sla} 公式 (2-4) \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -85,7 +85,7 @@
 \subsection{模块划分与形式化边界}
 \label{subsec:module-decomposition}
 
-伏羲在 crate 粒度上划分了 13 个模块，总代码规模约 7.27 万行（统计自 \texttt{tokei}，仅计 Rust 源文件）。表~\ref{tab:crate-boundary} 列出每个 crate 的职责、对外暴露的核心类型与依赖范围。
+伏羲在 crate 粒度上划分了 13 个模块，总代码规模约 8.25 万行（统计自 \texttt{find crates -name "*.rs" \textbar{} xargs wc -l}，结果为 82\,515 行；仅计 Rust 源文件）。表~\ref{tab:crate-boundary} 列出每个 crate 的职责、对外暴露的核心类型与依赖范围。
 
 \begin{table}[H]
 \centering
@@ -145,7 +145,7 @@
 
 整条数据流的关键设计点在三处。其一是\textbf{先订阅后查询}的回放协议：当某订阅者通过 \texttt{EventBus::replay(cursor, live\_tail=true)} 请求从历史游标开始接收事件时，必须先 \texttt{subscribe}() 拿到 broadcast Receiver，再去 SQLite 拉历史流，最后无缝拼接两段。反过来「先查历史再订阅」会留出窗口，期间产生的事件既未入历史快照、也未被订阅者收到，形成漏接。这条顺序规则看似细节，却是回放正确性的关键。
 
-其二是\textbf{lag 哨兵}与背压可观测性。当 writer 拥塞超过阈值（默认 256 条），\texttt{publish()} 通过同一个 broadcast 路径发出 \texttt{Custom \{ "event\_store\_lagged", pending \}} 哨兵事件，订阅者据此感知到底层 writer 已经堆了多少未落库事件。哨兵自身有去重逻辑（同一拥塞窗口内只发一次），不会反向加剧拥塞。这一机制把背压（backpressure）从「不可见的死锁」变成「可见的告警」，为运维侧提供了介入窗口~\parencite{lamport1978time}。
+其二是\textbf{lag 哨兵}与背压可观测性。当 writer 拥塞超过阈值（默认 512 条），\texttt{publish()} 通过同一个 broadcast 路径发出 \texttt{Custom \{ "event\_store\_lagged", pending \}} 哨兵事件，订阅者据此感知到底层 writer 已经堆了多少未落库事件。哨兵自身有去重逻辑（同一拥塞窗口内只发一次），不会反向加剧拥塞。这一机制把背压（backpressure）从「不可见的死锁」变成「可见的告警」，为运维侧提供了介入窗口~\parencite{lamport1978time}。
 
 其三是 \textbf{InputRequired 状态的端到端流转}。当门客遇到歧义需要人工答复时，通过 A2A 协议发出 \texttt{state: input-required}~\parencite{a2aproject2025a2a}。这一状态在伏羲中是规范扩展（A2A v1.0 原规范只有 5 态终态机）——它在协议层与编排层 \texttt{ShelfStatus::AwaitingInput} 一一对应，让整体调度器（包括跨节点 \texttt{NodeLoadProvider}）能正确把「在等用户」的门客从「在工作」剥离出来。这条路径的端到端流转——用户回复 $\to$ \texttt{tasks/send} 同 Task ID $\to$ 状态转回 Working $\to$ 门客继续——把人工介入从「编排器内部隐式状态」提升为「协议级显式状态」，是伏羲对 A2A 协议规范的关键扩展。
 
@@ -190,7 +190,7 @@ L_{e2e} = L_{enq} + L_{disp} + L_{exec} + L_{evt}
 \begin{equation}
 L_{evt} \geq \max_{i \in \mathcal{S}} \left( T_{\text{serialize}} + T_{\text{broadcast}} + T_{\text{consume},i} \right)
 \end{equation}
-式 (2-4) 中 $\mathcal{S}$ 是订阅者集合，$T_{\text{serialize}}$ 是事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 是 channel 内部分发耗时，$T_{\text{consume},i}$ 是第 $i$ 个订阅者的消费耗时~\parencite{lamport1978time}。该不等式表明端到端延迟受最慢订阅者制约。伏羲的应对策略是：广播路径上设置 lag 容忍阈值（默认 256 条），超过则丢弃该订阅者的旧事件并发出 \texttt{RecvError::Lagged}——业务侧的全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
+式 (2-4) 中 $\mathcal{S}$ 是订阅者集合，$T_{\text{serialize}}$ 是事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 是 channel 内部分发耗时，$T_{\text{consume},i}$ 是第 $i$ 个订阅者的消费耗时~\parencite{lamport1978time}。该不等式表明端到端延迟受最慢订阅者制约。伏羲的应对策略是：广播路径上设置 lag 容忍阈值（默认 512 条），超过则丢弃该订阅者的旧事件并发出 \texttt{RecvError::Lagged}——业务侧的全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
 
 吞吐量与调度损耗的形式化定义为：
 \begin{equation}

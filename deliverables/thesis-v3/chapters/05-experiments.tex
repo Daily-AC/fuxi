@@ -53,7 +53,7 @@ fuxi-workspace & \texttt{integration.rs} & 工作区创建与隔离 \\
 
 \subsection{基础吞吐量分析}
 
-吞吐量测试采用第二章公式 (2-3)（端到端延迟分解 $T_{e2e}=T_{exec}+T_{comm}$）与公式 (2-5)（吞吐与扩展效率定义）给出的指标定义。基线吞吐结果如表 \ref{tab:throughput} 所示。
+吞吐量测试采用第二章公式 (2-3) 与 (2-5) 给出的指标定义。其中公式 (2-3) 把端到端延迟拆为 $L_{e2e}=L_{enq}+L_{disp}+L_{exec}+L_{evt}$ 四个分量；本节把通讯与调度相关的三个分量合记为 $T_{comm}\equiv L_{enq}+L_{disp}+L_{evt}$、把任务执行单独写作 $T_{exec}\equiv L_{exec}$，得到工程视角的简化记法 $T_{e2e}=T_{exec}+T_{comm}$，便于讨论吞吐损耗。公式 (2-5) 则定义了吞吐与扩展效率指标。基线吞吐结果如表 \ref{tab:throughput} 所示。
 
 \begin{table}[H]
 \centering
@@ -76,11 +76,11 @@ worker\_n & job\_sleep & tasks\_n & median\_wall\_ms & tasks/s & 理论上限 & 
 \end{tabular}
 \end{table}
 
-从表 \ref{tab:throughput} 可观察到三组层次分明的现象。\textbf{第一组}：当任务粒度为 10 ms 时，1、4、8 个 Worker 的吞吐分别为 81.83、331.67 与 654.66 tasks/s，与理论上限的差距稳定在 17\%--19\% 之间。\textbf{第二组}：当任务粒度上升到 100 ms 时，损耗骤降到 2.1\%--2.3\%。\textbf{第三组}：当任务粒度进一步增加到 1000 ms 时，损耗已降至 0.2\%--0.4\% 量级。三段任务粒度下损耗递减的物理原因可由公式 (2-3) 的损耗分量分解给出。
+从表 \ref{tab:throughput} 可观察到三组层次分明的现象。\textbf{第一组}：当任务粒度为 10 ms 时，1、4、8 个 Worker 的吞吐分别为 81.83、331.67 与 654.66 tasks/s，与理论上限的差距稳定在 17\%--19\% 之间。\textbf{第二组}：当任务粒度上升到 100 ms 时，损耗骤降到 2.1\%--2.3\%。\textbf{第三组}：当任务粒度进一步增加到 1000 ms 时，损耗已降至 0.2\%--0.4\% 量级。三段任务粒度下损耗递减的物理原因可由上述 $T_{e2e}=T_{exec}+T_{comm}$ 简化记法的分量构成给出。
 
-按公式 (2-3)，单个任务的端到端时间可写作 $T_{e2e} = T_{exec} + T_{comm}$，其中 $T_{comm}$ 是 Fuxi 框架引入的通讯与调度开销，包含 axum HTTP 往返（约 4--6 ms，含 TLS 握手在本机环回为 0、HMAC 验证、JSON 编解码与中间件栈）、Tokio 任务调度（约 2--3 ms，含跨线程唤醒与异步 future poll）、SQLite 状态写入（约 1--2 ms，WAL 模式下 fsync 已合并）以及 Worker 拉取轮询（poll\_ms 平均一半的等待期望）。这些开销在不同任务粒度下的占比差异即为损耗递减的根源。
+具体而言，$T_{comm}$ 是 Fuxi 框架引入的通讯与调度开销，包含 axum HTTP 往返（约 4--6 ms，含 TLS 握手在本机环回为 0、HMAC 验证、JSON 编解码与中间件栈）、Tokio 任务调度（约 2--3 ms，含跨线程唤醒与异步 future poll）、SQLite 状态写入（约 1--2 ms，WAL 模式下 fsync 已合并）以及 Worker 拉取轮询（poll\_ms 平均一半的等待期望）。这些开销在不同任务粒度下的占比差异即为损耗递减的根源。
 
-具体地，10 ms 任务下 $T_{exec} = 10$ ms，$T_{comm} \approx 12 \pm 2$ ms，因此单任务视角下 $T_{comm}/T_{e2e} \approx 55\%$，但因为多个任务在同一时段并发流水化（即第一个任务正在 worker 上执行时，dispatcher 可同时为下一个任务做派发），最终体现在 wall-clock 上的损耗约为 18\%——这一比例与单任务 $T_{comm}$ 占比之间的差距，正是公式 (2-3) 中流水化项的贡献。流水化的有效程度取决于 dispatcher 与 worker 之间是否存在异步并发，Fuxi 通过 Tokio 异步任务模型与事件总线提前送达让 worker 几乎不必等待 dispatcher 的响应即可开始下一轮。100 ms 任务下 $T_{comm}/T_{e2e} \approx 11\%$，单任务占比已经接近最终损耗，流水化贡献边际化——因为执行时间长，dispatcher 在执行期间已经完成所有派发工作，流水化窗口已被充分利用。1000 ms 任务下 $T_{comm}/T_{e2e} \approx 1.2\%$，与实测损耗 0.2\%--0.4\% 的差距来自 Tokio 调度在长任务上的均摊：每秒一次任务开销下，调度器自身的负担在长时间窗口下被均摊到非常小的比例。
+具体地，10 ms 任务下 $T_{exec} = 10$ ms，$T_{comm} \approx 12 \pm 2$ ms，因此单任务视角下 $T_{comm}/T_{e2e} \approx 55\%$，但因为多个任务在同一时段并发流水化（即第一个任务正在 worker 上执行时，dispatcher 可同时为下一个任务做派发），最终体现在 wall-clock 上的损耗约为 18\%——这一比例与单任务 $T_{comm}$ 占比之间的差距来自流水化效应。该效应未在公式 (2-3) 这一静态分解中显式建模，只反映在 wall-clock 实测层面。流水化的有效程度取决于 dispatcher 与 worker 之间是否存在异步并发，Fuxi 通过 Tokio 异步任务模型与事件总线提前送达让 worker 几乎不必等待 dispatcher 的响应即可开始下一轮。100 ms 任务下 $T_{comm}/T_{e2e} \approx 11\%$，单任务占比已经接近最终损耗，流水化贡献边际化——因为执行时间长，dispatcher 在执行期间已经完成所有派发工作，流水化窗口已被充分利用。1000 ms 任务下 $T_{comm}/T_{e2e} \approx 1.2\%$，与实测损耗 0.2\%--0.4\% 的差距来自 Tokio 调度在长任务上的均摊：每秒一次任务开销下，调度器自身的负担在长时间窗口下被均摊到非常小的比例。
 
 \textbf{1 worker 与 8 worker 损耗几乎相同的现象}。对照表 \ref{tab:throughput} 第一组（10 ms 任务），1 worker 损耗 18.2\%、4 worker 损耗 17.1\%、8 worker 损耗 18.2\%——三档 worker 数下损耗几乎不变。这一现象在传统串行系统里几乎不可能出现：通常 worker 数增加会加剧 dispatcher 串行化压力，损耗应单调上升。Fuxi 这里损耗保持平稳的原因有二。第一，dispatcher 自身用 Tokio 异步路径处理请求，单 dispatcher 在本机能稳定承担 1000+ TPS，远超 8 worker × 100 tasks/s = 800 TPS 的实际负载，因此 dispatcher 不构成串行瓶颈。第二，事件总线 fan-out 是 O(1) 的（每个订阅者只递增引用计数），即使 worker 数增加，每个 worker 收到任务通知的延迟也几乎不变。这两点合起来让 Fuxi 在小规模水平扩展下表现出「损耗常数化」的优良性质。
 
