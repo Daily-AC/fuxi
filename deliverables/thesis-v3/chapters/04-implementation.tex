@@ -5,7 +5,7 @@
 
 \section{系统实现}
 
-第三章给出了伏羲（fuxi）的整体架构与各模块对外契约。本章把视角下沉到代码层，结合主仓 \texttt{/Users/e0\_7/fuxi}（HEAD: \texttt{04eb34c}）的真实实现，依次说明开发环境、Rust workspace 组织、事件数据结构与 Lamport 因果序、任务派发主循环、A2A 协议从零实现、跨节点分布式通讯六个方面。本章的全部代码片段均直接节选自 \texttt{crates/} 下相应文件，必要时为版面做了行宽折断和无关路径省略，但不修改控制流；行号与文件路径在每段代码上方注明，便于读者回到源码核对。本章重点展示工程取舍而非简单复述协议规范——读者会看到许多"为什么不这样做"的对比讨论，这些反向论证比正向陈述更能体现实现工作的真实价值。
+第三章给出了伏羲（fuxi）的整体架构与各模块对外契约。本章把视角下沉到代码层，结合主仓 \texttt{/Users/e0\_7/fuxi}（HEAD: \texttt{04eb34c}）的真实实现，依次说明开发环境、Rust workspace 组织、事件数据结构与 Lamport 因果序、任务派发主循环、A2A 协议从零实现、跨节点分布式通讯六个方面。代码片段均直接节选自 \texttt{crates/} 下相应文件，为版面做了必要的行宽折断与无关路径省略，但不修改控制流；行号与文件路径在每段代码上方注明，便于回到源码核对。本章的论述以工程取舍为主，不复述协议规范本身。
 
 \subsection{开发环境与技术选型}
 
@@ -294,7 +294,7 @@ pub async fn dispatch(&self, agent_id: AgentId, task: Task) -> Result<()> {
 
 这段代码体现了 publish-then-pump 模式：编排层对外只暴露 \texttt{dispatch(agent\_id, task) -> Result<()>}，调用方不关心事件如何流转；门客返回的 \texttt{mpsc::Receiver<Event>} 是私有通道，只在 pump task 内部消费，每条事件被补全 \texttt{task\_id} 后立即 \texttt{bus.publish()} 到全局通道。这样一来，订阅 EventBus 的所有下游（firehose TUI、IM WebSocket、SCM 提取器、玄女自身）都能看到完整事件流，而不需要分别去敲门客。\texttt{is\_terminal()} 后保留 50ms grace window 是 M2.1 实测发现的 bug 修复——cc 在发出 \texttt{ResultSuccess} 后还会异步 flush 几条 \texttt{DeliverableProduced} 事件，立即 break 会让它们被丢，给 50ms 缓冲后再退则全部能 republish。
 
-\texttt{auto\_pin\_from\_project} 这个步骤在 v2 跨节点版本里加入。它的语义是："如果 task 关联到某个 \texttt{Project} 且未显式 pinned\_node，就按 \texttt{project.host\_nodes} 列表选最闲的节点 auto-pin"。实现上调 \texttt{NodeLoadProvider}（CLI 装配时注入的 \texttt{Arc<dyn NodeLoadProvider>}）取每个候选节点的 \texttt{saturation = inflight / max\_concurrency}，pick 最低 saturation 的；候选全离线时返 None 退化到本地 spawn 路径，保证向后兼容。这条路径有一个反复被绕进去的边界条件：用户显式 \texttt{@<node>} pin 时绝不能被 auto\_pin 改写——\texttt{auto\_pin\_from\_project} 入口先看 \texttt{task.pinned\_node.is\_some()}，已 pin 直接返 None；调用方再加 \texttt{is\_none()} 守卫双保险。这种"双重防御"是 fuxi 在多次实测中血的教训：单层守卫一旦在重构中被误删，就会出现"用户明明 pin 在 mac-mini 上的任务跑到 home 上去了"的迷惑现象。
+\texttt{auto\_pin\_from\_project} 这个步骤在 v2 跨节点版本里加入。它的语义是："如果 task 关联到某个 \texttt{Project} 且未显式 pinned\_node，就按 \texttt{project.host\_nodes} 列表选最闲的节点 auto-pin"。实现上调 \texttt{NodeLoadProvider}（CLI 装配时注入的 \texttt{Arc<dyn NodeLoadProvider>}）取每个候选节点的 \texttt{saturation = inflight / max\_concurrency}，pick 最低 saturation 的；候选全离线时返 None 退化到本地 spawn 路径，保证向后兼容。这条路径有一个反复被绕进去的边界条件：用户显式 \texttt{@<node>} pin 时绝不能被 auto\_pin 改写——\texttt{auto\_pin\_from\_project} 入口先看 \texttt{task.pinned\_node.is\_some()}，已 pin 直接返 None；调用方再加 \texttt{is\_none()} 守卫双保险。这种「双重防御」是多次实测后沉淀的规约：单层守卫一旦在重构中被误删，就会出现「用户显式 pin 在 mac-mini 上的任务最终跑到 home 节点」的回归现象。
 
 dispatch 还有一个不太显眼但生产关键的细节：\texttt{Fuxi::shutdown\_agent} 必须豁免玄女本人。idle GC 任务会扫描超过 10 分钟未活动的门客并 \texttt{shutdown\_agent} 释放资源，但玄女对 GC 而言是普通 agent——如果不豁免，长时间没人输入时 GC 会把玄女自己关掉，整个 TUI 立刻无响应。\texttt{shutdown\_agent} 入口比对 \texttt{xuannv\_id()}，命中就 warn 后返 \texttt{Ok(())} 静默 noop。任何新增的 shutdown 路径（\texttt{fuxi kill --id} / 将来的 worker rebalance）都从这条豁免方法走，不绕旁路；唯一例外是 task \#8 上下文交接专用的 \texttt{shutdown\_xuannv\_for\_handoff}，命名上故意带 \texttt{\_for\_handoff} 让 grep 一眼看清"不要在别处调用"。这种"小动作的纪律"在生产系统里比任何架构图都更能决定可靠性。
 
@@ -323,7 +323,7 @@ fn spawn_inner(
 
 这条桥是公理 \#3"真实时不轮询"的具体落地——玄女完全不查询任何状态，所有"知情权"都通过 EventBus 推送实现。把"订阅"与"翻译"职责放在独立 crate 内，使得"如果将来想换玄女实现（比如换成另一个本地大模型）"只要重新实现 \texttt{Intervener} trait，这条桥代码可以原样复用。
 
-bridge 内部还藏着一个关键的工程细节：\texttt{handle\_event} 把 \texttt{EventKind} 翻译成"系统提示文本"时，会做去重与节流。例如 worker 节点 inflight 高的时候会狂发 \texttt{WorkerHeartbeat}，如果每条都翻译成 system prompt 喂给玄女，她会被淹没在心跳噪音里完全没法工作；bridge 在内部维护一个 "上次喂给玄女的同类事件时间戳"映射，只有跨过抑制窗口的事件才真正被翻译。\texttt{ReviewRequestTimeout} 这种关键事件还有 backoff 重试——首次翻译失败时按 \texttt{REVIEW\_RETRY\_BACKOFF\_MS}（默认 \texttt{[100, 300, 1000]} 三次）重试，避免玄女正在处理别的事时一次失败就丢掉重要通知。这种"事件路由 + 节流 + 重试"的组合在 fuxi 早期版本里散落在多处代码中，M2 重构后集中到 bridge crate 内单元测试覆盖率达 80\%，是降低系统运行复杂度的关键一步。
+bridge 内部还有一处关键工程细节：\texttt{handle\_event} 把 \texttt{EventKind} 翻译成「系统提示文本」时会做去重与节流。例如 worker 节点 inflight 较高时会高频发出 \texttt{WorkerHeartbeat}，若每条都翻译成 system prompt 喂给玄女，会让她被心跳事件刷屏而无法处理其他工作；bridge 内部维护一份「上次喂给玄女的同类事件时间戳」映射，只有跨过抑制窗口的事件才真正被翻译。\texttt{ReviewRequestTimeout} 这种关键事件还有 backoff 重试——首次翻译失败时按 \texttt{REVIEW\_RETRY\_BACKOFF\_MS}（默认 \texttt{[100, 300, 1000]} 三次）重试，避免玄女正在处理别的事时一次失败就丢掉重要通知。这种"事件路由 + 节流 + 重试"的组合在 fuxi 早期版本里散落在多处代码中，M2 重构后集中到 bridge crate 内单元测试覆盖率达 80\%，是降低系统运行复杂度的关键一步。
 
 \subsection{A2A 协议从零实现（论文核心贡献）}
 
