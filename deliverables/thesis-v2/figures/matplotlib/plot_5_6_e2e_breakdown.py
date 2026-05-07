@@ -23,9 +23,8 @@ OUT = Path(__file__).parent / "fig-5-6-e2e-breakdown.png"
 
 def parse_latency_p50(md_text: str, metric: str) -> float:
     m = re.search(
-        r"##\s*1\.\s*Baseline.*?\| metric .*?\n((?:\|.*\n)+)",
+        r"##\s*1\.\s*Baseline[\s\S]*?\| metric [^\n]*\n((?:\|[^\n]*\n)+)",
         md_text,
-        re.DOTALL,
     )
     if not m:
         raise RuntimeError("baseline latency 段未找到")

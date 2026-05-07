@@ -17,9 +17,8 @@ def parse_bus_stress(md_text: str):
     返回 dict[(n_sub, rate, payload)] = (publish_tps, p50_us, p99_us, drops)
     """
     m = re.search(
-        r"##\s*4\.\s*事件总线.*?\| subscribers .*?\n((?:\|.*\n)+)",
+        r"##\s*4\.\s*事件总线[\s\S]*?\| subscribers [^\n]*\n((?:\|[^\n]*\n)+)",
         md_text,
-        re.DOTALL,
     )
     if not m:
         raise RuntimeError("bus_stress 表未找到")

@@ -19,9 +19,8 @@ OUT = Path(__file__).parent / "fig-5-4-dispatch-latency.png"
 def parse_latency(md_text: str):
     """找 baseline 段里的 latency 表，返回 task_dispatch 行的 (min, p50, p99, max)。"""
     m = re.search(
-        r"##\s*1\.\s*Baseline.*?\| metric .*?\n((?:\|.*\n)+)",
+        r"##\s*1\.\s*Baseline[\s\S]*?\| metric [^\n]*\n((?:\|[^\n]*\n)+)",
         md_text,
-        re.DOTALL,
     )
     if not m:
         raise RuntimeError("baseline latency 段未找到")

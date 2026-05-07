@@ -13,9 +13,8 @@ OUT = Path(__file__).parent / "fig-5-5-event-flow-latency.png"
 
 def parse_event_flow(md_text: str):
     m = re.search(
-        r"##\s*1\.\s*Baseline.*?\| metric .*?\n((?:\|.*\n)+)",
+        r"##\s*1\.\s*Baseline[\s\S]*?\| metric [^\n]*\n((?:\|[^\n]*\n)+)",
         md_text,
-        re.DOTALL,
     )
     if not m:
         raise RuntimeError("baseline latency 段未找到")

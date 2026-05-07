@@ -14,9 +14,8 @@ OUT = Path(__file__).parent / "fig-5-2-poll-scan.png"
 def parse_poll_scan(md_text: str):
     """从 markdown 抓 poll_scan 表的 (poll_ms, tps, overhead) 列。"""
     m = re.search(
-        r"##\s*2\.\s*Poll_ms.*?\| poll_ms .*?\n((?:\|.*\n)+)",
+        r"##\s*2\.\s*Poll_ms[\s\S]*?\| poll_ms [^\n]*\n((?:\|[^\n]*\n)+)",
         md_text,
-        re.DOTALL,
     )
     if not m:
         raise RuntimeError("poll_scan 表未找到")
