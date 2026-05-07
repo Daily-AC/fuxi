@@ -57,6 +57,10 @@ pub async fn run() -> BenchSection {
     let event_samples = measure_event_flow_latency().await;
     rows.push(stats_row("event_flow", &event_samples));
 
+    // ── thesis-v3 dump：把 raw samples 落到 CSV，给 eCDF 出图用 ────────────
+    // 摘要 stats（min/p50/p99/max）丢失了分布形状；论文 fig 5-4/5-5 需要 eCDF。
+    dump_samples_csv(&task_samples, &event_samples);
+
     let task_tail = tail_ratio(&task_samples);
     let event_tail = tail_ratio(&event_samples);
     let notes = format!(
@@ -233,6 +237,30 @@ async fn wait_node_registered(harness: &super::BenchHarness, node_id: &str, time
             panic!("bench-node {node_id} not registered within {timeout:?}");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// thesis-v3 raw samples dump——CSV 给 matplotlib eCDF 用。
+/// 失败只 log warn 不 panic：bench 报告才是主交付，dump 只是副产物。
+fn dump_samples_csv(task_us: &[u128], event_us: &[u128]) {
+    let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out_dir = crate_root.join("../../deliverables/thesis-v3/benchmarks");
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("[latency] mkdir thesis-v3/benchmarks 失败：{e}（跳过 CSV dump）");
+        return;
+    }
+    let path = out_dir.join("latency-samples.csv");
+    let mut csv = String::from("metric,sample_us\n");
+    for s in task_us {
+        csv.push_str(&format!("task_dispatch,{}\n", s));
+    }
+    for s in event_us {
+        csv.push_str(&format!("event_flow,{}\n", s));
+    }
+    if let Err(e) = std::fs::write(&path, csv) {
+        eprintln!("[latency] dump CSV 失败：{e}");
+    } else {
+        eprintln!("[latency] raw samples dumped → {}", path.display());
     }
 }
 
