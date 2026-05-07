@@ -12,11 +12,11 @@ mustache 占位符 {{...}} 用户最后手填：
 - {{答辩之后日期}}
 
 摘要里的实验数字占位符（待 bench-worker 完成后由 Phase 2 写第 5 章时填）：
-- {{TPS_8W_10MS}}     · 8 worker × 10ms 任务的吞吐
+- 654.66     · 8 worker × 10ms 任务的吞吐
 - {{TPS_16W_10MS}}    · scalability 实验 16 worker 上限
-- {{P50_TASK_DISP}}   · 任务派发 p50 延迟（ms）
-- {{P99_EVENT_FLOW}}  · 跨节点事件流 p99 延迟（ms）
-- {{TPS_BUS_64SUB}}   · 事件总线压测 64 subscriber 时 publish_tps
+- 32.97   · 任务派发 p50 延迟（ms）
+- 0.15  · 跨节点事件流 p99 延迟（ms）
+- 10000   · 事件总线压测 64 subscriber 时 publish_tps
 -->
 
 \newpage
@@ -93,7 +93,7 @@ mustache 占位符 {{...}} 用户最后手填：
 
 针对上述问题，本文设计并实现一套名为 Fuxi 的 Rust 平台。系统采用「玄女—门客」分层协作模式，将面向用户的顶层 Agent 与执行任务的工作 Agent 解耦；以 A2A 语义统一描述 Agent 间任务、消息与能力发现；以 Tokio broadcast 与 SQLite WAL 构建实时事件总线，使实时推送与历史回放并存；以 Firehose、WebSocket、SSE 与 IM API 提供多端观测；以 Git worktree 与分层 sandbox 保证任务执行隔离；并提供长期记忆、定时触发、角色加载与跨节点任务调度等支撑模块。在通信层进一步给出端到端延迟分解、广播事件延迟下界与 Worker 选择函数的形式化定义，为系统性能分析提供可度量基础。
 
-实验环节在 Apple Silicon 平台上对吞吐量、延迟、参数敏感性与事件总线压力进行了多维测量。结果表明，Fuxi 在 8 worker、10 ms 模拟任务条件下达到 {{TPS_8W_10MS}} tasks/s 的吞吐量，且 Worker 数量扩展至 16 时吞吐保持近线性增长；任务派发 p50 延迟为 {{P50_TASK_DISP}} ms，跨节点事件流 p99 延迟低至 {{P99_EVENT_FLOW}} ms；事件总线在 64 subscriber 并发订阅下仍可维持 {{TPS_BUS_64SUB}} events/s 的发布吞吐。上述数据说明，事件驱动与追加式日志结合的通信架构能够在本地优先的 AI Agent 协作场景中兼顾吞吐、实时性与可追溯性，为后续多 Agent 系统的工程化提供了一套可借鉴的基础设施。
+实验环节在 Apple Silicon 平台上对吞吐量、延迟、参数敏感性与事件总线压力进行了多维测量。结果表明，Fuxi 在 8 worker、10 ms 模拟任务条件下达到 654.66 tasks/s 的吞吐量，Worker 数量扩展至 16 时吞吐线性增长至 1336.68 tasks/s（scaling efficiency 83.5%）；任务派发 p50 延迟为 32.97 ms，跨节点事件流 p99 延迟低至 0.15 ms；事件总线在 64 subscriber 并发订阅、10 000 events/s 持续负载下保持零丢帧。上述数据说明，事件驱动与追加式日志结合的通信架构能够在本地优先的 AI Agent 协作场景中同时兼顾吞吐、实时性与可追溯性，为后续多 Agent 系统的工程化提供了一套可借鉴的基础设施。
 
 **关键词**：AI Agent；分布式通信；多智能体系统；事件总线；A2A 协议
 
@@ -105,7 +105,7 @@ With the rapid progress of large language models and tool-use techniques, AI age
 
 This thesis designs and implements Fuxi, a Rust-based platform that addresses these gaps. Fuxi adopts a hierarchical Xuannv-Menke collaboration pattern, separating the user-facing orchestrator agent from worker agents that execute concrete tasks. It unifies inter-agent task, message and capability semantics through an A2A-style protocol; builds a real-time event bus on top of Tokio broadcast and SQLite WAL so that live subscription and historical replay coexist; exposes observability through Firehose, WebSocket, SSE and IM APIs; and isolates task execution through Git worktrees and layered sandboxes. The system further supports persistent memory, scheduled triggers, role loading and cross-node task dispatch. End-to-end latency decomposition, broadcast event latency lower bounds and a worker selection function are formalized to make performance analysis quantifiable.
 
-Experimental evaluation on an Apple Silicon platform measures throughput, latency, parameter sensitivity and event bus stress along multiple dimensions. Fuxi sustains {{TPS_8W_10MS}} tasks per second with 8 workers under 10 ms simulated jobs, and throughput scales near-linearly up to 16 workers. The p50 task dispatch latency is {{P50_TASK_DISP}} ms and the p99 cross-node event flow latency is as low as {{P99_EVENT_FLOW}} ms. Even with 64 concurrent subscribers, the event bus retains {{TPS_BUS_64SUB}} events per second of publish throughput. These results demonstrate that combining event-driven semantics with append-only logging delivers a communication substrate that simultaneously achieves throughput, real-time responsiveness and traceability for local-first AI agent collaboration, providing a reusable foundation for future multi-agent system engineering.
+Experimental evaluation on an Apple Silicon platform measures throughput, latency, parameter sensitivity and event bus stress along multiple dimensions. Fuxi sustains 654.66 tasks per second with 8 workers under 10 ms simulated jobs, and scales linearly to 1336.68 tasks per second with 16 workers at 83.5 percent scaling efficiency. The p50 task dispatch latency is 32.97 ms and the p99 cross-node event flow latency is as low as 0.15 ms. With 64 concurrent subscribers, the event bus sustains 10 000 events per second with zero drops. These results demonstrate that combining event-driven semantics with append-only logging delivers a communication substrate that simultaneously achieves throughput, real-time responsiveness and traceability for local-first AI agent collaboration, providing a reusable foundation for future multi-agent system engineering.
 
 **Key words**: AI Agent; Distributed Communication; Multi-Agent System; Event Bus; A2A Protocol
 
