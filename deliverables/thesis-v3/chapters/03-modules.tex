@@ -82,7 +82,7 @@ pub enum TaskState {
 }
 \end{lstlisting}
 
-这一扩展的工程价值在于把人工介入从「编排器内部隐式状态」提升为「协议级显式状态」。玄女（顶层 Agent）订阅门客的 SSE 流时，一旦看到 \texttt{state: input-required}，可以立即把对话权从该门客切换回用户，等用户回复后再走 \texttt{tasks/send} 把答复回传给同一 Task ID。在伏羲的实际使用中，这一机制覆盖了「门客对需求理解有歧义」「门客对工具调用授权犹豫」「门客遇到外部依赖问题」三类场景，全部都通过同一个状态语义统一处理，避免了为每类介入单独设计 ad-hoc 字段。
+这一平台映射的工程价值在于把人工介入从「编排器内部隐式状态」提升为「可被协议字段承载、可被事件流观测的显式状态」。玄女（顶层 Agent）订阅门客的 SSE 流时，一旦看到 \texttt{state: input-required}，可以立即把对话权从该门客切换回用户，等用户回复后再走 \texttt{tasks/send} 把答复回传给同一 Task ID。在伏羲的实际使用中，这一机制覆盖了「门客对需求理解有歧义」「门客对工具调用授权犹豫」「门客遇到外部依赖问题」三类场景，全部都通过同一个状态语义统一处理，避免了为每类介入单独设计 ad-hoc 字段。
 
 替代方案是在 \texttt{Working} 状态下用 \texttt{metadata} 字段标记「需要回复」。这种方案被否决，因为 \texttt{metadata} 是非结构化字段，既不能在编译期检查、也无法被未参与设计的第三方客户端理解；显式状态枚举则可被任何兼容客户端识别——这一点也正是 A2A 当前官方规范选择把 \texttt{InputRequired} 纳入正式 \texttt{TaskState} 的原因。\texttt{InputRequired} 与终态（\texttt{Completed}/\texttt{Failed}/\texttt{Canceled}）的关键区别是：终态不可恢复，任务一旦终止就关闭事件流；\texttt{InputRequired} 是中间态，事件流保持打开，等待用户回复后转回 \texttt{Working}。这条「中间态可恢复」的设计让多轮对话与多回合协作能在同一 Task 上下文内完成，避免每次介入都要新建任务的语义混乱。
 
