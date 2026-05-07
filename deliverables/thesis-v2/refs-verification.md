@@ -153,3 +153,75 @@
 - 验证 URL：https://github.com/Significant-Gravitas/AutoGPT
 - 验证证据：WebFetch 仓页返回 description「AutoGPT is the vision of accessible AI for everyone, to use and to build on.」WebSearch + Wikipedia 一致：「AutoGPT was released on March 30, 2023, by Toran Bruce Richards」。仓库当前活跃，最新 release autogpt-platform-beta-v0.6.58 (2026-04-29)。
 - 引用位置预估：§1.2 国内外现状（早期 LLM agent 标杆开源项目）
+
+## D 桶：分布式系统经典（7 篇）
+
+### D.1 [lamport1978time]
+- 标题：Time, Clocks, and the Ordering of Events in a Distributed System
+- 作者：Leslie Lamport
+- 出版：Communications of the ACM, Vol. 21, No. 7, pp. 558-565, July 1978
+- DOI：10.1145/359545.359563
+- 验证 URL（ACM DL）：https://dl.acm.org/doi/10.1145/359545.359563
+- 验证 URL（CACM 公开版）：https://cacm.acm.org/research/time-clocks-and-the-ordering-of-events-in-a-distributed-system/
+- 验证 URL（图灵奖 PDF）：https://amturing.acm.org/p558-lamport.pdf
+- 验证证据：ACM DL、CACM、Microsoft Research（Lamport 个人主页）三处均确认 21(7):558-565 (July 1978)。荣获 2000 PODC Influential Paper Award（即 Dijkstra Prize）和 2007 SIGOPS Hall of Fame。
+- 引用位置预估：§2.5 分布式系统理论（事件顺序与逻辑时钟）；§3.3 EventBus 顺序一致性论证
+
+### D.2 [dean2004mapreduce]
+- 标题：MapReduce: Simplified Data Processing on Large Clusters
+- 作者：Jeffrey Dean, Sanjay Ghemawat（Google）
+- 出版：6th USENIX OSDI, San Francisco, CA, December 2004, pp. 137-150
+- 验证 URL（USENIX 会议页）：https://www.usenix.org/conference/osdi-04/mapreduce-simplified-data-processing-large-clusters
+- 验证 URL（USENIX 全文 PDF）：https://www.usenix.org/legacy/event/osdi04/tech/full_papers/dean/dean.pdf
+- 验证 URL（Google Research）：https://research.google/pubs/mapreduce-simplified-data-processing-on-large-clusters/
+- 验证证据：USENIX 官网会议页 + Google Research 出版页 + ACM DL（10.5555/1251254.1251264）三处一致；OSDI'04 SF 12 月，页码 137-150 与候选清单完全对齐。
+- 引用位置预估：§2.5 分布式批处理范式；§5 性能基线对比（如适用）
+
+### D.3 [ghemawat2003gfs]
+- 标题：The Google File System
+- 作者：Sanjay Ghemawat, Howard Gobioff, Shun-Tak Leung（Google）
+- 出版：19th SOSP, Bolton Landing, NY, October 2003
+- DOI：10.1145/945445.945450
+- 验证 URL（Google Research PDF）：https://research.google.com/archive/gfs-sosp2003.pdf
+- 验证 URL（Google Research 索引）：https://research.google/pubs/the-google-file-system/
+- 验证证据：Google 官方 PDF + 多份大学课件 + dblp 一致：SOSP 2003 Bolton Landing NY，三作者顺序 Ghemawat/Gobioff/Leung 与候选清单完全对齐。
+- 引用位置预估：§2.5 分布式存储；§3.5 SQLite 选型对比（如适用）
+
+### D.4 [kreps2011kafka]
+- 标题：Kafka: A Distributed Messaging System for Log Processing
+- 作者：Jay Kreps, Neha Narkhede, Jun Rao（LinkedIn）
+- 出版：NetDB Workshop（与 SIGMOD 同地点协办），Athens, Greece, June 12, 2011
+- 验证 URL（Apache Kafka 论文索引）：https://kafka.apache.org/community/books_and_papers/
+- 验证 URL（NetDB slides）：https://netman.aiops.org/~peidan/ANM2016/BigDataSystems/ReadingLists/2011NetDB_Kafka_slides.pdf
+- 验证 URL（Stephen Holiday 镜像 PDF）：https://notes.stephenholiday.com/Kafka.pdf
+- 验证证据：Apache Kafka 官网 community 页面收录该论文，Semantic Scholar 与 SciRP 引文索引（2141069）一致；作者三人 Kreps/Narkhede/Rao 与候选清单完全对齐。Kafka 是伏羲事件总线设计的灵感来源之一。
+- 引用位置预估：§2.5 分布式消息系统；§3.3 EventBus 设计借鉴
+
+### D.5 [ongaro2014raft]
+- 标题：In Search of an Understandable Consensus Algorithm（即 Raft 论文）
+- 作者：Diego Ongaro, John Ousterhout（Stanford）
+- 出版：2014 USENIX ATC，Philadelphia PA，June 2014
+- 验证 URL（USENIX 会议页）：https://www.usenix.org/conference/atc14/technical-sessions/presentation/ongaro
+- 验证 URL（Stanford 作者 PDF）：https://web.stanford.edu/~ouster/cgi-bin/papers/raft-atc14.pdf
+- 验证 URL（Raft 官网）：https://raft.github.io/
+- 验证证据：USENIX 官网会议页 + Stanford ouster 个人主页 PDF + ACM DL（10.5555/2643634.2643666）三处一致。该论文获 USENIX ATC 2014 Best Paper Award。
+- 引用位置预估：§2.5 分布式共识算法；§3.6 跨节点协调机制（如分布式 v2 章节）
+
+### D.6 [hunt2010zookeeper]
+- 标题：ZooKeeper: Wait-Free Coordination for Internet-Scale Systems
+- 作者：Patrick Hunt, Mahadev Konar, Flavio P. Junqueira, Benjamin Reed（Yahoo!）
+- 出版：2010 USENIX ATC, Boston MA, June 23-25, 2010
+- 验证 URL（USENIX 会议页）：https://www.usenix.org/conference/usenix-atc-10/zookeeper-wait-free-coordination-internet-scale-systems
+- 验证 URL（dblp）：https://dblp.org/rec/conf/usenix/HuntKJR10.xml
+- 验证证据：USENIX 官网 + ACM DL（10.5555/1855840.1855851）+ dblp 一致；四作者顺序 Hunt/Konar/Junqueira/Reed 与候选清单完全对齐。
+- 引用位置预估：§2.5 分布式协调服务；§3.6 节点发现与租约（如适用）
+
+### D.7 [corbett2012spanner]
+- 标题：Spanner: Google's Globally-Distributed Database
+- 作者：James C. Corbett 等 25 人（Google）
+- 出版：10th USENIX OSDI，Hollywood CA，October 2012
+- 验证 URL（USENIX 会议页）：https://www.usenix.org/conference/osdi12/technical-sessions/presentation/corbett
+- 验证 URL（USENIX 全文 PDF）：https://www.usenix.org/system/files/conference/osdi12/osdi12-final-16.pdf
+- 验证 URL（Google Research）：https://research.google/pubs/spanner-googles-globally-distributed-database-2/
+- 验证证据：USENIX + Google Research + ACM DL（10.5555/2387880.2387905）三处一致。荣获 OSDI 2012 Jay Lepreau Best Paper Award。TrueTime API 是伏羲跨节点时间一致性思路的对照参考。
+- 引用位置预估：§2.5 全球分布式数据库；§3.6 跨节点时间一致性
