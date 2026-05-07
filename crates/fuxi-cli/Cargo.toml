@@ -17,6 +17,18 @@ name = "run_baseline"
 path = "benches/run_baseline.rs"
 harness = false
 
+# TB.2 thesis-v2：poll_ms 参数消融实验
+[[bench]]
+name = "poll_scan"
+path = "benches/poll_scan.rs"
+harness = false
+
+# TB.3 thesis-v2：scalability 1/2/4/8/16 worker
+[[bench]]
+name = "scalability"
+path = "benches/scalability.rs"
+harness = false
+
 [dependencies]
 fuxi-core.workspace = true
 fuxi-events.workspace = true

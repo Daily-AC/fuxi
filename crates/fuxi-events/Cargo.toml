@@ -18,3 +18,13 @@ tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
+
+# TB.4 thesis-v2：事件总线纯压测（bench-only，bench 直接 await broadcast::Receiver
+# 拿 Lagged drop 计数；fuxi-events 主体不直接吃 broadcast 类型）
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros", "time", "sync"] }
+
+# TB.4 thesis-v2：事件总线纯压测
+[[bench]]
+name = "bus_stress"
+harness = false

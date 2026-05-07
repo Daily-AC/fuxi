@@ -1,4 +1,4 @@
-//! β path：throughput bench section。3×3 矩阵，每 cell 重复 3 次取**中位数**
+//! β path：throughput bench section。3×3 矩阵，每 cell 重复 5 次取**中位数**
 //! （不取平均：GC pause / 调度抖动等长尾会把平均拉偏，中位数对异常更鲁棒）。
 //!
 //! 测的是**fuxi 跨节点 dispatch 编排开销**——刻意让每 worker `max_concurrency=1`
@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 /// 不是 fuxi infra）。tuned 5ms 把这部分摊薄。
 const TUNED_POLL_MS: u64 = 5;
 
-/// 每个 cell 重复 3 次取中位数——3 是最少能形成"中位"的样本数；多了 wall
-/// clock 太长（9 cell × N 重复 × cell 时长）。
-const REPEATS: usize = 3;
+/// 每个 cell 重复 5 次取中位数——3 是最少能形成"中位"的样本数；论文实验
+/// （thesis-v2 TB.1）升级到 5 是为了把 GC pause / 调度抖动这类长尾的影响
+/// 进一步压低，median 更稳。代价是 wall clock 比 3-run 长 ~1.7×。
+const REPEATS: usize = 5;
 
 #[derive(Clone, Copy)]
 struct CellSpec {
@@ -178,6 +179,153 @@ fn cell_row(spec: CellSpec, median_wall_ms: u128) -> Vec<String> {
         format!("{tps:.2}"),
         format!("{theoretical_tps:.2}"),
         format!("{overhead_pct:.1}%"),
+    ]
+}
+
+// ── TB.2 poll_ms 扫描（thesis-v2 实验 2）──────────────────────────────────
+//
+// 设计：固定 `worker_n=4, tasks_n=400, sleep_ms=10`，扫 poll_ms ∈
+// {5, 10, 25, 50, 100}。这一组 cell 是 baseline matrix 里 `4w × 10ms × 400`
+// 那一格的 poll_ms 切片——同 cell 但只调 poll，让"poll_ms 单独的影响"
+// 一目了然，不被 worker_n / sleep_ms 维度交叉污染。
+
+const POLL_SCAN_WORKERS: usize = 4;
+const POLL_SCAN_SLEEP_MS: u64 = 10;
+const POLL_SCAN_TASKS: usize = 400;
+const POLL_SCAN_VALUES: &[u64] = &[5, 10, 25, 50, 100];
+
+/// TB.2 入口——`benches/poll_scan.rs` 调本函数。
+pub async fn poll_scan() -> BenchSection {
+    let spec = CellSpec {
+        workers: POLL_SCAN_WORKERS,
+        sleep_ms: POLL_SCAN_SLEEP_MS,
+        tasks: POLL_SCAN_TASKS,
+    };
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(POLL_SCAN_VALUES.len());
+    for &poll_ms in POLL_SCAN_VALUES {
+        eprintln!(
+            "[poll_scan] cell workers={} sleep_ms={} tasks={} poll_ms={poll_ms} ×{} repeats …",
+            spec.workers, spec.sleep_ms, spec.tasks, REPEATS
+        );
+        let median = run_cell_median_with_poll(spec, poll_ms).await;
+        rows.push(poll_scan_row(spec, poll_ms, median));
+    }
+    BenchSection {
+        name: "poll_ms 扫描 · worker_n=4, tasks_n=400, sleep=10ms".into(),
+        headers: vec![
+            "poll_ms".into(),
+            "median_wall_ms".into(),
+            "tasks_per_sec".into(),
+            "理论上限_tps".into(),
+            "fuxi_损耗".into(),
+        ],
+        rows,
+        notes: format!(
+            "_{REPEATS}-run median · 固定 cell `{}w × {}ms × {} tasks`，仅扫 poll_ms。\
+             理论 tps = worker_n / sleep_sec = {:.0}._",
+            spec.workers,
+            spec.sleep_ms,
+            spec.tasks,
+            spec.workers as f64 / (spec.sleep_ms as f64 / 1000.0)
+        ),
+    }
+}
+
+fn poll_scan_row(spec: CellSpec, poll_ms: u64, median_wall_ms: u128) -> Vec<String> {
+    let wall_sec = median_wall_ms as f64 / 1000.0;
+    let tps = if wall_sec > 0.0 {
+        spec.tasks as f64 / wall_sec
+    } else {
+        f64::NAN
+    };
+    let theoretical_tps = spec.workers as f64 / (spec.sleep_ms as f64 / 1000.0);
+    let overhead_pct = if theoretical_tps > 0.0 {
+        (1.0 - tps / theoretical_tps) * 100.0
+    } else {
+        f64::NAN
+    };
+    eprintln!(
+        "[poll_scan]   poll_ms={poll_ms} wall_ms={median_wall_ms} tps={tps:.2} 损耗={overhead_pct:.1}%"
+    );
+    vec![
+        poll_ms.to_string(),
+        median_wall_ms.to_string(),
+        format!("{tps:.2}"),
+        format!("{theoretical_tps:.2}"),
+        format!("{overhead_pct:.1}%"),
+    ]
+}
+
+// ── TB.3 scalability 扫描（thesis-v2 实验 3）──────────────────────────────
+//
+// 设计：固定 `sleep_ms=10, poll_ms=5`，扫 worker_n ∈ {1,2,4,8,16}，每
+// worker 100 个 task（即 tasks_n = worker_n × 100）。observed tps vs 理论
+// (worker_n × 100) 的比值 = scaling efficiency；理想线性时 = 100%。
+
+const SCALABILITY_SLEEP_MS: u64 = 10;
+const SCALABILITY_TASKS_PER_WORKER: usize = 100;
+const SCALABILITY_WORKERS: &[usize] = &[1, 2, 4, 8, 16];
+
+/// TB.3 入口——`benches/scalability.rs` 调本函数。
+pub async fn scalability_scan() -> BenchSection {
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(SCALABILITY_WORKERS.len());
+    for &workers in SCALABILITY_WORKERS {
+        let spec = CellSpec {
+            workers,
+            sleep_ms: SCALABILITY_SLEEP_MS,
+            tasks: workers * SCALABILITY_TASKS_PER_WORKER,
+        };
+        eprintln!(
+            "[scalability] cell workers={workers} sleep_ms={} tasks={} ×{} repeats (poll_ms={TUNED_POLL_MS}) …",
+            spec.sleep_ms, spec.tasks, REPEATS
+        );
+        let median = run_cell_median_with_poll(spec, TUNED_POLL_MS).await;
+        rows.push(scalability_row(spec, median));
+    }
+    BenchSection {
+        name: "scalability · worker_n ∈ {1,2,4,8,16}, sleep=10ms".into(),
+        headers: vec![
+            "worker_n".into(),
+            "tasks_n".into(),
+            "median_wall_ms".into(),
+            "tasks_per_sec".into(),
+            "理论上限_tps".into(),
+            "scaling_efficiency".into(),
+        ],
+        rows,
+        notes: format!(
+            "_{REPEATS}-run median · poll_ms={TUNED_POLL_MS} · 每 worker 跑 {} 条 task；\
+             理论上限 = worker_n / sleep_sec；scaling_efficiency = 实测_tps / 理论_tps。\
+             max_concurrency=1 隔离 per-worker 并发——只看跨 worker 的 controller 编排上限。_",
+            SCALABILITY_TASKS_PER_WORKER
+        ),
+    }
+}
+
+fn scalability_row(spec: CellSpec, median_wall_ms: u128) -> Vec<String> {
+    let wall_sec = median_wall_ms as f64 / 1000.0;
+    let tps = if wall_sec > 0.0 {
+        spec.tasks as f64 / wall_sec
+    } else {
+        f64::NAN
+    };
+    let theoretical_tps = spec.workers as f64 / (spec.sleep_ms as f64 / 1000.0);
+    let efficiency = if theoretical_tps > 0.0 {
+        tps / theoretical_tps * 100.0
+    } else {
+        f64::NAN
+    };
+    eprintln!(
+        "[scalability]   workers={} wall_ms={median_wall_ms} tps={tps:.2} 理论={theoretical_tps:.2} efficiency={efficiency:.1}%",
+        spec.workers
+    );
+    vec![
+        spec.workers.to_string(),
+        spec.tasks.to_string(),
+        median_wall_ms.to_string(),
+        format!("{tps:.2}"),
+        format!("{theoretical_tps:.2}"),
+        format!("{efficiency:.1}%"),
     ]
 }
 
