@@ -11,7 +11,7 @@
 
 本论文围绕「基于 AI Agent 的高性能分布式通讯系统」这一主题，完成了 Fuxi 平台从需求分析、整体设计、模块实现到实测验证的完整闭环，整个工程产出在 13 个 crate、共计约 8.25 万行 Rust 代码、27 个集成测试文件中沉淀下来。回顾全文，本论文的核心贡献可以收敛为五条。
 
-\textbf{贡献一：与 fuxi 平台同源演进的 A2A v1.0 实现。} \texttt{fuxi-a2a} crate 共 1321 行，从零实现 \texttt{AgentCard}/\texttt{Task}/\texttt{Message}/\texttt{Part}/\texttt{Artifact} 等 wire 数据结构、JSON-RPC 2.0 信封、SSE 流式抽象、axum 服务端与 reqwest 客户端，覆盖五个 RPC 方法。与官方规范~\parencite{a2aproject2025a2a}相比，本工作还在状态机层面新增 \texttt{InputRequired} 中间态以承载「门客遇到歧义、需要人来判断」这一 LLM 场景下的高频协作语义，并采用「单连接 HTTP+SSE」的端点升级模式简化客户端实现。Rust 生态已有 \texttt{a2a-rs}（A2A 项目官方 SDK）以及 \texttt{a2a-client}、\texttt{a2a-types} 等第三方 crate 提供通用协议封装；与之相比，本 crate 的差异化定位在于与 \texttt{fuxi-events} 事件总线、玄女—门客编排层与反向 WebSocket sandbox 的深度集成，以及对 InputRequired 人工介入语义的协议级扩展。该实现与 MCP~\parencite{anthropic2024mcp}在层次上互补——A2A 处理 Agent 间协作契约，MCP 处理模型与工具的调用规范。
+\textbf{贡献一：与 fuxi 平台同源演进的 A2A 风格协议适配层。} \texttt{fuxi-a2a} crate 共 1321 行，实现了覆盖 agent discovery、task send、task stream、task query 与 task cancel 五条核心路径的轻量协议闭环，沿用早期 A2A JSON-RPC binding（方法命名 \texttt{agent/getCard}、\texttt{tasks/send} 等）。该实现并不以替代官方 \texttt{a2a-rs} SDK 或完整覆盖当前 A2A 规范为目标——后者在 a2a-rs / a2a-client / a2a-types 等 crate 中已有可比的覆盖；本 crate 的差异化定位在于与 \texttt{fuxi-events} 事件总线、玄女—门客编排层与反向 WebSocket sandbox 的深度集成，以及把 A2A 规范已有的 \texttt{input-required} 中间态映射到 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，使人工介入成为平台级可观测事件。\texttt{fuxi-a2a} 与 MCP~\parencite{anthropic2024mcp}在层次上互补——A2A 处理 Agent 间协作契约，MCP 处理模型与工具的调用规范。
 
 \textbf{贡献二：事件驱动通讯底座作为一等公民。} \texttt{fuxi-events} 把实时分发、持久化与历史回放三件事合并到同一抽象之内。\texttt{publish()} 路径同时投递 Tokio broadcast 与异步入库通道，前者零拷贝扇出实现毫秒级实时推送~\parencite{tokio2024broadcast}，后者经 SQLite WAL 模式串行落库~\parencite{sqlite2024wal}保证审计追溯。发布路径采用「\texttt{try\_send} + 后台转交 + lag 哨兵」三步组合，把背压从「不可见的死锁」变为「可见的告警」。事件因果序遵循 Lamport 逻辑时钟思路~\parencite{lamport1978time}，用 SQLite \texttt{rowid} 单调递增作为隐式时钟，避开向量时钟所需的时钟同步基础设施。
 
@@ -39,6 +39,8 @@
 \textbf{用户界面密度仍可优化。} TUI 与 IM 端目前以信息密度优先，对非技术用户而言学习成本仍偏高。事件流过密时低价值事件会刷屏，缺少足够的事件流摘要、任务状态可视化与对话流统一表达——这一点在面向开发者的工程场景下问题不大，但若扩展到非技术用户作为日常生产力工具，仍需在界面层做进一步收敛。
 
 \textbf{横向 baseline 对比缺失。} 第五章选择以「理论上限对照」作为主要参照，没有与 LangChain、AutoGen、CrewAI 等公开 Agent 编排框架做实测吞吐对比。理由是跨语言、跨抽象层级的 baseline 比较容易让数字失去工程意义——差异主要来自 Python 与 Rust、同步与异步等系统底层因素，而非编排层设计取舍。但这意味着本文未能给出 Fuxi 在主流框架坐标系下的相对位置。在统一负载、统一任务语义与统一观测口径之上的横向 baseline 是后续工作之一。
+
+\textbf{A2A 协议规范跟进与官方 SDK 互通验证待补。} A2A 规范在 2025--2026 年间仍处于快速演进阶段，当前官方规范已切到 PascalCase 方法集（\texttt{SendMessage}、\texttt{SendStreamingMessage}、\texttt{GetTask}、\texttt{CancelTask}、\texttt{SubscribeToTask}），\texttt{Part} 也使用 one-of 字段语义而非 tagged union。本文 \texttt{fuxi-a2a} 实现沿用早期 A2A JSON-RPC binding（方法命名 \texttt{agent/getCard}、\texttt{tasks/send} 等，\texttt{Part} 使用 \texttt{\#[serde(tag="type")]} tagged union），覆盖了 Fuxi 所需的 5 条核心协作路径，但尚未与当前官方 \texttt{a2a-rs} SDK 做完整 wire-level 互操作验证，也未完全覆盖最新规范中的全部方法、状态（如 \texttt{auth-required}、\texttt{rejected}）与 binding 细节。后续工作将把该 crate 升级为当前官方规范兼容层，或显式维护 legacy binding 适配器，并补 \texttt{a2a-rs} 互通测试。
 
 \subsection{未来工作}
 \label{subsec:future-work}
