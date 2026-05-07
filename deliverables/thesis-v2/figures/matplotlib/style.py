@@ -8,13 +8,16 @@ import matplotlib as mpl
 
 
 def apply():
+    # CJK：macOS 用 PingFang SC / Heiti TC；fallback 到 Arial Unicode 避免方框
     mpl.rcParams.update({
         "figure.figsize": (6.5, 4.0),
         "figure.dpi": 300,
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
         "font.size": 11,
-        "font.family": "serif",
+        "font.sans-serif": ["PingFang SC", "Heiti TC", "Arial Unicode MS", "DejaVu Sans"],
+        "font.family": "sans-serif",
+        "axes.unicode_minus": False,
         "axes.titlesize": 12,
         "axes.labelsize": 11,
         "xtick.labelsize": 10,

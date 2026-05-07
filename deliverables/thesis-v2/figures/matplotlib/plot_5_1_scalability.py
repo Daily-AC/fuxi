@@ -18,9 +18,8 @@ def parse_scalability(md_text: str):
     """从 markdown 抓 scalability 表的 (worker_n, tps, theoretical, efficiency) 列。"""
     # 找 "## 3. Scalability" 段
     m = re.search(
-        r"##\s*3\.\s*Scalability.*?\| worker_n .*?\n((?:\|.*\n)+)",
+        r"##\s*3\.\s*Scalability[\s\S]*?\| worker_n [^\n]*\n((?:\|[^\n]*\n)+)",
         md_text,
-        re.DOTALL,
     )
     if not m:
         raise RuntimeError("scalability 表未找到")
