@@ -159,7 +159,7 @@
 |---|---|---|
 | 图5.1 | 吞吐与 worker 数线性扩展 | scalability 实验 |
 | 图5.2 | poll_ms 参数消融 | poll_ms scan 实验 |
-| 图5.3 | WAL on/off 吞吐对比 | WAL 对比实验 |
+| 图5.3 | 事件总线 publish 吞吐 vs subscriber 数 | 事件总线纯压测 |
 | 图5.4 | 任务派发延迟分布（小提琴图）| latency 实验 500 样本 |
 | 图5.5 | 跨节点事件流延迟分布 | latency 实验 |
 | 图5.6 | 端到端延迟分解柱状图 | 把 (2-1) 各分量实测拆出来 |
@@ -184,7 +184,7 @@
 | 表5.2 | 分布式任务吞吐量测试结果 | 5.3 |
 | 表5.3 | 任务派发与事件流延迟 | 5.4 |
 | 表5.4 | poll_ms 扫描结果 | 5.5 |
-| 表5.5 | WAL on/off 对比 | 5.6 |
+| 表5.5 | 事件总线纯压测吞吐与延迟 | 5.6 |
 
 ---
 
@@ -203,12 +203,19 @@
 - 输出：`docs/benchmarks/poll-scan-2026-05-07.md`
 - 估时：~30 min 跑 + 1h 画图分析
 
-### 7.3 WAL on/off 对比
+### 7.3 事件总线纯压测（替代原 WAL on/off）
 
-- 设计：分两组——SQLite 默认 WAL vs `journal_mode=DELETE`；其余条件相同
-- 实现：在 `fuxi-events` 加 feature flag 或运行时开关；如果改太大就用 env var `FUXI_EVENT_NO_WAL=1`
-- 输出：`docs/benchmarks/wal-compare-2026-05-07.md`
-- 估时：~2h 改代码 + 30 min 跑
+- **动机**：现有 e2e baseline 把通信层性能埋在 agent dispatch 开销下；论文题目"高性能分布式通讯"必须**单独**测通信层。同时为公式 (3-1) 给的延迟下界提供实测兑现。
+- 设计：
+  - 单 publisher 直调 `EventBus::publish`，N 个 subscriber 各自 `subscribe()` 接收
+  - 维度 1：N ∈ {1, 4, 16, 64} subscriber，看延迟 + 吞吐随订阅者数的衰减
+  - 维度 2：发送速率从 1k/s 提到 100k/s，看 broadcast 何时开始丢帧（`RecvError::Lagged`）
+  - 维度 3：事件 payload size ∈ {小（< 256B EventKind 简单变体）, 大（含 4KB AssistantText）}
+- 实现：新建 `crates/fuxi-events/benches/bus_stress.rs`（与现有 dist_bench_common 解耦，纯进程内 channel 测试，不走 HTTP）
+- 输出：`docs/benchmarks/eventbus-stress-2026-05-07.md`
+- 估时：~1h 写 bench + 30 min 跑
+
+WAL 设计动机在 §3.3 用 1-2 段散文交代即可，不另开实验。
 
 ### 7.4 Scalability 1/2/4/8/16 worker
 
@@ -291,7 +298,7 @@ deliverables/thesis-v2/
 | 风险 | 概率 | 对策 |
 |---|---|---|
 | 找不到 25 篇都通过 search 验证 | 中 | 桶分布留 30 篇缓冲；中文期刊也接受；实在不够就找学位论文（CNKI）补 |
-| WAL on/off 实现改动大 | 中 | 优先 env var 开关，不行就放弃这项实验，改测「sync vs async commit」 |
+| 事件总线压测出现 broadcast lag 频繁丢帧 | 中 | lag 本身就是发现——把"系统在 X events/s 开始丢帧"当结果而不是 bug |
 | 第 5 章实验图风格不一致 | 中 | 所有 matplotlib 图共用一个 `style.py`，统一 rc params |
 | draft 与 refs 路时序错位（写到引用时还没验完） | 高 | refs 路按桶 A→B→C→D→E 排序，A/B 桶（绪论用得最多）优先验证 |
 | docx 导出后学校格式偏差 | 高 | 接受——专门写 `format-checklist.md` 让用户手调，不强求 pandoc 完美 |
