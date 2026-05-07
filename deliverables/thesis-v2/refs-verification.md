@@ -111,3 +111,45 @@
 - 验证 URL：https://arxiv.org/abs/2407.16741
 - 验证证据：arxiv 标题与候选完全一致；citation_date 2024/07/23。OpenHands 即原 OpenDevin，是伏羲门客架构的对照组。
 - 引用位置预估：§1.2 国内外现状（软件工程 agent 平台）；§5 实验对比基线（如有）
+
+## C 桶：Agent 通信协议与编排（5 篇）
+
+### C.1 [anthropic2024mcp]
+- 标题：Introducing the Model Context Protocol
+- 作者：Anthropic
+- 发布：2024-11-25 Anthropic News；规范站点 https://modelcontextprotocol.io
+- 验证 URL（公告原文）：https://www.anthropic.com/news/model-context-protocol
+- 验证 URL（规范站点）：https://modelcontextprotocol.io/
+- 验证证据：WebFetch modelcontextprotocol.io 返回页面正文「MCP (Model Context Protocol) is an open-source standard for connecting AI applications to external systems.」WebSearch 命中 Anthropic 官方公告页 + Wikipedia 条目，公告日期 2024-11-25 一致。MCP 是伏羲门客调用工具的可选适配层（伏羲核心仍坚持 CLI 直 shell，MCP 作为对照协议引述）。
+- 引用位置预估：§2.4 agent 通信协议对比；§3.4 工具调用协议选型论证
+
+### C.2 [a2aproject2025a2a]
+- 标题：Agent2Agent (A2A) Protocol Specification
+- 维护：A2A Project（开源，Google 主导，Linux Foundation 托管）
+- 验证 URL：https://github.com/a2aproject/A2A
+- 验证证据：WebFetch GitHub 仓页返回 README 描述「An open protocol enabling communication and interoperability between opaque agentic applications.」与候选完全一致。仓库 license Apache 2.0。伏羲 fuxi-a2a crate 即实现该协议子集。
+- 引用位置预估：§2.4 agent 通信协议；§3.3 fuxi-a2a 实现章节
+
+### C.3 [karpas2022mrkl]
+- 标题：MRKL Systems: A Modular, Neuro-Symbolic Architecture That Combines Large Language Models, External Knowledge Sources and Discrete Reasoning
+- 作者：Karpas Ehud, Abend Omri, Belinkov Yonatan 等（AI21 Labs）
+- 平台：arXiv:2205.00445，2022-05-01 提交
+- 验证 URL：https://arxiv.org/abs/2205.00445
+- 验证证据：arxiv 标题与候选清单一致，citation_author 头三位 Karpas/Abend/Belinkov 与候选清单完全对齐。MRKL 是「LLM + 外部模块」的早期奠基论文。
+- 引用位置预估：§2.3 LLM 调外部工具的早期范式
+
+### C.4 [yang2024sweagent]
+- 标题：SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering
+- 作者：Yang John, Jimenez Carlos E., Wettig Alexander, Lieret Kilian, Yao Shunyu, Narasimhan Karthik, Press Ofir（Princeton）
+- 平台：arXiv:2405.15793，2024-05-24 提交；NeurIPS 2024 接收
+- 验证 URL：https://arxiv.org/abs/2405.15793
+- 验证证据：arxiv 标题完全一致，作者列表完全对齐候选清单。Agent-Computer Interface (ACI) 概念与伏羲门客 CLI 接口设计同源思路。
+- 引用位置预估：§2.4 软件工程 agent；§3.4 ACI 设计借鉴
+
+### C.5 [significantgravitas2023autogpt]
+- 标题：AutoGPT 仓库
+- 维护：Significant-Gravitas（创始人 Toran Bruce Richards）
+- 首次发布：2023-03-30
+- 验证 URL：https://github.com/Significant-Gravitas/AutoGPT
+- 验证证据：WebFetch 仓页返回 description「AutoGPT is the vision of accessible AI for everyone, to use and to build on.」WebSearch + Wikipedia 一致：「AutoGPT was released on March 30, 2023, by Toran Bruce Richards」。仓库当前活跃，最新 release autogpt-platform-beta-v0.6.58 (2026-04-29)。
+- 引用位置预估：§1.2 国内外现状（早期 LLM agent 标杆开源项目）
