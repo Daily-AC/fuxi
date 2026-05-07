@@ -1,0 +1,95 @@
+// 图 3.1 模块依赖关系 — crate 之间的 use 依赖 DAG
+digraph fuxi_deps {
+  graph [
+    rankdir=BT,
+    bgcolor="white",
+    fontname="PingFang SC",
+    fontsize=11,
+    splines=spline,
+    nodesep=0.4,
+    ranksep=0.7,
+    pad=0.3,
+    margin=0.2
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="PingFang SC",
+    fontsize=12,
+    color="#9aa5b4",
+    fillcolor="#f4f6fa",
+    penwidth=1.0,
+    margin="0.18,0.10"
+  ];
+  edge [
+    color="#7a8699",
+    arrowsize=0.7,
+    penwidth=0.9
+  ];
+
+  // 第 0 层 · 核心
+  core   [label="fuxi-core",          fillcolor="#f1ecf7"];
+
+  // 第 1 层 · 基础设施
+  events [label="fuxi-events",        fillcolor="#fbeaea"];
+  a2a    [label="fuxi-a2a",           fillcolor="#fbeaea"];
+
+  // 第 2 层 · 执行 / 编排基础
+  ws     [label="fuxi-workspace",     fillcolor="#eaf4ee"];
+  cc     [label="fuxi-agent-cc",      fillcolor="#eaf4ee"];
+  codex  [label="fuxi-agent-codex",   fillcolor="#eaf4ee"];
+
+  // 第 3 层 · 编排与支撑
+  orch   [label="fuxi-orchestrator",  fillcolor="#fef4e6"];
+  mem    [label="fuxi-memory",        fillcolor="#fdf6e3"];
+  skill  [label="fuxi-skills",        fillcolor="#fdf6e3"];
+  sched  [label="fuxi-scheduler",     fillcolor="#fdf6e3"];
+
+  // 第 4 层 · 观测
+  fh     [label="fuxi-firehose",      fillcolor="#eef3fb"];
+  im     [label="fuxi-im",            fillcolor="#eef3fb"];
+
+  // 第 5 层 · 入口
+  cli    [label="fuxi-cli",           fillcolor="#fdecf2"];
+
+  // 1 -> 0
+  events -> core;
+  a2a    -> core;
+
+  // 2 -> 0/1
+  ws     -> core;
+  cc     -> core;
+  cc     -> events;
+  codex  -> core;
+  codex  -> events;
+
+  // 3 -> 0/1/2
+  orch   -> core;
+  orch   -> events;
+  orch   -> a2a;
+  orch   -> cc;
+  orch   -> codex;
+  orch   -> ws;
+  mem    -> core;
+  skill  -> core;
+  sched  -> core;
+
+  // 4 -> 1/3
+  fh     -> events;
+  im     -> events;
+  im     -> orch;
+
+  // 5 -> 全部
+  cli    -> orch;
+  cli    -> fh;
+  cli    -> im;
+  cli    -> mem;
+  cli    -> skill;
+  cli    -> sched;
+
+  // 同层对齐
+  { rank=same; events; a2a; }
+  { rank=same; ws; cc; codex; }
+  { rank=same; orch; mem; skill; sched; }
+  { rank=same; fh; im; }
+}
