@@ -151,7 +151,7 @@ L_{evt} \geq \max_{i \in \mathcal{S}} \left( T_{\text{serialize}} + T_{\text{bro
 \label{eq:evt-latency}
 \end{equation}
 
-式~\eqref{eq:evt-latency} 中 $\mathcal{S}$ 为订阅者集合，$T_{\text{serialize}}$ 为事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 为 channel 内部分发耗时，$T_{\text{consume},i}$ 为第 $i$ 个订阅者的消费耗时。该不等式表明，端到端延迟受最慢订阅者制约。伏羲采取的应对策略是：广播路径上设置 lag 容忍阈值（默认 256 条），超过则丢弃该订阅者的旧事件并发出 \texttt{RecvError::Lagged}——业务侧的全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
+式~\eqref{eq:evt-latency} 中 $\mathcal{S}$ 为订阅者集合，$T_{\text{serialize}}$ 为事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 为 channel 内部分发耗时，$T_{\text{consume},i}$ 为第 $i$ 个订阅者的消费耗时。该不等式表明，端到端延迟受最慢订阅者制约。伏羲采取的应对策略是：广播路径上设置 lag 容忍阈值（默认 512 条，对应 \texttt{crates/fuxi-events/src/bus.rs:41} 的 \texttt{Config::default}），超过则丢弃该订阅者的旧事件并发出 \texttt{RecvError::Lagged}——业务侧的全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
 
 事件之间的因果序遵循 Lamport 提出的逻辑时钟模型~\parencite{lamport1978time}。伏羲在每条事件的 \texttt{meta} 字段中记录 Agent ID、Task ID、墙钟时间戳与 SQLite \texttt{rowid}（单调递增），订阅者在需要重建因果链时用 \texttt{rowid} 排序，跨节点场景下远端事件回传到主节点时也以主节点 \texttt{rowid} 重排，保证最终订阅顺序的可读性。这避免了引入 Lamport 时钟或向量时钟所需的时钟同步基础设施。
 
@@ -159,7 +159,7 @@ L_{evt} \geq \max_{i \in \mathcal{S}} \left( T_{\text{serialize}} + T_{\text{bro
 
 历史回放是事件溯源模型的关键能力。\texttt{EventBus::replay(cursor, live\_tail)} 接受一个 \texttt{ReplayCursor}（可以是 \texttt{Beginning}、\texttt{FromId(uuid)} 或 \texttt{FromTime(ts)}），先从 SQLite 拉历史流，若 \texttt{live\_tail = true} 则在历史流末尾无缝拼接 broadcast 实时流。实现上必须先订阅 broadcast 再开始拉历史——反过来会留出窗口，期间产生的事件既未入历史快照、也未被订阅者收到，形成漏接。这条「先 subscribe 后 query」的顺序看似细节，却是回放正确性的关键。
 
-回放还有一处 SQLite 工程细节值得记录：\texttt{:memory:} 数据库在多连接场景下每条连接独立持有一份内存库，写入后从其他连接读不到。伏羲在单元测试中用 \texttt{:memory:} 库时强制 \texttt{max\_connections = 1}，生产环境用文件库不受此限。WAL 模式下高并发偶发 \texttt{SQLITE\_BUSY}，伏羲通过 \texttt{busy\_timeout=5s} 加三次指数退避（50ms / 100ms / 200ms）封装在 \texttt{EventStore::append} 内部，外层调用方完全感知不到这层重试。这些工程细节不构成论文的核心贡献，但它们是「事件总线在生产环境下不丢消息」承诺的具体兑现。整个 \texttt{fuxi-events} crate 共 1673 行（其中 \texttt{store.rs} 1024、\texttt{bus.rs} 649），是伏羲所有 crate 中代码与功能比最高的之一——从一个外观简单的 \texttt{publish/subscribe/replay} 接口背后挖出的工程取舍，构成了本节的主线。
+回放还有一处 SQLite 工程细节值得记录：\texttt{:memory:} 数据库在多连接场景下每条连接独立持有一份内存库，写入后从其他连接读不到。伏羲在单元测试中用 \texttt{:memory:} 库时强制 \texttt{max\_connections = 1}，生产环境用文件库不受此限。WAL 模式下高并发偶发 \texttt{SQLITE\_BUSY}，伏羲通过 \texttt{busy\_timeout=5s} 加三次线性退避（50ms / 100ms / 150ms，对应 \texttt{crates/fuxi-events/src/store.rs:124} 的 \texttt{50\_u64.saturating\_mul(attempt)}）封装在 \texttt{EventStore::append} 内部，外层调用方完全感知不到这层重试。这些工程细节不构成论文的核心贡献，但它们是「事件总线在生产环境下不丢消息」承诺的具体兑现。整个 \texttt{fuxi-events} crate 共 1673 行（其中 \texttt{store.rs} 1024、\texttt{bus.rs} 649），是伏羲所有 crate 中代码与功能比最高的之一——从一个外观简单的 \texttt{publish/subscribe/replay} 接口背后挖出的工程取舍，构成了本节的主线。
 
 \subsection{编排与任务调度模块}
 \label{subsec:orchestrator}

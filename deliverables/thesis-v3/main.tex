@@ -66,8 +66,8 @@
 % 学校样例：(2-1) (3-2) — section.equation 但用横杠
 % amsmath 提前到这里加载，因为 \numberwithin 来自 amsmath
 \usepackage{amsmath, amssymb, amsthm, mathtools}
-\renewcommand{\theequation}{\thesection-\arabic{equation}}
-\numberwithin{equation}{section}
+\numberwithin{equation}{section}                       % 先 numberwithin（重置 \theequation 格式）
+\renewcommand{\theequation}{\thesection-\arabic{equation}}  % 再 renewcommand 把分隔符改成横杠
 
 % ── 8. 图表标题（学校硬要求：图 N.M 描述 / 表 N.M 描述）
 \usepackage{caption}
