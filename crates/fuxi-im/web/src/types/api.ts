@@ -220,6 +220,25 @@ export interface NotificationsResponse {
 // ---------- v1-session17 task #9 · 「更多」hub 三个新页 ----------
 
 /** 单条策府事实（/api/memory）。 */
+/** v1-session19 · 河图洛书 insight wire 形（仓颉抽出的可迁移模式）。 */
+export interface HetuPatternView {
+  id: string;
+  role: string;
+  task_type: string;
+  pattern: string;
+  confidence: number;
+  created_at: string;
+}
+
+/** v1-session19 · 用户身份卡 wire 形（fuxi profile set / 仓颉自动）。 */
+export interface UserProfileView {
+  id: string;
+  key: string;
+  value: string;
+  source: string;
+  updated_at: string;
+}
+
 export interface MemoryFactView {
   id: string;
   subject: string;
@@ -241,6 +260,12 @@ export interface MemorySubjectGroup {
 export interface MemoryResponse {
   groups: MemorySubjectGroup[];
   total: number;
+  /** v1-session19 · 河图洛书 insights 列表（仓颉抽出的可迁移模式）。
+   *  老 wire 不带这字段——前端用 `?? []` 兼容。 */
+  insights?: HetuPatternView[];
+  /** v1-session19 · 用户身份卡（fuxi profile set / cangjie 抽）。
+   *  老 wire 不带这字段——前端用 `?? []` 兼容。 */
+  user_profile?: UserProfileView[];
 }
 
 /** 单张角色卡（/api/roles）。 */
