@@ -355,6 +355,15 @@ pub async fn run(args: StartArgs) -> Result<()> {
     let oracle = OracleStore::connect_file(&events_db_path)
         .await
         .with_context(|| format!("打开策府 SQLite {}", events_db_path.display()))?;
+    // v1-session19 · /api/memory 接 3 层（oracle 之外加 hetu_patterns + user_profile）
+    // ——之前只读 oracle 的话用户记忆页全是 session_id 噪音，hetu insight 真知识
+    // 显不出来。三库同 events.db，clone 廉价（sqlx Pool 内 Arc）。
+    let hetu_for_state = fuxi_memory::HetuStore::connect_file(&events_db_path)
+        .await
+        .with_context(|| format!("打开河图洛书 SQLite {}", events_db_path.display()))?;
+    let user_profile_store = fuxi_memory::UserProfileStore::connect_file(&events_db_path)
+        .await
+        .with_context(|| format!("打开 user_profile SQLite {}", events_db_path.display()))?;
     let roles_root = std::env::var_os("FUXI_ROLES_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -372,6 +381,8 @@ pub async fn run(args: StartArgs) -> Result<()> {
         .with_dist_secrets(dist_secrets)
         .with_notifications(notification_store)
         .with_oracle(oracle.clone())
+        .with_hetu(hetu_for_state)
+        .with_user_profile_store(user_profile_store)
         .with_triggers(sched_store.clone())
         .with_roles_root(roles_root);
     let app_state = match project_registry {

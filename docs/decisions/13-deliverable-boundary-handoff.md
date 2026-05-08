@@ -65,3 +65,30 @@
 - 40 分清单（B 路第 2 件实质内容，写在 `project_fuxi_b_path_vision` memory）
 - cc 的 teammate idle notification（`useTeammateShutdownNotification.ts`）类似机制
   的参照——cc 也是 pull on demand + 关键时主动 nudge
+
+---
+
+## v2 修正（2026-05-09 · issue a58e45b4）
+
+**实测盲点**：玄女上报「鲁班调研做完没跑 `_fuxi:request_review` sentinel」
+导致她蒙在鼓里——必须用户主动喊「门客已经完成了」才回过神去 `fuxi list`。
+
+根因 = Decision 13「TaskDone 默认 silent」语义在门客**忘**跑 sentinel 时
+让玄女完全失声。AgentRequestReview 是首选，但**不该是唯一**触发玄女
+attention 的路径。
+
+**修正**：bridge 在 `TaskStateChanged{Done}` 时若 worker != xuannv 且 role
+非 internal（extractor 等），给玄女注 `[TASK_DONE]` 系统消息——明示
+「门客 X 完成 task Y，没主动 sentinel，请 fuxi status 看产物」。
+
+跟 AgentRequestReview 路径并存（同 task 可能两条玄女消息）：origin 不同
+（`review_request` vs `task_done`）+ 内容措辞不同，**redundancy 优于
+失声**。dedupe 需要 task_id 状态机，未来再说。
+
+代码：`crates/fuxi-orchestrator/src/bridge.rs::handle_event` TaskStateChanged
+分支 + `build_task_done_prompt`。反回归测试 4 条覆盖 worker / xuannv-self /
+internal-role / Cancelled-不触发 四象限。
+
+**v1 精神保留**：中间过程（AgentResponded / ToolCalled）仍 silent；
+deliverable nudge 仍是首选；玄女 attention budget 仍主要花在 review。
+v2 加的只是**终态兜底**——一次额外注入，不是中间过程的洪水。
