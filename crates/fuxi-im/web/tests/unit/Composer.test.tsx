@@ -140,6 +140,44 @@ describe("Composer", () => {
     unmount();
   });
 
+  // v1-session19 #1 · 粘贴自动附件 ——
+  it("粘贴含 file 的剪贴板 → 自动起 chip", () => {
+    setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { getByTestId, queryAllByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Composer onSubmit={onSubmit} />
+      </ApiProvider>
+    ));
+    const input = getByTestId("composer-input") as HTMLTextAreaElement;
+    const evt = new Event("paste", { bubbles: true, cancelable: true }) as Event & {
+      clipboardData: { files: File[] };
+    };
+    evt.clipboardData = { files: [makeFile("Screenshot.png", "image/png", 100)] };
+    input.dispatchEvent(evt);
+    expect(queryAllByTestId(/^composer-chip-c-/)).toHaveLength(1);
+    expect(queryAllByTestId(/^composer-chip-c-/)[0]?.textContent).toContain("Screenshot.png");
+    unmount();
+  });
+
+  it("粘贴纯文本 · 不当附件", () => {
+    setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { getByTestId, queryAllByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Composer onSubmit={onSubmit} />
+      </ApiProvider>
+    ));
+    const input = getByTestId("composer-input") as HTMLTextAreaElement;
+    const evt = new Event("paste", { bubbles: true, cancelable: true }) as Event & {
+      clipboardData: { files: File[] };
+    };
+    evt.clipboardData = { files: [] };
+    input.dispatchEvent(evt);
+    expect(queryAllByTestId(/^composer-chip-c-/)).toHaveLength(0);
+    unmount();
+  });
+
   it("chip × 按钮 · 移除附件后按钮回 disabled（无 text 无 chip）", async () => {
     setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

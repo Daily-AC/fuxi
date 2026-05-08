@@ -208,10 +208,10 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
     }
   };
 
-  const onFilesPicked = (e: Event): void => {
-    const target = e.target as HTMLInputElement;
-    const files = target.files;
-    if (!files) return;
+  /** 把 N 个 File 推进 attachChips 并发上传。文件选择 / 粘贴 / 拖拽 三处共用。
+   *  v1-session19 #1 抽出成纯函数：原来只有 input[type=file] 一条路径。 */
+  const addFiles = (files: FileList | File[]): void => {
+    if (!files || files.length === 0) return;
     const fresh: AttachChip[] = [];
     for (let i = 0; i < files.length; i += 1) {
       const f = files[i];
@@ -224,10 +224,35 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
         controller: new AbortController(),
       });
     }
+    if (fresh.length === 0) return;
     setAttachChips([...attachChips(), ...fresh]);
-    target.value = ""; // 允许相同文件再次选
     // 并发上传所有新 chip · 不 await（不阻塞 UI）
     for (const c of fresh) void startUploadFor(c);
+  };
+
+  const onFilesPicked = (e: Event): void => {
+    const target = e.target as HTMLInputElement;
+    const files = target.files;
+    if (!files) return;
+    addFiles(files);
+    target.value = ""; // 允许相同文件再次选
+  };
+
+  /** v1-session19 #1 · 粘贴自动附件 ——
+   *  Cmd/Ctrl+V 含图片或文件时拦截 default（避免把二进制乱码塞进 textarea），
+   *  调 addFiles 走同一上传管线。clipboardData.files 在 Chromium / Safari /
+   *  Firefox 都给 FileList——含截图、Finder 复制的文件、ARC 浏览器 drag-and-drop
+   *  emulation 等多种场景。纯文本粘贴不动（让 textarea 默认行为接管）。
+   *
+   *  WHY 不直接 set textarea value：粘贴的图片如果不调用 preventDefault，浏览器会把
+   *  二进制当文本贴进去显示成乱码，用户体验糟糕。 */
+  const onPaste = (e: ClipboardEvent): void => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const files = cd.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    addFiles(files);
   };
 
   const removeAttach = (cid: string): void => {
@@ -478,6 +503,7 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
           onCompositionStart={onCompositionStart}
           onCompositionEnd={onCompositionEnd}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           autocomplete="off"
         />
         <button

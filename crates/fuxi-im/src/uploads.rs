@@ -63,6 +63,30 @@ pub struct UploadRecord {
     pub owner_device: Option<String>,
 }
 
+/// 附件元数据 wire 形（v1-session19 #2）—— UploadRecord 去掉 path / created_at /
+/// owner_device 等内部字段，让 conv messages handler hydrate 给前端。前端
+/// `Upload` interface 字段就是这五个。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadDigest {
+    pub id: String,
+    pub name: Option<String>,
+    pub mime: Option<String>,
+    pub bytes: i64,
+    pub sha256: String,
+}
+
+impl From<UploadRecord> for UploadDigest {
+    fn from(r: UploadRecord) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            mime: r.mime,
+            bytes: r.bytes,
+            sha256: r.sha256,
+        }
+    }
+}
+
 /// 包装 SqlitePool + 上传根目录。
 #[derive(Clone)]
 pub struct UploadStore {

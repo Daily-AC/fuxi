@@ -14,6 +14,19 @@ use crate::error::{Error, Result};
 use crate::state::AppState;
 use fuxi_memory::OracleFact;
 
+/// v1-session19 #3 · 基础设施 predicate 过滤名单。
+///
+/// OracleStore 同时承载两类事实：
+/// - **基础设施**：cc resume `session_id`、worktree 路径分配等内部 bookkeeping。
+///   这些是子系统按 task/role 注入的运行态，没有"用户语义"——前端展示纯噪音
+///   （uuid 组合显示成 hash 一片）。
+/// - **用户级事实**：身份卡 / 偏好 / 项目知识 等，是 PWA「记忆」页用户**真想看**
+///   的内容。
+///
+/// `/api/memory` 只露用户级，过掉这里列的 predicate。新增基础设施类 predicate
+/// 请加到这里，反之新增的用户级事实**不要**碰这个 list。
+const INFRA_PREDICATES: &[&str] = &["session_id", "worktree"];
+
 /// 单条事实的前端视图——用扁平 string subject/predicate/object，不抛 uuid。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryFactView {
@@ -69,11 +82,18 @@ pub async fn list(
         .oracle
         .as_ref()
         .ok_or_else(|| Error::Unavailable("策府未注入".into()))?;
-    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    let facts = oracle
-        .list_active(limit)
+    // v1-session19 #3：infra predicate 过完后才到的"用户级"事实可能远小于 limit，
+    // 多拉一些再过——避免 limit=200 拉到 200 条全 session_id 噪音、过完空集骗用户
+    // "策府空着"。1k 上限够覆盖现实量级。
+    let store_limit = q.limit.unwrap_or(200).clamp(1, 1000).max(1000);
+    let facts: Vec<OracleFact> = oracle
+        .list_active(store_limit)
         .await
-        .map_err(|e| Error::Internal(format!("oracle list_active: {e}")))?;
+        .map_err(|e| Error::Internal(format!("oracle list_active: {e}")))?
+        .into_iter()
+        .filter(|f| !INFRA_PREDICATES.contains(&f.predicate.as_str()))
+        .take(q.limit.unwrap_or(200).clamp(1, 1000) as usize)
+        .collect();
     let total = facts.len() as i64;
 
     // group by subject 保留 updated_at desc 的全局顺序（先到的 subject 先建组），
@@ -163,14 +183,17 @@ mod tests {
     #[tokio::test]
     async fn list_excludes_superseded_facts() {
         let (_dir, app, oracle) = build_app().await;
+        // 用 user-level predicate "prefers" 而不是基础设施 "session_id"——
+        // v1-session19 #3 起 INFRA_PREDICATES 把 session_id 过掉，会让本测的 "test
+        // 覆盖 supersede 机制" 同时被 INFRA filter 误盖。
         let stale = oracle
-            .insert(NewFact::new("xuannv", "session_id", "old"))
+            .insert(NewFact::new("user", "prefers", "old-coffee"))
             .await
             .unwrap();
         oracle
             .supersede(
                 stale.id,
-                NewFact::new("xuannv", "session_id", "new").with_source("agent"),
+                NewFact::new("user", "prefers", "new-coffee").with_source("agent"),
             )
             .await
             .unwrap();
@@ -187,7 +210,50 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
         let body: MemoryResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.total, 1);
-        assert_eq!(body.groups[0].facts[0].object, "new");
+        assert_eq!(body.groups[0].facts[0].object, "new-coffee");
+    }
+
+    /// v1-session19 #3 反回归 —— infra predicate（session_id / worktree）不进 wire。
+    /// 用户实测：home 上 583 条 oracle_facts 全是这俩 predicate，PWA 记忆页满屏 uuid
+    /// 看着像 hash。预期：filter 掉这俩，只露用户级事实。
+    #[tokio::test]
+    async fn list_filters_out_infra_predicates() {
+        let (_dir, app, oracle) = build_app().await;
+        // 灌一堆 infra noise
+        oracle
+            .insert(NewFact::new("xuannv", "session_id", "abc-123"))
+            .await
+            .unwrap();
+        oracle
+            .insert(NewFact::new("task-foo", "session_id", "def-456"))
+            .await
+            .unwrap();
+        oracle
+            .insert(NewFact::new("role-luban", "worktree", "/path/to/sandbox"))
+            .await
+            .unwrap();
+        // 灌一条用户级事实
+        oracle
+            .insert(NewFact::new("user", "prefers", "冰美式"))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+        let body: MemoryResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.total, 1, "infra predicate 应过掉，只剩 1 条用户级");
+        assert_eq!(body.groups.len(), 1);
+        assert_eq!(body.groups[0].subject, "user");
+        assert_eq!(body.groups[0].facts[0].predicate, "prefers");
     }
 
     #[tokio::test]

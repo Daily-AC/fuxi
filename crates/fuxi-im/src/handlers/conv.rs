@@ -102,14 +102,67 @@ pub async fn messages(
     let scope = q.conv.as_deref().unwrap_or(SCOPE_XUANNV);
     let conv_id = store.ensure_scope(scope, None).await?;
     let limit = q.limit.unwrap_or(50);
-    let (messages, has_more, oldest) = store
+    let (mut messages, has_more, oldest) = store
         .page_messages(&conv_id, limit, q.before.as_deref())
         .await?;
+    // v1-session19 #2 · hydrate 附件元数据 — 让前端历史回放显真名而非 uuid。
+    // upload_store 缺时（少数 smoke 路径）跳过：前端 fallback uploadsFromIds(id 当 name)
+    // 不致命，只是显示退化。
+    if let Some(upload_store) = state.upload_store.as_ref() {
+        hydrate_attachments(&mut messages, upload_store).await;
+    }
     Ok(Json(MessagesResponse {
         messages,
         has_more,
         oldest,
     }))
+}
+
+/// 把 messages 里 attachments JSON 数组中的 id 批量 lookup upload_store，
+/// 填到 message.attachment_uploads。lookup 失败的 id 静默跳过（前端 fallback）。
+async fn hydrate_attachments(messages: &mut [Message], upload_store: &crate::uploads::UploadStore) {
+    use std::collections::{BTreeSet, HashMap};
+    let mut all_ids: BTreeSet<String> = BTreeSet::new();
+    for m in messages.iter() {
+        let Some(att) = &m.attachments else {
+            continue;
+        };
+        let Some(arr) = att.as_array() else { continue };
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                all_ids.insert(s.to_string());
+            }
+        }
+    }
+    if all_ids.is_empty() {
+        return;
+    }
+    let mut by_id: HashMap<String, crate::uploads::UploadDigest> =
+        HashMap::with_capacity(all_ids.len());
+    for id in &all_ids {
+        match upload_store.get(id).await {
+            Ok(Some(rec)) => {
+                by_id.insert(id.clone(), rec.into());
+            }
+            Ok(None) => {
+                // 已删除 / 异常 id — 前端 fallback 显 id 当 name
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, id = %id, "hydrate_attachments: upload lookup 失败");
+            }
+        }
+    }
+    for m in messages.iter_mut() {
+        let Some(att) = &m.attachments else { continue };
+        let Some(arr) = att.as_array() else { continue };
+        for v in arr {
+            if let Some(s) = v.as_str()
+                && let Some(d) = by_id.get(s)
+            {
+                m.attachment_uploads.push(d.clone());
+            }
+        }
+    }
 }
 
 /// `WS /api/tasks/{id}/stream` —— 单任务事件流。
@@ -270,6 +323,110 @@ mod tests {
         let msgs = parsed["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2, "更早只剩 2 条");
         assert_eq!(parsed["has_more"], false);
+    }
+
+    /// v1-session19 #2 · hydrate 附件元数据测试 —— 老消息 attachments 是 ID 数组，
+    /// handler 应批量 lookup upload_store 填 attachment_uploads，让前端拿真名。
+    #[tokio::test]
+    async fn hydrates_attachment_uploads_from_upload_store() {
+        use crate::uploads::UploadStore;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let pool = init_at(&dir.path().join("im.db")).await.expect("init");
+        let conv = ConvStore::new(pool.clone());
+        let upload_store = UploadStore::new(pool, dir.path().join("im_uploads"));
+
+        // 灌一条已上传的文件，拿 id
+        let rec = upload_store
+            .put(b"hello", Some("Screenshot.png"), Some("image/png"), None)
+            .await
+            .expect("put");
+
+        // 写一条 user text 消息，attachments 携 [rec.id]
+        let conv_id = conv.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        conv.append_message(
+            &conv_id,
+            "user",
+            None,
+            "text",
+            &serde_json::json!({"text": "看图"}),
+            Some(&serde_json::json!([rec.id])),
+            None,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let (_ws_dir, ws) = make_workspace().await;
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let state = AppState::new(fuxi)
+            .with_conv_store(conv)
+            .with_upload_store(upload_store);
+        let app = Router::new()
+            .route("/api/conv/messages", axum_get(super::messages))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(req("/api/conv/messages?conv=xuannv&limit=20"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let msgs = parsed["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        let m = &msgs[0];
+        // 老的 attachments 仍是 string[] (id 列表)，新的 attachment_uploads 含真名
+        let atts = m["attachments"].as_array().unwrap();
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].as_str().unwrap(), rec.id);
+        let hydrated = m["attachment_uploads"].as_array().unwrap();
+        assert_eq!(hydrated.len(), 1, "应 hydrate 出 1 条 upload meta");
+        assert_eq!(hydrated[0]["id"].as_str().unwrap(), rec.id);
+        assert_eq!(
+            hydrated[0]["name"].as_str().unwrap(),
+            "Screenshot.png",
+            "name 应是原始文件名而非 uuid"
+        );
+        assert_eq!(hydrated[0]["mime"].as_str().unwrap(), "image/png");
+    }
+
+    /// 没注入 upload_store 时 handler 不报错，attachment_uploads 字段缺失（前端 fallback）。
+    #[tokio::test]
+    async fn no_upload_store_skips_hydration_gracefully() {
+        let (_dir, app, store) = build_app().await;
+        let conv_id = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        store
+            .append_message(
+                &conv_id,
+                "user",
+                None,
+                "text",
+                &serde_json::json!({"text": "hi"}),
+                Some(&serde_json::json!(["fake-id"])),
+                None,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(req("/api/conv/messages?conv=xuannv&limit=20"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let m = &parsed["messages"].as_array().unwrap()[0];
+        // 没 hydrate → 字段省略（serde skip_serializing_if Vec::is_empty）
+        assert!(
+            m.get("attachment_uploads").is_none()
+                || m["attachment_uploads"]
+                    .as_array()
+                    .map(|a| a.is_empty())
+                    .unwrap_or(true),
+            "无 upload_store 时应不带 attachment_uploads 或空数组"
+        );
     }
 
     #[tokio::test]

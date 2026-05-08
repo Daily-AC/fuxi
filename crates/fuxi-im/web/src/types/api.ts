@@ -15,6 +15,10 @@ export interface StoredMessage {
   /** 按 kind 分支：text → string；file → { caption?: string }；其余阶段 4 再扩。*/
   content: unknown;
   attachments?: string[];
+  /** v1-session19 #2 · 服务端 hydrate 的附件元数据（含真实文件名）。后端 conv
+   *  handler 在 page_messages 后批量 lookup upload_store 填上；前端展示历史
+   *  附件时优先用这个，缺时 fallback uploadsFromIds（id 当 name，老兼容）。*/
+  attachment_uploads?: Upload[];
   source_event_id?: string | null;
   ts: string;
   task?: TaskId | null;
