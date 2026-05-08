@@ -36,6 +36,7 @@ pub mod im_dist;
 pub mod insight_cmd;
 pub mod insight_extractor_hook;
 pub mod ipc;
+pub mod issue_cmd;
 pub mod l2_gc;
 pub mod markdown;
 pub mod memory_cmd;
