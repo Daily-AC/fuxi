@@ -453,10 +453,15 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 // β · #17 conv_store sync hook —— 玄女上线后立刻订 EventBus 翻消息进 messages 表。
                 // `spawn_xuannv_sync` 是 async 函数，**返回前**完成 ensure_scope + subscribe，
                 // 这样玄女后续任何 publish 都不会丢。
+                //
+                // 传 watch 而不是静态 id：handoff 后 ensure_xuannv 会 spawn 新副本并
+                // `set_xuannv(new_id)`，watch::Receiver 立刻看到新值，sync task
+                // 用新 id 过滤新副本事件——不切 watch 的话新副本发言全部 drop（
+                // bug "handoff 后新玄女副本发言不进 PWA IM 历史"）。
                 let h = fuxi_im::conv_store::spawn_xuannv_sync(
                     Arc::new(conv_store.clone()),
                     bus.clone(),
-                    id,
+                    fuxi.xuannv_id_watch(),
                 )
                 .await;
 
