@@ -179,6 +179,32 @@ export interface NotificationView {
   created_at: string;
   read_at?: string | null;
   closed_at?: string | null;
+  /** issue 工作流状态（v1-session19）：'open' / 'awaiting_test' / 'closed'。 */
+  status?: IssueStatus;
+  /** Claude push 的 fix commit 列表，PWA 详情页可点跳 GitHub。 */
+  fix_refs?: FixRef[];
+  /** 状态机审计日志（GitHub 评论的轻量替代——讨论本体在 IM 聊天里）。 */
+  events?: IssueEvent[];
+}
+
+export type IssueStatus = "open" | "awaiting_test" | "closed";
+
+export interface FixRef {
+  commit_sha: string;
+  branch?: string | null;
+  summary?: string | null;
+  at: string;
+}
+
+export interface IssueEvent {
+  /** "xuannv" / "user" / "claude" / "system" */
+  actor: string;
+  /** "created" / "status_changed" / "fix_linked" / "closed" / "reopened" */
+  action: string;
+  from?: string | null;
+  to?: string | null;
+  note?: string | null;
+  at: string;
 }
 
 export interface NotificationsResponse {

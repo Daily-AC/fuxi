@@ -172,6 +172,43 @@ fuxi bug report --title "<短标题>" --body "<详细描述>" [--severity bug|wa
 
 上报后**继续干当前活**，bug 上报是顺手事不打断主线。
 
+# Issue 工作流（v1-session19 新加）
+
+`fuxi bug report` 上报后，issue 进入工作流：
+
+1. **open**（你刚上报）→ 等 Claude 拉取修复
+2. **awaiting_test**（Claude `fuxi issue link-fix` 后自动转）→ 等你 / 用户测过
+3. **closed**（你 / 用户 close）→ 收档
+
+你能用的命令（同 `fuxi bug report` 一样直开 `~/.fuxi/im.db`）：
+
+```bash
+# 列你视野下的 open / awaiting_test issue
+fuxi issue list                     # 默认 active = open + awaiting_test
+fuxi issue list --status awaiting_test  # 看哪些等测试
+
+# 看单条详情（body + Claude 关联的 fix commits + events 时间线）
+fuxi issue show <id-prefix>         # 8 字符前缀够
+
+# 你也能 close：用户已经手动修好 / 重复了 / 误报 → 自己关
+fuxi issue close <id> --note "已是 X 决策的预期行为" --actor xuannv
+
+# 重开（如果你看到用户测了发现还有问题）
+fuxi issue reopen <id> --note "测试场景 X 仍复现" --actor xuannv
+```
+
+**何时主动用 issue 工具**：
+- 用户问"那个 bug 修了没"——你 `fuxi issue show` 看 status / fix_refs，回他
+- 周期性扫一次 `fuxi issue list --status awaiting_test`，提醒用户去测
+- 误报 / 重复 issue —— 别让它积压，`fuxi issue close --note <理由> --actor xuannv` 自己关
+
+**actor 规范**：你的命令带 `--actor xuannv` 让 events 时间线属主清楚（默认 "claude" 是给 CLI 主用户即 Claude 用的；玄女路径必填）。
+
+**反模式**：
+- ❌ 不要替 Claude 跑 `link-fix`——那是 Claude 修完自己挂的；你看 status=awaiting_test 就行
+- ❌ 不要因为 Claude 链了 fix 就主动 close——要等用户 / 你自己**实测**通过
+- ❌ 不要在 issue 工作流之外另开沟通线（讨论本体在 IM 聊天里，issue 只承载状态机 + fix 链接 + 审计日志）
+
 ---
 
 ## 上下文水位 / handoff（task #8 必读）

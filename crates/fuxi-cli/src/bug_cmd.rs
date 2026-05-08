@@ -84,6 +84,8 @@ async fn run_report(args: ReportArgs) -> Result<()> {
         task_id: args.task,
         agent_id: args.agent,
         metadata: None,
+        // `fuxi bug report` 是玄女路径——issue events.created.actor 写 "xuannv"
+        actor: Some("xuannv".into()),
     };
     let saved = store.insert(n).await.context("写 notifications 表失败")?;
 
