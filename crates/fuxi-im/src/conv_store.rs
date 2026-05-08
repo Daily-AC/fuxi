@@ -47,6 +47,12 @@ pub struct Message {
     pub attachments: Option<serde_json::Value>,
     pub source_event_id: Option<String>,
     pub ts: DateTime<Utc>,
+    /// v1-session19 #2 · 服务端 hydrate 的附件元数据（id/name/mime/bytes/sha256）。
+    /// conv handler 在 `page_messages` 后批量 lookup `upload_store` 填上，让前端
+    /// 历史回放显真名而非 uuid。空 = 该消息无附件 *或* 后端未注入 upload_store
+    /// （前端会 fallback 老路径用 id 当 name）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_uploads: Vec<crate::uploads::UploadDigest>,
 }
 
 /// conversation 行——列表视图用。
@@ -283,6 +289,9 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
             .try_get("source_event_id")
             .map_err(|e| Error::Internal(format!("row src: {e}")))?,
         ts,
+        // hydrate 由调用方（conv handler）后置填充——这里给空集，保持 store 层
+        // 跟 upload_store 解耦
+        attachment_uploads: Vec::new(),
     })
 }
 
