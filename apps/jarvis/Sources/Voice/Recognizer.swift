@@ -23,6 +23,13 @@ final class Recognizer {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
 
+    /// 静音超时计时器——Apple SFSpeechRecognizer 的 isFinal 触发时机不可靠（默认要 60s
+    /// task timeout 才算完）。我们自己做 VAD：每次拿到新 partial 重置计时；超时则
+    /// endAudio + cleanup 让 result 走 final 路径。
+    private var silenceTimer: DispatchSourceTimer?
+    private static let silenceTimeout: TimeInterval = 1.5
+    private var lastTranscript: String = ""
+
     init(onResult: @escaping (String, Bool) -> Void,
          onLevel: @escaping (Double) -> Void = { _ in }) {
         self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
@@ -61,17 +68,48 @@ final class Recognizer {
             return
         }
 
+        lastTranscript = ""
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
             if let result {
                 let text = result.bestTranscription.formattedString
+                let changed = text != self.lastTranscript
+                self.lastTranscript = text
                 self.onResult(text, result.isFinal)
-                if result.isFinal { self.cleanup() }
+                if result.isFinal {
+                    self.cleanup()
+                } else if changed {
+                    // 文本变了 → 还在说话 → 重置静音 timer
+                    self.armSilenceTimer()
+                }
             }
             if error != nil {
                 self.cleanup()
             }
         }
+        // 进 listening 立即装一次 timer——用户开口前 1.5s 都没声音也要兜底退出
+        armSilenceTimer()
+    }
+
+    /// 装/重置静音计时器：1.5s 内没新 partial 就 endAudio() → SDK 走 final 路径
+    /// → onResult(isFinal=true) → AppState 触发 sendToXuannv。
+    private func armSilenceTimer() {
+        silenceTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + Self.silenceTimeout)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            // endAudio 让 SFSpeechRecognizer 当 final——它会再回调一次 onResult(isFinal=true)
+            // 走自然清理路径，不直接 cleanup（避免没有 final 触发 sendToXuannv 上层）。
+            if let req = self.request {
+                req.endAudio()
+                self.logger.info("silence timeout → endAudio (transcript=\(self.lastTranscript, privacy: .public))")
+            } else {
+                self.cleanup()
+            }
+        }
+        t.resume()
+        silenceTimer = t
     }
 
     func stop() {
@@ -100,6 +138,8 @@ final class Recognizer {
     }
 
     private func cleanup() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil

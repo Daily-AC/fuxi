@@ -32,8 +32,7 @@ struct MainView: View {
         .frame(minWidth: 480, idealWidth: 560, minHeight: 420, idealHeight: 480)
         .background(.ultraThinMaterial)
         .sheet(isPresented: $showSettings) {
-            PreferencesView(state: state)
-                .frame(width: 520, height: 360)
+            PreferencesView(state: state, isPresented: $showSettings)
         }
     }
 
