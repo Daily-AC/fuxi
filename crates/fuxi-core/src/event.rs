@@ -604,6 +604,20 @@ pub enum EventKind {
         path: PathBuf,
         length_chars: u32,
     },
+    /// 玄女在语音模式下显式想"念出来给用户听"的一句话。由玄女通过
+    /// `fuxi xuannv say "..."` Bash 子命令触发，CLI 写 EventBus，订阅者
+    /// （macOS Jarvis App）拿到后调系统 TTS 播。文字本身仍走 IM 正常对话流，
+    /// 这条事件只是"语音侧的副本"，PWA 前端可忽略。
+    ///
+    /// 为何独立变体而不是在 `AgentResponded` 上塞 `speak: bool`：
+    /// (1) 玄女回复 IM 是文字流（含 markdown / 代码 / 列表），整段念出来又长又啰嗦；
+    /// (2) 玄女自己判断"哪句要念"语义清晰，工具调用粒度比响应粒度合适；
+    /// (3) 独立 EventKind 让 App 端订阅与 PWA 解耦——PWA 不渲染该事件不影响展示。
+    XuannvVoiceLine {
+        /// 要念的文本，玄女自己控制简短（一两句）。CLI 不做硬上限——
+        /// 极端长的内容由 TTS 端自己决定截断或拒绝。
+        text: String,
+    },
 
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
@@ -1282,6 +1296,27 @@ mod tests {
         ] {
             let v = serde_json::to_value(&kind).expect("ser");
             assert_eq!(v.get("type").and_then(|x| x.as_str()), Some(expect));
+        }
+    }
+
+    /// Jarvis · 语音模式：玄女通过 `fuxi xuannv say` 触发 TTS 副本事件。
+    /// tag = `xuannv_voice_line`，text 字段完整往返。
+    #[test]
+    fn xuannv_voice_line_tag_and_roundtrip() {
+        let kind = EventKind::XuannvVoiceLine {
+            text: "好的，已派给鲁班".into(),
+        };
+        let v = serde_json::to_value(&kind).expect("ser");
+        assert_eq!(
+            v.get("type").and_then(|x| x.as_str()),
+            Some("xuannv_voice_line")
+        );
+        let back: EventKind = serde_json::from_value(v).expect("de");
+        match back {
+            EventKind::XuannvVoiceLine { text } => {
+                assert_eq!(text, "好的，已派给鲁班");
+            }
+            other => panic!("expect XuannvVoiceLine, got {other:?}"),
         }
     }
 }

@@ -1,0 +1,24 @@
+# Xcode
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+
+# SPM
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# 证书 / 密钥
+*.p12
+*.cer
+*.mobileprovision
+
+# Picovoice 自定义唤醒词模型——按 README 指引训练后放 Resources/，
+# 但许可证可能不允许公开仓库存——视 Picovoice 政策决定是否解锁。
+Resources/xuannv-*.ppn

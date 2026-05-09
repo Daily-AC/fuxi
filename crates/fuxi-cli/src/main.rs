@@ -147,6 +147,12 @@ enum XuannvCmd {
     /// 注入 prelude（handoff 内容）。
     #[command(subcommand)]
     Handoff(HandoffCmd),
+    /// Jarvis 语音模式：玄女把"想直接念给用户听的一句话"通过此命令上发。
+    /// daemon publish `XuannvVoiceLine` 事件 + 注入 `meta.agent=xuannv_id`，
+    /// macOS App 订 `/api/conv` WS 拿到后调系统 TTS 念出来。
+    /// 文字本身仍走 IM 正常对话流——这条命令只是"语音侧的副本"。
+    /// `fuxi xuannv say "好的，已派给鲁班"`
+    Say(xuannv_cmd::SayArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -277,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
                 HandoffCmd::Write(args) => xuannv_cmd::run_handoff_write(args).await,
                 HandoffCmd::Read => xuannv_cmd::run_handoff_read().await,
             },
+            XuannvCmd::Say(args) => xuannv_cmd::run_say(args).await,
         },
         Some(Command::Bug(args)) => bug_cmd::run(args).await,
         Some(Command::Issue(args)) => issue_cmd::run(args).await,

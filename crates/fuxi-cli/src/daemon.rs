@@ -501,10 +501,18 @@ async fn dispatch_command(
         },
 
         Command::EmitEvent { kind } => {
-            use fuxi_core::{Event, EventMeta};
+            use fuxi_core::{Event, EventKind, EventMeta};
+            let ev_kind = kind.into_event_kind();
+            // Jarvis 语音线：必须把 `meta.agent = xuannv_id`，否则 conv WS（按
+            // `meta.agent==xuannv` 过滤透传）拿不到事件。其他 EmitEvent 变体
+            // （招贤一族）是平台事件 meta.agent 留 None 才正确。
+            let mut meta = EventMeta::now();
+            if matches!(ev_kind, EventKind::XuannvVoiceLine { .. }) {
+                meta.agent = fuxi.xuannv_id().await;
+            }
             let ev = Event {
-                meta: EventMeta::now(),
-                kind: kind.into_event_kind(),
+                meta,
+                kind: ev_kind,
             };
             match fuxi.bus().publish(ev) {
                 Ok(_) => Response::ok(serde_json::json!({"emitted": true})),
