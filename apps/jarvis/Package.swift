@@ -10,14 +10,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Jarvis",
+    name: "Xuannv",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "Jarvis", targets: ["Jarvis"]),
+        .executable(name: "Xuannv", targets: ["Xuannv"]),
     ],
     targets: [
         .executableTarget(
-            name: "Jarvis",
+            name: "Xuannv",
             path: "Sources",
             sources: ["App", "Voice", "Net", "UI"]
         ),

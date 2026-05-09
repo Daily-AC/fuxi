@@ -13,7 +13,7 @@ import OSLog
 /// 让 127.0.0.1 不走系统代理（按 CLAUDE.md 陷阱"cc 反连 --sdk-url 被 Clash TUN 吞"
 /// 同款防御）。
 final class FuxiClient: NSObject, URLSessionWebSocketDelegate {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "fuxi")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "fuxi")
     private var settings: Settings
     private let onEvent: (ConvEvent) -> Void
     private let onStatus: (String) -> Void

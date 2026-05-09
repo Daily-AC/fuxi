@@ -14,7 +14,7 @@ import OSLog
 //     主听写启动前会调 stop()。
 @MainActor
 final class LocalWakeFallback {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "wake-fallback")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "wake-fallback")
     private let recognizer: SFSpeechRecognizer?
     private let onWake: () -> Void
 

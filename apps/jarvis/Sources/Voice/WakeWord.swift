@@ -111,7 +111,7 @@ enum WakeClientEvent {
 
 @MainActor
 final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "wake-remote")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "wake-remote")
     private let onEvent: (WakeClientEvent) -> Void
 
     private var serverURL: URL
@@ -333,7 +333,7 @@ private final class ConvertFlag: @unchecked Sendable {
 }
 
 private final class AudioPipeline: @unchecked Sendable {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "wake-audio")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "wake-audio")
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat!

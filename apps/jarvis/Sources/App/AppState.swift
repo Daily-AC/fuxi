@@ -42,7 +42,7 @@ final class AppState: ObservableObject {
     /// 实时麦克风电平（0~1，已 RMS 归一化）。Recognizer 在 listening 期间持续推。
     @Published var audioLevel: Double = 0
 
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "state")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "state")
 
     // 子组件——延迟初始化，权限批准后才 spin up。
     var recognizer: Recognizer?
