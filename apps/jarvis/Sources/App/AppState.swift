@@ -202,8 +202,9 @@ final class AppState: ObservableObject {
 
     func startListening() {
         guard phase == .idle else { return }
-        // 释放麦给主 Recognizer——fallback 自身在命中 wake 后已 stop，但 hotkey/外部触发路径
-        // 这里也兜一次。
+        // 释放麦给主 Recognizer——RemoteWakeClient 的 audio 上传 + SFSpeechRecognizer
+        // 都在抢同一个 inputNode tap，必须互斥。fallback 同理。
+        wakeClient?.pauseAudio()
         wakeFallback?.stop()
         phase = .listening
         lastTranscript = ""
@@ -214,13 +215,11 @@ final class AppState: ObservableObject {
         guard phase == .listening else { return }
         recognizer?.stop()
         if commit, !lastTranscript.isEmpty {
+            // sendToXuannv 进 .sending 状态——wake 链路在那里继续暂停（avoid 抢麦）；
+            // 等到 idle 恢复点（intervene 失败 / speak 完成）再 resume。
             sendToXuannv(lastTranscript)
         } else {
-            phase = .idle
-        }
-        // 主 Recognizer 释放麦后，如果还在 fallback 模式就把兜底起回来——否则下次"玄女"喊不出。
-        if wakeMode == .fallback {
-            wakeFallback?.start()
+            enterIdle()
         }
     }
 
@@ -243,7 +242,7 @@ final class AppState: ObservableObject {
                 await MainActor.run { self.phase = .waiting }
             } catch {
                 logger.error("intervene 失败: \(error.localizedDescription)")
-                await MainActor.run { self.phase = .idle }
+                await MainActor.run { self.enterIdle() }
             }
         }
     }
@@ -262,7 +261,7 @@ final class AppState: ObservableObject {
         phase = .speaking
         synthesizer?.speak(text) { [weak self] in
             Task { @MainActor in
-                self?.phase = .idle
+                self?.enterIdle()
             }
         }
     }
@@ -270,6 +269,16 @@ final class AppState: ObservableObject {
     func cancelToIdle() {
         recognizer?.stop()
         synthesizer?.stop()
+        enterIdle()
+    }
+
+    /// 任何路径回到 idle 都走这——核心是恢复 wake 链路（不然下次「玄女」喊不出来）。
+    func enterIdle() {
         phase = .idle
+        if wakeMode == .remote {
+            wakeClient?.resumeAudio()
+        } else if wakeMode == .fallback {
+            wakeFallback?.start()
+        }
     }
 }
