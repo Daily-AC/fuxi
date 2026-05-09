@@ -59,26 +59,37 @@ mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
 cp "$BIN" "$STAGE/Contents/MacOS/Jarvis"
 chmod +x "$STAGE/Contents/MacOS/Jarvis"
 
-# Info.plist——SwiftPM 不注入，手写一份完整的（值都硬编，不留 $(VAR) 占位）
-cat > "$STAGE/Contents/Info.plist" <<'PLIST'
+# .icns 注入——install.sh 跑前 Resources/AppIcon.icns 必须就位（gpt-image-2 生成 +
+# iconutil 打包，详见 commit 历史）。没有就算了不挂，App 会用系统默认。
+if [[ -f "$JARVIS_DIR/Resources/AppIcon.icns" ]]; then
+    cp "$JARVIS_DIR/Resources/AppIcon.icns" "$STAGE/Contents/Resources/AppIcon.icns"
+    ICON_KV='<key>CFBundleIconFile</key><string>AppIcon</string>'
+else
+    ICON_KV=''
+fi
+
+# Info.plist——SwiftPM 不注入，手写一份完整的（值都硬编，不留 $(VAR) 占位）。
+# CFBundleDisplayName=玄女（用户可见名），CFBundleName=Jarvis（系统内部名/搜索词保留英文）。
+cat > "$STAGE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
-    <key>CFBundleDisplayName</key><string>贾维斯</string>
+    <key>CFBundleDisplayName</key><string>玄女</string>
     <key>CFBundleExecutable</key><string>Jarvis</string>
     <key>CFBundleIdentifier</key><string>cn.qmledmq.fuxi.jarvis</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>Jarvis</string>
+    <key>CFBundleName</key><string>玄女</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
+    ${ICON_KV}
     <key>NSAppleEventsUsageDescription</key><string>全局热键触发需要 AppleEvents 权限。</string>
-    <key>NSMicrophoneUsageDescription</key><string>贾维斯需要麦克风来听玄女的呼唤和你的指令。</string>
-    <key>NSSpeechRecognitionUsageDescription</key><string>贾维斯把你的语音转写成文字派给玄女——全程本机处理，不上云。</string>
+    <key>NSMicrophoneUsageDescription</key><string>玄女需要麦克风来听你的呼唤和指令。</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>玄女把你的语音转写成文字派给伏羲后端——全程本机处理，不上云。</string>
 </dict>
 </plist>
 PLIST
@@ -151,7 +162,7 @@ cat <<'EOF'
   首次启动会弹三次权限请求——都点允许：
     1) 麦克风（必给）
     2) 语音识别（必给）
-    3) 辅助功能（用全局热键时给——系统设置→隐私与安全性→辅助功能→Jarvis）
-  之后菜单栏 mic 图标点开，或说「玄女」唤醒。
+    3) 辅助功能（用全局热键时给——系统设置→隐私与安全性→辅助功能→玄女）
+  之后菜单栏「玄」字点开，或直接说「玄女」唤醒。
 ──────────────────────────────────────────────
 EOF
