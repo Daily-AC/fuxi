@@ -107,17 +107,16 @@ codesign --force --deep \
     --entitlements "$JARVIS_DIR/Resources/Jarvis.entitlements" \
     --sign - "$INSTALL_PATH"
 
-# ── 4. 取 home wake.token 写 Keychain ───────
-echo "==> [4/6] 取 home wake.token 写 mac Keychain"
+# ── 4. 取 home wake.token 写 UserDefaults ───
+echo "==> [4/6] 取 home wake.token 写 UserDefaults"
 WAKE_TOKEN="$(ssh home 'cat ~/.fuxi/wake.token' 2>/dev/null | tr -d '\n')"
 if [[ -z "$WAKE_TOKEN" ]]; then
     echo "ssh home 取 wake.token 失败——home 还没装 fuxi-wake-server？" >&2
     exit 5
 fi
-SERVICE="cn.qmledmq.fuxi.jarvis"
-security delete-generic-password -s "$SERVICE" -a wakeToken 2>/dev/null || true
-security add-generic-password -s "$SERVICE" -a wakeToken -w "$WAKE_TOKEN" -U
-echo "    wakeToken 长度 ${#WAKE_TOKEN} → Keychain"
+DOMAIN="cn.qmledmq.fuxi.jarvis"
+defaults write "$DOMAIN" wakeToken -string "$WAKE_TOKEN"
+echo "    wakeToken 长度 ${#WAKE_TOKEN} → UserDefaults($DOMAIN)"
 
 # ── 5. fuxi-im pair token ───────────────────
 if [[ "$SKIP_PAIR" -eq 1 ]]; then
@@ -145,9 +144,8 @@ TIP
     if [[ -z "$PAIR_TOKEN" ]]; then
         echo "pair token 空——后续设置面板里手动填也行" >&2
     else
-        security delete-generic-password -s "$SERVICE" -a pairToken 2>/dev/null || true
-        security add-generic-password -s "$SERVICE" -a pairToken -w "$PAIR_TOKEN" -U
-        echo "    pairToken 长度 ${#PAIR_TOKEN} → Keychain"
+        defaults write "$DOMAIN" pairToken -string "$PAIR_TOKEN"
+        echo "    pairToken 长度 ${#PAIR_TOKEN} → UserDefaults($DOMAIN)"
     fi
 fi
 

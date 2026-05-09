@@ -47,7 +47,9 @@ struct Settings: Equatable {
         baseURL: "https://im.qmledmq.cn:8443",
         pairToken: "",
         triggerMode: .both,
-        wakeServerURL: "wss://wake.qmledmq.cn:8443/api/wake",
+        // wake 复用 im 子域——避免给 wake.qmledmq.cn 单独配 DDNS A 记录 + Clash
+        // TUN 路由规则。nginx 在 im 站点加 /wake/ location 反代 :9101。
+        wakeServerURL: "wss://im.qmledmq.cn:8443/wake/api/wake",
         wakeToken: "",
         wakeKeywords: ["玄女", "贾维斯"],
         picovoiceKey: "",
@@ -57,21 +59,22 @@ struct Settings: Equatable {
 
     static func load() -> Settings {
         let d = UserDefaults.standard
-        guard let data = d.data(forKey: Self.userDefaultsKey),
-              let dec = try? JSONDecoder().decode(SettingsCodable.self, from: data)
-        else {
-            return .default
+        // Keychain 路径 ad-hoc 签名下被 macOS 14+ ACL 拦截（每次重 sign 都换 hash =
+        // 新 app identity，老 keychain ACL 不放行）。个人工具改走 UserDefaults
+        // 直接持 token——install.sh `defaults write` 即可注入，App 一致 read。
+        let dec = (d.data(forKey: Self.userDefaultsKey)).flatMap {
+            try? JSONDecoder().decode(SettingsCodable.self, from: $0)
         }
         return Settings(
-            baseURL: dec.baseURL,
-            pairToken: Keychain.load(account: "pairToken") ?? "",
-            triggerMode: TriggerMode(rawValue: dec.triggerMode) ?? .both,
-            wakeServerURL: dec.wakeServerURL ?? Self.default.wakeServerURL,
-            wakeToken: Keychain.load(account: "wakeToken") ?? "",
-            wakeKeywords: dec.wakeKeywords ?? Self.default.wakeKeywords,
-            picovoiceKey: Keychain.load(account: "picovoiceKey") ?? "",
-            hotkey: dec.hotkey,
-            ttsVoice: dec.ttsVoice
+            baseURL: dec?.baseURL ?? Self.default.baseURL,
+            pairToken: d.string(forKey: "pairToken") ?? "",
+            triggerMode: dec.flatMap { TriggerMode(rawValue: $0.triggerMode) } ?? Self.default.triggerMode,
+            wakeServerURL: dec?.wakeServerURL ?? Self.default.wakeServerURL,
+            wakeToken: d.string(forKey: "wakeToken") ?? "",
+            wakeKeywords: dec?.wakeKeywords ?? Self.default.wakeKeywords,
+            picovoiceKey: d.string(forKey: "picovoiceKey") ?? "",
+            hotkey: dec?.hotkey ?? Self.default.hotkey,
+            ttsVoice: dec?.ttsVoice ?? Self.default.ttsVoice
         )
     }
 
@@ -84,12 +87,13 @@ struct Settings: Equatable {
             hotkey: hotkey,
             ttsVoice: ttsVoice
         )
+        let d = UserDefaults.standard
         if let data = try? JSONEncoder().encode(enc) {
-            UserDefaults.standard.set(data, forKey: Self.userDefaultsKey)
+            d.set(data, forKey: Self.userDefaultsKey)
         }
-        Keychain.save(account: "pairToken", value: pairToken)
-        Keychain.save(account: "wakeToken", value: wakeToken)
-        Keychain.save(account: "picovoiceKey", value: picovoiceKey)
+        d.set(pairToken, forKey: "pairToken")
+        d.set(wakeToken, forKey: "wakeToken")
+        d.set(picovoiceKey, forKey: "picovoiceKey")
     }
 }
 
