@@ -28,6 +28,7 @@ struct PreferencesView: View {
             state.settings = new
             state.fuxiClient?.updateSettings(new)
             state.hotkey?.install(combo: new.hotkey)
+            state.reloadWake()
         }
     }
 
@@ -68,9 +69,11 @@ struct PreferencesView: View {
             .pickerStyle(.radioGroup)
 
             if draft.triggerMode != .hotkey {
-                SecureField("Picovoice Access Key", text: $draft.picovoiceKey)
+                TextField("Wake Server URL", text: $draft.wakeServerURL)
                     .textFieldStyle(.roundedBorder)
-                Text("唤醒词「玄女」需要 Picovoice access key（个人 plan 免费）+ 自定义训练的 .ppn 模型。")
+                SecureField("Wake Token", text: $draft.wakeToken)
+                    .textFieldStyle(.roundedBorder)
+                Text("唤醒词「玄女」走 home 端 fuxi-wake-server。本机 dev: ws://127.0.0.1:9101/api/wake；公网：wss://wake.qmledmq.cn/api/wake。Token 跟 fuxi-im pair token 同一颗。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

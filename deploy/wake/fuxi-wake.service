@@ -1,0 +1,47 @@
+[Unit]
+Description=fuxi wake server (玄女唤醒守护，:9101 WS, 给 Mac 贾维斯反向通道)
+After=network.target
+
+[Service]
+Type=simple
+User=e0-7
+# token 文件 / 默认路径解析依赖 HOME
+Environment=HOME=/home/e0-7
+Environment=PATH=/home/e0-7/.cargo/bin:/home/e0-7/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Clash TUN 模式拦本地反连——同 fuxi-im.service 同款防御
+Environment=NO_PROXY=127.0.0.1,localhost
+#
+# ---- 讯飞 AIKit ENV（接通 SDK 后必填；mock 模式忽略） ----
+# 三件套从讯飞控制台拿（fuxi-wake 应用）：
+# Environment=FUXI_XFYUN_APPID=<appid>
+# Environment=FUXI_XFYUN_API_KEY=<api_key>
+# Environment=FUXI_XFYUN_API_SECRET=<api_secret>
+#
+# SDK 工作目录——license 落盘 + keywords 文件存放（必须可写 + 持久）。
+# WorkingDirectory 跟 FUXI_WAKE_WORK_DIR 必须一致——讯飞 SDK 用 cwd 解析相对资源
+# 路径，license 缓存按 workDir 落盘；不一致 = 每次重启重新联网激活（CLAUDE.md
+# 公约：home 部署期讯飞首次激活需出公网，激活后 90 天可离线）。
+Environment=FUXI_WAKE_WORK_DIR=/var/lib/fuxi-wake
+WorkingDirectory=/var/lib/fuxi-wake
+#
+# 关键词列表——逗号分隔；默认仅"玄女"。多关键词联调时改 keywords 即可。
+Environment=FUXI_WAKE_KEYWORDS=玄女
+#
+# libaikit.so 路径——SDK rsync 到 /opt/fuxi-wake-sdk/libs/，dynamic linker 找得到
+# 这条 LD_LIBRARY_PATH 才能 dlopen libaikit.so（cargo build --release 链接时
+# rpath 会写编译机的 SDK 路径，运行时通常找不到，必须靠 LD_LIBRARY_PATH 兜）。
+Environment=LD_LIBRARY_PATH=/opt/fuxi-wake-sdk/libs
+#
+# tracing 默认 info，调试加 RUST_LOG=info,fuxi_wake_server=debug
+#
+# 默认 mock；接通讯飞 SDK 后改 ExecStart——删 --mock 即可（ENV 已就位会自动跑 xfyun）。
+ExecStart=/home/e0-7/.local/bin/fuxi-wake-server --bind 0.0.0.0:9101 --mock
+Restart=on-failure
+RestartSec=5
+
+# 资源限制——单进程 WS 守护，几十 MB 内存够用，硬上限防 SDK 抖动 OOM 拖崩主机
+MemoryMax=512M
+# CPU 不上限——讯飞 SDK 推理可能短时占满一核
+
+[Install]
+WantedBy=multi-user.target
