@@ -195,6 +195,23 @@ function uploadsFromIds(ids: string[]): Upload[] {
   }));
 }
 
+/** v1-session19 #2 · 历史 StoredMessage → Upload[]
+ *  优先用后端 hydrate 的 attachment_uploads（含真实文件名 + mime + bytes）；
+ *  无则 fallback uploadsFromIds(attachments) （老 wire 兼容，name=id 退化）。 */
+function uploadsFromStored(s: StoredMessage): Upload[] {
+  if (Array.isArray(s.attachment_uploads) && s.attachment_uploads.length > 0) {
+    // 后端给的 Upload meta name/mime 可能为 null，解 wire null → 容空字符串避炸
+    return s.attachment_uploads.map((u) => ({
+      id: u.id,
+      name: u.name ?? u.id,
+      mime: u.mime ?? "application/octet-stream",
+      bytes: u.bytes ?? 0,
+      sha256: u.sha256 ?? "",
+    }));
+  }
+  return Array.isArray(s.attachments) ? uploadsFromIds(s.attachments) : [];
+}
+
 function lastStreamingXuannv(prev: Message[]): XuannvMessage | null {
   const last = prev[prev.length - 1];
   return last && last.kind === "xuannv" && last.streaming ? last : null;
@@ -522,7 +539,6 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
   const ts = parseTs(s.ts);
   if (s.kind === "text") {
     const text = textFromContent(s.content);
-    const attachIds = Array.isArray(s.attachments) ? s.attachments : [];
     // bug #77：conv_store 把系统注入（review_request/carbon_copy 等）role 写
     // "system" + content {text, origin}，回放时还原 SystemMessage（玄女侧
     // 灰底气泡），不被错显成右侧 user bubble。
@@ -542,12 +558,13 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
     }
     // user text 允许空文本 + 仅附件（用户只发图场景），其它 role 仍按空丢
     if (s.role === "user") {
-      if (text.trim() === "" && attachIds.length === 0) return null;
+      const ups = uploadsFromStored(s);
+      if (text.trim() === "" && ups.length === 0) return null;
       return {
         kind: "user",
         id: s.id,
         text,
-        attachments: attachIds.length > 0 ? uploadsFromIds(attachIds) : undefined,
+        attachments: ups.length > 0 ? ups : undefined,
         pending: false,
         ts,
       };
@@ -569,10 +586,9 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
         ? String((s.content as { caption?: string }).caption ?? "")
         : "";
     // attachments 在 history 里要么是 file_id refs 要么是完整 Upload[]；
-    // β 给的是 file_id refs；ε 不知 mime/bytes 时显占位（阶段 4 完善）。
-    const ups: Upload[] = Array.isArray(s.attachments)
-      ? uploadsFromIds(s.attachments)
-      : [];
+    // v1-session19 #2 后端在 conv handler hydrate 出 attachment_uploads（带真名）；
+    // 老路径仍走 uploadsFromIds 作为 fallback。
+    const ups: Upload[] = uploadsFromStored(s);
     return {
       kind: "file",
       id: s.id,

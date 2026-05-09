@@ -182,3 +182,267 @@
 .metaSep {
   margin-left: 4px;
 }
+
+/* v1-session19 issue 工作流追加 */
+
+.subTabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px;
+  background: var(--bg);
+  border-radius: 8px;
+}
+
+.subTab {
+  padding: 4px 12px;
+  font-size: var(--size-meta, 12px);
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.subTab:hover {
+  color: var(--text-primary);
+}
+
+.subTabActive {
+  background: var(--surface);
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold, 600);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.filterBar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.filterChip {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.filterChip:hover {
+  color: var(--text-primary);
+}
+
+.filterChipActive {
+  background: var(--text-primary);
+  color: var(--bg);
+  border-color: var(--text-primary);
+}
+
+.statusBadge {
+  font-size: 10px;
+  font-weight: var(--weight-semibold, 600);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.statusOpen {
+  background: rgba(229, 165, 71, 0.15);
+  color: var(--warn, #c4862a);
+  border: 1px solid rgba(229, 165, 71, 0.3);
+}
+
+.statusAwaiting {
+  background: rgba(67, 175, 110, 0.15);
+  color: #2e7a4d;
+  border: 1px solid rgba(67, 175, 110, 0.4);
+}
+
+.statusClosed {
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  text-decoration: line-through;
+}
+
+.cardAwaiting {
+  border-color: rgba(67, 175, 110, 0.4);
+  background: linear-gradient(
+    180deg,
+    rgba(67, 175, 110, 0.04),
+    var(--surface)
+  );
+}
+
+.fixCount {
+  font-size: 11px;
+  color: #2e7a4d;
+  font-weight: var(--weight-semibold, 600);
+  flex-shrink: 0;
+}
+
+.detailBody {
+  margin: 8px 0 0 16px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: var(--size-meta, 12px);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.section {
+  margin: 10px 0 0 16px;
+}
+
+.sectionTitle {
+  font-size: 10px;
+  font-weight: var(--weight-semibold, 600);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.fixList,
+.eventList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fixItem {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.commitSha {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--text-primary);
+}
+
+.branchTag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--accent, #7aa0e5);
+  background: rgba(122, 160, 229, 0.1);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.fixSummary {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.eventItem {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+
+.eventTime {
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.eventActor {
+  font-weight: var(--weight-semibold, 600);
+  color: var(--text-primary);
+}
+
+.eventAction {
+  color: var(--text-secondary);
+}
+
+.eventTransition {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.eventNote {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  margin-left: calc(8px + 2ch);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 4px 16px;
+}
+
+.actionPrimary,
+.actionSecondary {
+  padding: 8px 14px;
+  font-size: var(--size-meta, 12px);
+  font-weight: var(--weight-semibold, 600);
+  border-radius: 6px;
+  cursor: pointer;
+  min-height: 44px; /* 移动端触控目标 */
+}
+
+.actionPrimary {
+  background: var(--text-primary);
+  color: var(--bg);
+  border: 0;
+}
+
+.actionPrimary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.actionSecondary {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.actionSecondary:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.actionPrimary:disabled,
+.actionSecondary:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.simpleBody {
+  margin: 8px 0 0 16px;
+  color: var(--text-secondary);
+  font-size: var(--size-meta, 12px);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

@@ -16,7 +16,7 @@ use crate::notifications::NotificationStore;
 use crate::pair::PendingPairs;
 use crate::push::VapidKeypair;
 use crate::uploads::UploadStore;
-use fuxi_memory::OracleStore;
+use fuxi_memory::{HetuStore, OracleStore, UserProfileStore};
 use fuxi_orchestrator::Fuxi;
 use fuxi_scheduler::TriggerStore;
 use fuxi_workspace::FileSystemProjectRegistry;
@@ -59,6 +59,14 @@ pub struct AppState {
     /// production 走 `~/.fuxi/events.db` 同库（同 fuxi-cli `im.rs` 的 `OracleStore::connect_file`）；
     /// `Option`：smoke / 单测默认 None；handler 返 503。
     pub oracle: Option<OracleStore>,
+    /// v1-session19：河图洛书 / 仓颉 insight 持久层。
+    /// `/api/memory` 拉它做 PWA「记忆」页 insight section 数据源——之前只读 oracle 一层
+    /// 让玄女自报现实只显 session_id/worktree 噪音，hetu 真知识被埋没。
+    /// `Option`：smoke / 单测默认 None；handler 视作 0 条。
+    pub hetu: Option<HetuStore>,
+    /// v1-session19：用户身份卡（`fuxi profile set` / `cangjie` 抽出来的标签）。
+    /// 同上接到 PWA 记忆页第三 section。
+    pub user_profile_store: Option<UserProfileStore>,
     /// v1-session17 task #9 「更多 → 更漏」：scheduler trigger 注册表。
     /// production 共用 events.db 上的 triggers 表；`Option` None 时 handler 返 503。
     pub triggers: Option<TriggerStore>,
@@ -122,6 +130,8 @@ impl AppState {
             project_registry: None,
             notifications: None,
             oracle: None,
+            hetu: None,
+            user_profile_store: None,
             triggers: None,
             roles_root: None,
         }
@@ -177,9 +187,21 @@ impl AppState {
         self
     }
 
-    /// v1-session17 task #9：注入策府 oracle 句柄，激活 `/api/memory`。
+    /// v1-session17 task #9：注入策府 oracle 句柄，激活 `/api/memory` 第一 section。
     pub fn with_oracle(mut self, oracle: OracleStore) -> Self {
         self.oracle = Some(oracle);
+        self
+    }
+
+    /// v1-session19：注入河图洛书 insight 持久层，激活 `/api/memory` insight section。
+    pub fn with_hetu(mut self, hetu: HetuStore) -> Self {
+        self.hetu = Some(hetu);
+        self
+    }
+
+    /// v1-session19：注入用户身份卡持久层，激活 `/api/memory` profile section。
+    pub fn with_user_profile_store(mut self, store: UserProfileStore) -> Self {
+        self.user_profile_store = Some(store);
         self
     }
 

@@ -27,6 +27,7 @@ use fuxi_events::EventBus;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
+use tokio::sync::watch;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -46,6 +47,12 @@ pub struct Message {
     pub attachments: Option<serde_json::Value>,
     pub source_event_id: Option<String>,
     pub ts: DateTime<Utc>,
+    /// v1-session19 #2 · 服务端 hydrate 的附件元数据（id/name/mime/bytes/sha256）。
+    /// conv handler 在 `page_messages` 后批量 lookup `upload_store` 填上，让前端
+    /// 历史回放显真名而非 uuid。空 = 该消息无附件 *或* 后端未注入 upload_store
+    /// （前端会 fallback 老路径用 id 当 name）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_uploads: Vec<crate::uploads::UploadDigest>,
 }
 
 /// conversation 行——列表视图用。
@@ -282,13 +289,21 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
             .try_get("source_event_id")
             .map_err(|e| Error::Internal(format!("row src: {e}")))?,
         ts,
+        // hydrate 由调用方（conv handler）后置填充——这里给空集，保持 store 层
+        // 跟 upload_store 解耦
+        attachment_uploads: Vec::new(),
     })
 }
 
 /// 起后台 sync task：订阅 EventBus，把玄女主线相关事件翻译为 messages 行。
 ///
-/// 返回 JoinHandle，调用方可 abort。`xuannv_id` 必须已设——sync 路径用它过滤
-/// "我"vs"别人的"事件。
+/// 返回 JoinHandle，调用方可 abort。
+///
+/// `xuannv_id_watch`：来自 [`fuxi_orchestrator::Fuxi::xuannv_id_watch`] 的 watch
+/// channel——每条事件**实时取最新值**做"我 vs 别人"的过滤。WHY watch 而不是
+/// 静态 `AgentId`：handoff 路径会 kill 旧 xuannv 再 spawn 新副本（agent_id 变），
+/// 静态 id 会让 sync 用旧 id 死过滤新副本的所有事件，新副本发言全部落不进
+/// messages 表，PWA IM 看不到——bug "handoff 后新玄女副本发言不进 PWA IM 历史"。
 ///
 /// **同步期完成**：
 /// - 进 conv `ensure_scope`
@@ -300,7 +315,7 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
 pub async fn spawn_xuannv_sync(
     store: Arc<ConvStore>,
     bus: EventBus,
-    xuannv_id: AgentId,
+    xuannv_id_watch: watch::Receiver<Option<AgentId>>,
 ) -> tokio::task::JoinHandle<()> {
     // 同步期：先 ensure conv + 先 subscribe
     let conv_id = match store.ensure_scope(SCOPE_XUANNV, None).await {
@@ -311,7 +326,11 @@ pub async fn spawn_xuannv_sync(
         }
     };
     let mut stream = bus.subscribe();
-    debug!(conv = %conv_id, xuannv = %xuannv_id, "conv_store xuannv sync 准备就绪");
+    debug!(
+        conv = %conv_id,
+        xuannv = ?*xuannv_id_watch.borrow(),
+        "conv_store xuannv sync 准备就绪"
+    );
 
     // 之后才 spawn 长跑 task 消费 stream
     tokio::spawn(async move {
@@ -323,7 +342,13 @@ pub async fn spawn_xuannv_sync(
                     continue;
                 }
             };
-            if let Err(e) = handle_event(&store, &conv_id, xuannv_id, &ev).await {
+            // 每条事件 borrow 当前 xuannv id——handoff 切副本后立刻用新值过滤。
+            // None = 玄女尚未上线（理论上 spawn 这个 sync 之前 set_xuannv 已调过，
+            // 所以此分支极少；保留兜底防 daemon 启动顺序 race）。
+            let Some(current_xn) = *xuannv_id_watch.borrow() else {
+                continue;
+            };
+            if let Err(e) = handle_event(&store, &conv_id, current_xn, &ev).await {
                 warn!(error = %e, kind = ?ev.kind, "conv_store sync 写库失败");
             }
         }
@@ -668,7 +693,8 @@ mod tests {
         let xuannv = AgentId::new();
         let task = TaskId::new();
 
-        let h = spawn_xuannv_sync(store.clone(), bus.clone(), xuannv).await;
+        let (_tx, rx) = watch::channel(Some(xuannv));
+        let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx).await;
 
         // user intervene 玄女
         bus.publish(user_intervention_event(xuannv, "你好", false))
@@ -706,5 +732,67 @@ mod tests {
             }
         }
         panic!("sync 应在 1s 内把 3 条消息写入");
+    }
+
+    /// 反回归：handoff 路径切玄女副本（kill 旧 spawn 新）后，新副本 emit 的
+    /// 事件要按"新 id"过滤入库。WHY：早期实现把 xuannv_id 按值捕获，handoff
+    /// 后 sync 还在拿旧 id 比对 ev.meta.agent，新副本所有事件全部 fall-through
+    /// 不写库 → PWA IM 看不到新副本对话。修法：换成 watch::Receiver，每条
+    /// 事件取最新 id。
+    #[tokio::test]
+    async fn sync_picks_up_new_xuannv_id_after_handoff() {
+        use fuxi_events::EventBus;
+        let (_dir, store) = open_store().await;
+        let store = Arc::new(store);
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let old_xn = AgentId::new();
+        let new_xn = AgentId::new();
+
+        let (tx, rx) = watch::channel(Some(old_xn));
+        let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx).await;
+
+        // 旧副本说一句
+        bus.publish(agent_responded_event(old_xn, "旧副本：我下班了"))
+            .unwrap();
+
+        // 等旧副本那条落库（避免后面查"新副本是否落库"被误识为旧副本未落）
+        let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        let mut old_landed = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let (msgs, _, _) = store.page_messages(&conv, 50, None).await.unwrap();
+            if msgs
+                .iter()
+                .any(|m| m.content["text"].as_str() == Some("旧副本：我下班了"))
+            {
+                old_landed = true;
+                break;
+            }
+        }
+        assert!(old_landed, "旧副本发言应先落库");
+
+        // handoff：watch 切到新副本 id
+        tx.send(Some(new_xn)).expect("watch send 新 id 不该失败");
+
+        // 新副本继续发言——这条在 buggy 版本不会落库
+        bus.publish(agent_responded_event(new_xn, "新副本：接班完成"))
+            .unwrap();
+
+        // 等新副本那条落库
+        let mut new_landed = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let (msgs, _, _) = store.page_messages(&conv, 50, None).await.unwrap();
+            if msgs
+                .iter()
+                .any(|m| m.content["text"].as_str() == Some("新副本：接班完成"))
+            {
+                new_landed = true;
+                break;
+            }
+        }
+        assert!(new_landed, "handoff 后新副本发言必须按新 id 过滤通过并落库");
+
+        h.abort();
     }
 }

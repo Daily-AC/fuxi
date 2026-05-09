@@ -314,6 +314,18 @@ fn build_death_prompt(agent_id: AgentId, role: &str, cause: &str) -> String {
     format!("门客 {agent_id}（role={role}）已下线，原因：{cause}。请判断是否续派或告知用户。")
 }
 
+/// issue a58e45b4 · 门客 task done 兜底通知玄女——门客没主动跑
+/// `_fuxi:request_review` sentinel 时的退路。措辞跟 AgentRequestReview 路径
+/// 区分（"已完成 task" vs "呈递 deliverable 待审"），让玄女知道这是兜底
+/// nudge 而非门客主动呈报。
+fn build_task_done_prompt(agent_id: AgentId, role: &str, task_id: TaskId) -> String {
+    format!(
+        "[TASK_DONE] 门客 {agent_id}（role={role}）已完成 task {task_id}。\n\
+         他没主动跑 `_fuxi:request_review` sentinel——你需要主动 `fuxi status --id {agent_id}` \
+         看产物 / 摘要，必要时 `fuxi intervene` 让他跑 sentinel 把 deliverable 走流程。"
+    )
+}
+
 fn build_cc_prompt(to_worker: AgentId, role: &str, text: &str) -> String {
     // bug #77：之前文案末「无需主动回话，除非判断需介入」给玄女留口子，cc 经常
     // 误判"需介入"主动反问用户「鲁班应答 ... 等你下一指令」。改硬规：抄送
@@ -737,6 +749,46 @@ async fn handle_event(
                 .await
             {
                 warn!(error = %e, "bridge: TaskStateChanged 自动归档 L2 失败");
+            }
+            // issue a58e45b4 兜底：门客 task 完成时，如果他没主动跑 sentinel，
+            // 玄女不会收到 AgentRequestReview → 用户必须手敲「门客完成了」。
+            // bridge 在终态时给玄女注入一条 [TASK_DONE] 系统消息——不依赖门客自觉。
+            //
+            // 跳过条件：
+            //   1. 没 worker agent_id（平台级 task，无对接对象）
+            //   2. worker == xuannv（玄女自己 turn done，对她报告等于自言自语）
+            //   3. worker role 是 internal（extractor 等后台 role 的噪音不抄给玄女）
+            //
+            // 跟 AgentRequestReview 路径并存可能造成同 task 两条玄女消息——但
+            // origin 不同（review_request vs task_done）+ 内容不同，redundancy 比
+            // 漏看好。dedupe 需要存 task_id 状态，复杂度暂不付。
+            if matches!(to, fuxi_core::task::TaskState::Done)
+                && let Some(worker_id) = ev.meta.agent
+                && worker_id != xuannv_id
+            {
+                let role = intervener
+                    .role_of(worker_id)
+                    .await
+                    .unwrap_or_else(|| "unknown".to_string());
+                if !is_internal_role(&role) {
+                    let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
+                    let interrupt_first = should_interrupt_worker_report(lag_ms);
+                    let prompt = build_task_done_prompt(worker_id, &role, task_id);
+                    info!(
+                        %worker_id,
+                        %role,
+                        %task_id,
+                        lag_ms,
+                        interrupt_first,
+                        "bridge: 门客 task done 兜底注入玄女"
+                    );
+                    if let Err(e) = intervener
+                        .intervene_system(xuannv_id, interrupt_first, &prompt, "task_done")
+                        .await
+                    {
+                        warn!(error = %e, "bridge: intervene(TaskDone) 失败");
+                    }
+                }
             }
         }
         _ => {}
@@ -1347,39 +1399,12 @@ mod tests {
         );
     }
 
-    /// Decision 13 后 TaskStateChanged → Done/Cancelled 不再抄送玄女（任何 role）。
-    /// 中间过程 silent，门客需用 AgentRequestReview 主动 nudge 才会占 attention。
-    /// 此 test 替代历史的 extractor_task_done_is_not_copied_to_xuannv 回归点。
-    #[tokio::test]
-    async fn task_done_no_longer_copies_to_xuannv() {
-        let bus = EventBus::with_memory_store().await.expect("bus");
-        let xuannv = AgentId::new();
-        let worker = AgentId::new();
-
-        let mock = MockIntervener::new();
-        mock.set_role(worker, "luban").await;
-
-        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let mut meta = EventMeta::now();
-        meta.agent = Some(worker);
-        meta.task = Some(fuxi_core::id::TaskId::new());
-        bus.publish(Event {
-            meta,
-            kind: EventKind::TaskStateChanged {
-                from: fuxi_core::task::TaskState::Delivering,
-                to: fuxi_core::task::TaskState::Done,
-            },
-        })
-        .expect("publish");
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            mock.snapshot().await.is_empty(),
-            "Decision 13 后 TaskDone 默认 silent，门客需主动 AgentRequestReview"
-        );
-    }
+    // 历史 `task_done_no_longer_copies_to_xuannv` 测试在 issue a58e45b4 修后
+    // 被反转——见 `bridge_intervenes_xuannv_on_worker_task_done` 等 4 条新测试。
+    // Decision 13 的"中间过程 silent"精神不变，但 TaskDone 终态是用户级
+    // 决策点，从"silent"调成"兜底 nudge"——门客**应**主动跑 sentinel 仍是首选，
+    // 没跑时玄女不再失声。详见 docs/decisions/13-deliverable-boundary-handoff.md
+    // 末尾的 v2 修正段。
 
     /// 中间事件（AgentResponded / ToolCallStarted / ToolCallFinished）默认 silent
     /// —— attention filter 白名单生效（Decision 13）。
@@ -1698,5 +1723,147 @@ mod tests {
         assert_eq!(REVIEW_RETRY_BACKOFF_MS, &[200u64, 500, 1000]);
         let total: u64 = REVIEW_RETRY_BACKOFF_MS.iter().sum();
         assert_eq!(total, 1700, "delta 用此 sum 算 timeout 预算（2.5s 留余量）");
+    }
+
+    // ─── issue a58e45b4 · TaskStateChanged Done 兜底注入玄女 ───
+    // 门客做完没主动跑 sentinel 时，bridge 必须把 TaskStateChanged{Done} 翻成
+    // [TASK_DONE] 系统消息塞玄女对话流——否则她蒙在鼓里得用户主动喊。
+
+    #[tokio::test]
+    async fn bridge_intervenes_xuannv_on_worker_task_done() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish TaskStateChanged");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let calls = mock.snapshot().await;
+        let task_done = calls
+            .iter()
+            .filter(|(_, _, t)| t.contains("[TASK_DONE]"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            task_done.len(),
+            1,
+            "门客 task done 应触发 1 次 [TASK_DONE] 注入：{calls:?}"
+        );
+        let (target, _interrupt, text) = task_done[0];
+        assert_eq!(*target, xuannv, "intervene 目标必须是玄女");
+        assert!(text.contains(&worker.to_string()), "提示应含 worker id");
+        assert!(text.contains("luban"), "提示应含 role");
+        assert!(text.contains(&task.to_string()), "提示应含 task id");
+    }
+
+    #[tokio::test]
+    async fn bridge_skips_xuannv_self_task_done() {
+        // 玄女自己 turn done 时不要再对她注入——会自言自语
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(xuannv, "xuannv").await;
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(xuannv);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            calls.iter().all(|(_, _, t)| !t.contains("[TASK_DONE]")),
+            "玄女自己 task done 不应触发 [TASK_DONE]：{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_skips_internal_role_task_done() {
+        // extractor 等内部 role 完成 task 不抄给玄女（噪音 > 价值）
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let extractor = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(extractor, "extractor").await;
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(extractor);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            calls.iter().all(|(_, _, t)| !t.contains("[TASK_DONE]")),
+            "extractor task done 不应触发 [TASK_DONE]：{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_does_not_intervene_on_non_done_task_state() {
+        // Cancelled 不触发——只有 Done 算"完成可 review"。Cancelled 的归档逻辑
+        // 已存在路径，但 nudge 玄女对取消的 task 没意义。
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Cancelled,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            calls.iter().all(|(_, _, t)| !t.contains("[TASK_DONE]")),
+            "Cancelled 不应触发 [TASK_DONE]：{calls:?}"
+        );
     }
 }

@@ -113,13 +113,17 @@ export interface ApiClient {
   /** v1-session16 · 通知 tab · GET /api/notifications · bug + handoff offer + review。 */
   fetchNotifications(opts?: {
     kind?: string;
+    /** v1-session19 · status 过滤（'open' / 'awaiting_test' / 'closed'）。 */
+    status?: string;
     include_closed?: boolean;
     limit?: number;
   }): Promise<NotificationsResponse>;
   /** 标已读（仅清红点，仍在列表里）。 */
   markNotificationRead(id: string): Promise<{ ok: true }>;
-  /** 关闭（默认列表隐藏）。 */
-  closeNotification(id: string): Promise<{ ok: true }>;
+  /** 关闭（默认列表隐藏）。actor 默认 "user"；body 可携 note。 */
+  closeNotification(id: string, opts?: { actor?: string; note?: string }): Promise<{ ok: true }>;
+  /** v1-session19 · 重开 issue。 */
+  reopenNotification(id: string, opts?: { actor?: string; note?: string }): Promise<{ ok: true }>;
   /** 一键全部标已读——进入「通知」tab 时调，红点清零。 */
   readAllNotifications(): Promise<{ ok: true; updated: number }>;
   /** v1-session17 task #9 · 「更多 → 记忆」· GET /api/memory · 策府现行事实分组。 */
@@ -266,6 +270,7 @@ export function createHttpClient(): ApiClient {
     fetchNotifications: (opts) => {
       const q: string[] = [];
       if (opts?.kind) q.push(`kind=${encodeURIComponent(opts.kind)}`);
+      if (opts?.status) q.push(`status=${encodeURIComponent(opts.status)}`);
       if (opts?.include_closed) q.push("include_closed=true");
       if (opts?.limit) q.push(`limit=${opts.limit}`);
       const qs = q.length > 0 ? `?${q.join("&")}` : "";
@@ -275,9 +280,15 @@ export function createHttpClient(): ApiClient {
       jsonFetch<{ ok: true }>(`/api/notifications/${encodeURIComponent(id)}/read`, {
         method: "POST",
       }),
-    closeNotification: (id) =>
+    closeNotification: (id, opts) =>
       jsonFetch<{ ok: true }>(`/api/notifications/${encodeURIComponent(id)}/close`, {
         method: "POST",
+        body: JSON.stringify(opts ?? {}),
+      }),
+    reopenNotification: (id, opts) =>
+      jsonFetch<{ ok: true }>(`/api/notifications/${encodeURIComponent(id)}/reopen`, {
+        method: "POST",
+        body: JSON.stringify(opts ?? {}),
       }),
     readAllNotifications: () =>
       jsonFetch<{ ok: true; updated: number }>(`/api/notifications/read-all`, {

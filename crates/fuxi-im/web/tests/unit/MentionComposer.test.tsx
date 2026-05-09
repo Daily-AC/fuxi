@@ -259,6 +259,42 @@ describe("MentionComposer · v3 #N5'/#N4'", () => {
     expect(queryAllByTestId(/^composer-attach-c-/)).toHaveLength(0);
   });
 
+  // v1-session19 #1 · 粘贴自动附件 ——
+  // 截图（Cmd+Shift+4 拷到剪贴板后 Cmd+V）/ Finder 复制文件 / drag-emul 都走
+  // clipboardData.files；本测覆盖最直观的截图路径。
+  it("v1-session19 · 粘贴含 file 的剪贴板 → 自动起 attach chip 并上传", async () => {
+    const { getByTestId, queryAllByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[]} onSubmit={noopSubmit} />
+    ));
+    const editor = getByTestId("mention-editor") as HTMLInputElement;
+    const file = new File(["png-bytes"], "Screenshot.png", { type: "image/png" });
+    // jsdom 不真造 ClipboardEvent.clipboardData.files；构造一个 mock 事件并 dispatch。
+    // fireEvent.paste 会让 React/Solid 走 onPaste handler；clipboardData 我们手动塞。
+    const evt = new Event("paste", { bubbles: true, cancelable: true }) as Event & {
+      clipboardData: { files: File[] };
+    };
+    evt.clipboardData = { files: [file] };
+    editor.dispatchEvent(evt);
+    const chips = queryAllByTestId(/^composer-attach-c-/);
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.textContent).toContain("Screenshot.png");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(queryAllByTestId(/^composer-attach-c-/)[0]?.getAttribute("data-status")).toBe("done");
+  });
+
+  it("v1-session19 · 粘贴纯文本 · 不当附件（让 textarea 走默认行为）", () => {
+    const { getByTestId, queryAllByTestId } = renderWithApi(() => (
+      <MentionComposer candidates={[]} onSubmit={noopSubmit} />
+    ));
+    const editor = getByTestId("mention-editor") as HTMLInputElement;
+    const evt = new Event("paste", { bubbles: true, cancelable: true }) as Event & {
+      clipboardData: { files: File[] };
+    };
+    evt.clipboardData = { files: [] };
+    editor.dispatchEvent(evt);
+    expect(queryAllByTestId(/^composer-attach-c-/)).toHaveLength(0);
+  });
+
   it("发送后 reset · attach chips 清空", async () => {
     const onSubmit = async (): Promise<void> => undefined;
     const { getByTestId, queryAllByTestId } = renderWithApi(() => (
