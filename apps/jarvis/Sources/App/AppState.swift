@@ -64,6 +64,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// 菜单栏 label——用单个中文字符避免跟系统 mic indicator 视觉撞色。
+    /// 状态机映射：闲=「玄」/ 听=「听」/ 派=「派」/ 等=「等」/ 说=「说」/ 兜底=「●」（单点提示）。
+    var menuBarLabel: String {
+        switch phase {
+        case .idle: return wakeMode == .fallback ? "玄·" : "玄"
+        case .listening: return "听"
+        case .sending: return "派"
+        case .waiting: return "等"
+        case .speaking: return "说"
+        }
+    }
+
     /// App 启动钩子——AppDelegate 在 applicationDidFinishLaunching 调一次。
     func bootstrap() {
         synthesizer = Synthesizer()
