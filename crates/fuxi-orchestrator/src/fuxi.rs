@@ -1453,6 +1453,7 @@ impl Fuxi {
     /// cc 适配器忽略 task_id，这里传随机 id 兼容 trait 签名；事件上不挂
     /// task 维度（没有从 dispatch 回流最近 task 的路径）——v0.2 补上"最近
     /// dispatch 的 task 记忆"后再加。
+    #[allow(clippy::too_many_arguments)]
     pub async fn intervene(
         &self,
         agent_id: AgentId,
@@ -1461,9 +1462,13 @@ impl Fuxi {
         mentions: Vec<AgentId>,
         pinned_node: Option<String>,
         attachments: Vec<String>,
+        task_id: Option<TaskId>,
     ) -> Result<()> {
         // 用户主动 intervene 路径——不带 system_origin（None）。
         // bug #76：bridge / sentinel 系统注入走 [`intervene_system_origin`]。
+        // Bug B · `task_id` 来自 PWA 任务 thread 上下文；写入所有 publish 事件的
+        // meta.task，让 `task_thread_visible` filter 能拉回这条用户消息。系统注入
+        // (`intervene_system_origin`) 维持 task_id=None。
         self.intervene_inner(
             agent_id,
             interrupt_first,
@@ -1472,6 +1477,7 @@ impl Fuxi {
             pinned_node,
             attachments,
             None,
+            task_id,
         )
         .await
     }
@@ -1499,6 +1505,7 @@ impl Fuxi {
             None,
             Vec::new(),
             Some(system_origin),
+            None,
         )
         .await
     }
@@ -1513,6 +1520,7 @@ impl Fuxi {
         pinned_node: Option<String>,
         attachments: Vec<String>,
         system_origin: Option<String>,
+        task_id: Option<TaskId>,
     ) -> Result<()> {
         let agent = self
             .shelf
@@ -1532,6 +1540,7 @@ impl Fuxi {
             let intervention_ev_id = {
                 let mut meta = EventMeta::now();
                 meta.agent = Some(agent_id);
+                meta.task = task_id;
                 let id = meta.id;
                 let _ = self.bus.publish(Event {
                     meta,
@@ -1567,6 +1576,7 @@ impl Fuxi {
             {
                 let mut meta = EventMeta::now();
                 meta.agent = Some(xn);
+                meta.task = task_id;
                 let _ = self.bus.publish(Event {
                     meta,
                     kind: EventKind::OrchestratorCcReceived {
@@ -1590,6 +1600,7 @@ impl Fuxi {
         let intervention_ev_id = {
             let mut meta = EventMeta::now();
             meta.agent = Some(agent_id);
+            meta.task = task_id;
             let id = meta.id;
             let _ = self.bus.publish(Event {
                 meta,
@@ -1613,8 +1624,9 @@ impl Fuxi {
         if interrupt_first {
             info!(agent = %agent_id, "intervene: 打断式");
             agent.cancel(dummy_task).await?;
-            self.publish_with_agent(
+            self.publish_with_agent_task(
                 agent_id,
+                task_id,
                 EventKind::AgentInterrupted {
                     reason: "user_intervention".to_string(),
                 },
@@ -1627,8 +1639,9 @@ impl Fuxi {
         agent.send_message(dummy_task, text).await?;
 
         // 4. TaskInterventionApplied —— wire 层确认
-        self.publish_with_agent(
+        self.publish_with_agent_task(
             agent_id,
+            task_id,
             EventKind::TaskInterventionApplied {
                 mode: mode_str.to_string(),
             },
@@ -1643,6 +1656,7 @@ impl Fuxi {
         {
             let mut meta = EventMeta::now();
             meta.agent = Some(xn);
+            meta.task = task_id;
             let _ = self.bus.publish(Event {
                 meta,
                 kind: EventKind::OrchestratorCcReceived {
@@ -1884,8 +1898,16 @@ impl Fuxi {
     /// 构造带 `agent` 字段的 `EventMeta` 并发到 bus——忽略 publish 的 `Err`
     /// （bus 关闭时）；调用方已经没法对此做什么了。
     fn publish_with_agent(&self, agent: AgentId, kind: EventKind) {
+        self.publish_with_agent_task(agent, None, kind);
+    }
+
+    /// 同 `publish_with_agent` 但额外挂 `meta.task`。Bug B 修：intervene 路径要
+    /// 把 PWA 任务 thread 的 `task_id` 写到 `AgentInterrupted` /
+    /// `TaskInterventionApplied` 等事件，让 `task_thread_visible` filter 拉得回。
+    fn publish_with_agent_task(&self, agent: AgentId, task_id: Option<TaskId>, kind: EventKind) {
         let mut meta = EventMeta::now();
         meta.agent = Some(agent);
+        meta.task = task_id;
         let _ = self.bus.publish(Event { meta, kind });
     }
 

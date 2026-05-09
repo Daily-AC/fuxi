@@ -811,9 +811,17 @@ async fn intervene_append_emits_user_intervention_and_applied() {
     fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, false, "hello mid-task", Vec::new(), None, Vec::new())
-        .await
-        .expect("intervene");
+    fuxi.intervene(
+        id,
+        false,
+        "hello mid-task",
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("intervene");
 
     // 事件顺序：UserInterventionSent(append) + TaskInterventionApplied(append)
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -917,9 +925,17 @@ async fn intervene_interrupt_emits_three_events_and_calls_cancel() {
     fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, true, "stop and rework", Vec::new(), None, Vec::new())
-        .await
-        .expect("intervene");
+    fuxi.intervene(
+        id,
+        true,
+        "stop and rework",
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("intervene");
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let mut collected = vec![];
@@ -974,7 +990,7 @@ async fn intervene_on_idle_auto_degrades_to_dispatch() {
     );
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(id, false, "你好，鲁班", Vec::new(), None, Vec::new())
+    fuxi.intervene(id, false, "你好，鲁班", Vec::new(), None, Vec::new(), None)
         .await
         .expect("intervene");
 
@@ -1084,7 +1100,7 @@ async fn intervene_on_missing_agent_returns_not_found() {
 
     let bogus = AgentId::new();
     let err = fuxi
-        .intervene(bogus, false, "ghost", Vec::new(), None, Vec::new())
+        .intervene(bogus, false, "ghost", Vec::new(), None, Vec::new(), None)
         .await
         .expect_err("should fail on missing agent");
     let msg = format!("{err}");
@@ -1144,9 +1160,17 @@ async fn intervene_on_worker_publishes_cc_received_to_xuannv() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "加个注释", Vec::new(), None, Vec::new())
-        .await
-        .expect("intervene worker");
+    fuxi.intervene(
+        worker_id,
+        false,
+        "加个注释",
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect("intervene worker");
 
     // 收集事件
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -1188,7 +1212,7 @@ async fn intervene_on_xuannv_herself_does_not_publish_cc_received() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(xuannv_id, false, "hi", Vec::new(), None, Vec::new())
+    fuxi.intervene(xuannv_id, false, "hi", Vec::new(), None, Vec::new(), None)
         .await
         .expect("intervene xuannv");
 
@@ -1219,7 +1243,7 @@ async fn intervene_without_xuannv_id_set_skips_cc_received() {
     let worker_id = fuxi.insert_agent(worker, None).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "hi", Vec::new(), None, Vec::new())
+    fuxi.intervene(worker_id, false, "hi", Vec::new(), None, Vec::new(), None)
         .await
         .expect("intervene");
 
@@ -1288,7 +1312,7 @@ async fn orchestrator_cc_received_carries_original_intervention_id() {
     fuxi.set_xuannv(xuannv_id).await;
 
     let mut sub = bus.subscribe();
-    fuxi.intervene(worker_id, false, "ping", Vec::new(), None, Vec::new())
+    fuxi.intervene(worker_id, false, "ping", Vec::new(), None, Vec::new(), None)
         .await
         .unwrap();
 
@@ -1316,6 +1340,154 @@ async fn orchestrator_cc_received_carries_original_intervention_id() {
     assert_eq!(
         orig, sent,
         "OrchestratorCcReceived.original_intervention_id 应等于 UserInterventionSent 的事件 id"
+    );
+}
+
+// ── Bug B: intervene 透传 task_id 到 meta.task ──
+// PWA 任务 thread @ 门客发的消息，切走再切回页面"消失"。
+// 根因：UserInterventionSent.meta.task=None → tasks::task_thread_visible 把它们全过滤。
+// 修法：Fuxi::intervene 加 task_id: Option<TaskId> 入参（最后一个），
+// 写到 UserInterventionSent / OrchestratorCcReceived / TaskInterventionApplied /
+// AgentInterrupted 四类事件的 meta.task。
+
+#[tokio::test]
+async fn intervene_with_task_id_publishes_event_with_meta_task() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = InterveneTrackingStub::new("dev");
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+    // append 路径要求 Busy
+    use fuxi_orchestrator::ShelfStatus;
+    fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
+
+    let task_id = TaskId::new();
+    let mut sub = bus.subscribe();
+    fuxi.intervene(
+        id,
+        false,
+        "hi worker",
+        Vec::new(),
+        None,
+        Vec::new(),
+        Some(task_id),
+    )
+    .await
+    .expect("intervene with task_id");
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let mut found_user_sent_with_task = false;
+    let mut found_applied_with_task = false;
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        match &ev.kind {
+            EventKind::UserInterventionSent { .. } if ev.meta.task == Some(task_id) => {
+                found_user_sent_with_task = true;
+            }
+            EventKind::TaskInterventionApplied { .. } if ev.meta.task == Some(task_id) => {
+                found_applied_with_task = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        found_user_sent_with_task,
+        "UserInterventionSent 应携带 meta.task=Some(t)"
+    );
+    assert!(
+        found_applied_with_task,
+        "TaskInterventionApplied 应携带 meta.task=Some(t)"
+    );
+}
+
+#[tokio::test]
+async fn intervene_with_none_task_id_publishes_event_with_meta_task_none() {
+    // 反向兼容：task_id=None 时 meta.task 应保持 None（旧 wire 行为不变）
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let stub = InterveneTrackingStub::new("dev");
+    let id = fuxi.insert_agent(stub.clone(), None).await;
+    use fuxi_orchestrator::ShelfStatus;
+    fuxi.clone_shelf().set_status(id, ShelfStatus::Busy).await;
+
+    let mut sub = bus.subscribe();
+    fuxi.intervene(id, false, "no task", Vec::new(), None, Vec::new(), None)
+        .await
+        .expect("intervene none task_id");
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let mut user_sent_meta_task: Option<Option<TaskId>> = None;
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        if matches!(ev.kind, EventKind::UserInterventionSent { .. }) {
+            user_sent_meta_task = Some(ev.meta.task);
+        }
+    }
+    assert_eq!(
+        user_sent_meta_task,
+        Some(None),
+        "task_id=None 时 UserInterventionSent.meta.task 应仍为 None"
+    );
+}
+
+#[tokio::test]
+async fn intervene_idle_degrade_path_propagates_task_id() {
+    // idle 退化 dispatch 路径里 publish 的 UserInterventionSent 也要带 meta.task
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let xuannv = InterveneTrackingStub::new("xuannv");
+    let worker = InterveneTrackingStub::new("dev");
+    let xuannv_id = fuxi.insert_agent(xuannv, None).await;
+    let worker_id = fuxi.insert_agent(worker, None).await;
+    fuxi.set_xuannv(xuannv_id).await;
+    // worker 默认 Idle —— 走 degrade 路径
+
+    let task_id = TaskId::new();
+    let mut sub = bus.subscribe();
+    fuxi.intervene(
+        worker_id,
+        false,
+        "idle path",
+        Vec::new(),
+        None,
+        Vec::new(),
+        Some(task_id),
+    )
+    .await
+    .expect("intervene idle");
+
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let mut user_sent_with_task = false;
+    let mut cc_with_task = false;
+    while let Ok(Some(Ok(ev))) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await
+    {
+        match &ev.kind {
+            EventKind::UserInterventionSent { mode, .. }
+                if mode == "append_via_dispatch" && ev.meta.task == Some(task_id) =>
+            {
+                user_sent_with_task = true;
+            }
+            EventKind::OrchestratorCcReceived { .. } if ev.meta.task == Some(task_id) => {
+                cc_with_task = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        user_sent_with_task,
+        "idle degrade 路径的 UserInterventionSent 应携带 meta.task"
+    );
+    assert!(
+        cc_with_task,
+        "idle degrade 路径抄送给玄女的 OrchestratorCcReceived 也应携带 meta.task"
     );
 }
 

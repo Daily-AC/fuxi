@@ -4421,6 +4421,7 @@ async fn drive_tui(
                                                 Vec::new(),
                                                 None,
                                                 Vec::new(),
+                                                None,
                                             )
                                             .await
                                         {
@@ -4431,13 +4432,16 @@ async fn drive_tui(
                                 Some(Submit::Worker(id, text)) => {
                                     let mut meta = EventMeta::now();
                                     meta.agent = Some(id);
-                                    meta.task = app.latest_task_id_for_worker(id);
+                                    let worker_task_id = app.latest_task_id_for_worker(id);
+                                    meta.task = worker_task_id;
                                     let _ = bus.publish(Event {
                                         meta,
                                         kind: EventKind::UserPrompted { text: text.clone() },
                                     });
                                     let fuxi_cl = fuxi.clone();
                                     let send_text = app.expand_image_refs_for_submit(&text);
+                                    // Bug B 一致性：TUI 给 worker 发消息也带 task_id（同 PWA
+                                    // TaskThreadPage 路径），让事件 meta.task 命中 task_thread filter。
                                     tokio::spawn(async move {
                                         if let Err(e) = fuxi_cl
                                             .intervene(
@@ -4447,6 +4451,7 @@ async fn drive_tui(
                                                 Vec::new(),
                                                 None,
                                                 Vec::new(),
+                                                worker_task_id,
                                             )
                                             .await
                                         {
