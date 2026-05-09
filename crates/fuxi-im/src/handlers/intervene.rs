@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
-use fuxi_core::AgentId;
+use fuxi_core::{AgentId, TaskId};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
@@ -38,6 +38,17 @@ fn parse_agent_id_lenient(s: &str) -> std::result::Result<AgentId, String> {
     Uuid::parse_str(trimmed).map(AgentId::from).map_err(|e| {
         format!("agent id 不是合法 uuid（接受 `<uuid>` 或 `agent-<uuid>`）: {s} ({e})")
     })
+}
+
+/// Bug B · 同款宽松解析 task id：接 `task-<uuid>` 或裸 `<uuid>`。
+///
+/// 前端 `task.id` 来自后端 `TaskId::Display`（含 `task-` 前缀），PWA TaskThreadPage
+/// 把它原样回传到 intervene body —— 不宽松接受会撞 `parse_str` 错误 → 400。
+fn parse_task_id_lenient(s: &str) -> std::result::Result<TaskId, String> {
+    let trimmed = s.strip_prefix("task-").unwrap_or(s);
+    Uuid::parse_str(trimmed)
+        .map(TaskId::from)
+        .map_err(|e| format!("task id 不是合法 uuid（接受 `<uuid>` 或 `task-<uuid>`）: {s} ({e})"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +86,15 @@ pub struct InterveneBody {
     /// 同时落到 `EventKind::UserInterventionSent.attachments` 给 PWA 历史回显。
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// Bug B 修复 · 任务上下文 task_id（前端 `TaskThreadPage` 已传，老 wire 不传）。
+    ///
+    /// PWA 任务详情页 @ 门客发的消息切走再切回"消失"的根因——后端原本不接此字段，
+    /// `Fuxi::intervene` publish `UserInterventionSent` 时 `meta.task=None`，
+    /// `task_thread_visible` filter 首关 `meta.task == Some(task_id)` 全过滤掉。
+    /// 现在透传到事件 meta，让任务 thread 历史能拉回用户消息。
+    /// 接受 `task-<uuid>` 前缀（来自 backend `TaskId::Display`）或裸 uuid。
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -195,6 +215,20 @@ pub async fn intervene(
         effective_text.push_str(&attachment_block);
     }
 
+    // Bug B · 解析可选 task_id（前端 TaskThreadPage 传）；无效格式 → 400。
+    let task_id_opt = match body
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(t) => Some(
+            parse_task_id_lenient(t)
+                .map_err(|e| Error::BadRequest(format!("task_id 解析失败: {e}")))?,
+        ),
+        None => None,
+    };
+
     state
         .fuxi
         .intervene(
@@ -204,6 +238,7 @@ pub async fn intervene(
             mentions,
             effective_pinned_node,
             body.attachments,
+            task_id_opt,
         )
         .await?;
 
@@ -627,5 +662,87 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "纯附件不应被 text 验证拒"
         );
+    }
+
+    // ── Bug B（task_id 透传）: PWA 任务 thread @ 门客发的消息切走再切回会"消失" ──
+    // 根因：handler 没接 body.task_id，前端传的 task_id 全 ignore →
+    // UserInterventionSent.meta.task=None → tasks::task_thread_visible 首关把它们全过滤。
+    // 修法：body 加 Option<task_id> + 解析（裸 uuid 或 task-<uuid>），透传给
+    // Fuxi::intervene 写到事件 meta。下面四条覆盖反序列化 + 解析路径。
+
+    /// legacy 客户端 body 不带 task_id —— `#[serde(default)]` 应给 None。
+    #[test]
+    fn body_deserializes_task_id_default_none_back_compat() {
+        let raw = serde_json::json!({ "text": "hi" });
+        let body: InterveneBody = serde_json::from_value(raw).expect("legacy body");
+        assert!(body.task_id.is_none(), "legacy body 应解析为 task_id=None");
+    }
+
+    /// 前端给 `task-<uuid>` 前缀（来自 backend `TaskId::Display`）—— handler 应宽松接受。
+    #[tokio::test]
+    async fn body_deserializes_task_id_with_task_prefix() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let task_uuid = uuid::Uuid::new_v4();
+        let body_json = serde_json::json!({
+            "text": "查 thread",
+            "task_id": format!("task-{task_uuid}"),
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        // task-<uuid> 前缀应解析成功 —— 不该 400。shelf 没真 agent → 503 路径正常。
+        assert_ne!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "`task-<uuid>` 前缀应被宽松解析"
+        );
+    }
+
+    /// 前端给裸 uuid（兼容旧前端）—— 也应解析成功。
+    #[tokio::test]
+    async fn body_deserializes_task_id_bare_uuid() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let task_uuid = uuid::Uuid::new_v4();
+        let body_json = serde_json::json!({
+            "text": "x",
+            "task_id": task_uuid.to_string(),
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "裸 uuid task_id 应被解析"
+        );
+    }
+
+    /// 无效 task_id（不是 uuid）→ 400 BadRequest 含明确文案。
+    #[tokio::test]
+    async fn body_rejects_invalid_task_id() {
+        let (_dir, app, fuxi) = build_app().await;
+        fuxi.set_xuannv(AgentId::new()).await;
+        let body_json = serde_json::json!({
+            "text": "x",
+            "task_id": "not-a-uuid",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
