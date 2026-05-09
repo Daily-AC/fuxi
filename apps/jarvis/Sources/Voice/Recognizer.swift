@@ -24,10 +24,13 @@ final class Recognizer {
     private var task: SFSpeechRecognitionTask?
 
     /// 静音超时计时器——Apple SFSpeechRecognizer 的 isFinal 触发时机不可靠（默认要 60s
-    /// task timeout 才算完）。我们自己做 VAD：每次拿到新 partial 重置计时；超时则
-    /// endAudio + cleanup 让 result 走 final 路径。
+    /// task timeout 才算完）。我们自己做 VAD。
+    /// 两套 timeout：
+    ///   - leading：用户开口前给的宽限（≥ 第一帧 partial 到达延迟）
+    ///   - trailing：开口后停顿多久算说完（自然语流停顿不该被误断）
     private var silenceTimer: DispatchSourceTimer?
-    private static let silenceTimeout: TimeInterval = 1.5
+    private static let leadingTimeout: TimeInterval = 6.0
+    private static let trailingTimeout: TimeInterval = 2.0
     private var lastTranscript: String = ""
 
     init(onResult: @escaping (String, Bool) -> Void,
@@ -79,31 +82,29 @@ final class Recognizer {
                 if result.isFinal {
                     self.cleanup()
                 } else if changed {
-                    // 文本变了 → 还在说话 → 重置静音 timer
-                    self.armSilenceTimer()
+                    // 收到非空 partial → 用户已经开口 → 切到 trailing timeout（说完停顿即断）
+                    self.armTimer(timeout: Self.trailingTimeout, kind: "trailing")
                 }
             }
             if error != nil {
                 self.cleanup()
             }
         }
-        // 进 listening 立即装一次 timer——用户开口前 1.5s 都没声音也要兜底退出
-        armSilenceTimer()
+        // 进 listening 装"开口前"宽限 timer——给 SFSpeech 启动 + 用户酝酿语句的时间
+        armTimer(timeout: Self.leadingTimeout, kind: "leading")
     }
 
-    /// 装/重置静音计时器：1.5s 内没新 partial 就 endAudio() → SDK 走 final 路径
-    /// → onResult(isFinal=true) → AppState 触发 sendToXuannv。
-    private func armSilenceTimer() {
+    /// 装/重置静音计时器：超时则 endAudio() → SDK 走 final 路径 → AppState 触发 sendToXuannv。
+    /// `kind` 仅用于日志区分 leading（开口前）/ trailing（说完停顿）。
+    private func armTimer(timeout: TimeInterval, kind: String) {
         silenceTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + Self.silenceTimeout)
+        t.schedule(deadline: .now() + timeout)
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            // endAudio 让 SFSpeechRecognizer 当 final——它会再回调一次 onResult(isFinal=true)
-            // 走自然清理路径，不直接 cleanup（避免没有 final 触发 sendToXuannv 上层）。
             if let req = self.request {
                 req.endAudio()
-                self.logger.info("silence timeout → endAudio (transcript=\(self.lastTranscript, privacy: .public))")
+                self.logger.info("\(kind, privacy: .public) timeout → endAudio (transcript=\(self.lastTranscript, privacy: .public))")
             } else {
                 self.cleanup()
             }
