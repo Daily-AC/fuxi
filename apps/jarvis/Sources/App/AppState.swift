@@ -26,11 +26,19 @@ final class AppState: ObservableObject {
         case speaking
     }
 
+    /// 唤醒链路当前在哪条腿：远端 wake-server / 本机 SFSpeech 兜底 / 不开（hotkey 模式或未配 token）
+    enum WakeMode: String {
+        case remote
+        case fallback
+        case disabled
+    }
+
     @Published var phase: VoicePhase = .idle
     @Published var lastTranscript: String = ""
     @Published var lastVoiceLine: String = ""
     @Published var connectionStatus: String = "disconnected"
     @Published var settings = Settings.load()
+    @Published var wakeMode: WakeMode = .disabled
 
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "state")
 
@@ -39,10 +47,17 @@ final class AppState: ObservableObject {
     var synthesizer: Synthesizer?
     var hotkey: HotkeyMonitor?
     var fuxiClient: FuxiClient?
+    var wakeClient: RemoteWakeClient?
+    var wakeFallback: LocalWakeFallback?
+
+    // fallback 期间每 60s 试一次主连接复活。@Sendable Timer 包裹见 setupWake。
+    private var fallbackProbeTimer: Timer?
 
     var menuBarIconName: String {
         switch phase {
-        case .idle: return "mic"
+        case .idle:
+            // mic.slash 表示 fallback 模式——主连断了用户得知道。
+            return wakeMode == .fallback ? "mic.slash" : "mic"
         case .listening: return "mic.fill"
         case .sending, .waiting: return "ellipsis.bubble"
         case .speaking: return "speaker.wave.2.fill"
@@ -74,6 +89,86 @@ final class AppState: ObservableObject {
             }
         }
         fuxiClient?.connect()
+
+        setupWake()
+    }
+
+    /// 起 wake 链路。triggerMode == .hotkey 不需要 wake；其它两种先 connect remote，
+    /// fallbackRequested 时切 LocalWakeFallback；recovered 切回。
+    private func setupWake() {
+        guard settings.triggerMode != .hotkey else {
+            wakeMode = .disabled
+            return
+        }
+        guard !settings.wakeToken.isEmpty,
+              let url = URL(string: settings.wakeServerURL)
+        else {
+            // 没填 token / URL 不合法——直接走 fallback 模式（用户至少有兜底）。
+            logger.warning("wake token / URL 缺失，直接进 fallback")
+            wakeFallback = LocalWakeFallback(keywords: settings.wakeKeywords) { [weak self] in
+                Task { @MainActor in self?.startListening() }
+            }
+            wakeMode = .fallback
+            wakeFallback?.start()
+            return
+        }
+        let client = RemoteWakeClient(serverURL: url, bearer: settings.wakeToken) { [weak self] event in
+            Task { @MainActor in self?.handleWakeEvent(event) }
+        }
+        let fb = LocalWakeFallback(keywords: settings.wakeKeywords) { [weak self] in
+            Task { @MainActor in self?.startListening() }
+        }
+        wakeClient = client
+        wakeFallback = fb
+        wakeMode = .remote
+        client.connect()
+    }
+
+    private func handleWakeEvent(_ event: WakeClientEvent) {
+        switch event {
+        case .wakeDetected:
+            startListening()
+        case .fallbackRequested:
+            switchToFallback()
+        case .reconnected:
+            switchToRemote()
+        }
+    }
+
+    private func switchToFallback() {
+        guard wakeMode != .fallback else { return }
+        logger.info("wake 切 fallback")
+        wakeMode = .fallback
+        wakeFallback?.start()
+        // 60s 一次试主连接复活——RemoteWakeClient 内部本身也在重试，这里二级保险，主要服务于
+        // 长时间断线后用户改了 wakeToken 想立即试通的场景。
+        fallbackProbeTimer?.invalidate()
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.wakeClient?.reconnect() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        fallbackProbeTimer = timer
+    }
+
+    /// 设置变更后重置 wake 链路——用户改 wakeServerURL / wakeToken / triggerMode 都走这。
+    func reloadWake() {
+        wakeClient?.stop()
+        wakeFallback?.stop()
+        fallbackProbeTimer?.invalidate()
+        fallbackProbeTimer = nil
+        wakeClient = nil
+        wakeFallback = nil
+        wakeMode = .disabled
+        setupWake()
+    }
+
+    private func switchToRemote() {
+        guard wakeMode != .remote else { return }
+        logger.info("wake 切回 remote")
+        wakeMode = .remote
+        wakeFallback?.stop()
+        fallbackProbeTimer?.invalidate()
+        fallbackProbeTimer = nil
     }
 
     func toggleListening() {
@@ -90,6 +185,9 @@ final class AppState: ObservableObject {
 
     func startListening() {
         guard phase == .idle else { return }
+        // 释放麦给主 Recognizer——fallback 自身在命中 wake 后已 stop，但 hotkey/外部触发路径
+        // 这里也兜一次。
+        wakeFallback?.stop()
         phase = .listening
         lastTranscript = ""
         recognizer?.start()
@@ -102,6 +200,10 @@ final class AppState: ObservableObject {
             sendToXuannv(lastTranscript)
         } else {
             phase = .idle
+        }
+        // 主 Recognizer 释放麦后，如果还在 fallback 模式就把兜底起回来——否则下次"玄女"喊不出。
+        if wakeMode == .fallback {
+            wakeFallback?.start()
         }
     }
 

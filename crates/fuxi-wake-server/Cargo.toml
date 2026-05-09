@@ -1,0 +1,39 @@
+[package]
+name = "fuxi-wake-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "伏羲家用 Linux 上的唤醒守护——讯飞 SDK / mock 引擎对外暴露 WS 给 Mac 贾维斯"
+build = "build.rs"
+
+[[bin]]
+name = "fuxi-wake-server"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures-util = { workspace = true }
+
+[build-dependencies]
+# 仅在 target_os=linux + target_arch=x86_64 + ENV `FUXI_XFYUN_SDK_DIR` 存在时才 bindgen。
+# build.rs 内部再 cfg gate，保持 mac dev `cargo build` 能过。
+bindgen = "0.71"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-tungstenite = { workspace = true }
+tempfile = "3"
+url = "2"

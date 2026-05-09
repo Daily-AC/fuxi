@@ -23,3 +23,8 @@ data/
 .superpowers/
 .fuxi-build-sha
 **/__pycache__/
+
+# 讯飞 IVW SDK —— 二进制 .so + 许可证不允许重分发，本地开发用，不入仓
+Linux_ivw_*/
+deploy/wake/sdk/
+

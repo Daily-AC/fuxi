@@ -18,7 +18,9 @@ struct JarvisApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
+        // 显式 SwiftUI.Settings——本项目里有 struct Settings 同名，trailing-closure 推断
+        // 在更多字段出现后会优先匹配我们自己的 struct，导致编译错。
+        SwiftUI.Settings {
             PreferencesView(state: state)
         }
     }
