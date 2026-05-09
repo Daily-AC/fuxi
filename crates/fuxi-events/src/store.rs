@@ -209,6 +209,36 @@ impl EventStore {
         Ok(out)
     }
 
+    /// 同 [`Self::recent`] 但额外按 agent 过滤——issue c35ef4a0 修复路径。
+    ///
+    /// 救急 CLI `fuxi events --filter agent-X --tail N` 走这里：filter 在 SQL
+    /// WHERE 层做，"先 filter 再取尾 N 条"，命中事件即便落在最近 N 条窗口外
+    /// 也能拿到。老路径 `recent(N)` 后才在 `format_event_line` 里 substring
+    /// 过滤，N 小时常空输出，逼用户加大 tail 再 grep——救急工具救不了急。
+    ///
+    /// `agent_substr` 是子串匹配（`'%substr%'`）——匹配语义跟旧 `format_event_line`
+    /// 的 `to_string().contains(f)` 一致：用户传 `agent-ace5d6da` / 裸 `ace5d6da`
+    /// / 8 字符前缀都能命中存储的 `agent-<full-uuid>` Display 格式。
+    /// `idx_events_agent` prefix 索引在子串场景帮不上忙，但 27MB 库全表 LIKE
+    /// 仍是毫秒级——保 UX 一致比强追性能重要。
+    pub async fn recent_filtered(&self, limit: i64, agent_substr: &str) -> Result<Vec<Event>> {
+        let pattern = format!("%{agent_substr}%");
+        let rows = sqlx::query(
+            "SELECT payload FROM events WHERE agent LIKE ?1 ORDER BY rowid DESC LIMIT ?2",
+        )
+        .bind(pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let payload: String = row.try_get("payload")?;
+            let ev: Event = serde_json::from_str(&payload)?;
+            out.push(ev);
+        }
+        Ok(out)
+    }
+
     /// 拿全部 `kind_tag == kind` 的事件（按 rowid 升序）。
     ///
     /// `/api/tasks` role 兜底用：旧 task 的 `AgentSpawning` 事件可能远在 history
@@ -1230,5 +1260,94 @@ mod tests {
             .map(|r| r.try_get::<String, _>("kind_tag").expect("kind_tag"))
             .collect();
         assert_eq!(tags, vec!["task_state_changed", "task_state_changed"]);
+    }
+
+    // ── issue c35ef4a0: recent_filtered ─────────────────────────────────
+    // CLI `fuxi events --filter agent-X --tail N` 必须 SQL where + tail，
+    // 否则命中事件落在最近 N 条窗口外就空输出。这三条覆盖：返目标 agent /
+    // strip prefix 兼容 / 无匹配。
+
+    #[tokio::test]
+    async fn recent_filtered_returns_only_matching_agent() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let target = AgentId::new();
+        let other_a = AgentId::new();
+        let other_b = AgentId::new();
+        let task = TaskId::new();
+        // 目标 agent 5 条
+        for _ in 0..5 {
+            store
+                .append(&mk_agent_event(target, task))
+                .await
+                .expect("append target");
+        }
+        // 噪声各 5 条
+        for _ in 0..5 {
+            store
+                .append(&mk_agent_event(other_a, task))
+                .await
+                .expect("noise a");
+            store
+                .append(&mk_agent_event(other_b, task))
+                .await
+                .expect("noise b");
+        }
+        // tail 3：只取目标 agent 最近 3 条；噪声不能混入
+        let target_str = target.to_string(); // `agent-<uuid>`
+        let got = store
+            .recent_filtered(3, &target_str)
+            .await
+            .expect("filtered");
+        assert_eq!(got.len(), 3, "应取 3 条");
+        for ev in &got {
+            assert_eq!(ev.meta.agent, Some(target), "不能混入别 agent 的事件");
+        }
+    }
+
+    #[tokio::test]
+    async fn recent_filtered_matches_with_or_without_agent_prefix() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let target = AgentId::new();
+        let task = TaskId::new();
+        for _ in 0..2 {
+            store
+                .append(&mk_agent_event(target, task))
+                .await
+                .expect("append");
+        }
+        let full = target.to_string(); // `agent-<uuid>`
+        // 用 backend Display 全串
+        let got_full = store.recent_filtered(10, &full).await.expect("full");
+        assert_eq!(got_full.len(), 2);
+        // 用裸 uuid 前 8 字符
+        let bare_prefix: String = target.0.to_string().chars().take(8).collect();
+        let got_bare = store
+            .recent_filtered(10, &bare_prefix)
+            .await
+            .expect("bare prefix");
+        assert_eq!(got_bare.len(), 2, "裸 uuid 前缀也要命中（substring 匹配）");
+        // 用带 agent- 前缀的截短串
+        let prefixed = format!("agent-{bare_prefix}");
+        let got_prefixed = store
+            .recent_filtered(10, &prefixed)
+            .await
+            .expect("agent- prefix");
+        assert_eq!(got_prefixed.len(), 2, "agent- 前缀也要命中");
+    }
+
+    #[tokio::test]
+    async fn recent_filtered_returns_empty_for_no_match() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let target = AgentId::new();
+        let task = TaskId::new();
+        store
+            .append(&mk_agent_event(target, task))
+            .await
+            .expect("append");
+        let got = store
+            .recent_filtered(10, "nonexistent-prefix-deadbeef")
+            .await
+            .expect("filtered");
+        assert!(got.is_empty(), "无匹配应返空 vec");
     }
 }
