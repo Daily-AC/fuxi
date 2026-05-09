@@ -30,12 +30,6 @@ settings:
     CODE_SIGNING_REQUIRED: YES
     SWIFT_STRICT_CONCURRENCY: complete
 
-packages:
-  # 唤醒词——task #6 才接，先留位。装好后 main target dependencies 加上 Porcupine 即可。
-  # Porcupine:
-  #   url: https://github.com/Picovoice/porcupine.git
-  #   from: "3.0.0"
-
 targets:
   Jarvis:
     type: application
@@ -66,11 +60,6 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: cn.qmledmq.fuxi.jarvis
-        # Porcupine 等三方静态库需要：
-        OTHER_LDFLAGS: -ObjC
-    # dependencies:
-    #   - package: Porcupine
-    #     product: Porcupine
 
   JarvisTests:
     type: bundle.unit-test
