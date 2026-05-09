@@ -154,6 +154,7 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     func connect() {
+        logger.notice("connect → \(self.serverURL.absoluteString, privacy: .public) bearerLen=\(self.bearer.count)")
         cancelWS()
         var req = URLRequest(url: serverURL)
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")

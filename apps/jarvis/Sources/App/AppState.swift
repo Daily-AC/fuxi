@@ -108,6 +108,7 @@ final class AppState: ObservableObject {
     /// 起 wake 链路。triggerMode == .hotkey 不需要 wake；其它两种先 connect remote，
     /// fallbackRequested 时切 LocalWakeFallback；recovered 切回。
     private func setupWake() {
+        logger.notice("setupWake: triggerMode=\(self.settings.triggerMode.rawValue, privacy: .public) tokenLen=\(self.settings.wakeToken.count) url=\(self.settings.wakeServerURL, privacy: .public)")
         guard settings.triggerMode != .hotkey else {
             wakeMode = .disabled
             return
