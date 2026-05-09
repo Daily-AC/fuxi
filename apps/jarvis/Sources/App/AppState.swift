@@ -39,6 +39,8 @@ final class AppState: ObservableObject {
     @Published var connectionStatus: String = "disconnected"
     @Published var settings = Settings.load()
     @Published var wakeMode: WakeMode = .disabled
+    /// 实时麦克风电平（0~1，已 RMS 归一化）。Recognizer 在 listening 期间持续推。
+    @Published var audioLevel: Double = 0
 
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "state")
 
@@ -49,6 +51,7 @@ final class AppState: ObservableObject {
     var fuxiClient: FuxiClient?
     var wakeClient: RemoteWakeClient?
     var wakeFallback: LocalWakeFallback?
+    var overlay: OverlayWindowController?
 
     // fallback 期间每 60s 试一次主连接复活。@Sendable Timer 包裹见 setupWake。
     private var fallbackProbeTimer: Timer?
@@ -56,34 +59,40 @@ final class AppState: ObservableObject {
     var menuBarIconName: String {
         switch phase {
         case .idle:
-            // mic.slash 表示 fallback 模式——主连断了用户得知道。
-            return wakeMode == .fallback ? "mic.slash" : "mic"
-        case .listening: return "mic.fill"
-        case .sending, .waiting: return "ellipsis.bubble"
-        case .speaking: return "speaker.wave.2.fill"
-        }
-    }
-
-    /// 菜单栏 label——用单个中文字符避免跟系统 mic indicator 视觉撞色。
-    /// 状态机映射：闲=「玄」/ 听=「听」/ 派=「派」/ 等=「等」/ 说=「说」/ 兜底=「●」（单点提示）。
-    var menuBarLabel: String {
-        switch phase {
-        case .idle: return wakeMode == .fallback ? "玄·" : "玄"
-        case .listening: return "听"
-        case .sending: return "派"
-        case .waiting: return "等"
-        case .speaking: return "说"
+            // 圆框 waveform——idle 时空心，跟 app icon 圆形主题搭；fallback 加 slash
+            // 让用户一眼看出主连断了。避开系统 macOS 麦克风 indicator 的橙色 mic 撞色。
+            return wakeMode == .fallback ? "waveform.slash" : "waveform.circle"
+        case .listening:
+            // 实心 + 波形——正在听
+            return "waveform.circle.fill"
+        case .sending, .waiting:
+            // 转圈 indicator
+            return "ellipsis.circle.fill"
+        case .speaking:
+            // 玄女在说——气泡
+            return "quote.bubble.fill"
         }
     }
 
     /// App 启动钩子——AppDelegate 在 applicationDidFinishLaunching 调一次。
     func bootstrap() {
+        // Siri 风格悬浮窗——按 phase 自动 show/hide。先于其他组件初始化让 overlay
+        // 早早 ready，避免首次唤醒时窗口还没创建错过初帧。
+        overlay = OverlayWindowController(state: self)
+
         synthesizer = Synthesizer()
-        recognizer = Recognizer { [weak self] transcript, isFinal in
-            Task { @MainActor in
-                self?.handleTranscript(transcript, isFinal: isFinal)
+        recognizer = Recognizer(
+            onResult: { [weak self] transcript, isFinal in
+                Task { @MainActor in
+                    self?.handleTranscript(transcript, isFinal: isFinal)
+                }
+            },
+            onLevel: { [weak self] level in
+                Task { @MainActor in
+                    self?.audioLevel = level
+                }
             }
-        }
+        )
         hotkey = HotkeyMonitor { [weak self] in
             Task { @MainActor in
                 self?.toggleListening()
