@@ -12,7 +12,7 @@ import OSLog
 /// 状态：start() 开始持续录音 + 转写；callback 每段中间/最终结果都回调。stop() 停。
 /// end-of-speech 由 SFSpeechRecognitionResult.isFinal 自动触发。
 final class Recognizer {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "speech")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "speech")
 
     private let recognizer: SFSpeechRecognizer?
     private let onResult: (String, Bool) -> Void

@@ -3,7 +3,7 @@ import Security
 
 /// 极简 Keychain 包装——只 string，只 generic password，service 写死。
 enum Keychain {
-    private static let service = "cn.qmledmq.fuxi.jarvis"
+    private static let service = "cn.qmledmq.fuxi.xuannv"
 
     static func save(account: String, value: String) {
         // 删旧再写——SecItemUpdate 需要查存在性，简单粗暴 add+delete 更省事。

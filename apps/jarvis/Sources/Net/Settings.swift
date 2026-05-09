@@ -38,7 +38,7 @@ struct Settings: Equatable {
         }
     }
 
-    static let userDefaultsKey = "cn.qmledmq.fuxi.jarvis.settings"
+    static let userDefaultsKey = "cn.qmledmq.fuxi.xuannv.settings"
 
     static let `default` = Settings(
         // 默认填家用部署公网地址——install-jarvis.sh 已把 token 写进 Keychain，
@@ -53,7 +53,9 @@ struct Settings: Equatable {
         wakeToken: "",
         wakeKeywords: ["玄女", "贾维斯"],
         picovoiceKey: "",
-        hotkey: HotkeyCombo(modifiers: [.option, .shift], keyCode: 49 /* space */),
+        // 默认 ⌃⌥M——避开 ⌘Space (Spotlight) / ⌥Space / ⌃Space 一族常见冲突。
+        // m=0x2E。用户在设置里可改。
+        hotkey: HotkeyCombo(modifiers: [.control, .option], keyCode: 0x2E),
         ttsVoice: "zh-CN"
     )
 

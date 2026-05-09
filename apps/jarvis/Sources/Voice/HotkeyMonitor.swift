@@ -10,7 +10,7 @@ import OSLog
 /// **必需权限**：辅助功能（Accessibility）—— 系统设置 → 隐私与安全性 → 辅助功能 →
 /// 允许「贾维斯」。首次使用要让用户手动开。
 final class HotkeyMonitor {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "hotkey")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "hotkey")
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private let onTrigger: () -> Void

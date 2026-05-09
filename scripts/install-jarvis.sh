@@ -48,16 +48,18 @@ echo "==> [1/6] swift build -c release"
 cd "$JARVIS_DIR"
 swift build -c release 2>&1 | tail -3
 
-BIN="$JARVIS_DIR/.build/release/Jarvis"
-[[ -x "$BIN" ]] || { echo "找不到 build 出的 Jarvis binary"; exit 4; }
+BIN="$JARVIS_DIR/.build/release/Xuannv"
+[[ -x "$BIN" ]] || { echo "找不到 build 出的 Xuannv binary"; exit 4; }
 
-# ── 3. 组 .app bundle + 装 /Applications/ ──
+# ── 3. 组 .app bundle + 装 ~/Applications/ ─
+# .app 目录名保留 ASCII (Xuannv.app) 避免 LS/Finder 路径中文歧义；用户可见名「玄女」
+# 通过 CFBundleDisplayName 控制。
 echo "==> [2/6] 组 .app bundle"
-STAGE="$JARVIS_DIR/.build/release/Jarvis.app"
+STAGE="$JARVIS_DIR/.build/release/Xuannv.app"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
-cp "$BIN" "$STAGE/Contents/MacOS/Jarvis"
-chmod +x "$STAGE/Contents/MacOS/Jarvis"
+cp "$BIN" "$STAGE/Contents/MacOS/Xuannv"
+chmod +x "$STAGE/Contents/MacOS/Xuannv"
 
 # .icns 注入——install.sh 跑前 Resources/AppIcon.icns 必须就位（gpt-image-2 生成 +
 # iconutil 打包，详见 commit 历史）。没有就算了不挂，App 会用系统默认。
@@ -77,8 +79,8 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
     <key>CFBundleDisplayName</key><string>玄女</string>
-    <key>CFBundleExecutable</key><string>Jarvis</string>
-    <key>CFBundleIdentifier</key><string>cn.qmledmq.fuxi.jarvis</string>
+    <key>CFBundleExecutable</key><string>Xuannv</string>
+    <key>CFBundleIdentifier</key><string>cn.qmledmq.fuxi.xuannv</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>玄女</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -98,14 +100,27 @@ plutil -lint "$STAGE/Contents/Info.plist" >/dev/null
 # 装到 ~/Applications/——用户级目录无需 sudo，Launchpad / Spotlight 同样可达。
 # 想全局 /Applications/ 自己 sudo cp 一份即可。
 INSTALL_DIR="$HOME/Applications"
-INSTALL_PATH="$INSTALL_DIR/Jarvis.app"
+INSTALL_PATH="$INSTALL_DIR/Xuannv.app"
 echo "==> [3/6] 装到 $INSTALL_PATH"
 mkdir -p "$INSTALL_DIR"
+# 顺手清掉历史 Jarvis.app（同 bundle id 但 v0.1 用过，名字残留在系统索引里）
+rm -rf "$INSTALL_DIR/Jarvis.app" "/Applications/Jarvis.app" 2>/dev/null || true
 rm -rf "$INSTALL_PATH"
 cp -R "$STAGE" "$INSTALL_PATH"
 codesign --force --deep \
     --entitlements "$JARVIS_DIR/Resources/Jarvis.entitlements" \
     --sign - "$INSTALL_PATH"
+
+# 清 macOS TCC 数据库里旧 bundle id 的权限残留——不清的话用户在系统设置里看到老名字
+# "Jarvis"，且新 binary 用同名权限项可能不被认。tccutil reset 让用户首次启动时
+# 重新弹权限对话框（接受即写新条目）。
+tccutil reset Microphone cn.qmledmq.fuxi.jarvis 2>/dev/null || true
+tccutil reset SpeechRecognition cn.qmledmq.fuxi.jarvis 2>/dev/null || true
+tccutil reset Accessibility cn.qmledmq.fuxi.jarvis 2>/dev/null || true
+# Launch Services 重注册——强刷 Display Name 缓存
+LSREG=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+"$LSREG" -u "$INSTALL_DIR/Jarvis.app" 2>/dev/null || true
+"$LSREG" -f "$INSTALL_PATH"
 
 # ── 4. 取 home wake.token 写 UserDefaults ───
 echo "==> [4/6] 取 home wake.token 写 UserDefaults"
@@ -114,7 +129,7 @@ if [[ -z "$WAKE_TOKEN" ]]; then
     echo "ssh home 取 wake.token 失败——home 还没装 fuxi-wake-server？" >&2
     exit 5
 fi
-DOMAIN="cn.qmledmq.fuxi.jarvis"
+DOMAIN="cn.qmledmq.fuxi.xuannv"
 defaults write "$DOMAIN" wakeToken -string "$WAKE_TOKEN"
 echo "    wakeToken 长度 ${#WAKE_TOKEN} → UserDefaults($DOMAIN)"
 
@@ -161,6 +176,9 @@ cat <<'EOF'
     1) 麦克风（必给）
     2) 语音识别（必给）
     3) 辅助功能（用全局热键时给——系统设置→隐私与安全性→辅助功能→玄女）
-  之后菜单栏「玄」字点开，或直接说「玄女」唤醒。
+  - 菜单栏：圆形 waveform 图标（深色波形）→ 点开看状态/设置
+  - 默认热键：⌃⌥M（Control+Option+M，避开 Spotlight ⌘Space 冲突）
+  - 唤醒词：「玄女」（远端讯飞 SDK + 本地 SFSpeech 兜底）
+  - 唤醒后屏幕底部弹 Siri 风格悬浮窗 + 实时波形动画
 ──────────────────────────────────────────────
 EOF

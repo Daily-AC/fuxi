@@ -7,7 +7,7 @@ import OSLog
 /// 想换男声 / 高质量音色（如「Lili 增强版」），系统设置 → 辅助功能 → 朗读 → 系统语音
 /// 单独下载，然后在 jarvis 设置里填 voice identifier。
 final class Synthesizer: NSObject, AVSpeechSynthesizerDelegate {
-    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.jarvis", category: "tts")
+    private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "tts")
     private let synth = AVSpeechSynthesizer()
     private var onFinish: (() -> Void)?
 
