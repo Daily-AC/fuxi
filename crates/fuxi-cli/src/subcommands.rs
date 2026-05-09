@@ -456,8 +456,10 @@ pub async fn run_kill(args: KillArgs) -> Result<()> {
 /// 玄女 skill 教学里明确写"不要把 `fuxi events` 当 poll 用"。
 #[derive(Debug, ClapArgs)]
 pub struct EventsArgs {
-    /// SQLite 路径。省略时读 `$FUXI_DB`，再省则 `~/.fuxi/memory.db`——
-    /// 和 `fuxi memory` 同一文件（events / oracle 共存同一 db，PRAGMA WAL 互不踩）。
+    /// SQLite 路径。省略时读 `$FUXI_DB`，再省则 `~/.fuxi/events.db`——
+    /// daemon `fuxi im start` 写的就是这一份。issue d044c089 修复：老默认走
+    /// `~/.fuxi/memory.db`（fuxi-memory 子系统的 db）→ `fuxi events` 不带
+    /// `--db` 永远空输出，文档与实际不符。
     #[arg(long)]
     pub db: Option<std::path::PathBuf>,
     /// 取尾巴 N 条事件（最新在前的逆序输出，便于 less / grep）。
@@ -468,17 +470,45 @@ pub struct EventsArgs {
     /// 用 rowid 游标避免重复输出已 dump 过的事件。
     #[arg(long)]
     pub follow: bool,
-    /// 按 agent id 过滤（前缀匹配，便于贴半截 id）。
+    /// 按 agent id 过滤（substring 匹配，前缀/裸 uuid/带 agent- 前缀都行）。
+    /// issue c35ef4a0 修：filter 走 SQL where，"先 filter 再 tail N"，避免命中
+    /// 事件因落在最近 N 条窗口外被丢。follow 模式仍走后处理 filter（增量流没有
+    /// SQL 重过滤的语义）。
     #[arg(long)]
     pub filter: Option<String>,
 }
 
+/// `fuxi events` 默认 db 路径——issue d044c089：必须 events.db 不是 memory.db。
+/// 跟 `crates/fuxi-cli/src/im.rs::default_events_db_path` 同语义；本地复一份避免
+/// 跨模块可见性扩散。
+pub(crate) fn default_events_db_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".fuxi").join("events.db"))
+}
+
+/// `--db` > `$FUXI_DB` > `~/.fuxi/events.db` 的解析顺序。
+fn resolve_events_db_path(explicit: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
+    if let Some(p) = explicit {
+        return Ok(p);
+    }
+    if let Ok(env_path) = std::env::var("FUXI_DB")
+        && !env_path.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(env_path));
+    }
+    default_events_db_path()
+        .ok_or_else(|| anyhow::anyhow!("无法解析 events.db 默认路径：$HOME 未设置"))
+}
+
 pub async fn run_events(args: EventsArgs) -> Result<()> {
     use fuxi_events::EventStore;
-    let db = crate::memory_cmd::resolve_db_path(args.db)?;
+    let db = resolve_events_db_path(args.db)?;
     let store = EventStore::connect_file(&db).await?;
 
-    let mut events = store.recent(args.tail).await?;
+    // issue c35ef4a0：filter 非空走 SQL where；空走老的 recent。
+    let mut events = match args.filter.as_deref() {
+        Some(f) if !f.trim().is_empty() => store.recent_filtered(args.tail, f.trim()).await?,
+        _ => store.recent(args.tail).await?,
+    };
     // 时间正序输出——recent() 是 DESC（最新在前），但人读的时候习惯老→新。
     events.reverse();
     for ev in &events {
@@ -1206,6 +1236,26 @@ mod tests {
         let line = format_event_line(&ev, None).expect("应输出");
         assert!(line.contains("agent_responded"), "缺 kind: {line}");
         assert!(line.contains("README 可改两点"), "缺摘要正文: {line}");
+    }
+
+    /// issue d044c089 反回归：default 路径必须 `events.db` 不是 `memory.db`。
+    /// daemon (`fuxi im start`) 写的就是 events.db；老默认走 memory_cmd 的
+    /// memory.db 让 `fuxi events` 不带 `--db` 永远空输出。
+    #[test]
+    fn events_default_db_path_returns_events_not_memory() {
+        // 临时设 HOME 防 CI 上 $HOME 缺失干扰 — 用现 HOME 即可
+        let path = super::default_events_db_path()
+            .expect("$HOME 应有，否则平台异常")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            path.ends_with("/.fuxi/events.db"),
+            "default 路径应是 ~/.fuxi/events.db；得到 {path}"
+        );
+        assert!(
+            !path.ends_with("memory.db"),
+            "回归保护：禁止 fallback 到 memory.db；得到 {path}"
+        );
     }
 
     /// `fuxi nodes` 默认 table，--json 输出 NodeSnapshot[]——clap 解析两个 flag
