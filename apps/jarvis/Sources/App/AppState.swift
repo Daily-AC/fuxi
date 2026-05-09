@@ -51,7 +51,6 @@ final class AppState: ObservableObject {
     var fuxiClient: FuxiClient?
     var wakeClient: RemoteWakeClient?
     var wakeFallback: LocalWakeFallback?
-    var overlay: OverlayWindowController?
 
     // fallback 期间每 60s 试一次主连接复活。@Sendable Timer 包裹见 setupWake。
     private var fallbackProbeTimer: Timer?
@@ -76,10 +75,6 @@ final class AppState: ObservableObject {
 
     /// App 启动钩子——AppDelegate 在 applicationDidFinishLaunching 调一次。
     func bootstrap() {
-        // Siri 风格悬浮窗——按 phase 自动 show/hide。先于其他组件初始化让 overlay
-        // 早早 ready，避免首次唤醒时窗口还没创建错过初帧。
-        overlay = OverlayWindowController(state: self)
-
         synthesizer = Synthesizer()
         recognizer = Recognizer(
             onResult: { [weak self] transcript, isFinal in

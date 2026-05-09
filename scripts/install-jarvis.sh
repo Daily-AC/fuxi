@@ -87,7 +87,6 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>LSUIElement</key><true/>
     ${ICON_KV}
     <key>NSAppleEventsUsageDescription</key><string>全局热键触发需要 AppleEvents 权限。</string>
     <key>NSMicrophoneUsageDescription</key><string>玄女需要麦克风来听你的呼唤和指令。</string>
@@ -176,9 +175,9 @@ cat <<'EOF'
     1) 麦克风（必给）
     2) 语音识别（必给）
     3) 辅助功能（用全局热键时给——系统设置→隐私与安全性→辅助功能→玄女）
-  - 菜单栏：圆形 waveform 图标（深色波形）→ 点开看状态/设置
-  - 默认热键：⌃⌥M（Control+Option+M，避开 Spotlight ⌘Space 冲突）
+  - Dock 有「玄女」图标，自动弹主窗口。关窗口 = 退出（也支持 ⌘Q）
+  - 主窗口：状态 + 大波形 + 转写/玄女回话 + 开始/取消/设置按钮
+  - 默认热键：⌃⌥M（Control+Option+M）
   - 唤醒词：「玄女」（远端讯飞 SDK + 本地 SFSpeech 兜底）
-  - 唤醒后屏幕底部弹 Siri 风格悬浮窗 + 实时波形动画
 ──────────────────────────────────────────────
 EOF
