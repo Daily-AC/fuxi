@@ -180,6 +180,22 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
         heartbeatTimer = nil
     }
 
+    /// 暂停音频上传——保留 WS 连接（继续收 ping/wake event），但不抢麦克风让
+    /// SFSpeechRecognizer 用。AppState.startListening 调一次。
+    func pauseAudio() {
+        logger.notice("pauseAudio (释放麦给 SFSpeechRecognizer)")
+        audio.stop()
+    }
+
+    /// 恢复音频上传——AppState.stopListening / cancelToIdle 调。
+    func resumeAudio() {
+        guard ready else { return }
+        logger.notice("resumeAudio")
+        audio.start { [weak self] data in
+            Task { @MainActor in self?.sendAudio(data) }
+        }
+    }
+
     private func cancelWS() {
         ws?.cancel(with: .goingAway, reason: nil)
         ws = nil
@@ -228,7 +244,8 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
             audio.start { [weak self] data in
                 Task { @MainActor in self?.sendAudio(data) }
             }
-        case .wake(let keyword, _, _):
+        case .wake(let keyword, let score, _):
+            logger.notice("wake! keyword=\(keyword, privacy: .public) score=\(score)")
             onEvent(.wakeDetected(keyword: keyword))
         case .ping(let at):
             // 必须 5s 内回 pong——直接同步发，下次 receive 会刷新 lastDownlinkAt。
