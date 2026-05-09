@@ -35,58 +35,66 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JARVIS_DIR="$REPO_ROOT/apps/jarvis"
 
 # ── 1. 工具检查 ─────────────────────────────
+# CommandLineTools 自带 swift / codesign / security——不强制装 Xcode。
 need() { command -v "$1" >/dev/null 2>&1 || { echo "缺工具: $1"; exit 3; }; }
-need xcodebuild
+need swift
 need codesign
 need security
 need ssh
+need plutil
 
-# xcodegen 不装就 brew 装一发；brew 没装就提示用户
-if ! command -v xcodegen >/dev/null 2>&1; then
-    if command -v brew >/dev/null 2>&1; then
-        echo "==> 装 xcodegen"
-        brew install xcodegen
-    else
-        cat <<'TIP' >&2
-缺 xcodegen 且没 brew。装一个：
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    brew install xcodegen
-然后重跑本脚本。
-TIP
-        exit 3
-    fi
-fi
-
-# ── 2. xcodegen + build ────────────────────
-echo "==> [1/6] 生成 Xcode 工程"
+# ── 2. swift build ─────────────────────────
+echo "==> [1/6] swift build -c release"
 cd "$JARVIS_DIR"
-xcodegen generate
+swift build -c release 2>&1 | tail -3
 
-echo "==> [2/6] xcodebuild Release"
-xcodebuild \
-    -project Jarvis.xcodeproj \
-    -scheme Jarvis \
-    -configuration Release \
-    -destination "platform=macOS" \
-    -derivedDataPath build/derived \
-    CODE_SIGN_IDENTITY="-" \
-    CODE_SIGN_STYLE=Automatic \
-    DEVELOPMENT_TEAM="" \
-    -quiet \
-    clean build
+BIN="$JARVIS_DIR/.build/release/Jarvis"
+[[ -x "$BIN" ]] || { echo "找不到 build 出的 Jarvis binary"; exit 4; }
 
-APP_PATH="$(find "$JARVIS_DIR/build/derived/Build/Products/Release" -maxdepth 2 -name 'Jarvis.app' -type d | head -1)"
-if [[ -z "$APP_PATH" ]]; then
-    echo "找不到 build 出的 Jarvis.app" >&2
-    exit 4
-fi
+# ── 3. 组 .app bundle + 装 /Applications/ ──
+echo "==> [2/6] 组 .app bundle"
+STAGE="$JARVIS_DIR/.build/release/Jarvis.app"
+rm -rf "$STAGE"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources"
+cp "$BIN" "$STAGE/Contents/MacOS/Jarvis"
+chmod +x "$STAGE/Contents/MacOS/Jarvis"
 
-# ── 3. 安装到 /Applications/ ────────────────
-echo "==> [3/6] 装到 /Applications/Jarvis.app"
-sudo rm -rf /Applications/Jarvis.app
-sudo cp -R "$APP_PATH" /Applications/Jarvis.app
-# 重新 ad-hoc 签——cp 后签名会被破坏（按 fuxi feedback_macos_gatekeeper_codesign）
-sudo codesign --force --deep --sign - /Applications/Jarvis.app
+# Info.plist——SwiftPM 不注入，手写一份完整的（值都硬编，不留 $(VAR) 占位）
+cat > "$STAGE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+    <key>CFBundleDisplayName</key><string>贾维斯</string>
+    <key>CFBundleExecutable</key><string>Jarvis</string>
+    <key>CFBundleIdentifier</key><string>cn.qmledmq.fuxi.jarvis</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Jarvis</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSAppleEventsUsageDescription</key><string>全局热键触发需要 AppleEvents 权限。</string>
+    <key>NSMicrophoneUsageDescription</key><string>贾维斯需要麦克风来听玄女的呼唤和你的指令。</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>贾维斯把你的语音转写成文字派给玄女——全程本机处理，不上云。</string>
+</dict>
+</plist>
+PLIST
+plutil -lint "$STAGE/Contents/Info.plist" >/dev/null
+
+# 装到 ~/Applications/——用户级目录无需 sudo，Launchpad / Spotlight 同样可达。
+# 想全局 /Applications/ 自己 sudo cp 一份即可。
+INSTALL_DIR="$HOME/Applications"
+INSTALL_PATH="$INSTALL_DIR/Jarvis.app"
+echo "==> [3/6] 装到 $INSTALL_PATH"
+mkdir -p "$INSTALL_DIR"
+rm -rf "$INSTALL_PATH"
+cp -R "$STAGE" "$INSTALL_PATH"
+codesign --force --deep \
+    --entitlements "$JARVIS_DIR/Resources/Jarvis.entitlements" \
+    --sign - "$INSTALL_PATH"
 
 # ── 4. 取 home wake.token 写 Keychain ───────
 echo "==> [4/6] 取 home wake.token 写 mac Keychain"
@@ -133,8 +141,8 @@ TIP
 fi
 
 # ── 6. 启动 ─────────────────────────────────
-echo "==> [6/6] open /Applications/Jarvis.app"
-open /Applications/Jarvis.app
+echo "==> [6/6] open $INSTALL_PATH"
+open "$INSTALL_PATH"
 
 cat <<'EOF'
 

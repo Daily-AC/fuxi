@@ -14,9 +14,9 @@ import OSLog
 @MainActor
 final class AppState: ObservableObject {
     /// 单例——SwiftUI 的 @StateObject 不方便从 AppDelegate 拿引用，singleton 最直接。
-    /// `nonisolated(unsafe)` 是因为 static let 需要在任何 actor 之外初始化；实际访问
-    /// 全部 @MainActor 隔离。
-    nonisolated(unsafe) static let shared = AppState()
+    /// @MainActor class 的 static let 默认 MainActor 隔离；所有访问点（SwiftUI App
+    /// body / AppDelegate 的 Task { @MainActor in ... }）都从 MainActor 进，安全。
+    static let shared = AppState()
 
     enum VoicePhase: String {
         case idle
