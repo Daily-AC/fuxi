@@ -14,10 +14,10 @@ struct JarvisApp: App {
         MenuBarExtra {
             MenuBarPanel(state: state)
         } label: {
-            // 用「玄」字做 menubar label——避开系统 macOS 麦克风 indicator（橙色 mic）
-            // 视觉重叠的歧义。SF Symbol 渲染中文需 Text；颜色随状态变化由 SwiftUI
-            // 默认渲染（系统 dark/light 自适应）。
-            Text(state.menuBarLabel)
+            // SF Symbol `waveform.circle` 圆框波形——避开系统橙色 mic indicator 视觉
+            // 重叠（菜单栏小图标也是 app 颜面，纯文字 label 在某些 macOS 14+ 下不渲染）。
+            // 状态映射靠 fill / non-fill 切换给视觉提示，颜色由系统 dark/light 自适应。
+            Image(systemName: state.menuBarIconName)
         }
         .menuBarExtraStyle(.window)
 

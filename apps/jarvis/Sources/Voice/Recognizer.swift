@@ -16,14 +16,18 @@ final class Recognizer {
 
     private let recognizer: SFSpeechRecognizer?
     private let onResult: (String, Bool) -> Void
+    /// 麦克风 RMS 电平回调——SwiftUI 悬浮窗波形动画驱动。0~1。
+    private let onLevel: (Double) -> Void
 
     private var engine: AVAudioEngine?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
 
-    init(onResult: @escaping (String, Bool) -> Void) {
+    init(onResult: @escaping (String, Bool) -> Void,
+         onLevel: @escaping (Double) -> Void = { _ in }) {
         self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
         self.onResult = onResult
+        self.onLevel = onLevel
     }
 
     func start() {
@@ -44,8 +48,9 @@ final class Recognizer {
         self.engine = engine
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             request.append(buffer)
+            self?.publishLevel(from: buffer)
         }
         engine.prepare()
         do {
@@ -72,6 +77,26 @@ final class Recognizer {
     func stop() {
         request?.endAudio()
         cleanup()
+        onLevel(0)
+    }
+
+    /// 从 PCM buffer 算 RMS → log 归一化到 0~1 推回 callback。
+    /// 静音 ~0.0；正常语音 0.2~0.6；大声 0.8+。波形动画驱动用。
+    private func publishLevel(from buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData?[0] else { return }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return }
+        var sum: Float = 0
+        for i in 0..<frameCount {
+            let s = channelData[i]
+            sum += s * s
+        }
+        let rms = sqrt(sum / Float(frameCount))
+        // log 化让中等音量在中段（人耳感受非线性）。dBFS = 20*log10(rms)。
+        // -50 dBFS（接近静音）→ 0；-10 dBFS（响亮）→ 1。
+        let db = 20 * log10(max(rms, 1e-7))
+        let normalized = max(0, min(1, (Double(db) + 50) / 40))
+        onLevel(normalized)
     }
 
     private func cleanup() {
