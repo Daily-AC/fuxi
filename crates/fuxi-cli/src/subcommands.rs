@@ -56,6 +56,12 @@ pub struct SpawnArgs {
     /// ephemeral 是为新 task 起 worktree）。
     #[arg(long = "task", conflicts_with = "recall_task")]
     pub task_for_ephemeral: Option<String>,
+    /// 只输出裸 agent_id（便于 shell pipeline 直接接 `fuxi dispatch --to`）。
+    /// 默认输出 JSON `{"agent_id":"..."}`（向后兼容）。
+    /// issue 0a31de15：玄女实测 `fuxi spawn ... | xargs fuxi dispatch --to` 因
+    /// JSON 而炸 `invalid character`，加这个 flag 让她直接 `--id-only` 接 pipe。
+    #[arg(long = "id-only", default_value_t = false)]
+    pub id_only: bool,
 }
 
 pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
@@ -67,6 +73,7 @@ pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
         } else {
             None
         };
+    let id_only = args.id_only;
     let resp = client::send(Command::Spawn {
         role: args.role,
         name: args.name,
@@ -78,7 +85,24 @@ pub async fn run_spawn(args: SpawnArgs) -> Result<()> {
         ephemeral_task,
     })
     .await?;
+    if id_only && let Some(id) = spawn_agent_id_from_response(&resp) {
+        // issue 0a31de15：daemon 回 `{"agent_id":"...", ...}`，--id-only 时只
+        // 打 id 给玄女 pipeline 接 dispatch --to。失败 / 字段缺退到 print_response
+        // 走 JSON 路径——pipeline 至少能看到错。
+        println!("{id}");
+        return Ok(());
+    }
     print_response(resp)
+}
+
+/// 从 daemon `Response::Ok` 提取 spawn 的裸 agent_id。--id-only 模式 + 测试用。
+fn spawn_agent_id_from_response(resp: &Response) -> Option<String> {
+    let Response::Ok { data } = resp else {
+        return None;
+    };
+    data.get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 // ── dispatch ──
@@ -1085,6 +1109,34 @@ mod tests {
         };
         let got = dispatch_task_id_from_response(resp).unwrap();
         assert_eq!(got, "task-123");
+    }
+
+    /// issue 0a31de15 · --id-only 把 spawn 回的 JSON 提取裸 agent_id 给 pipeline。
+    #[test]
+    fn spawn_agent_id_from_response_extracts_bare_id() {
+        let resp = Response::Ok {
+            data: serde_json::json!({"agent_id":"agent-abc","worktree":"/tmp/x"}),
+        };
+        assert_eq!(
+            spawn_agent_id_from_response(&resp),
+            Some("agent-abc".to_string())
+        );
+    }
+
+    #[test]
+    fn spawn_agent_id_from_response_missing_field_returns_none() {
+        let resp = Response::Ok {
+            data: serde_json::json!({"task_id":"task-foo"}),
+        };
+        assert_eq!(spawn_agent_id_from_response(&resp), None);
+    }
+
+    #[test]
+    fn spawn_agent_id_from_response_err_returns_none() {
+        let resp = Response::Err {
+            error: "daemon 挂了".into(),
+        };
+        assert_eq!(spawn_agent_id_from_response(&resp), None);
     }
 
     #[test]

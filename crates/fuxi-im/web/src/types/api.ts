@@ -15,6 +15,10 @@ export interface StoredMessage {
   /** 按 kind 分支：text → string；file → { caption?: string }；其余阶段 4 再扩。*/
   content: unknown;
   attachments?: string[];
+  /** v1-session19 #2 · 服务端 hydrate 的附件元数据（含真实文件名）。后端 conv
+   *  handler 在 page_messages 后批量 lookup upload_store 填上；前端展示历史
+   *  附件时优先用这个，缺时 fallback uploadsFromIds（id 当 name，老兼容）。*/
+  attachment_uploads?: Upload[];
   source_event_id?: string | null;
   ts: string;
   task?: TaskId | null;
@@ -179,6 +183,32 @@ export interface NotificationView {
   created_at: string;
   read_at?: string | null;
   closed_at?: string | null;
+  /** issue 工作流状态（v1-session19）：'open' / 'awaiting_test' / 'closed'。 */
+  status?: IssueStatus;
+  /** Claude push 的 fix commit 列表，PWA 详情页可点跳 GitHub。 */
+  fix_refs?: FixRef[];
+  /** 状态机审计日志（GitHub 评论的轻量替代——讨论本体在 IM 聊天里）。 */
+  events?: IssueEvent[];
+}
+
+export type IssueStatus = "open" | "awaiting_test" | "closed";
+
+export interface FixRef {
+  commit_sha: string;
+  branch?: string | null;
+  summary?: string | null;
+  at: string;
+}
+
+export interface IssueEvent {
+  /** "xuannv" / "user" / "claude" / "system" */
+  actor: string;
+  /** "created" / "status_changed" / "fix_linked" / "closed" / "reopened" */
+  action: string;
+  from?: string | null;
+  to?: string | null;
+  note?: string | null;
+  at: string;
 }
 
 export interface NotificationsResponse {
@@ -190,6 +220,25 @@ export interface NotificationsResponse {
 // ---------- v1-session17 task #9 · 「更多」hub 三个新页 ----------
 
 /** 单条策府事实（/api/memory）。 */
+/** v1-session19 · 河图洛书 insight wire 形（仓颉抽出的可迁移模式）。 */
+export interface HetuPatternView {
+  id: string;
+  role: string;
+  task_type: string;
+  pattern: string;
+  confidence: number;
+  created_at: string;
+}
+
+/** v1-session19 · 用户身份卡 wire 形（fuxi profile set / 仓颉自动）。 */
+export interface UserProfileView {
+  id: string;
+  key: string;
+  value: string;
+  source: string;
+  updated_at: string;
+}
+
 export interface MemoryFactView {
   id: string;
   subject: string;
@@ -211,6 +260,12 @@ export interface MemorySubjectGroup {
 export interface MemoryResponse {
   groups: MemorySubjectGroup[];
   total: number;
+  /** v1-session19 · 河图洛书 insights 列表（仓颉抽出的可迁移模式）。
+   *  老 wire 不带这字段——前端用 `?? []` 兼容。 */
+  insights?: HetuPatternView[];
+  /** v1-session19 · 用户身份卡（fuxi profile set / cangjie 抽）。
+   *  老 wire 不带这字段——前端用 `?? []` 兼容。 */
+  user_profile?: UserProfileView[];
 }
 
 /** 单张角色卡（/api/roles）。 */

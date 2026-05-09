@@ -343,6 +343,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     fetchNotifications: async () => ({ notifications: [], unread_count: 0 }),
     markNotificationRead: async () => ({ ok: true as const }),
     closeNotification: async () => ({ ok: true as const }),
+    reopenNotification: async () => ({ ok: true as const }),
     readAllNotifications: async () => ({ ok: true as const, updated: 0 }),
     fetchMemory: async () => state.memory ?? { groups: [], total: 0 },
     fetchRoles: async () => state.roles ?? { roles: [] },

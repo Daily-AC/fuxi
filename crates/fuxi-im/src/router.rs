@@ -152,6 +152,19 @@ pub fn build(state: AppState) -> Router {
             "/api/notifications/{id}/close",
             post(handlers::notifications::close),
         )
+        // v1-session19 issue 工作流（重开 / 通用 PATCH 转态 / Claude 关联 fix）
+        .route(
+            "/api/notifications/{id}/reopen",
+            post(handlers::notifications::reopen),
+        )
+        .route(
+            "/api/notifications/{id}/link-fix",
+            post(handlers::notifications::link_fix),
+        )
+        .route(
+            "/api/notifications/{id}",
+            axum::routing::patch(handlers::notifications::update_status),
+        )
         // β · #17 文件上传 / 下载
         // #49 修：DefaultBodyLimit 必须显式拉到 UPLOAD_BODY_LIMIT_BYTES——axum
         // 默认只 2MB，iOS Safari 中等图片就超，multer 报 failed to read stream。

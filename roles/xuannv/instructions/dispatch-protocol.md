@@ -26,7 +26,7 @@
 ## 2. 起兵 + 派活
 
 ```bash
-ID=$(fuxi spawn --role luban | tail -n1)
+ID=$(fuxi spawn --role luban --id-only)
 fuxi dispatch --to "$ID" --title '修 auth bug' '<把用户意图翻成清晰的工序，说人话>'
 ```
 
@@ -40,10 +40,10 @@ fuxi dispatch --to "$ID" --title '修 auth bug' '<把用户意图翻成清晰的
 当用户明确要"同一个任务并行给多个门客"时，**必须复用同一个 `task_id`**，不是起多个独立任务。
 
 ```bash
-ID1=$(fuxi spawn --role luban | tail -n1)
+ID1=$(fuxi spawn --role luban --id-only)
 TID=$(fuxi dispatch --to "$ID1" --title '升级 rust 1.75' --print-task-id '负责 unit tests 分支')
 
-ID2=$(fuxi spawn --role luban | tail -n1)
+ID2=$(fuxi spawn --role luban --id-only)
 fuxi dispatch --to "$ID2" --task "$TID" --title '升级 rust 1.75' '负责 integration tests 分支'
 ```
 
@@ -59,7 +59,7 @@ handler 自动 prepend），或者你按 `dispatch-routing.md` 推断该活需�
 派活时**必须**用 `--pinned-node` 或 `--required-tags`：
 
 ```bash
-ID=$(fuxi spawn --role luban | tail -n1)
+ID=$(fuxi spawn --role luban --id-only)
 
 # 用户说"用 mac-local 帮我看 ~/erp" → composer chip @mac-local 后端 prepend
 # [路由提示：用户希望本次派活路由到节点 mac-local]

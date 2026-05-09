@@ -12,7 +12,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::state::AppState;
-use fuxi_memory::OracleFact;
+use fuxi_memory::{HetuPattern, OracleFact, UserProfileEntry};
+
+/// v1-session19 #3 · 基础设施 predicate 过滤名单。
+///
+/// OracleStore 同时承载两类事实：
+/// - **基础设施**：cc resume `session_id`、worktree 路径分配等内部 bookkeeping。
+///   这些是子系统按 task/role 注入的运行态，没有"用户语义"——前端展示纯噪音
+///   （uuid 组合显示成 hash 一片）。
+/// - **用户级事实**：身份卡 / 偏好 / 项目知识 等，是 PWA「记忆」页用户**真想看**
+///   的内容。
+///
+/// `/api/memory` 只露用户级，过掉这里列的 predicate。新增基础设施类 predicate
+/// 请加到这里，反之新增的用户级事实**不要**碰这个 list。
+const INFRA_PREDICATES: &[&str] = &["session_id", "worktree"];
 
 /// 单条事实的前端视图——用扁平 string subject/predicate/object，不抛 uuid。
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,11 +60,65 @@ pub struct MemorySubjectGroup {
     pub facts: Vec<MemoryFactView>,
 }
 
+/// 河图洛书 insight 单条 wire 形（v1-session19 加）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HetuPatternView {
+    pub id: String,
+    pub role: String,
+    pub task_type: String,
+    pub pattern: String,
+    pub confidence: f32,
+    pub created_at: String,
+}
+
+impl From<HetuPattern> for HetuPatternView {
+    fn from(p: HetuPattern) -> Self {
+        Self {
+            id: p.id.to_string(),
+            role: p.role,
+            task_type: p.task_type,
+            pattern: p.pattern,
+            confidence: p.confidence,
+            created_at: p.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// 用户身份卡单条 wire 形（v1-session19 加）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserProfileView {
+    pub id: String,
+    pub key: String,
+    pub value: String,
+    pub source: String,
+    pub updated_at: String,
+}
+
+impl From<UserProfileEntry> for UserProfileView {
+    fn from(e: UserProfileEntry) -> Self {
+        Self {
+            id: e.id.to_string(),
+            key: e.key,
+            value: e.value,
+            source: e.source,
+            updated_at: e.updated_at.to_rfc3339(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryResponse {
     pub groups: Vec<MemorySubjectGroup>,
     /// 跨 subject 的总条数——前端 header 显「策府 共 N 条」用。
     pub total: i64,
+    /// v1-session19 · 河图洛书 insight 列表（仓颉抽出的可迁移模式）。
+    /// PWA 记忆页第二 section 渲染。`None`/缺省 = HetuStore 未注入（smoke）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub insights: Vec<HetuPatternView>,
+    /// v1-session19 · 用户身份卡（identity / tone / preferences 等 key）。
+    /// PWA 记忆页第三 section 渲染。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_profile: Vec<UserProfileView>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -69,11 +136,18 @@ pub async fn list(
         .oracle
         .as_ref()
         .ok_or_else(|| Error::Unavailable("策府未注入".into()))?;
-    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    let facts = oracle
-        .list_active(limit)
+    // v1-session19 #3：infra predicate 过完后才到的"用户级"事实可能远小于 limit，
+    // 多拉一些再过——避免 limit=200 拉到 200 条全 session_id 噪音、过完空集骗用户
+    // "策府空着"。1k 上限够覆盖现实量级。
+    let store_limit = q.limit.unwrap_or(200).clamp(1, 1000).max(1000);
+    let facts: Vec<OracleFact> = oracle
+        .list_active(store_limit)
         .await
-        .map_err(|e| Error::Internal(format!("oracle list_active: {e}")))?;
+        .map_err(|e| Error::Internal(format!("oracle list_active: {e}")))?
+        .into_iter()
+        .filter(|f| !INFRA_PREDICATES.contains(&f.predicate.as_str()))
+        .take(q.limit.unwrap_or(200).clamp(1, 1000) as usize)
+        .collect();
     let total = facts.len() as i64;
 
     // group by subject 保留 updated_at desc 的全局顺序（先到的 subject 先建组），
@@ -90,7 +164,35 @@ pub async fn list(
         }
     }
 
-    Ok(Json(MemoryResponse { groups, total }))
+    // v1-session19 · 加挂 insights + user_profile 两层。任何一层注入缺都视作空，
+    // 不阻塞 oracle 路径（PWA 拿到部分数据仍能正常渲染各 section）。
+    let insights: Vec<HetuPatternView> = match state.hetu.as_ref() {
+        Some(h) => h
+            .list_active(200)
+            .await
+            .map_err(|e| Error::Internal(format!("hetu list_active: {e}")))?
+            .into_iter()
+            .map(HetuPatternView::from)
+            .collect(),
+        None => Vec::new(),
+    };
+    let user_profile: Vec<UserProfileView> = match state.user_profile_store.as_ref() {
+        Some(p) => p
+            .list_active()
+            .await
+            .map_err(|e| Error::Internal(format!("user_profile list_active: {e}")))?
+            .into_iter()
+            .map(UserProfileView::from)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    Ok(Json(MemoryResponse {
+        groups,
+        total,
+        insights,
+        user_profile,
+    }))
 }
 
 #[cfg(test)]
@@ -102,7 +204,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use fuxi_events::EventBus;
-    use fuxi_memory::{NewFact, OracleStore};
+    use fuxi_memory::{HetuStore, NewFact, NewPattern, NewProfile, OracleStore, UserProfileStore};
     use fuxi_orchestrator::Fuxi;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -163,14 +265,17 @@ mod tests {
     #[tokio::test]
     async fn list_excludes_superseded_facts() {
         let (_dir, app, oracle) = build_app().await;
+        // 用 user-level predicate "prefers" 而不是基础设施 "session_id"——
+        // v1-session19 #3 起 INFRA_PREDICATES 把 session_id 过掉，会让本测的 "test
+        // 覆盖 supersede 机制" 同时被 INFRA filter 误盖。
         let stale = oracle
-            .insert(NewFact::new("xuannv", "session_id", "old"))
+            .insert(NewFact::new("user", "prefers", "old-coffee"))
             .await
             .unwrap();
         oracle
             .supersede(
                 stale.id,
-                NewFact::new("xuannv", "session_id", "new").with_source("agent"),
+                NewFact::new("user", "prefers", "new-coffee").with_source("agent"),
             )
             .await
             .unwrap();
@@ -187,7 +292,119 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
         let body: MemoryResponse = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body.total, 1);
-        assert_eq!(body.groups[0].facts[0].object, "new");
+        assert_eq!(body.groups[0].facts[0].object, "new-coffee");
+    }
+
+    /// v1-session19 #3 反回归 —— infra predicate（session_id / worktree）不进 wire。
+    /// 用户实测：home 上 583 条 oracle_facts 全是这俩 predicate，PWA 记忆页满屏 uuid
+    /// 看着像 hash。预期：filter 掉这俩，只露用户级事实。
+    #[tokio::test]
+    async fn list_filters_out_infra_predicates() {
+        let (_dir, app, oracle) = build_app().await;
+        // 灌一堆 infra noise
+        oracle
+            .insert(NewFact::new("xuannv", "session_id", "abc-123"))
+            .await
+            .unwrap();
+        oracle
+            .insert(NewFact::new("task-foo", "session_id", "def-456"))
+            .await
+            .unwrap();
+        oracle
+            .insert(NewFact::new("role-luban", "worktree", "/path/to/sandbox"))
+            .await
+            .unwrap();
+        // 灌一条用户级事实
+        oracle
+            .insert(NewFact::new("user", "prefers", "冰美式"))
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+        let body: MemoryResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.total, 1, "infra predicate 应过掉，只剩 1 条用户级");
+        assert_eq!(body.groups.len(), 1);
+        assert_eq!(body.groups[0].subject, "user");
+        assert_eq!(body.groups[0].facts[0].predicate, "prefers");
+    }
+
+    /// v1-session19 · /api/memory 现在带 insights + user_profile 两层。HetuStore +
+    /// UserProfileStore 注入后 wire 应有真名 + content；没注入时 wire 是空数组（
+    /// serde skip_serializing_if Vec::is_empty → 字段省略），不影响老 caller。
+    #[tokio::test]
+    async fn list_includes_insights_and_user_profile_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let ws = Arc::new(fuxi_workspace::GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+        let oracle = OracleStore::connect_memory().await.unwrap();
+        let hetu = HetuStore::connect_memory().await.unwrap();
+        let user_profile = UserProfileStore::connect_memory().await.unwrap();
+
+        // 灌 1 条 oracle 用户级 + 1 条 hetu insight + 1 条 user_profile
+        oracle
+            .insert(NewFact::new("user", "prefers", "冰美式"))
+            .await
+            .unwrap();
+        hetu.record(
+            NewPattern::new(
+                "luban",
+                "refactor",
+                "拆函数前先列调用方再 grep 重命名",
+                "success",
+            )
+            .with_confidence(0.85),
+        )
+        .await
+        .unwrap();
+        user_profile
+            .record(NewProfile::new("identity", "用户名 = 以琳").with_source("manual"))
+            .await
+            .unwrap();
+
+        let state = AppState::new(fuxi)
+            .with_oracle(oracle)
+            .with_hetu(hetu)
+            .with_user_profile_store(user_profile);
+        let app = Router::new()
+            .route("/api/memory", get(list))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/memory")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024 * 64).await.unwrap();
+        let body: MemoryResponse = serde_json::from_slice(&bytes).unwrap();
+        // oracle 第一 section
+        assert_eq!(body.total, 1);
+        assert_eq!(body.groups[0].subject, "user");
+        // hetu 第二 section
+        assert_eq!(body.insights.len(), 1);
+        assert_eq!(body.insights[0].role, "luban");
+        assert_eq!(body.insights[0].task_type, "refactor");
+        assert!(body.insights[0].pattern.contains("调用方"));
+        // user_profile 第三 section
+        assert_eq!(body.user_profile.len(), 1);
+        assert_eq!(body.user_profile[0].key, "identity");
+        assert!(body.user_profile[0].value.contains("以琳"));
     }
 
     #[tokio::test]

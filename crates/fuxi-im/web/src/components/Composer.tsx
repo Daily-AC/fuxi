@@ -44,10 +44,9 @@ export const Composer: Component<ComposerProps> = (props) => {
     setChips((cs) => cs.map((c) => (c.cid === cid ? { ...c, ...patch } : c)));
   };
 
-  const onFilesPicked = (e: Event): void => {
-    const target = e.target as HTMLInputElement;
-    const files = target.files;
-    if (!files) return;
+  /** v1-session19 #1 抽出复用：选择 / 粘贴 / 拖拽 共用同一推 chip 路径。 */
+  const addFiles = (files: FileList | File[]): void => {
+    if (!files || files.length === 0) return;
     const fresh: AttachmentChip[] = [];
     for (let i = 0; i < files.length; i += 1) {
       const f = files[i];
@@ -59,8 +58,27 @@ export const Composer: Component<ComposerProps> = (props) => {
         progress: 0,
       });
     }
+    if (fresh.length === 0) return;
     setChips([...chips(), ...fresh]);
+  };
+
+  const onFilesPicked = (e: Event): void => {
+    const target = e.target as HTMLInputElement;
+    const files = target.files;
+    if (!files) return;
+    addFiles(files);
     target.value = ""; // 允许相同文件再次选
+  };
+
+  /** Cmd/Ctrl+V 粘贴含图片 / 文件时拦截 default → 走 addFiles 上传管线。
+   *  纯文本粘贴不动（textarea 默认行为接管）。详见 MentionComposer 同名 handler。 */
+  const onPaste = (e: ClipboardEvent): void => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const files = cd.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    addFiles(files);
   };
 
   const removeChip = (cid: string): void => {
@@ -208,6 +226,7 @@ export const Composer: Component<ComposerProps> = (props) => {
           data-testid="composer-input"
           disabled={busy() || props.disabled}
           onInput={(e) => setText(e.currentTarget.value)}
+          onPaste={onPaste}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
