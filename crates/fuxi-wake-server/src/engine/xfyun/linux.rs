@@ -287,7 +287,9 @@ impl Session {
                 name: key.as_ptr(),
                 data: frame.as_ptr() as *mut c_void,
                 len: chunk_size as c_int,
-                status: raw::AIKIT_DataStatus_AIKIT_DataContinue as c_int,
+                // bindgen 用 enum typedef 名拼前缀；SDK header 写 `typedef enum
+                // _AIKIT_DataStatus_ {..} _AIKIT_DataStatus;` → 常量名带 `_` 前缀。
+                status: raw::_AIKIT_DataStatus_AIKIT_DataContinue as c_int,
             };
             let db = unsafe { raw::AIKITBuilder_Create(raw::BuilderType__BUILDER_TYPE_DATA) };
             if db.is_null() {

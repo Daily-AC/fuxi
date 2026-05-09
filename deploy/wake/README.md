@@ -95,6 +95,41 @@ v0.2 起 `engine/xfyun.rs` 已接真 FFI（`#[cfg(xfyun_ffi)]` Linux x86_64）�
 rsync -avP /Users/e0_7/fuxi/Linux_ivw_e867a88f2_v1.0.11_v2.2.15-rc5/ home:/opt/fuxi-wake-sdk/
 ```
 
+### 1.5. 两个 SDK 隐坑（实测踩过）
+
+**讯飞 Linux IVW v1.0.11 包不完整**——bindgen / 运行时都会撞，必须手动补：
+
+**坑 A：`aikit_biz_api_c.h` 引用的兄弟头不分发**
+
+`include/aikit_biz_api_c.h:12` `#include "../api_aee/aee_biz_api_c.h"` —— 这个头在 v1.0.11
+包里**没有**。bindgen 跑 clang 时 transitive include 失败，不到 ifndef 守门就 panic。
+解：手写一个空 stub header 让 clang 找得到、又不定义 `AEE_BIZ_API_C_H` macro：
+
+```bash
+ssh home
+mkdir -p /opt/fuxi-wake-sdk/api_aee
+cat > /opt/fuxi-wake-sdk/api_aee/aee_biz_api_c.h <<'EOF'
+/* 真 SDK 不分发本头——空 stub 让 clang 找得到，**不**定义
+   AEE_BIZ_API_C_H macro，让 aikit_biz_api_c.h 内 #ifndef 守门为真，
+   走它内置的 BuilderType / BuilderData / BuilderDataType 备用定义。 */
+EOF
+```
+
+**坑 B：SDK 期望 cwd 下有 `resource/` 子目录（symlink 不解，必须真拷贝）**
+
+讯飞 IVW SDK loadResource 用 work_dir 相对路径找 `IVW_KEYWORD_1` / `IVW_GRAM_1` 等
+资源文件，且**不解 symlink**——必须真 cp 一份到 work_dir：
+
+```bash
+ssh home
+sudo mkdir -p /var/lib/fuxi-wake
+sudo cp -r /opt/fuxi-wake-sdk/bin/resource /var/lib/fuxi-wake/resource
+sudo chown -R e0-7:e0-7 /var/lib/fuxi-wake
+```
+
+不做这步 daemon 启动时 SDK 立即 `cannot find dependent resource:IVW_KEYWORD_1`
++ `corrupted double-linked list` 崩溃。
+
 ### 2. 在 home 编 release binary
 
 ```bash
