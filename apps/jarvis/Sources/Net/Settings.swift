@@ -41,10 +41,13 @@ struct Settings: Equatable {
     static let userDefaultsKey = "cn.qmledmq.fuxi.jarvis.settings"
 
     static let `default` = Settings(
-        baseURL: "http://127.0.0.1:9100",
+        // 默认填家用部署公网地址——install-jarvis.sh 已把 token 写进 Keychain，
+        // 用户开 App 即用，无需进设置面板填地址。
+        // 想切本地 dev：设置面板覆盖即可。
+        baseURL: "https://im.qmledmq.cn:8443",
         pairToken: "",
         triggerMode: .both,
-        wakeServerURL: "ws://127.0.0.1:9101/api/wake",
+        wakeServerURL: "wss://wake.qmledmq.cn:8443/api/wake",
         wakeToken: "",
         wakeKeywords: ["玄女", "贾维斯"],
         picovoiceKey: "",
