@@ -44,6 +44,13 @@ const EVENT_CHANNEL_BUFFER: usize = 32;
 /// （keychain 拉取 / 模型预热）。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bug A 玄女堵塞自愈 · cancel 后仍卡 `Stopping` 多久强制摊回 Idle。
+///
+/// 30s 是踩在"用户感知卡顿但还能忍" + "正常 turn 中断 ack 应在数秒内回到"
+/// 之间的折中——home node 实测从 cancel 到 cc 真停 turn 通常 ≤2s；30s 足够
+/// 覆盖 cc 在长 thinking/tool-loop 中段的最坏 ack 延迟。再长用户体感"假死"。
+const STOPPING_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// `fuxi-agent-cc` 的错误类型——聚合 io / serde / core / ws。
 #[derive(Debug, thiserror::Error)]
 pub enum CcError {
@@ -91,6 +98,17 @@ struct Inner {
     /// 处 drain 后按 FIFO 调 `channel.send`；idle 时由 `send_message` 立即 drain
     /// 自送（无 turn 触发它）。
     pending: PendingOutbox,
+    /// Bug A · 玄女堵塞自愈：cancel() 发 interrupt 时记下 request_id；pump_loop
+    /// 收 `control_response` 时如果 ack 的 request_id 命中、subtype="success" → 触发
+    /// 同 turn-terminal 同款 drain（status 摊 Idle + drain pending）。
+    /// 不命中（不是 interrupt ack）则继续走老逻辑日志即丢。
+    last_interrupt_request_id: Option<String>,
+    /// Bug A · cancel 代际：每次 cancel 自增 1。30s watchdog 携带 spawn 时的
+    /// 代际值，醒来比对当前——大于自己 → 已被新 cancel 取代，silent return；
+    /// 否则强制摊回 Idle + 发 `AgentInterrupted{reason:"stopping_timeout"}` 警告
+    /// 玄女自检。WHY counter 不 channel：watchdog spawn 完不持锁；用 `Inner.lock()`
+    /// 醒来比对一次原子读即可，比 watch 简单。
+    cancel_generation: u64,
 }
 
 /// Claude Code 门客——WS 反连承载。
@@ -195,6 +213,8 @@ impl CcAgent {
                 .with_window_size(crate::config::resolve_default_window_size()),
             death_tx: Some(death_tx),
             pending: PendingOutbox::new(),
+            last_interrupt_request_id: None,
+            cancel_generation: 0,
         }));
 
         // 4. pump task——长跑，直到 channel 关闭
@@ -219,6 +239,83 @@ impl CcAgent {
             .lock()
             .ok()
             .and_then(|mut g| std::mem::take(&mut *g))
+    }
+
+    /// Bug A 测试 fixture · 起 [`WsChannel`] 但**不**起真 cc 子进程，让测试自己用
+    /// `tokio_tungstenite::connect_async(url)` 反连模拟 cc。返回 `(agent, url)`。
+    ///
+    /// 跟 `launch_with_id` 唯一差别：跳过 `spawn_claude` + `wait_connect`，直接
+    /// 起 pump_loop。pump_loop 内 `channel.recv().await` 在没人反连时只是 await，
+    /// 等测试反连后 ws_handler 把消息推进 incoming queue 自然继续。
+    ///
+    /// `#[doc(hidden)]` 暴露——生产路径不该调，但 integration test
+    /// （`tests/cancel_drain.rs` 等）需要 always-pub。改 `#[cfg(test)]` 会让
+    /// integration test 编译不通过（cfg(test) 只覆盖 lib 内单测）。
+    #[doc(hidden)]
+    pub async fn for_test_with_fake_cli(profile: AgentProfile) -> Result<(Self, String)> {
+        let id = AgentId::new();
+        let role_for_parser = profile.role.clone();
+        let sid = uuid::Uuid::new_v4().to_string();
+        let channel = Arc::new(WsChannel::bind(&sid).await.map_err(CcError::from)?);
+        let url = channel.url();
+
+        let card = AgentCard {
+            id,
+            profile,
+            endpoint: "test:fake-cli".to_string(),
+            status: AgentStatus::Idle,
+        };
+
+        let (death_tx, death_rx) = mpsc::unbounded_channel::<String>();
+        let inner = Arc::new(Mutex::new(Inner {
+            channel: channel.clone(),
+            child: None,
+            status: AgentStatus::Idle,
+            active_tx: None,
+            current_task: None,
+            translate_state: TranslateState::with_role(role_for_parser)
+                .with_window_size(crate::config::resolve_default_window_size()),
+            death_tx: Some(death_tx),
+            pending: PendingOutbox::new(),
+            last_interrupt_request_id: None,
+            cancel_generation: 0,
+        }));
+
+        let pump = tokio::spawn(pump_loop(channel.clone(), id, None, inner.clone()));
+
+        Ok((
+            Self {
+                card,
+                inner,
+                death_rx: std::sync::Mutex::new(Some(death_rx)),
+                _pump: pump,
+            },
+            url,
+        ))
+    }
+
+    /// Bug A 测试 helper · 读当前 status，绕过外部调用语义只读内部字段。
+    #[doc(hidden)]
+    pub async fn test_status(&self) -> AgentStatus {
+        self.inner.lock().await.status
+    }
+
+    /// Bug A 测试 helper · pending 队列剩余条数。
+    #[doc(hidden)]
+    pub async fn test_pending_len(&self) -> usize {
+        self.inner.lock().await.pending.len()
+    }
+
+    /// Bug A 测试 helper · 上次 cancel 用的 control_request id。`None` 即从未 cancel。
+    #[doc(hidden)]
+    pub async fn test_last_interrupt_request_id(&self) -> Option<String> {
+        self.inner.lock().await.last_interrupt_request_id.clone()
+    }
+
+    /// Bug A 测试 helper · cancel 代际（每次 cancel +1）。
+    #[doc(hidden)]
+    pub async fn test_cancel_generation(&self) -> u64 {
+        self.inner.lock().await.cancel_generation
     }
 
     /// 组装 `{type:"user", ...}` JSON。
@@ -377,16 +474,55 @@ impl Agent for CcAgent {
     async fn cancel(&self, _task_id: TaskId) -> Result<()> {
         // 打断式介入：WS `control_request { subtype: "interrupt" }`。
         // 参照 anya claude-code-backend.ts:470-485。
+        //
+        // Bug A · 玄女堵塞自愈：cc 收到 interrupt 后**只 emit `control_response`**，
+        // 并不一定继续 emit `ResultSuccess`/`Error`——尤其玄女 thinking/tool-loop
+        // 中段被打断时。turn-terminal 是 pump_loop 唯一摊回 Idle 的入口，永远不
+        // 来 → status 永远 Stopping → pending 队列只长不 drain → 玄女假死 44 分钟。
+        //
+        // 治法两条：
+        // 1. 记下 `last_interrupt_request_id` 让 pump_loop 收 control_response
+        //    success 时直接走 drain（同 turn-terminal 路径）。
+        // 2. 30s watchdog 兜底：cc 既不 emit terminal 也不 ack 的极端场景下强制
+        //    摊回 + 发 `AgentInterrupted{reason:"stopping_timeout"}` 让玄女自检。
         let request_id = uuid::Uuid::new_v4().to_string();
         let msg = json!({
             "type": "control_request",
             "request_id": request_id,
             "request": {"subtype": "interrupt"},
         });
-        let mut inner = self.inner.lock().await;
-        inner.channel.send(msg).map_err(CcError::from)?;
-        inner.status = AgentStatus::Stopping;
-        tracing::info!(agent = %self.card.id, request_id, "打断介入：sent control_request interrupt");
+        let (current_task, my_generation) = {
+            let mut inner = self.inner.lock().await;
+            inner.channel.send(msg).map_err(CcError::from)?;
+            inner.status = AgentStatus::Stopping;
+            inner.last_interrupt_request_id = Some(request_id.clone());
+            inner.cancel_generation = inner.cancel_generation.wrapping_add(1);
+            (inner.current_task, inner.cancel_generation)
+        };
+        tracing::info!(
+            agent = %self.card.id,
+            request_id,
+            generation = my_generation,
+            "打断介入：sent control_request interrupt"
+        );
+
+        // Bug A · 30s watchdog——fire-and-forget，generation counter 取消语义。
+        // 新 cancel 把 generation+1 → 旧 watchdog 醒来发现 inner.cancel_generation
+        // 已超自己 → silent return；当前最新那个 watchdog 跑完自然摊回。
+        let inner_cl = self.inner.clone();
+        let agent_id = self.card.id;
+        tokio::spawn(async move {
+            tokio::time::sleep(STOPPING_WATCHDOG_TIMEOUT).await;
+            drain_pending_to_idle(
+                &inner_cl,
+                agent_id,
+                current_task,
+                DrainCause::WatchdogTimeout {
+                    expected_generation: my_generation,
+                },
+            )
+            .await;
+        });
         Ok(())
     }
 
@@ -497,11 +633,26 @@ fn build_review_event(
     }
 }
 
+/// Bug A · 摊回 Idle + drain pending 的入口分类，让 [`drain_pending_to_idle`]
+/// 共用三条路径——pump terminal / interrupt ack / 30s watchdog。
+#[derive(Debug)]
+enum DrainCause {
+    /// 正常 turn 结束（cc emit ResultSuccess/Error）。
+    TurnTerminal,
+    /// cc 收 interrupt 后回的 control_response.subtype="success" ack。
+    InterruptAck { request_id: String },
+    /// cancel 后 30s 没等到 ack 也没等到 terminal——强制摊回 + 警告事件。
+    WatchdogTimeout { expected_generation: u64 },
+}
+
 /// 长跑 pump：拉 WS 消息 → 路由。
 ///
 /// 路由规则：
 /// - `control_request/can_use_tool` → v0.1 全 `allow`（策略层 v0.2 再加）
-/// - `control_request/interrupt` 的 **ack** 来自 claude 的 `control_response`，只日志
+/// - `control_request/interrupt` 的 **ack** 来自 claude 的 `control_response`，
+///   subtype=success 时（Bug A 修）走 [`drain_pending_to_idle`] 同 turn-terminal
+///   路径——cc 这之后不一定再 emit ResultSuccess/Error，等不到就是用户感受
+///   到的"假死"。
 /// - `keep_alive` / `rate_limit_event` → 日志或 Custom 事件（目前走 parse_line 兜底）
 /// - 其它 → parse_line + translate → 发到当前 active_tx
 async fn pump_loop(
@@ -516,9 +667,36 @@ async fn pump_loop(
             handle_control_request(&channel, &msg).await;
             continue;
         }
-        // control_response：我方发 interrupt 的 ack，v0.1 仅日志
+        // control_response：我方发 interrupt 的 ack。Bug A 修：subtype=success 时
+        // 走 drain（让 status 摊回 Idle、pending 立即送出）。
         if msg.get("type").and_then(Value::as_str) == Some("control_response") {
             tracing::debug!(msg = ?msg, "control_response acked");
+            let resp = msg.get("response");
+            let subtype = resp
+                .and_then(|r| r.get("subtype"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // request_id 可能在顶层（早期 anya wire）或 response 内（spec），都收。
+            let req_id = msg
+                .get("request_id")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    resp.and_then(|r| r.get("request_id"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_string);
+            if subtype == "success"
+                && let Some(rid) = req_id
+            {
+                let task_id = inner.lock().await.current_task;
+                drain_pending_to_idle(
+                    &inner,
+                    agent_id,
+                    task_id,
+                    DrainCause::InterruptAck { request_id: rid },
+                )
+                .await;
+            }
             continue;
         }
 
@@ -592,25 +770,13 @@ async fn pump_loop(
 
         if is_terminal {
             // terminal 后，不再 auto-drop active_tx——调用方可能要留着用 send_message 追加
-            // 任务完成的认定由 orchestrator 层看到 TaskStateChanged → Done 来决
+            // 任务完成的认定由 orchestrator 层看到 TaskStateChanged → Done 来决。
             //
             // M2.1 · 消息黑洞修：turn 结束此刻是 cc 重新 poll WS 的窗口——把 pending
-            // 队列的 follow-up 消息按 FIFO drain 自送。先从锁内 take channel + drain，
-            // 再锁外 send 避免长持锁。
-            let (channel_clone, cli_sid, drained) = {
-                let mut guard = inner.lock().await;
-                guard.status = AgentStatus::Idle;
-                let drained = guard.pending.drain_all();
-                let cli_sid = guard.channel.cli_session_id().await.unwrap_or_default();
-                (guard.channel.clone(), cli_sid, drained)
-            };
-            for body in drained {
-                let msg = CcAgent::user_message_value(&body, &cli_sid);
-                if let Err(e) = channel_clone.send(msg) {
-                    tracing::warn!(error = %e, "pump terminal drain：channel send 失败（channel 已关？）");
-                    break;
-                }
-            }
+            // 队列的 follow-up 消息按 FIFO drain 自送。Bug A 后该逻辑被提到
+            // [`drain_pending_to_idle`] 让 interrupt-ack / watchdog 共用同一路径。
+            let task_id = inner.lock().await.current_task;
+            drain_pending_to_idle(&inner, agent_id, task_id, DrainCause::TurnTerminal).await;
         }
     }
     tracing::info!("ws_pump: channel closed, pump exiting");
@@ -623,6 +789,105 @@ async fn pump_loop(
     };
     if let Some(tx) = death_tx {
         let _ = tx.send("ws channel closed".to_string());
+    }
+}
+
+/// Bug A · 把 status 摊回 Idle + drain pending → 锁外送回 channel。
+///
+/// 三条入口共享：
+/// - `TurnTerminal`：cc emit ResultSuccess/Error（最常态）
+/// - `InterruptAck`：cc 收到 interrupt 后回的 control_response.subtype="success"
+/// - `WatchdogTimeout`：cancel 后 30s 兜底（cc 死活不 ack 也不 emit terminal）
+///
+/// 排他性靠 `cancel_generation` + `last_interrupt_request_id` + status 三重检查
+/// 保证：
+/// 1. 旧 watchdog 醒来发现 generation 已被新 cancel bump → silent return（避免
+///    一次 cancel 触发两次 watchdog）
+/// 2. interrupt-ack 命中 request_id 但 status 已 Idle（被 watchdog 抢先摊回） →
+///    silent return，不重复 drain
+/// 3. interrupt-ack 收到了**别人的** request_id（不 match 自己最近一次 cancel
+///    的）→ silent return（防御 race）
+async fn drain_pending_to_idle(
+    inner: &Arc<Mutex<Inner>>,
+    agent_id: AgentId,
+    task_id: Option<TaskId>,
+    cause: DrainCause,
+) {
+    let (channel_clone, cli_sid, drained, emit_warning) = {
+        let mut guard = inner.lock().await;
+        match &cause {
+            DrainCause::TurnTerminal => {
+                // 不做条件判定——turn 真到头就摊回（保留 M2.1 行为）
+            }
+            DrainCause::InterruptAck { request_id } => {
+                // 不命中我们最近一次 cancel 的 request_id → 不是我们关心的 ack
+                if guard.last_interrupt_request_id.as_deref() != Some(request_id.as_str()) {
+                    return;
+                }
+                // 已被 watchdog / terminal 抢先摊回 → 不重复 drain
+                if !matches!(guard.status, AgentStatus::Stopping) {
+                    return;
+                }
+            }
+            DrainCause::WatchdogTimeout {
+                expected_generation,
+            } => {
+                // 新 cancel 已 bump generation → 旧 watchdog 失效
+                if guard.cancel_generation != *expected_generation {
+                    return;
+                }
+                // 已被 ack drain / terminal 摊回 → silent return
+                if !matches!(guard.status, AgentStatus::Stopping) {
+                    return;
+                }
+            }
+        }
+        guard.status = AgentStatus::Idle;
+        // 清掉 last_interrupt_request_id：防止下一轮 cc emit 同 id 的 stale ack
+        // 误命中本次 drain 已处理过的状态。
+        guard.last_interrupt_request_id = None;
+        let drained = guard.pending.drain_all();
+        let cli_sid = guard.channel.cli_session_id().await.unwrap_or_default();
+        let warn = matches!(cause, DrainCause::WatchdogTimeout { .. });
+        (guard.channel.clone(), cli_sid, drained, warn)
+    };
+    for body in drained {
+        let msg = CcAgent::user_message_value(&body, &cli_sid);
+        if let Err(e) = channel_clone.send(msg) {
+            tracing::warn!(error = %e, "drain：channel send 失败（channel 已关？）");
+            break;
+        }
+    }
+    // watchdog 兜底必发 AgentInterrupted{stopping_timeout}——让玄女自检
+    // ("我打了 interrupt 但 cc 30s 没 ack，可能要重启")。active_tx=None 时仅日志。
+    if emit_warning {
+        tracing::warn!(
+            agent = %agent_id,
+            "stopping watchdog 30s 未见 ack/terminal，强制摊回 Idle 并发出 AgentInterrupted{{stopping_timeout}}"
+        );
+        let tx_opt = inner.lock().await.active_tx.clone();
+        if let Some(tx) = tx_opt {
+            let mut meta = EventMeta::now();
+            meta.agent = Some(agent_id);
+            meta.task = task_id;
+            let ev = Event {
+                meta,
+                kind: EventKind::AgentInterrupted {
+                    reason: "stopping_timeout".to_string(),
+                },
+            };
+            if tx.send(ev).await.is_err() {
+                tracing::debug!(
+                    agent = %agent_id,
+                    "stopping_timeout 事件投递失败：active_tx 已关闭"
+                );
+            }
+        } else {
+            tracing::warn!(
+                agent = %agent_id,
+                "stopping_timeout 无处投递：active_tx=None"
+            );
+        }
     }
 }
 
