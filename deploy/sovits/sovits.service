@@ -1,0 +1,17 @@
+[Unit]
+Description=GPT-SoVITS API server (api_v2 on :9880)
+After=network.target
+
+[Service]
+Type=simple
+User=e0-7
+Environment=HOME=/home/e0-7
+Environment=PATH=/home/e0-7/miniforge3/envs/GPTSoVITS/bin:/usr/bin:/bin
+Environment=HF_ENDPOINT=https://hf-mirror.com
+WorkingDirectory=/home/e0-7/GPT-SoVITS
+ExecStart=/home/e0-7/miniforge3/envs/GPTSoVITS/bin/python api_v2.py -a 127.0.0.1 -p 9880
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
