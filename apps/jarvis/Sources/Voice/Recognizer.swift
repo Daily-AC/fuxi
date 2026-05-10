@@ -171,16 +171,22 @@ final class Recognizer {
         onLevel(0)
 
         let snapshot = buffer.snapshot()
-        guard !snapshot.isEmpty,
-              let pipe = WhisperModelManager.shared.readyPipeline else {
-            // 模型没好或没收到声——直接发空 final，让 AppState 的兜底逻辑接管
+        guard !snapshot.isEmpty else {
+            // 没收到声——直接空 final，AppState 兜底
             onResult(lastPartialText, true)
             return
         }
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                // 模型首次启动 prewarm + ANE compile 可能要 5-15s——await 让 lib 加载
+                // 完再 transcribe，而不是 readyPipeline=nil 时静默吞掉用户讲的话。
+                // 用户体感：从 VAD 说完到玄女回话之间多等几秒（首次启动；后续有 cache 秒级）。
+                self.logger.info("await 模型 ready 中…")
+                let pipe = try await WhisperModelManager.shared.ensureLoaded()
+                self.logger.info("模型 ready，开始 transcribe")
                 let text = try await Self.runTranscribe(pipe: pipe, audio: snapshot)
+                self.logger.info("transcribe 出结果: \(text, privacy: .public)")
                 self.onResult(text, true)
             } catch {
                 self.logger.error("final transcribe 失败: \(error.localizedDescription, privacy: .public)")

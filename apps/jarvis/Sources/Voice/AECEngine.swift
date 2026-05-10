@@ -3,6 +3,7 @@ import Foundation
 // 我们自己保证：tap 回调和 fan-out 闭包都跑在同一条 audio render thread 上，
 // 不跨线程；@preconcurrency 抑制误报。
 @preconcurrency import AVFoundation
+import AppKit
 import OSLog
 
 // MARK: - AECEngine
@@ -29,6 +30,13 @@ import OSLog
 // 鸣谢 https://github.com/kasimok/AECAudioStream（vpio 用法参考；我们走 AVAudioEngine
 // 而不是它的 AudioUnit 直调）。
 
+/// 诊断用 RMS 累积——audio thread 间共享，NSLock 保护。
+private final class RMSDiagState: @unchecked Sendable {
+    var count = 0
+    var rmsSumSquared: Float = 0
+    var rmsFrames = 0
+}
+
 @MainActor
 final class AECEngine {
     static let shared = AECEngine()
@@ -39,11 +47,13 @@ final class AECEngine {
     /// 唯一的 input tap fan-out 调度器——audio thread 上调用其 `dispatch(_:)`。
     private let dispatcher = TapDispatcher()
 
-    /// earcon 播放节点：attach 到 outputNode，AVAudioFile schedule 一发一响。
-    private var earconPlayer: AVAudioPlayerNode?
-    /// earcon 音频缓冲——一次 load，多次复用，避免每次 schedule 时的磁盘读延迟。
-    private var earconBuffer: AVAudioPCMBuffer?
-    private var earconFormat: AVAudioFormat?
+    /// earcon 走独立 NSSound 而**不**接进 vpio engine：
+    /// 早期实现把 AVAudioPlayerNode attach 到 engine.mainMixerNode 上，但 file 的
+    /// processingFormat（Tink.aiff 是 stereo 22050）跟 vpio mainMixer 期望的 format
+    /// （mono 48k Float32）撞不上，engine.start() 直接抛 -10875 把整个 mic 链路废掉。
+    /// 代价：earcon 不走 AEC reference 路径，回声会被 mic 收到——但 200ms 短促音 +
+    /// 用户开口窗口本来就有 SFSpeech leading timeout 6s 缓冲，影响可忽略。
+    private var earconSound: NSSound?
 
     private var started = false
 
@@ -71,14 +81,44 @@ final class AECEngine {
         logger.notice("vpio native format: sr=\(nativeFormat.sampleRate) ch=\(nativeFormat.channelCount) common=\(nativeFormat.commonFormat.rawValue)")
 
         let dispatcher = self.dispatcher
+        // 诊断用：每 100 个 buffer 打一次 RMS（约 1s 一次 @48k）——验证 mic 链路真有信号。
+        let rmsCounter = NSLock()
+        let rmsState = RMSDiagState()
+        let diagLogger = self.logger
         // bufferSize 1024 同原实现——vpio 实际可能给到 ~480 帧（10ms@48k），系统会按需切。
         input.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { buffer, _ in
             // 跑在 audio render thread。dispatcher 内部已加锁，不阻塞 main。
             dispatcher.dispatch(buffer: buffer)
+
+            // 算第一通道 RMS 累积——audio thread 操作，counter 自旋
+            rmsCounter.lock()
+            rmsState.count += 1
+            if let chan = buffer.floatChannelData?[0] {
+                let n = Int(buffer.frameLength)
+                var sum: Float = 0
+                for i in 0..<n {
+                    sum += chan[i] * chan[i]
+                }
+                rmsState.rmsSumSquared += sum
+                rmsState.rmsFrames += n
+            }
+            let shouldLog = rmsState.count >= 100
+            var rmsToReport: Float = 0
+            var framesToReport = 0
+            if shouldLog {
+                rmsToReport = rmsState.rmsFrames > 0 ? sqrt(rmsState.rmsSumSquared / Float(rmsState.rmsFrames)) : 0
+                framesToReport = rmsState.rmsFrames
+                rmsState.count = 0
+                rmsState.rmsSumSquared = 0
+                rmsState.rmsFrames = 0
+            }
+            rmsCounter.unlock()
+            if shouldLog {
+                diagLogger.notice("mic RMS=\(rmsToReport, privacy: .public) frames=\(framesToReport, privacy: .public)")
+            }
         }
 
-        // earcon 播放器：attach + connect 到 mainMixer（mainMixer → outputNode 系统会自动连）。
-        // 等真正 play earcon 时再 schedule buffer。
+        // earcon 加载——走独立 NSSound 不接 engine graph（详见 earconSound 注释）。
         prepareEarcon()
 
         engine.prepare()
@@ -90,11 +130,8 @@ final class AECEngine {
     func stop() {
         guard started else { return }
         engine.inputNode.removeTap(onBus: 0)
-        if let player = earconPlayer {
-            player.stop()
-            engine.detach(player)
-            earconPlayer = nil
-        }
+        earconSound?.stop()
+        earconSound = nil
         engine.stop()
         started = false
         dispatcher.removeAll()
@@ -120,8 +157,17 @@ final class AECEngine {
         let converter: AVAudioConverter?
         if let format, format != inFormat {
             converter = AVAudioConverter(from: inFormat, to: format)
-            if converter == nil {
-                logger.error("listener=\(id, privacy: .public) AVAudioConverter 构造失败 (inFmt sr=\(inFormat.sampleRate) → outFmt sr=\(format.sampleRate))")
+            if let conv = converter {
+                // 多通道源 → 单声道目标（wake/STT/VAD 都是 mono）：默认 N→1 是平均所有通道，
+                // 但用户系统装了向日葵 OrayVirtualAudioDevice 之类虚拟驱动后 vpio 可能拿到
+                // 9 ch 聚合视图——其余 8 通道空，平均后信号被稀释 9 倍，wake/STT 听到的是
+                // 接近静音的 mono。强制 channelMap[0] = 只取 channel 0（默认主 mic 位置），
+                // 振幅不被稀释。
+                if format.channelCount == 1, inFormat.channelCount > 1 {
+                    conv.channelMap = [0]
+                }
+            } else {
+                logger.error("listener=\(id, privacy: .public) AVAudioConverter 构造失败 (inFmt sr=\(inFormat.sampleRate) ch=\(inFormat.channelCount) → outFmt sr=\(format.sampleRate) ch=\(format.channelCount))")
             }
         } else {
             converter = nil
@@ -135,19 +181,21 @@ final class AECEngine {
 
     // MARK: - earcon
 
-    /// 200ms「叮」短音确认唤醒——替代 TTS「我在」。走 vpio output，AEC 自动从 mic 减掉，
-    /// 不会自激。落到 main mixer → outputNode → vpio 输出端。
+    /// 200ms「叮」短音确认唤醒——替代 TTS「我在」。
+    ///
+    /// 走 NSSound 独立路径不进 vpio engine——绕开 AVAudioFile.processingFormat 跟 vpio
+    /// mainMixer expected format mismatch 的坑（实测会让 engine.start() 抛 -10875）。
+    /// 代价：自激不被 AEC 减掉，但 200ms 短音影响可忽略。
     func playEarcon() {
-        guard started, let player = earconPlayer, let buffer = earconBuffer else {
-            logger.warning("playEarcon: engine 未启动或 earcon 未加载")
+        guard let sound = earconSound else {
+            logger.warning("playEarcon: earcon 未加载")
             return
         }
-        // schedule 完立即 play。重复触发不排队——interrupt + replay。
-        if player.isPlaying {
-            player.stop()
+        // 重复触发：先 stop 再 play 避免叠加。
+        if sound.isPlaying {
+            sound.stop()
         }
-        player.scheduleBuffer(buffer, at: nil, options: [.interrupts])
-        player.play()
+        sound.play()
     }
 
     // MARK: - 内部
@@ -156,44 +204,19 @@ final class AECEngine {
     /// 没找到就 fallback `/System/Library/Sounds/Tink.aiff`（macOS 系统音，必存在）。
     private func prepareEarcon() {
         let candidatePaths: [String] = [
-            // app bundle 内的资源（xcodegen + Resources 目录）
             Bundle.main.url(forResource: "earcon-zen", withExtension: "caf")?.path,
-            // SwiftPM `swift run` 场景：cwd 下找
             FileManager.default.currentDirectoryPath + "/Resources/earcon-zen.caf",
-            // 系统兜底——macOS 14+ 这个路径是稳定 ABI
             "/System/Library/Sounds/Tink.aiff",
         ].compactMap { $0 }
 
-        guard let path = candidatePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            logger.error("找不到任何 earcon 候选音频文件")
+        guard let path = candidatePaths.first(where: { FileManager.default.fileExists(atPath: $0) }),
+              let sound = NSSound(contentsOfFile: path, byReference: false)
+        else {
+            logger.error("找不到/加载失败 earcon 候选音频文件")
             return
         }
-
-        do {
-            let url = URL(fileURLWithPath: path)
-            let file = try AVAudioFile(forReading: url)
-            let format = file.processingFormat
-            let frameCount = AVAudioFrameCount(file.length)
-            guard frameCount > 0,
-                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)
-            else {
-                logger.error("earcon buffer 构造失败")
-                return
-            }
-            try file.read(into: buffer)
-            earconBuffer = buffer
-            earconFormat = format
-
-            // attach + connect player → mainMixer。format 传 file 的 processingFormat
-            // 而不是 outputNode format——AVAudioEngine 内部会做必要的格式转换。
-            let player = AVAudioPlayerNode()
-            engine.attach(player)
-            engine.connect(player, to: engine.mainMixerNode, format: format)
-            earconPlayer = player
-            logger.notice("earcon ready: \(path, privacy: .public)")
-        } catch {
-            logger.error("earcon 加载失败: \(error.localizedDescription, privacy: .public)")
-        }
+        earconSound = sound
+        logger.notice("earcon ready: \(path, privacy: .public)")
     }
 }
 

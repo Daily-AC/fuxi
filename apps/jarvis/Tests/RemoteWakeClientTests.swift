@@ -99,4 +99,40 @@ final class RemoteWakeClientTests: XCTestCase {
         let decoded = WakeFrame.decode(from: json)
         XCTAssertEqual(decoded, original)
     }
+
+    // MARK: 自取消识别——避免把自己 cancel 自己的 pending 回调当成真失败计入 fallback 阈值
+    //
+    // 场景：connect() 进门 cancelWS()，老 WS 的 pending receive 回调随后以 .failure(cancelled)
+    // 触发 onWSFailure；如果计数，就会把刚连上的好 WS 又因为「累计 3 次失败」撕掉。
+
+    func test_isSelfCancellation_NSURLErrorCancelled() {
+        let err = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: nil)
+        XCTAssertTrue(isSelfCancellation(err))
+    }
+
+    func test_isSelfCancellation_chineseDescription() {
+        // 实测 macOS 系统错误本地化中文 description = "已取消"，domain 不一定是 NSURLErrorDomain
+        // （URLSessionWebSocketTask 内部走 NSPOSIXErrorDomain 88/89 也可能）。
+        let err = NSError(domain: "test", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "已取消"])
+        XCTAssertTrue(isSelfCancellation(err))
+    }
+
+    func test_isSelfCancellation_englishDescription() {
+        let err = NSError(domain: "test", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "The operation couldn't be completed. (cancelled)"])
+        XCTAssertTrue(isSelfCancellation(err))
+    }
+
+    func test_isSelfCancellation_socketNotConnected_isReal() {
+        let err = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet,
+                          userInfo: [NSLocalizedDescriptionKey: "未能完成该操作。Socket未连接"])
+        XCTAssertFalse(isSelfCancellation(err))
+    }
+
+    func test_isSelfCancellation_genericTimeout_isReal() {
+        let err = NSError(domain: "wake", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "downlink timeout"])
+        XCTAssertFalse(isSelfCancellation(err))
+    }
 }
