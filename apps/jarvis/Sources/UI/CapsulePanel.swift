@@ -95,6 +95,36 @@ final class CapsulePanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    /// 右键药丸 → 弹「设置 / 退出」菜单。NSStatusItem 在 menubar 太挤被 macOS 隐藏时
+    /// 用户找不到设置 / 关不掉 app（pkill 才能退）；右键药丸是兜底入口。
+    /// `nonactivatingPanel` 下 mouseDown 事件仍正常派发到 NSPanel——直接 override。
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+
+        let settingsItem = NSMenuItem(
+            title: "设置…",
+            action: #selector(AppDelegate.openSettings),
+            keyEquivalent: ","
+        )
+        settingsItem.keyEquivalentModifierMask = [.command]
+        settingsItem.target = NSApp.delegate
+        menu.addItem(settingsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(
+            title: "退出玄女",
+            action: #selector(AppDelegate.quitApp),
+            keyEquivalent: "q"
+        )
+        quitItem.keyEquivalentModifierMask = [.command]
+        quitItem.target = NSApp.delegate
+        menu.addItem(quitItem)
+
+        // 在鼠标位置弹——nil view 让 NSMenu 走全局坐标。
+        NSMenu.popUpContextMenu(menu, with: event, for: contentView ?? NSView())
+    }
+
     /// 显示胶囊——计算位置后 orderFront（不 makeKey 避免抢焦点）。
     func show() {
         repositionAboveDock()
