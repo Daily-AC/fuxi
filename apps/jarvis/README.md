@@ -91,6 +91,6 @@ v0.3 起新增「立绘」形态——水墨仙气 280×420 panel，5 状态对�
 - 设置 → 「连接」标签顶部「形态」radio → 选「立绘」/「药丸」实时生效
 - 右键药丸 → 「切到立绘」/ 右键立绘 → 「切回药丸」
 
-**资产装哪**：`apps/jarvis/Resources/Pet/poses/{idle,listening,thinking,speaking,ack}@2x.png`。资产缺失时切「立绘」会自动弹 alert 并回到药丸——不会让 App 黑屏。资产由 art track 单独走 gpt-image-2 出图（参考 `docs/superpowers/plans/2026-05-11-jarvis-pet-implementation.md` Art Track 段的 prompt）。
+**资产装哪**：`apps/jarvis/Sources/Resources/Pet/poses/{idle,listening,thinking,speaking,ack}@2x.png`（路径在 SwiftPM `Sources/Resources/` 下而非顶层 `Resources/`——SwiftPM `path: "Sources"` 限制下走 `.copy("Resources/Pet")` 才能让 `Bundle.module` 找到）。资产缺失时切「立绘」会自动弹 alert 并回到药丸——不会让 App 黑屏。资产由 art track 单独走 gpt-image-2 出图（参考 `docs/superpowers/plans/2026-05-11-jarvis-pet-implementation.md` Art Track 段的 prompt）。
 
 **架构**：UI 层 `apps/jarvis/Sources/UI/Pet/` 子目录 6 个文件（PetPanel / PetPoseView / PoseAssetCatalog / SleeveCanvasOverlay / BlinkCoordinator / PetSweepOverlay），后端零改动；状态机仍走 `AppState.VoicePhase` 现成 5 状态。
