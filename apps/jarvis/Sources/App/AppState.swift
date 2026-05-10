@@ -288,7 +288,12 @@ final class AppState: ObservableObject {
 
     private func speak(_ text: String) {
         phase = .speaking
-        synthesizer?.speak(text) { [weak self] in
+        let id = settings.ttsVoice.trimmingCharacters(in: .whitespaces)
+        synthesizer?.speak(
+            text,
+            voiceIdentifier: id.isEmpty ? nil : id,
+            rate: Float(settings.ttsRate)
+        ) { [weak self] in
             Task { @MainActor in
                 self?.enterIdle()
             }
