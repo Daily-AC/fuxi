@@ -109,6 +109,25 @@ enum WakeClientEvent {
     case reconnected
 }
 
+/// 判断 WS 错误是不是「我们自己 cancel 自己」——connect() 进门会 cancelWS() 把上一条 WS
+/// 的 pending receive 踢出 .failure(cancelled)；如果计入 consecutiveFailures，会迅速把
+/// 刚连上的好连接因「累计 3 次失败」撕掉。
+///
+/// 检测策略：NSURLErrorCancelled (-999) + description 文本兜底。WebSocketTask 取消时
+/// 错误 domain 不一定是 NSURLErrorDomain（实测有 NSPOSIXErrorDomain 89），所以 description
+/// 兜一层。
+func isSelfCancellation(_ error: Error) -> Bool {
+    let nserr = error as NSError
+    if nserr.domain == NSURLErrorDomain, nserr.code == NSURLErrorCancelled {
+        return true
+    }
+    let desc = nserr.localizedDescription.lowercased()
+    if desc.contains("cancel") || nserr.localizedDescription.contains("已取消") {
+        return true
+    }
+    return false
+}
+
 @MainActor
 final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "wake-remote")
@@ -127,6 +146,15 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
     private var consecutiveFailures = 0
     private static let fallbackThreshold = 3
     private var fallbackOpen = false
+
+    // 任意时刻最多一个 reconnect Task；新调度前取消旧的。否则瞬时多次失败会排队多个
+    // Task，每个 Task 醒来都盲调 connect()——后醒的把先醒已连上的 WS 撕掉，永远在 ready
+    // 与 fallback 之间反复横跳（实测 30s 内切 5+ 次）。
+    private var pendingReconnect: Task<Void, Never>?
+    // 每条连接一个 generation。listen/receive 的 async 回调闭包捕获本次 generation；
+    // 老 generation 的 success/failure 都直接丢——避免老 WS 的 pending recv 因为 cancelWS()
+    // 触发 .failure(cancelled) 又走一遍 onWSFailure 把新连接捅死。
+    private var connectionGeneration: UInt = 0
 
     // 心跳：server 5s 一 ping，30s 没下行帧视为断线。
     private var lastDownlinkAt = Date()
@@ -155,7 +183,12 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
 
     func connect() {
         logger.notice("connect → \(self.serverURL.absoluteString, privacy: .public) bearerLen=\(self.bearer.count)")
+        // 进门先取消任何排队中的 reconnect——我们正在主动建连，那些 Task 都过期了。
+        pendingReconnect?.cancel()
+        pendingReconnect = nil
         cancelWS()
+        connectionGeneration &+= 1
+        let myGen = connectionGeneration
         var req = URLRequest(url: serverURL)
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         let task = session.webSocketTask(with: req)
@@ -163,7 +196,7 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
         ready = false
         lastDownlinkAt = Date()
         task.resume()
-        listen()
+        listen(generation: myGen)
         sendHello()
         startHeartbeatWatcher()
     }
@@ -174,6 +207,8 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     func stop() {
+        pendingReconnect?.cancel()
+        pendingReconnect = nil
         cancelWS()
         audio.stop()
         heartbeatTimer?.invalidate()
@@ -206,17 +241,23 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
         sendFrame(.hello(client: "jarvis-mac", version: "0.1.0"))
     }
 
-    private func listen() {
+    private func listen(generation: UInt) {
         ws?.receive { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
-                Task { @MainActor in self.onWSFailure(error) }
+                Task { @MainActor in
+                    // 已经换 generation 了：老 WS 的 pending recv 在收尾，事件都丢——它们
+                    // 自己就是被 cancelWS 踢出的，重复计数会把新连接撕掉。
+                    guard self.connectionGeneration == generation else { return }
+                    self.onWSFailure(error)
+                }
             case .success(let msg):
                 Task { @MainActor in
+                    guard self.connectionGeneration == generation else { return }
                     self.lastDownlinkAt = Date()
                     self.handle(msg)
-                    self.listen()
+                    self.listen(generation: generation)
                 }
             }
         }
@@ -234,9 +275,12 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
         case .ready(let keywords):
             logger.info("ready, keywords=\(keywords, privacy: .public)")
             ready = true
-            // 复连成功：清失败计数 + 退避；如之前已开 fallback 通知 AppState 切回。
+            // 复连成功：清失败计数 + 退避；排队中的 reconnect Task 一并作废（不然下一秒
+            // 它醒来会把这条好连接重新撕掉）。如之前已开 fallback 通知 AppState 切回。
             backoffIndex = 0
             consecutiveFailures = 0
+            pendingReconnect?.cancel()
+            pendingReconnect = nil
             if fallbackOpen {
                 fallbackOpen = false
                 onEvent(.reconnected)
@@ -314,6 +358,12 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     private func onWSFailure(_ error: Error) {
+        // 自己 cancel 自己（cancelWS 把上一条 WS 踢出 .failure(cancelled)）不算真失败，
+        // 否则一次真断会被三次自取消放大成「3 次失败 → trip fallback」，把好连接撕掉。
+        if isSelfCancellation(error) {
+            logger.debug("WS self-cancel ignored: \(error.localizedDescription, privacy: .public)")
+            return
+        }
         logger.warning("WS 失败: \(error.localizedDescription, privacy: .public)")
         cancelWS()
         consecutiveFailures += 1
@@ -322,8 +372,11 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
         }
         let delay = Self.backoffLadder[min(backoffIndex, Self.backoffLadder.count - 1)]
         backoffIndex = min(backoffIndex + 1, Self.backoffLadder.count - 1)
-        Task { [weak self] in
+        // 任意时刻只允许一个 reconnect 在排队——上一次的没醒就让它过期，避免堆积。
+        pendingReconnect?.cancel()
+        pendingReconnect = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if Task.isCancelled { return }
             await MainActor.run { self?.connect() }
         }
     }
@@ -337,33 +390,26 @@ final class RemoteWakeClient: NSObject, URLSessionWebSocketDelegate {
 
 // MARK: - 音频管线
 //
-// 把系统输入硬件格式（一般 44.1/48 kHz Float32）转 16kHz mono PCM s16le。
-// AVAudioConverter 处理 sample rate + bitdepth 一把梭。每攒 640 samples 输出一帧。
+// 把 vpio 输入（mono Float32，48 kHz 一般）切成 16 kHz mono PCM s16le 帧。
+// 不再自起 AVAudioEngine——挂 AECEngine.shared 的 fan-out tap，AEC/AGC/降噪都吃到。
+// 每攒 640 samples（40 ms @ 16 kHz）= 1280 bytes 输出一帧。
 //
-// 不在 RemoteWakeClient 主类里写，是为了：
-//   1) 单元测试不需要起 AVAudioEngine
-//   2) tap 回调跑在 audio thread——和 main actor 解耦，最后通过 callback 跨过去
+// listener 注册的 target format 直接是 16k s16 mono：AECEngine 在 audio thread 上做
+// AVAudioConverter，pipeline 这里只需要把已经转好的 buffer 切帧上送。
 
-// 给 AVAudioConverter.convert 闭包用的 mutable 容器——避免 var 捕获报 Sendable 警告。
-private final class ConvertFlag: @unchecked Sendable {
-    var consumed = false
-}
-
-private final class AudioPipeline: @unchecked Sendable {
+@MainActor
+private final class AudioPipeline {
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "wake-audio")
-    private var engine: AVAudioEngine?
-    private var converter: AVAudioConverter?
-    private var outputFormat: AVAudioFormat!
-    private var pendingSamples = Data()
-    // 40ms @ 16kHz = 640 samples * 2 bytes = 1280 bytes
-    private static let frameBytes = 1280
+    /// audio thread 上读写——用 NSLock 包的 buffer，listener 闭包跨 thread 安全。
+    private let buffer = PendingBuffer()
+    /// 40ms @ 16kHz = 640 samples * 2 bytes = 1280 bytes（wake 协议帧大小）。
+    /// nonisolated：audio thread 闭包要读，不能 main-actor hop。
+    nonisolated static let frameBytes = 1280
+    /// AECEngine listener id——进程内只一个 RemoteWakeClient 实例，hardcode 即可。
+    nonisolated static let listenerID = "wake"
 
-    func start(onFrame: @escaping (Data) -> Void) {
+    func start(onFrame: @escaping @Sendable (Data) -> Void) {
         stop()
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        let inFormat = input.outputFormat(forBus: 0)
-        // 16kHz mono Int16 little-endian——协议指定。
         guard let outFormat = AVAudioFormat(
             commonFormat: .pcmFormatInt16,
             sampleRate: 16000,
@@ -373,66 +419,53 @@ private final class AudioPipeline: @unchecked Sendable {
             logger.error("无法构造目标音频格式")
             return
         }
-        self.outputFormat = outFormat
-        self.converter = AVAudioConverter(from: inFormat, to: outFormat)
-
-        input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buffer, _ in
-            self?.process(buffer: buffer, onFrame: onFrame)
-        }
-        engine.prepare()
         do {
-            try engine.start()
-            self.engine = engine
+            try AECEngine.shared.start()
         } catch {
-            logger.error("audio engine start 失败: \(error.localizedDescription, privacy: .public)")
+            logger.error("AECEngine start 失败: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        let buffer = self.buffer
+        AECEngine.shared.addListener(id: Self.listenerID, format: outFormat) { pcm in
+            // audio thread 调。pcm 已 16k s16 mono，切 1280 字节一帧上送。
+            guard let int16Channel = pcm.int16ChannelData?[0] else { return }
+            let count = Int(pcm.frameLength) * 2
+            if count == 0 { return }
+            let chunk = Data(bytes: int16Channel, count: count)
+            buffer.append(chunk)
+            while let frame = buffer.popFrame(of: Self.frameBytes) {
+                onFrame(frame)
+            }
         }
     }
 
     func stop() {
-        engine?.stop()
-        engine?.inputNode.removeTap(onBus: 0)
-        engine = nil
-        converter = nil
-        pendingSamples.removeAll(keepingCapacity: false)
+        AECEngine.shared.removeListener(id: Self.listenerID)
+        buffer.reset()
+    }
+}
+
+/// audio thread + main 都会摸——NSLock 守 Data。pop/append 简单互斥。
+private final class PendingBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
     }
 
-    private func process(buffer: AVAudioPCMBuffer, onFrame: @escaping (Data) -> Void) {
-        guard let converter, let outputFormat else { return }
-        // 估算输出 buffer 容量——按比例 + 安全 margin（converter 内部会按需吃多帧）
-        let ratio = outputFormat.sampleRate / buffer.format.sampleRate
-        let outCapacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio + 16)
-        guard let outBuf = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: outCapacity) else {
-            return
-        }
-        // 用引用类型包 consumed——AV 的 @Sendable 闭包不允许捕获 mutable 局部 var。
-        // 闭包同步执行（由 convert 在 audio thread 调一次），class 引用本身被传是 OK 的。
-        let flag = ConvertFlag()
-        var error: NSError?
-        let status = converter.convert(to: outBuf, error: &error) { [flag] _, statusOut in
-            if flag.consumed {
-                statusOut.pointee = .noDataNow
-                return nil
-            }
-            flag.consumed = true
-            statusOut.pointee = .haveData
-            return buffer
-        }
-        guard status != .error, error == nil,
-              let int16Channel = outBuf.int16ChannelData?[0]
-        else {
-            if let error { logger.error("convert err: \(error.localizedDescription, privacy: .public)") }
-            return
-        }
-        let count = Int(outBuf.frameLength) * 2
-        if count == 0 { return }
-        let chunk = Data(bytes: int16Channel, count: count)
-        pendingSamples.append(chunk)
-        // 切 1280 字节（40ms）一帧推出
-        while pendingSamples.count >= Self.frameBytes {
-            let frame = pendingSamples.prefix(Self.frameBytes)
-            pendingSamples.removeFirst(Self.frameBytes)
-            onFrame(Data(frame))
-        }
+    func popFrame(of size: Int) -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        guard data.count >= size else { return nil }
+        let frame = data.prefix(size)
+        data.removeFirst(size)
+        return Data(frame)
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        data.removeAll(keepingCapacity: false)
     }
 }
 

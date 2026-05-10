@@ -7,23 +7,27 @@ import OSLog
 //
 // 设计考虑：
 //   - SFSpeechRecognitionTask 单次最长 60s（Apple 限），所以 50s 主动 finalize 起新 task 接力，
-//     避免 rolling 缝隙。每次 swap 都重用 AVAudioEngine（engine restart 比 task swap 慢得多）。
-//   - 触发后立刻 stop()——主 Recognizer 也要占麦，俩 SFSpeechRecognizer 不能同时跑。
+//     避免 rolling 缝隙。
+//   - 音频走 AECEngine.shared 的 fan-out listener——和 wake/recognizer/vad 共享同一条 vpio
+//     audio engine，AEC/AGC/降噪自动吃到。listener id "fallback"。
+//   - 触发后立刻 stop()——释放 listener 让主 Recognizer 起；fallback 只在 wakeMode == .fallback
+//     期间活。
 //   - 关键词命中规则在 `isWakeKeywordHit`，纯函数+单测覆盖；详见函数注释。
-//   - 不抢主 Recognizer 的 audio session：fallback 只在 wakeMode == .fallback 期间活，
-//     主听写启动前会调 stop()。
 @MainActor
 final class LocalWakeFallback {
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "wake-fallback")
     private let recognizer: SFSpeechRecognizer?
     private let onWake: () -> Void
 
-    private var engine: AVAudioEngine?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
+    /// audio thread 从 listener 闭包读 request、转发 buffer.append；main actor 在 rotate
+    /// 时换成新 request。NSLock 守一个非 Sendable 引用——SFSpeech 自己保证 append 多线程安全。
+    private let requestHolder = RequestHolder()
     private var task: SFSpeechRecognitionTask?
     private var rotateTimer: Timer?
     private var keywords: [String]
     private var running = false
+    /// AECEngine listener id——进程里只一个 LocalWakeFallback，hardcode 即可。
+    nonisolated static let listenerID = "fallback"
 
     // 50s 接力——SFSpeech 单 task 上限 60s（Apple 文档），留 10s 余量。
     private static let rotateInterval: TimeInterval = 50
@@ -44,7 +48,14 @@ final class LocalWakeFallback {
             logger.warning("zh-CN recognizer 不可用，fallback 启动失败")
             return
         }
+        do {
+            try AECEngine.shared.start()
+        } catch {
+            logger.error("AECEngine start 失败: \(error.localizedDescription, privacy: .public)")
+            return
+        }
         running = true
+        installListener()
         startTask()
         let timer = Timer(timeInterval: Self.rotateInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.rotate() }
@@ -58,15 +69,23 @@ final class LocalWakeFallback {
         rotateTimer?.invalidate()
         rotateTimer = nil
         cleanupTask()
-        engine?.stop()
-        engine?.inputNode.removeTap(onBus: 0)
-        engine = nil
+        AECEngine.shared.removeListener(id: Self.listenerID)
+    }
+
+    /// 注册 AECEngine listener：format 传 nil 拿 vpio 原生 Float32（SFSpeech 接受任意 PCM
+    /// 格式，AVAudioPCMBuffer 自带 format 描述，append 时会按需消化）。
+    private func installListener() {
+        let holder = self.requestHolder
+        AECEngine.shared.addListener(id: Self.listenerID, format: nil) { buffer in
+            // audio thread——request.append 文档说 thread-safe（SFSpeech 内部排队）。
+            holder.append(buffer)
+        }
     }
 
     private func rotate() {
         guard running else { return }
-        // finalize 当前 task 让结果落定，再起新的——audio engine 不停。
-        request?.endAudio()
+        // finalize 当前 task 让结果落定，再起新的——listener 不动，新 request 接管。
+        requestHolder.endAudio()
         cleanupTask()
         startTask()
     }
@@ -78,27 +97,7 @@ final class LocalWakeFallback {
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
-        self.request = request
-
-        // engine 第一次起，后续 rotate 复用。
-        if engine == nil {
-            let e = AVAudioEngine()
-            let input = e.inputNode
-            let format = input.outputFormat(forBus: 0)
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-                // tap 回调跑 audio thread——append 是 thread-safe（SFSpeech 自己处理）。
-                self?.request?.append(buffer)
-            }
-            e.prepare()
-            do {
-                try e.start()
-                self.engine = e
-            } catch {
-                logger.error("audio engine start 失败: \(error.localizedDescription, privacy: .public)")
-                running = false
-                return
-            }
-        }
+        requestHolder.set(request)
 
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
@@ -130,7 +129,33 @@ final class LocalWakeFallback {
     private func cleanupTask() {
         task?.cancel()
         task = nil
-        request = nil
+        requestHolder.set(nil)
+    }
+}
+
+/// audio thread 跟 main actor 共享的 SFSpeechRequest 槽位。SFSpeech 的 append/endAudio
+/// 文档说 thread-safe（它自己排队），这里只需要保证 swap 原子。
+private final class RequestHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+
+    func set(_ req: SFSpeechAudioBufferRecognitionRequest?) {
+        lock.lock(); defer { lock.unlock() }
+        request = req
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        let req = request
+        lock.unlock()
+        req?.append(buffer)
+    }
+
+    func endAudio() {
+        lock.lock()
+        let req = request
+        lock.unlock()
+        req?.endAudio()
     }
 }
 

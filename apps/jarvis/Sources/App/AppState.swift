@@ -75,6 +75,13 @@ final class AppState: ObservableObject {
 
     /// App 启动钩子——AppDelegate 在 applicationDidFinishLaunching 调一次。
     func bootstrap() {
+        // 共享 vpio audio engine——一开机就起，让 wake/fallback/recognizer 注册 listener
+        // 时立即拿到 buffer。AECEngine.start() 幂等，重复调安全。
+        do {
+            try AECEngine.shared.start()
+        } catch {
+            logger.error("AECEngine 启动失败: \(error.localizedDescription, privacy: .public)")
+        }
         synthesizer = Synthesizer()
         recognizer = Recognizer(
             onResult: { [weak self] transcript, isFinal in
@@ -123,7 +130,7 @@ final class AppState: ObservableObject {
             // 没填 token / URL 不合法——直接走 fallback 模式（用户至少有兜底）。
             logger.warning("wake token / URL 缺失，直接进 fallback")
             wakeFallback = LocalWakeFallback(keywords: settings.wakeKeywords) { [weak self] in
-                Task { @MainActor in self?.startListening() }
+                Task { @MainActor in self?.ackWakeThenListen() }
             }
             wakeMode = .fallback
             wakeFallback?.start()
@@ -133,7 +140,7 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.handleWakeEvent(event) }
         }
         let fb = LocalWakeFallback(keywords: settings.wakeKeywords) { [weak self] in
-            Task { @MainActor in self?.startListening() }
+            Task { @MainActor in self?.ackWakeThenListen() }
         }
         wakeClient = client
         wakeFallback = fb
@@ -144,12 +151,28 @@ final class AppState: ObservableObject {
     private func handleWakeEvent(_ event: WakeClientEvent) {
         switch event {
         case .wakeDetected:
-            startListening()
+            ackWakeThenListen()
         case .fallbackRequested:
             switchToFallback()
         case .reconnected:
             switchToRemote()
         }
+    }
+
+    /// 唤醒确认：播 200ms「叮」短音，立刻进 listening。
+    ///
+    /// 旧实现是 TTS「我在」+ 800ms 硬 sleep（等扬声器残响消散），原因是 SFSpeech 没法分辨
+    /// 自己刚出声的"在"和用户开口；现在 AECEngine 的 vpio 在 mic 链路上自动做了回声消除，
+    /// earcon 通过 vpio output 出去，**自激被硬件级减掉**——可以丢掉 sleep hack 直接 listen。
+    func ackWakeThenListen() {
+        guard phase == .idle else {
+            logger.debug("ackWakeThenListen 跳过——phase=\(self.phase.rawValue, privacy: .public)")
+            return
+        }
+        // wake 链路的 listener 在 startListening 内会被释放——这里不再 pauseAudio。
+        // earcon 走 AECEngine 共享 outputNode，跟 mic 链路同节奏，不需要协调时序。
+        AECEngine.shared.playEarcon()
+        startListening()
     }
 
     private func switchToFallback() {
