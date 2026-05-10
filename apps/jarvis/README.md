@@ -73,8 +73,24 @@ xcodebuild test -project Jarvis.xcodeproj -scheme Jarvis
 
 或在 Xcode 内 ⌘U。
 
+> 仅装 CommandLineTools（无完整 Xcode）的环境跑不了 `swift test`——XCTest framework 不在 CLT bundle 里。Pet 模块（PetSettings / PetPoseAssetCatalog / PetBlinkCoordinator）测试代码已就位，跑前确认 `xcode-select -p` 指向 `/Applications/Xcode.app/Contents/Developer`。
+
 ## 已知陷阱
 
 - **Clash TUN 模式吞 127.0.0.1**：FuxiClient 已注入 `connectionProxyDictionary = [:]`（按 fuxi `feedback_macos_gatekeeper_codesign` 同款防御），手动 curl 测试也加 `--noproxy '*'`
 - **首次中文 STT 慢**：on-device zh-CN 模型首次会下载，可能需要 1-2 分钟。System Settings → General → Keyboard → Dictation 提前打开下载更稳
 - **全局热键被前台 app 抢**：addGlobalMonitorForEvents 不能 consume 事件——某些应用（如 Xcode 调试中）会抢同款组合键。换 `addGlobalMonitorForEvents` → Carbon `RegisterEventHotKey` 可独占，但要桥 C API
+
+## v0.3 · 立绘桌宠模式
+
+v0.3 起新增「立绘」形态——水墨仙气 280×420 panel，5 状态对应 5 张 pose 图（idle / listening / thinking / speaking / ack）+ 衣袖 Canvas 飘动 + 偶发微眨。和老「药丸」形态共存，用户可切。
+
+**默认仍走药丸**——老用户升级无感，v0.2 持久化的 UserDefaults 没 `uiMode` 字段会回退到 capsule。
+
+**怎么切**：
+- 设置 → 「连接」标签顶部「形态」radio → 选「立绘」/「药丸」实时生效
+- 右键药丸 → 「切到立绘」/ 右键立绘 → 「切回药丸」
+
+**资产装哪**：`apps/jarvis/Resources/Pet/poses/{idle,listening,thinking,speaking,ack}@2x.png`。资产缺失时切「立绘」会自动弹 alert 并回到药丸——不会让 App 黑屏。资产由 art track 单独走 gpt-image-2 出图（参考 `docs/superpowers/plans/2026-05-11-jarvis-pet-implementation.md` Art Track 段的 prompt）。
+
+**架构**：UI 层 `apps/jarvis/Sources/UI/Pet/` 子目录 6 个文件（PetPanel / PetPoseView / PoseAssetCatalog / SleeveCanvasOverlay / BlinkCoordinator / PetSweepOverlay），后端零改动；状态机仍走 `AppState.VoicePhase` 现成 5 状态。
