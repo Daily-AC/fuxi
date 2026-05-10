@@ -23,8 +23,12 @@ struct Settings: Equatable {
     var picovoiceKey: String
     /// 全局热键 — 用人类可读字符串保存（如 `cmd+shift+j`），运行时再 parse。
     var hotkey: HotkeyCombo
-    /// TTS 语言/音色，默认普通话女声。
+    /// TTS voice identifier。空串 = 让 Synthesizer 自动选最高质量 zh-CN voice
+    /// （`AVSpeechSynthesisVoice.speechVoices()` 里 quality.rawValue 最大的）。
     var ttsVoice: String
+    /// TTS 语速。`AVSpeechUtteranceDefaultSpeechRate` = 0.5；默认 0.55 提 10%。
+    /// 设置面板 slider 范围 [0.4, 0.7]——再往两端会失真。
+    var ttsRate: Double
 
     enum TriggerMode: String, CaseIterable, Identifiable {
         case hotkey, wakeWord, both
@@ -56,7 +60,9 @@ struct Settings: Equatable {
         // 默认 ⌃⌥M——避开 ⌘Space (Spotlight) / ⌥Space / ⌃Space 一族常见冲突。
         // m=0x2E。用户在设置里可改。
         hotkey: HotkeyCombo(modifiers: [.control, .option], keyCode: 0x2E),
-        ttsVoice: "zh-CN"
+        // 空串 = 自动选最高质量；用户在设置 → 语音 picker 里选完再覆盖。
+        ttsVoice: "",
+        ttsRate: 0.55
     )
 
     static func load() -> Settings {
@@ -76,7 +82,15 @@ struct Settings: Equatable {
             wakeKeywords: dec?.wakeKeywords ?? Self.default.wakeKeywords,
             picovoiceKey: d.string(forKey: "picovoiceKey") ?? "",
             hotkey: dec?.hotkey ?? Self.default.hotkey,
-            ttsVoice: dec?.ttsVoice ?? Self.default.ttsVoice
+            // 老版本 ttsVoice 默认值是 "zh-CN"——它不是合法 identifier，运行时
+            // `AVSpeechSynthesisVoice(identifier:)` 返 nil 走 language fallback；
+            // 但 v0.2 Synthesizer 把空串当"自动选最高质量"信号，所以把老 "zh-CN"
+            // 也归一为 ""，让升级用户立即享受 premium 音色。
+            ttsVoice: {
+                let v = dec?.ttsVoice ?? Self.default.ttsVoice
+                return v == "zh-CN" ? "" : v
+            }(),
+            ttsRate: dec?.ttsRate ?? Self.default.ttsRate
         )
     }
 
@@ -87,7 +101,8 @@ struct Settings: Equatable {
             wakeServerURL: wakeServerURL,
             wakeKeywords: wakeKeywords,
             hotkey: hotkey,
-            ttsVoice: ttsVoice
+            ttsVoice: ttsVoice,
+            ttsRate: ttsRate
         )
         let d = UserDefaults.standard
         if let data = try? JSONEncoder().encode(enc) {
@@ -107,6 +122,7 @@ private struct SettingsCodable: Codable {
     var wakeKeywords: [String]?
     var hotkey: HotkeyCombo
     var ttsVoice: String
+    var ttsRate: Double?
 }
 
 /// 热键的 modifier + keyCode 组合。Codable 直接 JSON 持久化。

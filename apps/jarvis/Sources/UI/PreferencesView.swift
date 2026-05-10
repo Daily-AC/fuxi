@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// 设置面板——sheet 形式，自带「完成」按钮关闭（macOS sheet 默认无 close button，
@@ -67,12 +68,58 @@ struct PreferencesView: View {
         }
     }
 
+    /// 试听用的临时 synthesizer——不复用 AppState.synthesizer 避开抢占主线 TTS。
+    @State private var auditionSynth = Synthesizer()
+
     private var voiceTab: some View {
-        Form {
-            TextField("TTS Voice (留空=系统默认中文)", text: $draft.ttsVoice)
-                .textFieldStyle(.roundedBorder)
-            Text("更换音色：系统设置 → 辅助功能 → 朗读 → 系统语音 下载，然后填 identifier。")
-                .font(.caption).foregroundStyle(.secondary)
+        let voices = Synthesizer.availableZhCNVoices()
+        // "" = auto；后面跟所有系统已装 zh-CN voice
+        return Form {
+            Picker("音色", selection: $draft.ttsVoice) {
+                Text("自动（最高质量）").tag("")
+                ForEach(voices, id: \.identifier) { v in
+                    Text("\(v.name) · \(qualityLabel(v.quality))").tag(v.identifier)
+                }
+            }
+            .pickerStyle(.menu)
+
+            HStack {
+                Text("语速")
+                Slider(value: $draft.ttsRate, in: 0.4...0.7, step: 0.01)
+                Text(String(format: "%.2f", draft.ttsRate))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40, alignment: .trailing)
+            }
+
+            HStack {
+                Button("试听") {
+                    let id = draft.ttsVoice.trimmingCharacters(in: .whitespaces)
+                    auditionSynth.speak(
+                        "玄女在位，可调度可点将。",
+                        voiceIdentifier: id.isEmpty ? nil : id,
+                        rate: Float(draft.ttsRate)
+                    ) {}
+                }
+                Button("停止") { auditionSynth.stop() }
+                Spacer()
+            }
+
+            if voices.isEmpty {
+                Text("⚠️ 没扫到任何 zh-CN 系统音色——去 系统设置 → 辅助功能 → 朗读 → 系统语音 下载普通话语音包。")
+                    .font(.caption).foregroundStyle(.orange)
+            } else {
+                Text("premium > enhanced > default。premium 音色最像真人，需在 系统设置 → 辅助功能 → 朗读 → 系统语音 单独下载（约 100MB）。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func qualityLabel(_ q: AVSpeechSynthesisVoiceQuality) -> String {
+        switch q {
+        case .premium: return "premium"
+        case .enhanced: return "enhanced"
+        default: return "default"
         }
     }
 
