@@ -1,60 +1,60 @@
 import Foundation
-import Speech
 @preconcurrency import AVFoundation
 import OSLog
+@preconcurrency import WhisperKit
 
-/// SFSpeechRecognizer 实时听写——音频吃 AECEngine.shared 的 vpio fan-out。
+/// 语音转写——接 AECEngine 的 16kHz mono Float32 fan-out，喂 WhisperKit large-v3-turbo。
 ///
-/// 中文识别走 `zh-CN` locale。强制 on-device（`requiresOnDeviceRecognition=true`）—— 按
-/// 用户决策（feedback_aigc_no_third_party 同等隐私偏好），不让语音上云。macOS 14+ 支持
-/// 中文 on-device，但首次调用系统会下载语言资源。
+/// 替原来的 SFSpeechRecognizer zh-CN（系统中文识别准确率烂——实测「帮我把伏羲跑起来」
+/// 经常听成「帮我把胡子刮起来」）。WhisperKit 走 Core ML + ANE 加速，模型一次性加载常驻。
 ///
-/// 不再自起 AVAudioEngine——挂 AECEngine listener id "main-stt"，用 vpio 原生 Float32 buffer
-/// 直接喂 SFSpeech。这样回声消除/AGC/降噪都能吃到，wake earcon 期间用户开口也不会被自激
-/// 当成"在"。
+/// 由于 WhisperKit 不暴露真 streaming API（`transcribeStream` 在 oss-swift 1.0 里没有），
+/// 这里采用「滚动 buffer + 周期性 transcribe」的近似 partial 方案：
+///   1. AECEngine listener `"main-stt-whisper"` 收 16kHz Float32 buffer，append 到内部 ring
+///   2. 每 ~1.2s 截一次「迄今全部 audio」喂 WhisperKit.transcribe(audioArray:)，输出当成 partial
+///   3. stop() 时再做一次最终 transcribe，标 isFinal=true
 ///
-/// **NOTE**：T2 会用 WhisperKit 整体重写本文件——保留这个 stub-friendly 形态，让 T2 改写
-/// 时只动 task/recognizer 部分，audio listener 接入逻辑可以保留。
+/// **不**做端点检测——T3 的 VAD agent 负责。Recognizer 暴露 `finalize()` 给 VAD 触发收尾。
+/// **不**复用「上一轮 transcribe」结果——whisper 每次都从头吃完整音频，partial 就是越来越长的
+/// 重新转写。1.2s 间隔在 large-v3-turbo 上 M-series 实测延迟 ~400ms，能跟上正常语速。
 @MainActor
 final class Recognizer {
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "speech")
 
-    private let recognizer: SFSpeechRecognizer?
     private let onResult: (String, Bool) -> Void
-    /// 麦克风 RMS 电平回调——SwiftUI 悬浮窗波形动画驱动。0~1。
     private let onLevel: (Double) -> Void
 
-    /// audio thread 跟 main 共享的 request slot——audio thread 调 append，main 在 cleanup
-    /// 时 swap 掉。SFSpeech 自己保证 append/endAudio 多线程安全。
-    private let requestHolder = SttHolder()
-    private var task: SFSpeechRecognitionTask?
+    /// audio thread 跟 main 共享的 PCM ring——audio thread append、main 读快照转写。
+    private let buffer = PCMBuffer()
+    /// AECEngine listener id——进程内最多一个 Recognizer 实例 hardcode 即可。
+    nonisolated static let listenerID = "main-stt-whisper"
 
-    /// 静音超时计时器——Apple SFSpeechRecognizer 的 isFinal 触发时机不可靠（默认要 60s
-    /// task timeout 才算完）。我们自己做 VAD。
-    /// 两套 timeout：
-    ///   - leading：用户开口前给的宽限（≥ 第一帧 partial 到达延迟）
-    ///   - trailing：开口后停顿多久算说完（自然语流停顿不该被误断）
-    private var silenceTimer: DispatchSourceTimer?
-    private static let leadingTimeout: TimeInterval = 6.0
-    private static let trailingTimeout: TimeInterval = 2.0
-    private var lastTranscript: String = ""
-    /// AECEngine listener id——进程内最多一个 Recognizer 实例，hardcode 即可。
-    nonisolated static let listenerID = "main-stt"
+    /// 周期性 partial transcribe 触发器。stop() 时取消。
+    private var partialTimer: DispatchSourceTimer?
+    private static let partialInterval: TimeInterval = 1.2
+
+    /// 防止 partial transcribe 任务串行重叠（whisper 一次推理 ~300-500ms，两次紧挨会堆任务）。
+    private var partialInFlight = false
+    private var lastPartialText = ""
+    /// 标记当前是否处于 listening——stop()/finalize 后 partial timer 触发要忽略。
+    private var listening = false
 
     init(onResult: @escaping (String, Bool) -> Void,
          onLevel: @escaping (Double) -> Void = { _ in }) {
-        self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
         self.onResult = onResult
         self.onLevel = onLevel
+        // 预触发模型加载——首启时 ~800MB 下载，越早起越好。等用户唤醒时大概率已就绪。
+        Task { @MainActor in
+            do {
+                _ = try await WhisperModelManager.shared.ensureLoaded()
+            } catch {
+                logger.error("Whisper 模型预加载失败: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func start() {
-        guard let recognizer, recognizer.isAvailable else {
-            logger.warning("zh-CN recognizer 不可用——可能首次未下载语言资源")
-            return
-        }
         stop()
-
         do {
             try AECEngine.shared.start()
         } catch {
@@ -62,90 +62,190 @@ final class Recognizer {
             return
         }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
+        // WhisperKit 期望 16kHz mono Float32——AECEngine 内部 AVAudioConverter 帮忙转。
+        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                               sampleRate: 16_000,
+                                               channels: 1,
+                                               interleaved: false) else {
+            logger.error("16kHz target format 构造失败")
+            return
         }
-        requestHolder.set(request)
 
-        // listener: vpio 原生 Float32 → SFSpeech.append（接受任意 PCM）+ RMS 电平
-        let holder = self.requestHolder
+        buffer.reset()
+        listening = true
+        lastPartialText = ""
+
+        // 模型未就绪时给 UI 一个提示，listener 照常挂；transcribe 在第一次 timer 触发时
+        // 看 readyPipeline，没就绪就跳过。
+        if WhisperModelManager.shared.readyPipeline == nil {
+            onResult("(模型加载中…)", false)
+            // 起一条独立 task 等模型加载完——加载完后清掉占位文本，partial 自然续上。
+            Task { @MainActor [weak self] in
+                _ = try? await WhisperModelManager.shared.ensureLoaded()
+                guard let self, self.listening else { return }
+                if self.lastPartialText.isEmpty {
+                    self.onResult("", false)
+                }
+            }
+        }
+
+        let buffer = self.buffer
         let onLevel = self.onLevel
-        AECEngine.shared.addListener(id: Self.listenerID, format: nil) { buffer in
-            holder.append(buffer)
-            // RMS 在 audio thread 算，hop 一次 main actor 推 callback——SwiftUI @Published
-            // 必须 main actor 写，per-frame ~10-20ms 的 hop 频率主线程吃得住（实测无掉帧）。
-            let level = computeRMSLevel(buffer)
+        AECEngine.shared.addListener(id: Self.listenerID, format: targetFormat) { audioBuffer in
+            // audio thread——append 到 ring + 算 RMS hop 到 main。
+            buffer.append(audioBuffer)
+            let level = computeRMSLevel(audioBuffer)
             Task { @MainActor in onLevel(level) }
         }
 
-        lastTranscript = ""
-        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            // SFSpeech 在内部 queue 调——hop 到 main actor 改 state。
-            guard let self else { return }
-            Task { @MainActor in
-                if let result {
-                    let text = result.bestTranscription.formattedString
-                    let changed = text != self.lastTranscript
-                    self.lastTranscript = text
-                    self.onResult(text, result.isFinal)
-                    if result.isFinal {
-                        self.cleanup()
-                    } else if changed {
-                        // 收到非空 partial → 用户已经开口 → 切到 trailing timeout（说完停顿即断）
-                        self.armTimer(timeout: Self.trailingTimeout, kind: "trailing")
-                    }
-                }
-                if error != nil {
-                    self.cleanup()
-                }
-            }
-        }
-        // 进 listening 装"开口前"宽限 timer——给 SFSpeech 启动 + 用户酝酿语句的时间
-        armTimer(timeout: Self.leadingTimeout, kind: "leading")
+        armPartialTimer()
     }
 
-    /// 装/重置静音计时器：超时则 endAudio() → SDK 走 final 路径 → AppState 触发 sendToXuannv。
-    /// `kind` 仅用于日志区分 leading（开口前）/ trailing（说完停顿）。
-    private func armTimer(timeout: TimeInterval, kind: String) {
-        silenceTimer?.cancel()
-        let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + timeout)
-        let holder = self.requestHolder
-        let logger = self.logger
-        let lastTranscriptSnapshot = self.lastTranscript
-        t.setEventHandler { [weak self] in
-            // DispatchSourceTimer 的 handler 在我们指定的 .main queue 上跑——但 Swift 6 不
-            // 信任 queue 标签，要么 hop 一下要么手动声明。直接 dispatch 到 MainActor。
-            Task { @MainActor in
-                guard let self else { return }
-                if self.requestHolder.hasRequest {
-                    holder.endAudio()
-                    logger.info("\(kind, privacy: .public) timeout → endAudio (transcript=\(lastTranscriptSnapshot, privacy: .public))")
-                } else {
-                    self.cleanup()
-                }
+    /// 标记最终一次转写——T3 VAD onSpeechEnd 调；外部 stop() 也走这里。
+    /// 跑完后 partial timer 取消、listener 移除、isFinal=true 推一次给 onResult。
+    func finalize() {
+        guard listening else { return }
+        listening = false
+        partialTimer?.cancel()
+        partialTimer = nil
+        AECEngine.shared.removeListener(id: Self.listenerID)
+        onLevel(0)
+
+        let snapshot = buffer.snapshot()
+        guard !snapshot.isEmpty,
+              let pipe = WhisperModelManager.shared.readyPipeline else {
+            // 模型没好或没收到声——直接发空 final，让 AppState 的兜底逻辑接管
+            onResult(lastPartialText, true)
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let text = try await Self.runTranscribe(pipe: pipe, audio: snapshot)
+                self.onResult(text, true)
+            } catch {
+                self.logger.error("final transcribe 失败: \(error.localizedDescription, privacy: .public)")
+                self.onResult(self.lastPartialText, true)
             }
         }
-        t.resume()
-        silenceTimer = t
     }
 
     func stop() {
-        requestHolder.endAudio()
-        cleanup()
+        if listening {
+            // 用户主动 stop（例：再按热键收回）——走 finalize 路径让 partial 落 isFinal。
+            // 注意：finalize 是 async，stop 同步返回；listener 在 finalize 内已立即 removed。
+            finalize()
+            return
+        }
+        partialTimer?.cancel()
+        partialTimer = nil
+        AECEngine.shared.removeListener(id: Self.listenerID)
         onLevel(0)
     }
 
-    private func cleanup() {
-        silenceTimer?.cancel()
-        silenceTimer = nil
-        AECEngine.shared.removeListener(id: Self.listenerID)
-        task?.cancel()
-        task = nil
-        requestHolder.set(nil)
+    // MARK: - 内部
+
+    private func armPartialTimer() {
+        partialTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + Self.partialInterval, repeating: Self.partialInterval)
+        t.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.tickPartial()
+            }
+        }
+        t.resume()
+        partialTimer = t
     }
+
+    private func tickPartial() {
+        guard listening else { return }
+        guard !partialInFlight else { return }
+        guard let pipe = WhisperModelManager.shared.readyPipeline else { return }
+        let snapshot = buffer.snapshot()
+        // 太短没必要喂——whisper 对 <0.3s 输入容易瞎填字
+        guard snapshot.count >= 16_000 / 3 else { return }
+        partialInFlight = true
+        Task { @MainActor [weak self] in
+            defer { self?.partialInFlight = false }
+            guard let self else { return }
+            do {
+                let text = try await Self.runTranscribe(pipe: pipe, audio: snapshot)
+                guard self.listening else { return }
+                if text != self.lastPartialText {
+                    self.lastPartialText = text
+                    self.onResult(text, false)
+                }
+            } catch {
+                self.logger.error("partial transcribe 失败: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// transcribe 的薄包装——`detectLanguage=false` + 锁 zh，避免短 partial 被识别成英文。
+    /// `usePrefillPrompt`/`temperatureFallbackCount` 走默认；后续要 tune 再说。
+    private static func runTranscribe(pipe: WhisperKit, audio: [Float]) async throws -> String {
+        let options = DecodingOptions(
+            verbose: false,
+            task: .transcribe,
+            language: "zh",
+            temperature: 0.0,
+            temperatureFallbackCount: 3,
+            sampleLength: 224,
+            usePrefillPrompt: true,
+            skipSpecialTokens: true,
+            withoutTimestamps: true
+        )
+        let results = try await pipe.transcribe(audioArray: audio, decodeOptions: options)
+        // results 多段拼起来——partial 走滚动 buffer 实际只有一段，但兜底处理一下。
+        let joined = results.map { $0.text }.joined(separator: "")
+        return cleanWhisperText(joined)
+    }
+}
+
+// MARK: - PCM ring + utils
+
+/// audio thread append、main thread snapshot。NSLock 守 storage——append 短临界区，
+/// snapshot 拷贝整段（whisper 反正要全量）。
+final class PCMBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        samples.removeAll(keepingCapacity: true)
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        guard let channelData = buffer.floatChannelData?[0] else { return }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return }
+        let chunk = UnsafeBufferPointer(start: channelData, count: frameCount)
+        lock.lock()
+        samples.append(contentsOf: chunk)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Float] {
+        lock.lock(); defer { lock.unlock() }
+        return samples
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return samples.count
+    }
+}
+
+/// whisper 输出经常带 `<|notimestamps|>` 残留特殊 token + 头尾空格——剥掉。
+/// `withoutTimestamps=true` 已让 segment 里不带 `<|0.00|>`，但首尾偶尔还漏。
+private func cleanWhisperText(_ raw: String) -> String {
+    var s = raw
+    // 去常见控制 token 残留
+    let tokens = ["<|startoftranscript|>", "<|endoftext|>", "<|notimestamps|>",
+                  "<|zh|>", "<|transcribe|>"]
+    for t in tokens { s = s.replacingOccurrences(of: t, with: "") }
+    return s.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 /// 从 PCM buffer 算 RMS → log 归一化到 0~1。静音 ~0.0；正常语音 0.2~0.6；大声 0.8+。
@@ -162,35 +262,4 @@ private func computeRMSLevel(_ buffer: AVAudioPCMBuffer) -> Double {
     let rms = sqrt(sum / Float(frameCount))
     let db = 20 * log10(max(rms, 1e-7))
     return max(0, min(1, (Double(db) + 50) / 40))
-}
-
-/// audio thread 跟 main actor 共享的 SFSpeechRequest 槽位——append/endAudio 文档说
-/// SFSpeech 自己保证多线程安全，holder 只负责 swap 原子（NSLock + raw 指针）。
-private final class SttHolder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-
-    func set(_ req: SFSpeechAudioBufferRecognitionRequest?) {
-        lock.lock(); defer { lock.unlock() }
-        request = req
-    }
-
-    var hasRequest: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return request != nil
-    }
-
-    func append(_ buffer: AVAudioPCMBuffer) {
-        lock.lock()
-        let req = request
-        lock.unlock()
-        req?.append(buffer)
-    }
-
-    func endAudio() {
-        lock.lock()
-        let req = request
-        lock.unlock()
-        req?.endAudio()
-    }
 }

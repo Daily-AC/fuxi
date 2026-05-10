@@ -22,3 +22,9 @@ Package.resolved
 # Picovoice 自定义唤醒词模型——按 README 指引训练后放 Resources/，
 # 但许可证可能不允许公开仓库存——视 Picovoice 政策决定是否解锁。
 Resources/xuannv-*.ppn
+
+# WhisperKit 模型本地缓存（首次启动 background download，~800MB）
+# 实际下载到 ~/Library/Application Support/Xuannv/whisper-models/，
+# 但若用户调试时 WhisperKit 在工程内 cache 一份也一并忽略。
+**/whisper-models/
+**/whisperkit-coreml/
