@@ -42,17 +42,32 @@ struct PreferencesView: View {
             .padding(20)
         }
         .frame(width: 520, height: 400)
-        .onChange(of: draft) { _, new in
+        .onChange(of: draft) { old, new in
             new.save()
             state.settings = new
             state.fuxiClient?.updateSettings(new)
             state.hotkey?.install(combo: new.hotkey)
             state.reloadWake()
+            // uiMode 变了让 AppDelegate swap panel
+            if old.uiMode != new.uiMode {
+                if let delegate = NSApp.delegate as? AppDelegate {
+                    delegate.applyUIMode(new.uiMode)
+                }
+            }
         }
     }
 
     private var connectionTab: some View {
         Form {
+            Picker("形态", selection: $draft.uiMode) {
+                ForEach(Settings.UIMode.allCases) { m in
+                    Text(m.label).tag(m)
+                }
+            }
+            .pickerStyle(.radioGroup)
+
+            Divider()
+
             TextField("fuxi-im 地址", text: $draft.baseURL)
                 .textFieldStyle(.roundedBorder)
             // pair token 用 TextField 不用 SecureField——SecureField 会触发系统密码
@@ -63,7 +78,7 @@ struct PreferencesView: View {
                 Text("当前状态：")
                 Text(state.connectionStatus).foregroundStyle(.secondary)
             }
-            Text("PWA 设置里生成 token，粘贴这里，App 自动重连。")
+            Text("PWA 设置里生成 token，粘贴这里，App 自动重连。立绘需先在 apps/jarvis/Resources/Pet/poses/ 装 5 张 PNG。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
