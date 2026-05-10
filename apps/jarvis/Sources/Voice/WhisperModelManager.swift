@@ -8,13 +8,23 @@ import OSLog
 // 管 WhisperKit 模型生命周期。Recognizer 跟它要 pipe，不直接 init WhisperKit——
 // 让模型加载/下载状态有处可问，避免每次 listening 都重 load。
 //
-// 选 `openai_whisper-large-v3-turbo`：
+// 选 `openai_whisper-large-v3-v20240930_turbo_632MB`（v3 dated turbo 4-bit quantized）：
 //   - large-v3-turbo 是 OpenAI 2024-10 出的精简版（4 decoder layers vs large-v3 的 32），
 //     英文 wer 几乎不掉、中文实测拉满，但推理速度 8x。M 系芯片 ANE 跑实时绰绰有余。
-//   - 模型权重 ~800MB（Core ML quantized），首启 background download；之后离线可用。
+//   - dated v3 (v20240930) 是 OpenAI 2024-09-30 重训发布的 v3 权重，相比原始 v3 中文准
+//     确率显著提升，是 WhisperKit README 推荐的 production 模型族。
+//   - 4-bit quantized → 模型 632MB（首启 background download；之后离线可用），ANE 友好。
+//
+// **千万别**写成 `openai_whisper-large-v3-turbo`——HF repo `argmaxinc/whisperkit-coreml`
+// 里没这个目录，WhisperKit `*<name>/*` glob 永远 miss → 死链路。已知踩过。
+// 真实目录见 https://huggingface.co/argmaxinc/whisperkit-coreml/tree/main，可选：
+//   - openai_whisper-large-v3-v20240930_turbo_632MB ← 我们选这个（dated turbo + 量化）
+//   - openai_whisper-large-v3-v20240930_turbo       (未量化全精度 turbo，~1.6GB)
+//   - openai_whisper-large-v3-v20240930_626MB       (非 turbo 但量化，更准但慢 8x)
+//   - openai_whisper-large-v3_turbo                 (老 v3 turbo，注意 `_turbo` 是 _underscore_)
 //
 // 模型存放：`~/Library/Application Support/Xuannv/whisper-models/`。
-// 选 ApplicationSupport 而非 Caches——后者系统会自动清，模型 800MB 重下载体感差；
+// 选 ApplicationSupport 而非 Caches——后者系统会自动清，模型重下载体感差；
 // 名字用 Xuannv（产品名「玄女」）保持跟 task spec 一致，不跟 bundleId（jarvis）混。
 
 @MainActor
@@ -24,8 +34,9 @@ final class WhisperModelManager {
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "whisper")
 
     /// WhisperKit hub 仓库 + 模型目录名。modelRepo 里的文件夹名要跟 model 字段对得上。
+    /// 改名前**先去 https://huggingface.co/argmaxinc/whisperkit-coreml/tree/main 核对存在**。
     static let modelRepo = "argmaxinc/whisperkit-coreml"
-    static let modelName = "openai_whisper-large-v3-turbo"
+    static let modelName = "openai_whisper-large-v3-v20240930_turbo_632MB"
 
     enum State: Equatable {
         case notLoaded
