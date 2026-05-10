@@ -5,9 +5,15 @@ protocol PoseBundleSource {
     func url(forPose name: String) -> URL?
 }
 
+/// 两条 build 路径资产位置不同——SwiftPM `swift build` 进 `Bundle.module`，
+/// xcodegen+xcodebuild .app 进 `Bundle.main`。先 module 后 main 兜两端。
 struct DefaultPoseBundle: PoseBundleSource {
     func url(forPose name: String) -> URL? {
-        Bundle.module.url(forResource: "Pet/poses/\(name)@2x", withExtension: "png")
+        let res = "Pet/poses/\(name)@2x"
+        if let u = Bundle.module.url(forResource: res, withExtension: "png") {
+            return u
+        }
+        return Bundle.main.url(forResource: res, withExtension: "png")
     }
 }
 
