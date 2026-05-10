@@ -39,6 +39,15 @@ final class Recognizer {
     /// 标记当前是否处于 listening——stop()/finalize 后 partial timer 触发要忽略。
     private var listening = false
 
+    /// Silero VAD——onSpeechEnd 触发 finalize 替手写 trailing 2s timer。
+    private var vad: VAD?
+    /// leading 兜底：用户唤醒后 6s 没开口（VAD 没 start）→ 自动收，不让 mic 空挂。
+    /// VAD onSpeechStart 后取消。
+    private var leadingTimer: DispatchSourceTimer?
+    private static let leadingTimeout: TimeInterval = 6.0
+    /// VAD onSpeechStart 是否已触发本轮——leading timer 用。
+    private var speechStarted = false
+
     init(onResult: @escaping (String, Bool) -> Void,
          onLevel: @escaping (Double) -> Void = { _ in }) {
         self.onResult = onResult
@@ -98,16 +107,66 @@ final class Recognizer {
             Task { @MainActor in onLevel(level) }
         }
 
+        speechStarted = false
+        let vad = VAD(
+            onSpeechStart: { [weak self] in self?.handleVADSpeechStart() },
+            onSpeechEnd: { [weak self] in self?.handleVADSpeechEnd() }
+        )
+        vad.start()
+        self.vad = vad
+
+        armLeadingTimer()
         armPartialTimer()
     }
 
-    /// 标记最终一次转写——T3 VAD onSpeechEnd 调；外部 stop() 也走这里。
-    /// 跑完后 partial timer 取消、listener 移除、isFinal=true 推一次给 onResult。
+    /// VAD 开口——撤 leading 兜底 timer，让用户慢慢说。
+    private func handleVADSpeechStart() {
+        guard listening, !speechStarted else { return }
+        speechStarted = true
+        leadingTimer?.cancel()
+        leadingTimer = nil
+        logger.info("VAD: speech started")
+    }
+
+    /// VAD 说完了——立即收尾 transcribe + isFinal。
+    /// 注意：speechStarted == false 的 onSpeechEnd 不该触发——这种情况是 VAD 误抖动
+    /// （Silero 偶尔一帧高概率然后立刻回落），忽略。
+    private func handleVADSpeechEnd() {
+        guard listening else { return }
+        guard speechStarted else {
+            logger.debug("VAD: speechEnd 但未 started → 忽略")
+            return
+        }
+        logger.info("VAD: speech ended → finalize")
+        finalize()
+    }
+
+    private func armLeadingTimer() {
+        leadingTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + Self.leadingTimeout)
+        t.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.listening, !self.speechStarted else { return }
+                self.logger.info("leading timeout (\(Self.leadingTimeout)s 无人说话) → finalize")
+                self.finalize()
+            }
+        }
+        t.resume()
+        leadingTimer = t
+    }
+
+    /// 标记最终一次转写——VAD onSpeechEnd 调；外部 stop() 也走这里。
+    /// 跑完后 partial/leading timer 取消、VAD 停、listener 移除、isFinal=true 推一次给 onResult。
     func finalize() {
         guard listening else { return }
         listening = false
         partialTimer?.cancel()
         partialTimer = nil
+        leadingTimer?.cancel()
+        leadingTimer = nil
+        vad?.stop()
+        vad = nil
         AECEngine.shared.removeListener(id: Self.listenerID)
         onLevel(0)
 
@@ -139,6 +198,10 @@ final class Recognizer {
         }
         partialTimer?.cancel()
         partialTimer = nil
+        leadingTimer?.cancel()
+        leadingTimer = nil
+        vad?.stop()
+        vad = nil
         AECEngine.shared.removeListener(id: Self.listenerID)
         onLevel(0)
     }
