@@ -34,6 +34,9 @@ packages:
   WhisperKit:
     url: https://github.com/argmaxinc/argmax-oss-swift.git
     from: "1.0.0"
+  RealTimeCutVADLibrary:
+    url: https://github.com/helloooideeeeea/RealTimeCutVADLibrary.git
+    from: "1.0.14"
 
 targets:
   Jarvis:
@@ -44,6 +47,8 @@ targets:
     dependencies:
       - package: WhisperKit
         product: WhisperKit
+      - package: RealTimeCutVADLibrary
+        product: RealTimeCutVADLibrary
     resources:
       - path: Resources/Assets.xcassets
         optional: true

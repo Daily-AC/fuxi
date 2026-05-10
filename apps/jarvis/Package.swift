@@ -19,12 +19,15 @@ let package = Package(
     dependencies: [
         // WhisperKit（argmax-oss-swift 仓库 product 名为 WhisperKit）：替 SFSpeech zh-CN
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.0.0"),
+        // RealTimeCutVADLibrary：Silero v5 ONNX + WebRTC APM，替手写 trailing timer
+        .package(url: "https://github.com/helloooideeeeea/RealTimeCutVADLibrary.git", from: "1.0.14"),
     ],
     targets: [
         .executableTarget(
             name: "Jarvis",
             dependencies: [
                 .product(name: "WhisperKit", package: "argmax-oss-swift"),
+                .product(name: "RealTimeCutVADLibrary", package: "RealTimeCutVADLibrary"),
             ],
             path: "Sources",
             sources: ["App", "Voice", "Net", "UI"]
