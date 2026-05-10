@@ -16,9 +16,16 @@ let package = Package(
     products: [
         .executable(name: "Jarvis", targets: ["Jarvis"]),
     ],
+    dependencies: [
+        // WhisperKit（argmax-oss-swift 仓库 product 名为 WhisperKit）：替 SFSpeech zh-CN
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.0.0"),
+    ],
     targets: [
         .executableTarget(
             name: "Jarvis",
+            dependencies: [
+                .product(name: "WhisperKit", package: "argmax-oss-swift"),
+            ],
             path: "Sources",
             sources: ["App", "Voice", "Net", "UI"]
         ),

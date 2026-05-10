@@ -30,12 +30,20 @@ settings:
     CODE_SIGNING_REQUIRED: YES
     SWIFT_STRICT_CONCURRENCY: complete
 
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    from: "1.0.0"
+
 targets:
   Jarvis:
     type: application
     platform: macOS
     sources:
       - path: Sources
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
     resources:
       - path: Resources/Assets.xcassets
         optional: true
