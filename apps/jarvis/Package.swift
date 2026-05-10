@@ -31,6 +31,13 @@ let package = Package(
             ],
             path: "Sources",
             sources: ["App", "Voice", "Net", "UI"],
+            resources: [
+                // pose 资产 —— gpt-image-2 生的 PNG 放这。validate 失败时 jarvis
+                // 自动回退 capsule 模式，不阻塞编译。
+                // 路径：SwiftPM `path: "Sources"` 对 `..` 静默忽略不报错（上一次踩过——
+                // 编译过但 Bundle.module 不生成），实测必须放 Sources/ 下面。
+                .copy("Resources/Pet"),
+            ],
             linkerSettings: [
                 // RealTimeCutVADCXXLibrary.framework 是 binaryTarget xcframework，加载时 dyld
                 // 用 `@rpath/...` 找；ad-hoc 装到 .app/Contents/MacOS 后没 default rpath，
