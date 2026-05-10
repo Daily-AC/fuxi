@@ -36,6 +36,22 @@ struct Settings: Equatable {
     /// 远端 TTS API URL。默认走 fuxi-im 同入口 + nginx 反代到 home GPT-SoVITS。
     /// `POST` 协议：body `{"text": ...}` + Bearer token = 同 fuxi-im pair token。
     var ttsRemoteURL: String
+    /// UI 形态：药丸（默认，老用户无感升级）/ 立绘（桌宠模式）。
+    var uiMode: UIMode
+
+    enum UIMode: String, CaseIterable, Identifiable, Codable {
+        /// 现有禅意药丸——160×32 圆角胶囊悬浮 dock 上方。
+        case capsule
+        /// 立绘桌宠——~280×420 pose 图 panel，仙气线条。
+        case pet
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .capsule: return "药丸"
+            case .pet: return "立绘"
+            }
+        }
+    }
 
     enum TTSProvider: String, CaseIterable, Identifiable, Codable {
         /// macOS AVSpeechSynthesizer 内置 zh-CN 音色（compact / enhanced / premium）。
@@ -86,7 +102,9 @@ struct Settings: Equatable {
         ttsRate: 0.55,
         ttsProvider: .system,
         // 默认走家用入口同 fuxi-im 域 + nginx /api/tts 反代——避免再开端口/再签证书。
-        ttsRemoteURL: "https://im.qmledmq.cn:8443/api/tts"
+        ttsRemoteURL: "https://im.qmledmq.cn:8443/api/tts",
+        // 默认走药丸——老用户升级无感；新用户进设置切立绘。
+        uiMode: .capsule
     )
 
     static func load() -> Settings {
@@ -116,7 +134,9 @@ struct Settings: Equatable {
             }(),
             ttsRate: dec?.ttsRate ?? Self.default.ttsRate,
             ttsProvider: dec.flatMap { TTSProvider(rawValue: $0.ttsProvider ?? "") } ?? Self.default.ttsProvider,
-            ttsRemoteURL: dec?.ttsRemoteURL ?? Self.default.ttsRemoteURL
+            ttsRemoteURL: dec?.ttsRemoteURL ?? Self.default.ttsRemoteURL,
+            // 老 UserDefaults 没 uiMode → 回 capsule，无感
+            uiMode: dec.flatMap { UIMode(rawValue: $0.uiMode ?? "") } ?? Self.default.uiMode
         )
     }
 
@@ -130,7 +150,8 @@ struct Settings: Equatable {
             ttsVoice: ttsVoice,
             ttsRate: ttsRate,
             ttsProvider: ttsProvider.rawValue,
-            ttsRemoteURL: ttsRemoteURL
+            ttsRemoteURL: ttsRemoteURL,
+            uiMode: uiMode.rawValue
         )
         let d = UserDefaults.standard
         if let data = try? JSONEncoder().encode(enc) {
@@ -153,6 +174,7 @@ private struct SettingsCodable: Codable {
     var ttsRate: Double?
     var ttsProvider: String?
     var ttsRemoteURL: String?
+    var uiMode: String?
 }
 
 /// 热键的 modifier + keyCode 组合。Codable 直接 JSON 持久化。
