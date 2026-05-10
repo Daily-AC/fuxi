@@ -25,10 +25,31 @@ struct Settings: Equatable {
     var hotkey: HotkeyCombo
     /// TTS voice identifier。空串 = 让 Synthesizer 自动选最高质量 zh-CN voice
     /// （`AVSpeechSynthesisVoice.speechVoices()` 里 quality.rawValue 最大的）。
+    /// 仅 `ttsProvider == .system` 时生效。
     var ttsVoice: String
     /// TTS 语速。`AVSpeechUtteranceDefaultSpeechRate` = 0.5；默认 0.55 提 10%。
     /// 设置面板 slider 范围 [0.4, 0.7]——再往两端会失真。
+    /// 仅 `ttsProvider == .system` 时生效（远端 TTS 语速由 server 模型自身决定）。
     var ttsRate: Double
+    /// TTS provider：系统语音（AVSpeechSynthesizer）/ 远端角色音色（GPT-SoVITS）。
+    var ttsProvider: TTSProvider
+    /// 远端 TTS API URL。默认走 fuxi-im 同入口 + nginx 反代到 home GPT-SoVITS。
+    /// `POST` 协议：body `{"text": ...}` + Bearer token = 同 fuxi-im pair token。
+    var ttsRemoteURL: String
+
+    enum TTSProvider: String, CaseIterable, Identifiable, Codable {
+        /// macOS AVSpeechSynthesizer 内置 zh-CN 音色（compact / enhanced / premium）。
+        case system
+        /// 远端 GPT-SoVITS / Bert-VITS2 等 voice cloning 服务（派蒙 / 钟离 等角色音）。
+        case remote
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .system: return "系统语音（macOS）"
+            case .remote: return "角色语音（远端）"
+            }
+        }
+    }
 
     enum TriggerMode: String, CaseIterable, Identifiable {
         case hotkey, wakeWord, both
@@ -62,7 +83,10 @@ struct Settings: Equatable {
         hotkey: HotkeyCombo(modifiers: [.control, .option], keyCode: 0x2E),
         // 空串 = 自动选最高质量；用户在设置 → 语音 picker 里选完再覆盖。
         ttsVoice: "",
-        ttsRate: 0.55
+        ttsRate: 0.55,
+        ttsProvider: .system,
+        // 默认走家用入口同 fuxi-im 域 + nginx /api/tts 反代——避免再开端口/再签证书。
+        ttsRemoteURL: "https://im.qmledmq.cn:8443/api/tts"
     )
 
     static func load() -> Settings {
@@ -90,7 +114,9 @@ struct Settings: Equatable {
                 let v = dec?.ttsVoice ?? Self.default.ttsVoice
                 return v == "zh-CN" ? "" : v
             }(),
-            ttsRate: dec?.ttsRate ?? Self.default.ttsRate
+            ttsRate: dec?.ttsRate ?? Self.default.ttsRate,
+            ttsProvider: dec.flatMap { TTSProvider(rawValue: $0.ttsProvider ?? "") } ?? Self.default.ttsProvider,
+            ttsRemoteURL: dec?.ttsRemoteURL ?? Self.default.ttsRemoteURL
         )
     }
 
@@ -102,7 +128,9 @@ struct Settings: Equatable {
             wakeKeywords: wakeKeywords,
             hotkey: hotkey,
             ttsVoice: ttsVoice,
-            ttsRate: ttsRate
+            ttsRate: ttsRate,
+            ttsProvider: ttsProvider.rawValue,
+            ttsRemoteURL: ttsRemoteURL
         )
         let d = UserDefaults.standard
         if let data = try? JSONEncoder().encode(enc) {
@@ -123,6 +151,8 @@ private struct SettingsCodable: Codable {
     var hotkey: HotkeyCombo
     var ttsVoice: String
     var ttsRate: Double?
+    var ttsProvider: String?
+    var ttsRemoteURL: String?
 }
 
 /// 热键的 modifier + keyCode 组合。Codable 直接 JSON 持久化。
