@@ -13,6 +13,7 @@ import OSLog
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "delegate")
     private var capsulePanel: CapsulePanel?
+    private var petPanel: PetPanel?
     private var settingsController: SettingsWindowController?
     private var statusItem: NSStatusItem?
 
@@ -40,18 +41,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         AppState.shared.bootstrap()
 
-        // 禅意药丸——dock 正上方悬浮胶囊
-        let panel = CapsulePanel(state: AppState.shared)
-        panel.show()
-        capsulePanel = panel
+        // 按 settings.uiMode 起对应 panel
+        capsulePanel = CapsulePanel(state: AppState.shared)
+        petPanel = PetPanel(state: AppState.shared)
+        applyUIMode(AppState.shared.settings.uiMode)
 
-        // 设置入口——statusItem 右键菜单
         installStatusItem()
-
-        // 设置窗口控制器（lazy show）
         settingsController = SettingsWindowController(state: AppState.shared)
+        logger.notice("玄女 ready (uiMode=\(AppState.shared.settings.uiMode.rawValue, privacy: .public))")
+    }
 
-        logger.notice("玄女 ready (zen capsule mode)")
+    /// 切换 panel 显示——隐当前，显新。capsule 始终保留实例（轻量），不销毁。
+    func applyUIMode(_ mode: Settings.UIMode) {
+        // 资产缺失保护：用户切 pet 但资产没装好 → 强制 capsule + 设置回写 + 用户 alert
+        if mode == .pet {
+            let catalog = PoseAssetCatalog()
+            if !catalog.validate() {
+                logger.warning("立绘资产校验失败，强制回 capsule")
+                AppState.shared.setUIMode(.capsule)
+                showAssetMissingAlert()
+                applyUIMode(.capsule)
+                return
+            }
+        }
+
+        switch mode {
+        case .capsule:
+            petPanel?.orderOut(nil)
+            capsulePanel?.show()
+        case .pet:
+            capsulePanel?.orderOut(nil)
+            petPanel?.show()
+        }
+    }
+
+    private func showAssetMissingAlert() {
+        let alert = NSAlert()
+        alert.messageText = "立绘资产未就绪"
+        alert.informativeText = "Resources/Pet/poses/ 下缺 5 张 pose 图，已暂时回到药丸模式。资产装好后重启 App 再切。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
+    /// PetPanel 右键菜单「切回药丸」入口
+    @objc func switchToCapsule() {
+        AppState.shared.setUIMode(.capsule)
+        applyUIMode(.capsule)
+    }
+
+    /// CapsulePanel 右键菜单「切到立绘」入口
+    @objc func switchToPet() {
+        AppState.shared.setUIMode(.pet)
+        applyUIMode(.pet)
     }
 
     /// 装菜单栏 NSStatusItem——左键 / 右键都弹同一个菜单（只有「设置」+「退出」两项，
