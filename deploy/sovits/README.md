@@ -97,3 +97,16 @@ mac 上：jarvis 设置 → 连接 → Pair Token 粘贴上面 token；设置 �
 - `sudo journalctl -u sovits-proxy -n 50 --no-pager` — proxy 日志（401/502 错误码）
 - `curl http://127.0.0.1:9881/healthz` — proxy 在不在
 - token 过期：`python3 ~/.fuxi/im-mint-token.py` 重 mint，jarvis 重新粘
+
+### 已知坑
+
+- **混中英文本走英文 POS tagger 时 sovits 返 400 `Resource 'averaged_perceptron_tagger_eng' not found`**：
+  `install.sh` 下的是老 NLTK 命名 `averaged_perceptron_tagger`，NLTK 4+ 改名带
+  `_eng` 后缀。运行时 lazy download 旧版仍然不命中。补装：
+  ```bash
+  source ~/miniforge3/etc/profile.d/conda.sh && conda activate GPTSoVITS
+  python -m nltk.downloader averaged_perceptron_tagger_eng cmudict
+  sudo systemctl restart sovits.service
+  ```
+  jarvis 客户端表现：第一次纯中文回话用派蒙音色 OK，后续含英文词的回话降级回
+  系统 TTS（`remote tts http 400`）。
