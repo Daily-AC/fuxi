@@ -51,6 +51,7 @@ final class AppState: ObservableObject {
     // 子组件——延迟初始化，权限批准后才 spin up。
     var recognizer: Recognizer?
     var synthesizer: Synthesizer?
+    var remoteTTS: RemoteTTSProvider?
     var hotkey: HotkeyMonitor?
     var fuxiClient: FuxiClient?
     var wakeClient: RemoteWakeClient?
@@ -87,6 +88,7 @@ final class AppState: ObservableObject {
             logger.error("AECEngine 启动失败: \(error.localizedDescription, privacy: .public)")
         }
         synthesizer = Synthesizer()
+        remoteTTS = RemoteTTSProvider()
         recognizer = Recognizer(
             onResult: { [weak self] transcript, isFinal in
                 Task { @MainActor in
@@ -288,6 +290,15 @@ final class AppState: ObservableObject {
 
     private func speak(_ text: String) {
         phase = .speaking
+        switch settings.ttsProvider {
+        case .system:
+            speakSystem(text)
+        case .remote:
+            speakRemote(text)
+        }
+    }
+
+    private func speakSystem(_ text: String) {
         let id = settings.ttsVoice.trimmingCharacters(in: .whitespaces)
         synthesizer?.speak(
             text,
@@ -300,9 +311,27 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// 远端 GPT-SoVITS 失败时降级回 system TTS——用户耳朵不能因为家里 server 抖了
+    /// 就一片寂静。logger 警示 + system fallback 念出来才符合公理 #1「不显式沟通=没做」。
+    private func speakRemote(_ text: String) {
+        let token = settings.pairToken
+        remoteTTS?.speak(text, baseURL: settings.ttsRemoteURL, bearerToken: token) { [weak self] success in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if !success {
+                    self.logger.warning("remote tts 失败，降级回系统 TTS")
+                    self.speakSystem(text)
+                    return
+                }
+                self.enterIdle()
+            }
+        }
+    }
+
     func cancelToIdle() {
         recognizer?.stop()
         synthesizer?.stop()
+        remoteTTS?.stop()
         enterIdle()
     }
 
