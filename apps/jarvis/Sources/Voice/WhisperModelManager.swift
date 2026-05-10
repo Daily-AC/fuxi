@@ -120,18 +120,41 @@ final class WhisperModelManager {
 
         logger.notice("WhisperKit 加载开始: model=\(Self.modelName, privacy: .public) repo=\(Self.modelRepo, privacy: .public) base=\(self.storageURL.path, privacy: .public) localCached=\(alreadyLocal)")
 
-        // 注：WhisperKit 0.x 的 convenience init 没暴露 download progress callback；
-        // downloading 状态只是粗粒度 placeholder。后续如果库给了 progress hook 再细化。
-        let config = WhisperKitConfig(
-            model: Self.modelName,
-            downloadBase: storageURL,
-            modelRepo: Self.modelRepo,
-            verbose: false,
-            logLevel: .error,
-            prewarm: true,
-            load: true,
-            download: true
-        )
+        // 关键：localCached 时用 modelFolder 直接指向本地路径，绕开 swift-transformers
+        // hub api——即使 model weights 已下，lib 还会强制去 huggingface.co 拉 metadata
+        // / generation_config.json 校验，国内 TLS 直接被墙（实测 NSURLError -1200）。
+        // 给了 modelFolder lib 直接读本地不走网络。**前提是目录里 mlmodelc + json 都齐**。
+        //
+        // 国内用户离线模型用 `huggingface-cli download --include "<modelName>/*"` 配
+        // HF_ENDPOINT=https://hf-mirror.com 拉到 storageURL 即可（一次性）。
+        let config: WhisperKitConfig
+        if alreadyLocal {
+            let modelFolder = storageURL
+                .appendingPathComponent("argmaxinc")
+                .appendingPathComponent("whisperkit-coreml")
+                .appendingPathComponent(Self.modelName)
+                .path
+            config = WhisperKitConfig(
+                model: Self.modelName,
+                modelFolder: modelFolder,
+                verbose: false,
+                logLevel: .error,
+                prewarm: true,
+                load: true,
+                download: false  // 双保险：不走任何 hub 路径
+            )
+        } else {
+            config = WhisperKitConfig(
+                model: Self.modelName,
+                downloadBase: storageURL,
+                modelRepo: Self.modelRepo,
+                verbose: false,
+                logLevel: .error,
+                prewarm: true,
+                load: true,
+                download: true
+            )
+        }
 
         if !alreadyLocal {
             transition(to: .loading)

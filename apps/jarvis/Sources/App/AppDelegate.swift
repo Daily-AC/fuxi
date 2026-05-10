@@ -17,6 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
 
     static func main() {
+        // HuggingFace 在国内直连不通——WhisperKit 内部用 swift-transformers 拉模型，
+        // 它尊重 HF_ENDPOINT 环境变量。在 NSApplication.run 之前 setenv 让 lib 一启动
+        // 就走镜像，否则 lookup metadata.json 直接超时（见日志 NSURLErrorDomain -1001）。
+        // hf-mirror.com 是国内常用 HF 镜像，1:1 同步，公益运营。
+        if getenv("HF_ENDPOINT") == nil {
+            setenv("HF_ENDPOINT", "https://hf-mirror.com", 1)
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

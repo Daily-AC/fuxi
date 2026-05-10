@@ -41,6 +41,10 @@ final class AppState: ObservableObject {
     @Published var wakeMode: WakeMode = .disabled
     /// 实时麦克风电平（0~1，已 RMS 归一化）。Recognizer 在 listening 期间持续推。
     @Published var audioLevel: Double = 0
+    /// ack 脉冲计数器——每次唤醒触发 +1。CapsuleStateView 监听 onChange，与 earcon 同步
+    /// 叠 SweepOverlay 200ms 墨笔横扫。用 counter 而非 Bool 是为了重复 ack（连续唤醒）
+    /// 时每次都重新触发 onAppear。
+    @Published var ackPulse: Int = 0
 
     private let logger = Logger(subsystem: "cn.qmledmq.fuxi.xuannv", category: "state")
 
@@ -172,6 +176,8 @@ final class AppState: ObservableObject {
         // wake 链路的 listener 在 startListening 内会被释放——这里不再 pauseAudio。
         // earcon 走 AECEngine 共享 outputNode，跟 mic 链路同节奏，不需要协调时序。
         AECEngine.shared.playEarcon()
+        // 同步触发胶囊上的墨笔横扫——视听节奏对齐 200ms。
+        ackPulse &+= 1
         startListening()
     }
 

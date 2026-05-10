@@ -31,6 +31,15 @@ struct CapsuleStateView: View {
             // 主体内容——switch on phase
             content
                 .padding(.horizontal, ZenStyle.capsuleWidth * ZenStyle.contentInsetRatio)
+
+            // ack 横扫——key by ackPulse 让每次 ack 都重建一次 SweepOverlay 触发 onAppear。
+            // ackPulse == 0 时不显示（启动状态），>0 时按 id 切换重建。
+            if state.ackPulse > 0 {
+                SweepOverlay(scheme: scheme)
+                    .id(state.ackPulse)
+                    .padding(.horizontal, ZenStyle.capsuleWidth * ZenStyle.contentInsetRatio)
+                    .allowsHitTesting(false)
+            }
         }
         .frame(width: ZenStyle.capsuleWidth, height: ZenStyle.capsuleHeight)
     }
