@@ -1,0 +1,17 @@
+
+digraph G {
+  graph [rankdir=LR, bgcolor="white", pad="0.25", nodesep="0.45", ranksep="0.45"];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12, color="#475569", fillcolor="#F8FAFC"];
+  edge [fontname="Arial", fontsize=10, color="#475569", arrowsize=0.7];
+  p1 [label="UserPrompt\n用户意图"];
+  p2 [label="TaskCreated\n生成任务"];
+  p3 [label="TaskDispatched\n选择门客"];
+  p4 [label="AgentReady / Busy\n执行任务"];
+  p5 [label="ToolCall / Message\n过程事件"];
+  p6 [label="TaskStateChanged\nDelivering / Done"];
+  p7 [label="Bridge Inject\n玄女知情"];
+  p8 [label="Firehose\n实时观察"];
+  p1 -> p2 -> p3 -> p4 -> p5 -> p6 -> p7;
+  p5 -> p8;
+  p6 -> p8;
+}

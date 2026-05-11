@@ -1,0 +1,25 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 13 of 13, the closing slide. This slide closes the deck by returning to the central thesis claim — its second line is verbatim from slide 2, completing the deck's first-and-last loop. The visual anchor is a central two-line statement on warm off-white paper, with a small thanks line below. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained, scholarly, contemplative.
+
+INK MARK
+ONE soft ink-wash mark only — a small horizontal pale ink wash (淡墨晕) just LEFT of center, slightly above the central statement, no longer than 8% of slide width, with very soft watery edges (淡墨), almost like a single exhaled breath. Pure deep ink black diluted to roughly 40% intensity. NO sharp brush strokes, NO second mark.
+
+LAYOUT
+A "closing statement with thanks" layout, similar in feel to slide 2 (the opening claim) — a deliberate first-and-last bookend. The two-line main statement sits in the optical center of the slide (vertically between 38% and 60% from top), centered horizontally. Below the statement, generous whitespace. At the bottom of the slide (around 80% from top), a single thanks line sits centered horizontally in slightly muted weight. The pale ink wash sits just left of center, slightly above the statement. NO title, NO contribution counter, NO footer notes, NO seal mark.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the main statement, Medium for the thanks line; deep ink black #0E0E0E; full-width Chinese punctuation; mid-dot "·" between thanks fragments; no emoji, no decorative glyphs):
+- Statement line 1 (very large, ~50pt, ExtraBold, centered, single line): "不是最快，也不是完整的分布式。"
+- Statement line 2 (very large, ~50pt, ExtraBold, centered, single line): "是把通讯底座，显式剥离。"
+- Thanks line (~26pt, Medium, centered, single line): "谢谢倾听 · 请批评指正"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 75% of the slide must be empty paper. The composition feels like a final breath of speech written on a piece of paper.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

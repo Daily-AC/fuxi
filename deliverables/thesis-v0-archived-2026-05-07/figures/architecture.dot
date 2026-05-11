@@ -1,0 +1,31 @@
+
+digraph G {
+  graph [rankdir=TB, bgcolor="white", pad="0.3", nodesep="0.45", ranksep="0.55"];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=13, color="#4B5563", penwidth=1.2, fillcolor="#F8FAFC"];
+  edge [fontname="Arial", fontsize=11, color="#475569", arrowsize=0.75];
+
+  user [label="用户 / IM / TUI", fillcolor="#E0F2FE"];
+  cli [label="fuxi-cli\nREPL / daemon / im start", fillcolor="#E0F2FE"];
+  orch [label="fuxi-orchestrator\n玄女编排 / Dispatch / Bridge", fillcolor="#DCFCE7"];
+  a2a [label="fuxi-a2a\nAgentCard / Task / Message", fillcolor="#FEF3C7"];
+  adapters [label="Agent Adapters\nClaude Code / Codex", fillcolor="#FDE68A"];
+  workers [label="门客 Agent\n专项任务执行", fillcolor="#FDE68A"];
+  bus [label="fuxi-events\nTokio broadcast + SQLite WAL", fillcolor="#EDE9FE"];
+  firehose [label="fuxi-firehose\nWebSocket / SSE / REST / TUI", fillcolor="#EDE9FE"];
+  workspace [label="fuxi-workspace\nGit worktree / L1-L3 Sandbox", fillcolor="#FCE7F3"];
+  memory [label="fuxi-memory\nOracle / Hetu / Extractor", fillcolor="#FCE7F3"];
+  scheduler [label="fuxi-scheduler\nCron / FS / Webhook", fillcolor="#FCE7F3"];
+  im [label="fuxi-im\nPWA API / dist controller", fillcolor="#DBEAFE"];
+
+  user -> cli -> orch;
+  orch -> a2a -> adapters -> workers;
+  workers -> bus;
+  orch -> bus;
+  scheduler -> bus;
+  bus -> firehose -> user;
+  im -> orch;
+  im -> bus;
+  orch -> workspace;
+  orch -> memory;
+  memory -> bus;
+}

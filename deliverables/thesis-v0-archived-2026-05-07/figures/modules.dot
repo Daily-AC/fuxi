@@ -1,0 +1,15 @@
+
+digraph G {
+  graph [rankdir=TB, bgcolor="white", pad="0.25", nodesep="0.4", ranksep="0.45"];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12, color="#475569", fillcolor="#F8FAFC"];
+  edge [color="#64748B", arrowsize=0.65];
+  core [label="fuxi-core\n类型与接口层", fillcolor="#E0F2FE"];
+  comm [label="通信层\nA2A + EventBus", fillcolor="#DCFCE7"];
+  orches [label="编排层\n玄女 / Shelf / Bridge", fillcolor="#FEF3C7"];
+  runtime [label="执行层\nAgent Adapter / Worktree", fillcolor="#FDE68A"];
+  obs [label="观测层\nFirehose / IM / TUI", fillcolor="#EDE9FE"];
+  support [label="支撑层\nMemory / Scheduler / Roles", fillcolor="#FCE7F3"];
+  test [label="验证层\nUnit / Integration / E2E / Bench", fillcolor="#DBEAFE"];
+  core -> comm; core -> orches; core -> runtime;
+  comm -> obs; orches -> runtime; orches -> support; runtime -> comm; support -> comm; test -> core; test -> comm; test -> orches;
+}
