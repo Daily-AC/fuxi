@@ -480,7 +480,12 @@ mod tests {
         assert!(txt.contains("local"));
         assert!(txt.contains("erp"));
         assert!(txt.contains("home"));
-        assert!(txt.contains("mac-local"));
+        // PR-B：原断言 "mac-local" 是错的 node alias 在文中——已改为教玄女走
+        // `fuxi nodes --json` 拿真实 node_id（避免硬编对部署用户脱钩的节点名）。
+        assert!(
+            txt.contains("fuxi nodes"),
+            "addendum 必须教玄女查真实 node_id；硬编 alias 会让 enqueue 卡死"
+        );
     }
 
     #[test]

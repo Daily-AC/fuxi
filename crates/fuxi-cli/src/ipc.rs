@@ -196,9 +196,7 @@ impl EventKindPayload {
             Self::SkillRejected { role, reason } => EventKind::SkillRejected { role, reason },
             Self::SkillActivated { role } => EventKind::SkillActivated { role },
             Self::NoRoleMatched { need } => EventKind::NoRoleMatched { need },
-            Self::XuannvVoiceLine { text, emotion } => {
-                EventKind::XuannvVoiceLine { text, emotion }
-            }
+            Self::XuannvVoiceLine { text, emotion } => EventKind::XuannvVoiceLine { text, emotion },
         }
     }
 }

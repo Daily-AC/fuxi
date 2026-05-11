@@ -227,7 +227,18 @@ pub fn spawn_home_heartbeat_task(
                     }
                 }
             }
-            ctrl.heartbeat(HOME_NODE_ID, inflight).await;
+            // PR-B：心跳带 metadata 让 home 节点在 controller 重启后自动重建 entry
+            // （home embedded controller 一进程双角，理论上不会丢，但走同一路径对称
+            // 避免 future 拆分进程时漏修）。
+            ctrl.heartbeat(
+                HOME_NODE_ID,
+                inflight,
+                Some(crate::dist::NodeHeartbeatMetadata {
+                    tags: HOME_NODE_TAGS.iter().map(|s| s.to_string()).collect(),
+                    max_concurrency: HOME_NODE_MAX_CONCURRENCY,
+                }),
+            )
+            .await;
         }
     });
 }

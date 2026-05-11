@@ -239,13 +239,14 @@ async fn ws_conv_streams_xuannv_voice_line() {
         meta,
         kind: EventKind::XuannvVoiceLine {
             text: "好的，已派给鲁班".into(),
+            emotion: None,
         },
     })
     .expect("publish");
 
     let got = next_event(&mut r, "conv-voice-line").await;
     match got.kind {
-        EventKind::XuannvVoiceLine { text } => assert_eq!(text, "好的，已派给鲁班"),
+        EventKind::XuannvVoiceLine { text, .. } => assert_eq!(text, "好的，已派给鲁班"),
         other => panic!("expect XuannvVoiceLine, got {other:?}"),
     }
 }

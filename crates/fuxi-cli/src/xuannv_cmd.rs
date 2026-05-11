@@ -252,10 +252,10 @@ fn load_hotwords(path: &std::path::Path) -> Result<HotwordsFile> {
     if !path.exists() {
         return Ok(HotwordsFile::default());
     }
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("读 {} 失败", path.display()))?;
-    let file: HotwordsFile = serde_json::from_str(&body)
-        .with_context(|| format!("{} 不是合法 JSON", path.display()))?;
+    let body =
+        std::fs::read_to_string(path).with_context(|| format!("读 {} 失败", path.display()))?;
+    let file: HotwordsFile =
+        serde_json::from_str(&body).with_context(|| format!("{} 不是合法 JSON", path.display()))?;
     Ok(file)
 }
 
@@ -265,8 +265,7 @@ fn save_hotwords(path: &std::path::Path, file: &HotwordsFile) -> Result<()> {
             .with_context(|| format!("建 {} 目录失败", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(file).context("序列化 hotwords")?;
-    std::fs::write(path, body + "\n")
-        .with_context(|| format!("写 {} 失败", path.display()))?;
+    std::fs::write(path, body + "\n").with_context(|| format!("写 {} 失败", path.display()))?;
     Ok(())
 }
 
@@ -276,8 +275,7 @@ fn re_escape_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for ch in s.chars() {
         match ch {
-            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
-            | '\\' => {
+            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' => {
                 out.push('\\');
                 out.push(ch);
             }
