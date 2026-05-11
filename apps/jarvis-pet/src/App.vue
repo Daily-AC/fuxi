@@ -1,20 +1,12 @@
 <script setup lang="ts">
+import PetCanvas from './components/PetCanvas.vue'
 </script>
 
 <template>
-  <div class="placeholder">玄女</div>
+  <PetCanvas />
 </template>
 
-<style scoped>
-.placeholder {
-  width: 280px;
-  height: 420px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: serif;
-  font-size: 24px;
-  color: #6E8896;
-  background: rgba(250, 247, 241, 0.08);
-}
+<style>
+html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+#app { width: 100vw; height: 100vh; background: transparent; }
 </style>
