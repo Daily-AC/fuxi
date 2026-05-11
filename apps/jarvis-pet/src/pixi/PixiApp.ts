@@ -13,15 +13,24 @@ export class PixiApp {
     await this.app.init({
       width: opts.width,
       height: opts.height,
-      // 透明背景：让 Tauri 透明窗口的桌面背景透出来
+      // PIXI v8：background 取代了 v7 backgroundColor；'transparent' 让 WebGL
+      // context 用 alpha:true 创建，clear color alpha=0 渲染透明，跟 NSPanel
+      // opaque=false 配套才能让桌面背景透下来。
+      background: 'transparent',
       backgroundAlpha: 0,
       antialias: true,
       // mac WebKit 性能：preferWebGL2，不用 WebGPU（mac WebKit WebGPU 还不稳）
       preference: 'webgl',
-      // 抗锯齿权衡：开了清晰但拖动时性能 -10%；桌宠主要静态可接受
+      // autoDensity:true + resolution:dpr 让 Retina sprite 清晰：canvas 物理
+      // 像素 = logical * dpr，css 尺寸保持 logical。app.screen.{w,h} 仍是
+      // logical，不受 dpr 污染，AnimationPlayer 直接用即可。
       resolution: window.devicePixelRatio || 1,
-      autoDensity: true
+      autoDensity: true,
+      // 不保留 drawing buffer：每帧 clear，避免 Safari WebGL 残影
+      clearBeforeRender: true
     })
+    // canvas DOM 显式 transparent，避免 webkit 默认 background 浮出
+    this.app.canvas.style.background = 'transparent'
     return this.app.canvas
   }
 

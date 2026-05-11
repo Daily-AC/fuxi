@@ -30,7 +30,11 @@ export class AnimationPlayer {
     this.frameIdx = 0
     this.elapsedMs = 0
     this.sprite.texture = this.textures[0]
-    // 居屏幕中央底部
+    // fit to panel：PIXI v8 autoDensity:true 下 app.screen.{w,h} 是 logical
+    // 尺寸（已除 resolution），可直接用作 scale 基准。锚点 (0.5,1.0) 让脚下踩底沿。
+    const tex0 = this.textures[0]
+    const scale = this.app.screen.height / tex0.height
+    this.sprite.scale.set(scale, scale)
     this.sprite.x = this.app.screen.width / 2
     this.sprite.y = this.app.screen.height
   }
