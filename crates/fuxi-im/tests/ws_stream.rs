@@ -221,6 +221,35 @@ async fn ws_conv_streams_xuannv_events_live() {
     }
 }
 
+/// Jarvis · 反回归：`XuannvVoiceLine` 事件 publish 时只要 `meta.agent=xuannv_id`，
+/// `/api/conv` WS 必须透传给客户端（macOS App 靠这条事件触发 TTS）。
+/// 守现有"按 agent 过滤、不维护 EventKind 白名单"的设计——加新 EventKind 不该改 conv。
+#[tokio::test]
+async fn ws_conv_streams_xuannv_voice_line() {
+    let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
+    let (_w, mut r) = ws.split();
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let mut meta = EventMeta::now();
+    meta.agent = Some(xuannv);
+    bus.publish(Event {
+        meta,
+        kind: EventKind::XuannvVoiceLine {
+            text: "好的，已派给鲁班".into(),
+        },
+    })
+    .expect("publish");
+
+    let got = next_event(&mut r, "conv-voice-line").await;
+    match got.kind {
+        EventKind::XuannvVoiceLine { text } => assert_eq!(text, "好的，已派给鲁班"),
+        other => panic!("expect XuannvVoiceLine, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn ws_conv_filters_out_other_agents() {
     let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;

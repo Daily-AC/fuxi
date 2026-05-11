@@ -501,10 +501,18 @@ async fn dispatch_command(
         },
 
         Command::EmitEvent { kind } => {
-            use fuxi_core::{Event, EventMeta};
+            use fuxi_core::{Event, EventKind, EventMeta};
+            let ev_kind = kind.into_event_kind();
+            // Jarvis 语音线：必须把 `meta.agent = xuannv_id`，否则 conv WS（按
+            // `meta.agent==xuannv` 过滤透传）拿不到事件。其他 EmitEvent 变体
+            // （招贤一族）是平台事件 meta.agent 留 None 才正确。
+            let mut meta = EventMeta::now();
+            if matches!(ev_kind, EventKind::XuannvVoiceLine { .. }) {
+                meta.agent = fuxi.xuannv_id().await;
+            }
             let ev = Event {
-                meta: EventMeta::now(),
-                kind: kind.into_event_kind(),
+                meta,
+                kind: ev_kind,
             };
             match fuxi.bus().publish(ev) {
                 Ok(_) => Response::ok(serde_json::json!({"emitted": true})),
@@ -1124,17 +1132,17 @@ async fn spawn_by_role(
 
     let kind: WorkerKind = match cli.as_str() {
         "claude-code" => {
-            // P2 召回前提：cc 必须 persist session 才能下次 --resume 命中。
-            // CcLaunchConfig 默认在 resume_session_id 和 session_id **都 None** 时
-            // 加 `--no-session-persistence`——sink 记的 session_id 第二轮 resume 即死。
-            // 普通 spawn（无召回）时强塞一个新 uuid 给 `session_id`：cc honor 这个 id
-            // 在 system/init 事件里回报，sink 拿到的就是这个值。
+            // 普通 spawn（无召回）时**不**强塞 `session_id`——cc 2.1.114+ 在
+            // `--sdk-url` SDK 模式下把 `--session-id <uuid>` 当 strict resume 解释，
+            // session 不存在就直接 stderr `No conversation found with session ID: <uuid>`
+            // 退出，fuxi-im 看不到死亡只看到 WS Connection reset；玄女永久 zombie。
+            // （cc stdio 模式下 `--session-id <new-uuid>` 仍允许新建，单测和 fuxi 路径
+            // 走 SDK 模式踩坑。）
+            //
+            // 让 cc 自己生成 session_id，`ws_bridge` 已经从 `system/init` 事件 peek
+            // session_id 写进 `cli_session_id` slot（见 `ws_bridge.rs::287`）；P2 召回
+            // 路径继续从 sink 的 `cli_session_id` fact 拿值传 `resume_session_id`。
             let resume_session_id = recall.resume_session_id.clone();
-            let session_id = if resume_session_id.is_none() {
-                Some(Uuid::new_v4().to_string())
-            } else {
-                None
-            };
             WorkerKind::Cc(CcLaunchConfig {
                 append_system_prompt: if loaded.append_system_prompt.is_empty() {
                     None
@@ -1144,7 +1152,7 @@ async fn spawn_by_role(
                 allowed_tools: loaded.allowed_tools,
                 disallowed_tools: loaded.disallowed_tools,
                 resume_session_id,
-                session_id,
+                session_id: None,
                 ..Default::default()
             })
         }

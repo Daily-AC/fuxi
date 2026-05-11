@@ -756,6 +756,10 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
         XuannvHandoffWritten { length_chars, .. } => {
             format!("玄女 handoff ↓ {length_chars} chars")
         }
+        XuannvVoiceLine { text } => {
+            let preview: String = text.chars().take(40).collect();
+            format!("玄女 say {preview}")
+        }
     }
 }
 

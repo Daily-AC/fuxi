@@ -211,17 +211,11 @@ async fn spawn_with_prelude(
 ) -> Result<AgentId> {
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let xuannv_profile = loaded.profile.clone();
+    let _ = oracle;
 
-    // 接班 handoff 是新 cc session（老 cc 已 kill）→ 走 fresh path：
-    // resume_session_id = None；让 session_id 由策府新生成 + 落盘。
-    let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(oracle)
-        .await
-        .context("解析玄女 session_id")?;
-    // 老 session 已经 kill—不该 resume 老内容（cc 重读老 system prompt 不带 handoff prelude）
-    // 强制走 fresh：把 resume 路径丢掉
-    let _ = resume_session_id;
-    let resume_session_id = None;
-    let fresh_session_to_record = session_id.clone();
+    // 接班 handoff 是新 cc session（老 cc 已 kill）。同 xuannv_bootstrap：cc 2.1.114+
+    // SDK 模式 strict resume，预先生成 session_id 也会被拒。让 cc 自己生成；handoff
+    // 全部上下文已经在 prelude 里 inline，不依赖 cc 端 session 持久化。
 
     // handoff prelude 在最顶部，原 append_system_prompt（含 dispatch-routing 教学）
     // 在后面——cc 接收 system prompt 是按顺序拼接的字符串，前者优先级 = 出现位置。
@@ -244,8 +238,8 @@ async fn spawn_with_prelude(
         append_system_prompt: Some(combined),
         allowed_tools: loaded.allowed_tools,
         disallowed_tools: loaded.disallowed_tools,
-        resume_session_id,
-        session_id,
+        resume_session_id: None,
+        session_id: None,
         ..Default::default()
     };
 
@@ -253,10 +247,5 @@ async fn spawn_with_prelude(
         .spawn_worker(xuannv_profile, WorkerKind::Cc(cc_cfg))
         .await
         .context("spawn 新玄女失败")?;
-    if let Some(sid) = fresh_session_to_record
-        && let Err(e) = crate::session::record_xuannv_session(oracle, &sid, "im-handoff").await
-    {
-        warn!(error = %e, session_id = %sid, "新玄女 session 落策府失败");
-    }
     Ok(id)
 }

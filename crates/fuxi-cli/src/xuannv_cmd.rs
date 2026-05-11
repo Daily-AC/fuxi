@@ -144,6 +144,57 @@ pub async fn run_handoff_read() -> Result<()> {
     Ok(())
 }
 
+/// Jarvis · 语音模式：上限只是"防呆"，玄女自己应该写一两句。超过 500 字
+/// 大概率是她把整段 IM 回复也塞过来了——拒并提示她精简。
+const SAY_MAX_CHARS: usize = 500;
+
+#[derive(Debug, Args)]
+pub struct SayArgs {
+    /// 要念出口的话；传 `-` 从 stdin 读（兼容长字符串里有引号、换行等场景）。
+    pub text: String,
+}
+
+pub async fn run_say(args: SayArgs) -> Result<()> {
+    let text = if args.text == "-" {
+        let mut s = String::new();
+        std::io::stdin()
+            .read_to_string(&mut s)
+            .context("读 stdin 失败")?;
+        s
+    } else {
+        args.text
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("say 内容为空——至少给一两个字让用户听到");
+    }
+    let len = trimmed.chars().count();
+    if len > SAY_MAX_CHARS {
+        anyhow::bail!(
+            "say 超长：{len} chars > {SAY_MAX_CHARS}。语音模式下只念一两句， \
+             长内容（代码 / 列表 / 解释）写 IM 即可，不必念出来"
+        );
+    }
+
+    // 走 daemon —— daemon 端 EmitEvent handler 会注入 meta.agent=xuannv_id，
+    // CLI 进程拿不到运行时 xuannv_id，必须 daemon 兜底。
+    let resp = crate::client::send(crate::ipc::Command::EmitEvent {
+        kind: crate::ipc::EventKindPayload::XuannvVoiceLine {
+            text: trimmed.to_string(),
+        },
+    })
+    .await
+    .context("daemon 通讯失败——是否在 `fuxi up` 或 `fuxi im start` 进程下")?;
+    match resp {
+        crate::ipc::Response::Ok { .. } => {
+            println!("✓ 已上发 ({} chars)", len);
+            Ok(())
+        }
+        crate::ipc::Response::Pong => anyhow::bail!("daemon 返回 Pong（异常）"),
+        crate::ipc::Response::Err { error } => anyhow::bail!("daemon 拒绝：{error}"),
+    }
+}
+
 pub async fn run_refresh() -> Result<()> {
     let path = std::env::var("FUXI_EVENTS_DB")
         .map(std::path::PathBuf::from)

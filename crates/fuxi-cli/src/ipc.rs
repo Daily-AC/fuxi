@@ -166,6 +166,13 @@ pub enum EventKindPayload {
     NoRoleMatched {
         need: String,
     },
+    /// Jarvis · 语音模式：玄女通过 `fuxi xuannv say` 让 daemon publish 一条
+    /// `XuannvVoiceLine` 事件。daemon 端在 publish 时会注入
+    /// `meta.agent = xuannv_id`——CLI 进程拿不到运行时 xuannv_id，必须 daemon 兜底，
+    /// 否则 `/api/conv` WS（按 `meta.agent==xuannv` 过滤）不会透传给 macOS App。
+    XuannvVoiceLine {
+        text: String,
+    },
 }
 
 impl EventKindPayload {
@@ -186,6 +193,7 @@ impl EventKindPayload {
             Self::SkillRejected { role, reason } => EventKind::SkillRejected { role, reason },
             Self::SkillActivated { role } => EventKind::SkillActivated { role },
             Self::NoRoleMatched { need } => EventKind::NoRoleMatched { need },
+            Self::XuannvVoiceLine { text } => EventKind::XuannvVoiceLine { text },
         }
     }
 }
@@ -449,6 +457,27 @@ mod tests {
         let s = serde_json::to_string(&snap).unwrap();
         assert!(s.contains(r#""last_seen_ms_ago":null"#), "got: {s}");
         assert!(s.contains(r#""registered_at_ms_ago":null"#), "got: {s}");
+    }
+
+    /// Jarvis · 语音模式：`XuannvVoiceLine` payload 序列化 tag + 转 EventKind 保真。
+    /// （注意：daemon 注入 `meta.agent = xuannv_id` 不在 payload 责任里，那是 daemon
+    /// publish 路径上的事，单元测在 daemon 测试或集成测试里覆盖。）
+    #[test]
+    fn xuannv_voice_line_payload_roundtrips() {
+        let p = EventKindPayload::XuannvVoiceLine {
+            text: "好的，已派给鲁班".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["type"], "xuannv_voice_line");
+        assert_eq!(v["text"], "好的，已派给鲁班");
+        let back: EventKindPayload = serde_json::from_value(v).unwrap();
+        let kind = back.into_event_kind();
+        match kind {
+            fuxi_core::EventKind::XuannvVoiceLine { text } => {
+                assert_eq!(text, "好的，已派给鲁班");
+            }
+            other => panic!("expect XuannvVoiceLine, got {other:?}"),
+        }
     }
 
     #[test]

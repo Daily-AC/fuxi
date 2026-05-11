@@ -1,0 +1,87 @@
+# Jarvis · macOS 语音壳子（玄女前端）
+#
+# 生成 Xcode 工程：
+#   brew install xcodegen   # 没装的话
+#   cd apps/jarvis
+#   xcodegen generate
+#   open Jarvis.xcodeproj
+#
+# 先 ad-hoc 签（按 feedback_macos_gatekeeper_codesign）：
+#   Xcode → Signing & Capabilities → Sign to Run Locally
+
+name: Jarvis
+options:
+  bundleIdPrefix: cn.qmledmq.fuxi
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: zh-Hans
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    # 本地 dev 用 ad-hoc，真发布换 Developer ID
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    from: "1.0.0"
+  RealTimeCutVADLibrary:
+    url: https://github.com/helloooideeeeea/RealTimeCutVADLibrary.git
+    from: "1.0.14"
+
+targets:
+  Jarvis:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
+      - package: RealTimeCutVADLibrary
+        product: RealTimeCutVADLibrary
+    resources:
+      - path: Resources/Assets.xcassets
+        optional: true
+      # v0.3 立绘桌宠资产——SwiftPM Bundle.module 走 Sources/Resources/Pet 自动注入，
+      # xcodegen 这边显式声明让 xcodebuild 也把 Pet 拷进 .app/Contents/Resources/Pet
+      - path: Sources/Resources/Pet
+        optional: true
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleName: Jarvis
+        CFBundleDisplayName: 贾维斯
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: YES   # 菜单栏 app，dock 不显示
+        NSMicrophoneUsageDescription: "贾维斯需要麦克风来听玄女的呼唤和你的指令。"
+        NSSpeechRecognitionUsageDescription: "贾维斯把你的语音转写成文字派给玄女——全程本机处理，不上云。"
+        NSAppleEventsUsageDescription: "全局热键触发需要 AppleEvents 权限。"
+    entitlements:
+      path: Resources/Jarvis.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.device.audio-input: true
+        com.apple.security.network.client: true
+        com.apple.security.automation.apple-events: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cn.qmledmq.fuxi.jarvis
+
+  JarvisTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Jarvis

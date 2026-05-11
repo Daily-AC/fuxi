@@ -332,32 +332,11 @@ pub async fn run(args: Args) -> Result<()> {
     let loaded = skill_loader::load(&args.xuannv_role)
         .with_context(|| format!("加载 roles/{}/ROLE.md", args.xuannv_role))?;
     let xuannv_profile = loaded.profile.clone();
-    let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(&oracle)
-        .await
-        .context("解析玄女 session_id")?;
-    // 构造启动横幅——resume 时让用户看到"续上次对话"；首次则什么都不说
-    let resume_banner: Option<String> = match (&resume_session_id, &session_id) {
-        (Some(id), _) => {
-            tracing::info!(session = %id, "玄女 cc 续写策府已有 session");
-            let short = &id[..id.len().min(8)];
-            Some(format!(
-                "已续写玄女上次 session（{short}…）——上下文保留在 cc 端，TUI 对话历史不回放。直接开口接着聊。"
-            ))
-        }
-        (_, Some(id)) => {
-            // #12：spawn 前不落盘——message 改成"将首次启动"，落盘移到 spawn 成功之后
-            tracing::info!(session = %id, "玄女 cc 即将首次启动（spawn 成功后落盘）");
-            None
-        }
-        // 上游契约：resolve_xuannv_session 总返回至少一个 Some。若两者皆 None，
-        // 说明策府读写出了 invariant 异常——返 Err 而非 panic，让顶层错误边界打印。
-        (None, None) => anyhow::bail!(
-            "策府返回 (None, None)：玄女 session_id 既未命中也未生成，请检查 oracle_facts 表"
-        ),
-    };
-
-    // #12：留 fresh uuid 句柄——spawn 成功后落策府
-    let fresh_session_to_record = session_id.clone();
+    // cc 2.1.114+ SDK 模式 strict resume——`--session-id <new-uuid>` 也会被当
+    // 「resume 不存在的 session」拒掉。同 xuannv_bootstrap 处理：让 cc 自己生
+    // 成 session_id，REPL 玄女每次启动 = fresh session（cc 端无对话连续性，但
+    // fuxi events.db 历史完整）。横幅取消。
+    let resume_banner: Option<String> = None;
 
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
@@ -367,8 +346,8 @@ pub async fn run(args: Args) -> Result<()> {
         },
         allowed_tools: loaded.allowed_tools,
         disallowed_tools: loaded.disallowed_tools,
-        resume_session_id,
-        session_id,
+        resume_session_id: None,
+        session_id: None,
         ..Default::default()
     };
     let xuannv_id = fuxi
@@ -376,18 +355,6 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("玄女 spawn 失败")?;
     fuxi.set_xuannv(xuannv_id).await;
-
-    // #12：spawn 成功后才把首次生成的 session_id 落策府——失败时上面的 ? 已 bail
-    // 留住 oracle 干净状态，重启 redeploy 不必 sqlite delete。
-    if let Some(sid) = fresh_session_to_record
-        && let Err(e) = crate::session::record_xuannv_session(&oracle, &sid, "repl-bootstrap").await
-    {
-        tracing::warn!(
-            error = %e,
-            session_id = %sid,
-            "玄女 session 落策府失败——下次启动会作为新 session 重启（丢历史）"
-        );
-    }
 
     tracing::info!(xuannv = %xuannv_id, "玄女已就绪");
 

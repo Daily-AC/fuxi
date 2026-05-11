@@ -588,6 +588,7 @@ fn summarize(k: &EventKind) -> String {
         XuannvHandoffWritten { length_chars, .. } => {
             format!("xuannv handoff ↓ {length_chars} chars")
         }
+        XuannvVoiceLine { text } => format!("xuannv say {}", one_line(text, 40)),
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -691,6 +692,9 @@ fn color_for(k: &EventKind) -> Color {
         UsageReport { .. } => Color::DarkGray,
         XuannvContextWatermark { .. } => Color::Yellow,
         XuannvHandoffWritten { .. } => Color::LightMagenta,
+        // Jarvis 语音侧副本——青色，跟 inline message 一族近但更冷，
+        // 提示"这是给 TTS 的"不抢正常对话流。
+        XuannvVoiceLine { .. } => Color::Cyan,
 
         Custom { .. } => Color::DarkGray,
     }
