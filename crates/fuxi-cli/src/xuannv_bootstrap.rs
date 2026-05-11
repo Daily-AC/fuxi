@@ -39,7 +39,7 @@ pub const DEFAULT_XUANNV_ROLE: &str = "xuannv";
 ///
 /// 错误传染语义：role 找不到 / cc launch 失败时，IM daemon 应该让用户感知（眼前
 /// 一片白花花的玄女不存在错），而非静默吞掉——返回 `Err` 让上层 main fail-fast。
-pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Result<AgentId> {
+pub async fn ensure_xuannv(fuxi: &Fuxi, _oracle: &OracleStore, role: &str) -> Result<AgentId> {
     if let Some(existing) = fuxi.xuannv_id().await {
         tracing::info!(xuannv = %existing, "玄女已就绪，跳过 spawn");
         return Ok(existing);
@@ -48,13 +48,17 @@ pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Res
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let xuannv_profile = loaded.profile.clone();
 
-    let (resume_session_id, session_id) = crate::session::resolve_xuannv_session(oracle)
-        .await
-        .context("解析玄女 session_id")?;
-    // #12：留住 fresh uuid（spawn 成功后才落盘）。已有 resume → session_id 是 None
-    // 不需要 record；新 session → spawn ok 后写。
-    let fresh_session_to_record = session_id.clone();
-
+    // 玄女 cc spawn：**不**强塞 `session_id`。cc 2.1.114+ 在 SDK 模式下把
+    // `--session-id <new-uuid>` 当 strict resume，session 不存在立死；连带的
+    // `--resume <stale-uuid>`（oracle 残留 fact 拉出来的）也死。让 cc 自己生
+    // 成 session，进程内对话由 fuxi 通过 message inject 续——cc 自身 session
+    // 持久化和 resume 在 v1 都不需要。
+    //
+    // 老路径 `resolve_xuannv_session` + `record_xuannv_session` 暂时**绕开**：
+    // 玄女每次 IM 启动 = fresh session，丢 cc 自身的对话历史（fuxi events.db
+    // 里的对话历史不受影响）。如未来要恢复跨重启续写，应改成：spawn 后等
+    // `ws_bridge` 从 `system/init` 事件 peek 到的 `cli_session_id` 异步 record，
+    // 不在 spawn 前预先生成。
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: if loaded.append_system_prompt.is_empty() {
             None
@@ -63,8 +67,8 @@ pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Res
         },
         allowed_tools: loaded.allowed_tools,
         disallowed_tools: loaded.disallowed_tools,
-        resume_session_id,
-        session_id,
+        resume_session_id: None,
+        session_id: None,
         ..Default::default()
     };
 
@@ -73,19 +77,6 @@ pub async fn ensure_xuannv(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Res
         .await
         .context("玄女 spawn 失败")?;
     fuxi.set_xuannv(xuannv_id).await;
-
-    // #12：仅在新 session 路径（首次启动）才 record——spawn 成功 ⇒ 落盘安全
-    if let Some(sid) = fresh_session_to_record
-        && let Err(e) = crate::session::record_xuannv_session(oracle, &sid, "im-bootstrap").await
-    {
-        // record 失败不应让玄女进程跟着死——下次启动会重新生成 uuid（等于 fresh
-        // start），代价是丢历史 session。warn 级提示运维。
-        tracing::warn!(
-            error = %e,
-            session_id = %sid,
-            "玄女 session 落策府失败——下次启动会作为新 session 重启（丢历史）"
-        );
-    }
 
     tracing::info!(xuannv = %xuannv_id, role, "玄女已自启");
     Ok(xuannv_id)

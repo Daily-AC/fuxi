@@ -1,0 +1,18 @@
+[Unit]
+Description=TTS Proxy for jarvis (port 9881, 调 sovits :9880)
+After=sovits.service network.target
+Wants=sovits.service
+
+[Service]
+Type=simple
+User=e0-7
+Environment=HOME=/home/e0-7
+Environment=PATH=/home/e0-7/miniforge3/envs/GPTSoVITS/bin:/usr/bin:/bin
+EnvironmentFile=/home/e0-7/.fuxi/sovits-proxy.env
+WorkingDirectory=/home/e0-7
+ExecStart=/home/e0-7/miniforge3/envs/GPTSoVITS/bin/python -m uvicorn tts_proxy:app --host 127.0.0.1 --port 9881
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

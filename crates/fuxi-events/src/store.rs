@@ -397,6 +397,7 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         UsageReport { .. } => "usage_report",
         XuannvContextWatermark { .. } => "xuannv_context_watermark",
         XuannvHandoffWritten { .. } => "xuannv_handoff_written",
+        XuannvVoiceLine { .. } => "xuannv_voice_line",
         Custom { .. } => "custom",
     }
 }
