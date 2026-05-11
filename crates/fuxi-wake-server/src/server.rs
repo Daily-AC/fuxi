@@ -124,11 +124,10 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
 
 /// WS 升级入口——Authorization 校验失败直接 401。
 ///
-/// 两条 token 通道：
-///   1. Authorization: Bearer <token>（药丸 v0.2 走的；Swift URLRequest 加 header）
-///   2. Query `?token=<token>`（桌宠 Tauri webview 走的；Web WebSocket API
-///      不能 set custom header，token 只能塞 URL）
-/// 两条用同一颗预共享 `~/.fuxi/wake.token` 比对，安全等价。
+/// 两条 token 通道（两条用同一颗预共享 `~/.fuxi/wake.token` 比对，安全等价）：
+/// - **Authorization: Bearer <token>**：药丸 v0.2 走的；Swift URLRequest 加 header
+/// - **Query `?token=<token>`**：桌宠 Tauri webview 走的；Web WebSocket API 不能
+///   set custom header，token 只能塞 URL
 async fn wake_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -141,7 +140,10 @@ async fn wake_ws(
         .and_then(|v| v.to_str().ok())
         .and_then(auth::parse_bearer)
         .map(str::to_string);
-    let query_token = q.get("token").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let query_token = q
+        .get("token")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let Some(token) = header_token.or(query_token) else {
         warn!(%addr, "wake ws: 缺 token（Authorization Bearer 或 ?token=）");
