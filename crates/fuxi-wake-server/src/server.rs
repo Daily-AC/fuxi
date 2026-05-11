@@ -123,21 +123,33 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// WS 升级入口——Authorization 校验失败直接 401。
+///
+/// 两条 token 通道（两条用同一颗预共享 `~/.fuxi/wake.token` 比对，安全等价）：
+/// - **Authorization: Bearer <token>**：药丸 v0.2 走的；Swift URLRequest 加 header
+/// - **Query `?token=<token>`**：桌宠 Tauri webview 走的；Web WebSocket API 不能
+///   set custom header，token 只能塞 URL
 async fn wake_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    let auth = headers
+    let header_token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let Some(token) = auth::parse_bearer(auth) else {
-        warn!(%addr, "wake ws: 缺 Authorization Bearer 头");
-        return (StatusCode::UNAUTHORIZED, "missing bearer").into_response();
+        .and_then(auth::parse_bearer)
+        .map(str::to_string);
+    let query_token = q
+        .get("token")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let Some(token) = header_token.or(query_token) else {
+        warn!(%addr, "wake ws: 缺 token（Authorization Bearer 或 ?token=）");
+        return (StatusCode::UNAUTHORIZED, "missing token").into_response();
     };
-    if !auth::constant_time_eq(token, &state.token) {
+    if !auth::constant_time_eq(&token, &state.token) {
         warn!(%addr, "wake ws: token 不匹配");
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }

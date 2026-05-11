@@ -21,6 +21,18 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 use tracing::warn;
 
+/// 从 `?a=b&token=xyz&c=d` 形式找 token 值。手解析省 url crate dep（lib 没装）。
+/// token 值若 URL-encoded 不做 decode——HMAC token 是 base64url 不含特殊字符，
+/// 客户端如错塞了 encoded 'token=%xx' 让它撞验签失败更安全。
+fn extract_token_from_query(q: &str) -> Option<&str> {
+    for pair in q.split('&') {
+        if let Some(v) = pair.strip_prefix("token=") {
+            return Some(v);
+        }
+    }
+    None
+}
+
 /// 给 layer 用的状态——共享的 HMAC secret。
 #[derive(Clone)]
 pub struct AuthGate {
@@ -66,22 +78,45 @@ pub async fn cookie_auth_layer(
         return next.run(request).await;
     }
 
-    let cookie_header = request
+    // 鉴权解析三通道（优先级 Bearer > Query > Cookie）：
+    //   1. Authorization Bearer——非浏览器客户端（curl / 第三方）走的主路
+    //   2. URL ?token=<...>——浏览器 WebSocket 走的；Web WebSocket API 不能 set
+    //      自定义 header，token 只能塞 URL；桌宠 Tauri webview WS 必须靠它，
+    //      fetch 也用它作 fallback
+    //   3. Cookie `fuxi_im_token`——PWA / 药丸 v0.2 主路；HttpOnly 防 XSS
+    // 三条都用同一颗 HMAC secret 验签，安全等价；client 选哪条按自己环境最方便。
+    let token: Option<String> = request
         .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok());
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            // 解析 query string ?token=...
+            request
+                .uri()
+                .query()
+                .and_then(extract_token_from_query)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            request
+                .headers()
+                .get(header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(extract_token_from_cookie_header)
+                .map(str::to_string)
+        });
 
-    let Some(cookie_str) = cookie_header else {
-        warn!(path, reason = "missing_cookie", "im auth reject");
+    let Some(token) = token else {
+        warn!(path, reason = "missing_token", "im auth reject");
         return unauthorized();
     };
 
-    let Some(token) = extract_token_from_cookie_header(cookie_str) else {
-        warn!(path, reason = "cookie_missing_token", "im auth reject");
-        return unauthorized();
-    };
-
-    match verify_token(&gate.secret, token) {
+    match verify_token(&gate.secret, &token) {
         Ok(_claims) => {
             // claims 暂不通过 extension 注入下游——handler 没人需要 device_id。
             // 等真有 handler 要审计是哪台设备来的再加 `request.extensions_mut().insert(claims)`。
@@ -212,6 +247,72 @@ mod tests {
             .unwrap();
         let resp = make_app(gate).oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn accepts_query_token_for_websocket_clients() {
+        // Web WebSocket API 不能 set 自定义 header，token 必须走 URL ?token=
+        // 桌宠 Tauri webview 的 FuxiClient.ts /api/conv WS 唯一通道
+        let secret = fixture_secret();
+        let claims = fresh_claims("dev-pet".into(), "jarvis-pet".into());
+        let token = sign_token(&secret, &claims).unwrap();
+        let gate = AuthGate::new(Arc::new(secret));
+        let app = make_app(gate);
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("/api/intervene?token={token}&from=cursor"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn query_token_with_invalid_signature_rejected() {
+        let gate = AuthGate::new(Arc::new(fixture_secret()));
+        let app = make_app(gate);
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/intervene?token=not.valid")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn accepts_bearer_token_for_non_browser_clients() {
+        // 桌宠 Tauri webview / curl / 任何非浏览器客户端通过 Authorization Bearer
+        // 鉴权——webview 不能 set Cookie header（forbidden name）。
+        let secret = fixture_secret();
+        let claims = fresh_claims("dev-pet".into(), "jarvis-pet".into());
+        let token = sign_token(&secret, &claims).unwrap();
+        let gate = AuthGate::new(Arc::new(secret));
+        let app = make_app(gate);
+
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn bearer_with_invalid_signature_rejected() {
+        let gate = AuthGate::new(Arc::new(fixture_secret()));
+        let app = make_app(gate);
+        let req = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/intervene")
+            .header(header::AUTHORIZATION, "Bearer not.a.valid.token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

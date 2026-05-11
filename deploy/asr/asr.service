@@ -1,0 +1,21 @@
+[Unit]
+Description=FunASR Paraformer-zh ASR server for jarvis-pet (port 9882)
+After=network.target
+# 不依赖 sovits.service——两个 GPU 服务可独立活/独立挂
+
+[Service]
+Type=simple
+User=e0-7
+Environment=HOME=/home/e0-7
+Environment=PATH=/home/e0-7/miniforge3/envs/funasr-asr/bin:/usr/bin:/bin
+Environment=HF_ENDPOINT=https://hf-mirror.com
+# modelscope mirror（FunASR 默认拉 modelscope，国内直连慢）
+Environment=MODELSCOPE_DOMAIN=modelscope.cn
+EnvironmentFile=-/home/e0-7/.fuxi/asr-server.env
+WorkingDirectory=/home/e0-7
+ExecStart=/home/e0-7/miniforge3/envs/funasr-asr/bin/python -m uvicorn asr_server:app --host 127.0.0.1 --port 9882
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
