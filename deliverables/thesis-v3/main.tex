@@ -114,6 +114,13 @@
   morestring=[b]",
   morestring=[b]'
 }
+% 伪代码语言 — 算法描述用，沿用 listings 浮动体避免引入新浮动体兼容风险
+\lstdefinelanguage{Pseudo}{
+  morekeywords={Input,Output,if,then,else,elif,for,foreach,while,do,return,emit,spawn,await,match,break,continue,case,end,when,and,or,not,is,let,assign,repeat,until,procedure,function,call,publish,subscribe,raise,abort,otherwise},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  sensitive=true
+}
 \lstset{
   basicstyle=\ttfamily\small,
   keywordstyle=\color{blue!75!black}\bfseries,
@@ -221,9 +228,8 @@
 \input{chapters/01-introduction}
 \input{chapters/02-overall-design}
 \input{chapters/03-modules}
-\input{chapters/04-implementation}
-\input{chapters/05-experiments}
-\input{chapters/06-conclusion}
+\input{chapters/04-experiments}
+\input{chapters/05-conclusion}
 
 % 参考文献
 \printbibliography[title={参考文献}, heading=bibliography]

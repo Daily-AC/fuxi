@@ -1,0 +1,122 @@
+% 图 4-1 端到端任务执行闭环 v3 — 全部序号气泡统一钉在"源端 + 4mm 偏移"
+% 9 步闭环：用户提交 → 选 worker → A2A dispatch → sandbox 执行 → 事件回流 →
+%          双路径（broadcast + WAL）→ 观测端 → 断线 replay → input-required 回环
+\documentclass[border=4pt]{standalone}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric, fit, backgrounds}
+\input{_style.tex}
+
+\begin{document}
+\begin{tikzpicture}[font=\sffamily, node distance=9mm and 16mm]
+
+% ── 用户面（最左）─────────────────────────────────────
+\node[modBox, minimum width=25mm] (user) {用户\\\scriptsize IM/PWA/REPL};
+
+% ── 编排核心（中左）─────────────────────────────────
+\node[highlightBox, right=26mm of user, minimum width=29mm] (xuannv) {玄女\\\scriptsize 顶层 Agent};
+\node[modBox, below=8mm of xuannv, minimum width=29mm] (shelf) {Shelf 橱柜\\\scriptsize claim\_idle\_by\_role};
+
+% ── 执行体（最右，组合：A2A + Worker + Sandbox）──────
+\node[modBox, right=32mm of xuannv, minimum width=30mm] (a2aep) {A2A 端点\\\scriptsize JSON-RPC + SSE};
+\node[modBox, below=8mm of a2aep, minimum width=30mm] (worker) {门客 Worker\\\scriptsize cc / codex};
+\node[modBox, below=8mm of worker, minimum width=30mm] (sandbox) {Workspace Sandbox\\\scriptsize L2 worktree};
+
+% ── EventBus 双路径（中间偏下）──────────────────────
+\node[highlightBox, below=24mm of shelf, minimum width=44mm] (bus) {EventBus\\\scriptsize broadcast \;$\parallel$\; WAL writer};
+
+% ── 持久化（最下偏右）───────────────────────────────
+\node[ghostBox, below=14mm of bus, xshift=-24mm, minimum width=29mm] (sqlite) {SQLite WAL\\\scriptsize 单一真相源};
+
+% ── 观测端（最下偏左）───────────────────────────────
+\node[modBox, below=14mm of bus, xshift=24mm, minimum width=33mm] (observer) {观测端\\\scriptsize Firehose · IM · SSE · TUI};
+
+% ── 跨进程边界 ─────────────────────────────────────
+\begin{scope}[on background layer]
+  \node[externalBoundary, fit=(a2aep) (worker) (sandbox), inner sep=4pt,
+    label={[font=\scriptsize\itshape, text=fuxiGrayDark, yshift=1pt]above:{执行体（cc/codex 子进程 + L2 沙箱）}}] (workergroup) {};
+\end{scope}
+
+% ============================================================================
+% 主流程箭头 — 序号气泡统一规则：钉在源端 + 4mm 偏移
+%   横向 LR 箭头 → 气泡在源端右上 +(3, 4)
+%   横向 RL 箭头 → 气泡在源端左下 +(-3, -7)（让出顶部空间给反向箭头）
+%   纵向 down  → 气泡在源端左下 +(-5, -3)
+%   L 形      → 气泡在源端，与第一段垂直方向偏 4mm
+% ============================================================================
+
+% ① user → xuannv（横向 LR）
+\draw[flow] (user.east) -- node[above=1pt, font=\scriptsize] {intervene} (xuannv.west);
+\node[numBubble, fill=fuxiBlue!8] at ($(user.east)+(3mm,4mm)$) {1};
+
+% ② xuannv ↔ shelf（纵向 bidir，源端=xuannv.south）
+\draw[bidir] (xuannv.south) -- node[right=2pt, font=\scriptsize] {claim} (shelf.north);
+\node[numBubble, fill=fuxiBlue!8] at ($(xuannv.south)+(-6mm,-3mm)$) {2};
+
+% ③ xuannv → A2A 端点（横向 LR，blue）
+\draw[flow, color=fuxiBlue] (xuannv.east) -- node[above=1pt, font=\scriptsize, color=fuxiBlue] {sendSubscribe} (a2aep.west);
+\node[numBubble, fill=fuxiBlue!8] at ($(xuannv.east)+(3mm,4mm)$) {3};
+
+% A2A → Worker 内部（无序号）
+\draw[flow] (a2aep.south) -- (worker.north);
+
+% ④ worker → sandbox（纵向 down）
+\draw[flow] (worker.south) -- node[right=2pt, font=\scriptsize] {exec} (sandbox.north);
+\node[numBubble, fill=fuxiBlue!8] at ($(worker.south)+(-6mm,-3mm)$) {4};
+
+% ⑤ worker → bus（L 形：worker.west → 左 5mm → 下 → 进 bus.east）
+\draw[flowEvent] (worker.west) -- ++(-5mm,0) |- ($(bus.east)+(0,2mm)$);
+\node[numBubble, fill=fuxiBlue!8] at ($(worker.west)+(-3mm,4mm)$) {5};
+
+% ⑥ bus → {sqlite, observer} — trunk + rail + 两枝分叉（与 fig 3.1 同款）
+\coordinate (busFanY) at ($(bus.south)+(0,-5mm)$);
+\draw[color=fuxiBlue, line width=0.9pt] (bus.south) -- (busFanY);
+\draw[color=fuxiBlue, line width=0.9pt] (sqlite.north |- busFanY) -- (observer.north |- busFanY);
+\draw[flowEvent] (sqlite.north |- busFanY) -- (sqlite.north);
+\draw[flowEvent] (observer.north |- busFanY) -- (observer.north);
+% 6b 在 sqlite 分支源端右上, 6a 在 observer 分支源端左上, 让 6b 在左, 6a 在右
+\node[numBubble, fill=fuxiBlue!8] at ($(sqlite.north |- busFanY)+(3mm,3mm)$) {6b};
+\node[numBubble, fill=fuxiBlue!8] at ($(observer.north |- busFanY)+(-3mm,3mm)$) {6a};
+
+% ⑦ sqlite → observer（横向 LR，orange dashed replay）— ⑦ 气泡放路径下方避开 replay 文字
+\draw[flow, color=fuxiOrange, dashed] (sqlite.east) -- node[above=1pt, font=\scriptsize, color=fuxiOrange] {replay} (observer.west);
+\node[numBubble, fill=fuxiOrange!12, draw=fuxiOrange, text=fuxiOrange] at ($(sqlite.east)+(4mm,-4mm)$) {7};
+
+% ⑧ bus → xuannv（system bridge, purple）— 4 段路径让最后段 vertical 上进玄女,
+%   彻底避免与 ⑨ 横线在同一 y 平行重叠
+%   bus.west → 左 5mm → 长 vert 上至 y=-14 → horiz 右 → 短 vert 上 9mm 进玄女 south
+\coordinate (eight_a) at ($(bus.west)+(-5mm,0)$);
+\coordinate (eight_d) at ($(xuannv.south)+(-10mm,0)$);
+\coordinate (eight_c) at ($(eight_d)+(0,-4mm)$);
+\coordinate (eight_b) at (eight_a |- eight_c);
+\draw[flow, color=fuxiPurple]
+  (bus.west) -- (eight_a) -- (eight_b) -- (eight_c) -- (eight_d);
+% 标签放在长 vertical 段 (eight_a → eight_b) 中点左侧
+\node[anchor=east, font=\scriptsize, color=fuxiPurple, align=center]
+  at ($(eight_a)!0.5!(eight_b)+(-1mm,0)$) {system bridge\\(AwaitingInput)};
+\node[numBubble, fill=fuxiPurple!12, draw=fuxiPurple, text=fuxiPurple]
+  at ($(bus.west)+(-3mm,5mm)$) {8};
+
+% ⑨ xuannv → user（横向 RL, purple）— y 从 -4 调到 -3, 留出 1mm 与 ⑧ approach 段(y=-14) 分开
+\coordinate (nineStart) at ($(xuannv.west)+(0,-3mm)$);
+\coordinate (nineEnd)   at ($(user.east)+(0,-3mm)$);
+\draw[flow, color=fuxiPurple] (nineStart) -- (nineEnd);
+% ⑨ 气泡放在横线中段下方 3mm — 明显属于 ⑨ 这条横线, 远离 ⑧ 路径无歧义
+\node[numBubble, fill=fuxiPurple!12, draw=fuxiPurple, text=fuxiPurple]
+  at ($(nineStart)!0.5!(nineEnd)+(0,-3mm)$) {9};
+
+% ── 图例（中下，居于 sqlite 与 observer 之间下方）──────
+\node[anchor=north, font=\scriptsize, align=center, draw=fuxiGrayLine!40, fill=white,
+      inner sep=4pt, line width=0.3pt]
+  at ($(sqlite.south)!0.5!(observer.south)+(0,-4mm)$) {%
+\textcolor{fuxiGrayDark}{$\rightarrow$ 控制流 \quad}
+\textcolor{fuxiBlue}{$\rightarrow$ 事件流（live broadcast / WAL append）}\\
+\textcolor{fuxiOrange}{$-\!-\!\rightarrow$ 断线 replay（cursor 推进）\quad}
+\textcolor{fuxiPurple}{$\rightarrow$ input-required 回环}
+};
+
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,65 @@
+% ============================================================================
+% 第 5 章 总结与展望（合并 ch3+4 后由原第 6 章顺位为第 5 章）
+% ============================================================================
+
+\section{总结与展望}
+
+第四章给出的实测数据完成了对设计假设的兑现验证，本章在此基础上对全文工作做出总结、坦诚陈述系统当前的局限，并沿四条主线给出未来工作的演进路径。本章不再重复前面章节的论证，而是把零散的工程取舍归并为「本论文真正贡献了什么」「本论文还没解决什么」「这条研究路线接下来如何走」三个问题，与第一章研究目标相呼应。
+
+\subsection{工作总结}
+\label{subsec:summary}
+
+本论文围绕「基于 AI Agent 的高性能分布式通讯系统」这一主题，完成了 Fuxi 平台从需求分析、整体设计、模块实现到实测验证的完整闭环，整个工程产出在 13 个 crate、共计约 8.25 万行 Rust 代码、27 个集成测试文件中沉淀下来。回顾全文，核心贡献可以收敛为五条。
+
+\textbf{贡献一：与 fuxi 平台同源演进的 A2A 风格协议适配层。} \texttt{fuxi-a2a} 共 1321 行，覆盖 agent discovery、task send、task stream、task query 与 task cancel 五条核心路径，沿用早期 A2A JSON-RPC binding。差异化定位在与 \texttt{fuxi-events} 事件总线、玄女—门客编排层、反向 WebSocket sandbox 的深度集成，以及把 A2A 规范 \texttt{TASK\_STATE\_INPUT\_REQUIRED} 人工介入语义映射到 \texttt{Task::PendingApproval} 与 \texttt{ShelfStatus::AwaitingInput}，使人工介入成为平台级可观测事件。\texttt{fuxi-a2a} 与 MCP\parencite{anthropic2024mcp} 在层次上互补——A2A 处理 Agent 间协作契约，MCP 处理模型与工具的调用规范。
+
+\textbf{贡献二：事件驱动通讯底座作为一等公民。} \texttt{fuxi-events} 把实时分发、持久化与历史回放三件事合并到同一抽象之内。\texttt{publish()} 路径同时投递 Tokio broadcast 与异步入库通道，前者零拷贝扇出实现毫秒级实时推送\parencite{tokio2024broadcast}，后者经 SQLite WAL 串行落库\parencite{sqlite2024wal} 保证审计追溯。「\texttt{try\_send} + 后台转交 + lag 哨兵」三步组合把背压从「不可见的死锁」变为「可见的告警」。事件因果序遵循 Lamport 逻辑时钟思路\parencite{lamport1978time}，用 SQLite \texttt{rowid} 单调递增作为隐式时钟，避开向量时钟所需时钟同步基础设施。
+
+\textbf{贡献三：玄女—门客分层与不可绕过的编排层。} 系统在 Agent 角色上确立顶层调度（玄女）与执行（门客）的显式分工，与 MetaGPT\parencite{hong2023metagpt} 角色分工一致，但更强调「编排层不可绕过」与「自动决策不得覆盖用户显式意图」两项硬约束。Worker 选择函数在标签兼容、节点钉死与最低饱和度三层过滤下选择目标门客，思路与 MapReduce\parencite{dean2004mapreduce} 的「数据本地性 + 负载均衡」相通而更轻量。
+
+\textbf{贡献四：WebSocket 反连打破传统 stdio 范式。} 传统 stdin/stdout 范式中编排层必须等门客主动 \texttt{poll}，门客陷入工具循环就形成「消息黑洞」。本工作将连接方向反转：编排层在本机起 WebSocket 服务器\parencite{fette2011websocket}，子进程通过 \texttt{--sdk-url} 反连回来。三层 sandbox（L1 只读快照 / L2 任务级 worktree / L3 角色级持久构建缓存）依赖 git worktree\parencite{git2024worktree} 保证多门客并发文件操作互不干扰。
+
+\textbf{贡献五：跨节点扩展点的钩子化抽象与 sandbox 验证。} 跨节点协作所需的四个扩展点抽象为依赖反转 trait：\texttt{RecallSink}、\texttt{DistEnqueuer}、\texttt{NodeLoadProvider}、\texttt{ExtractorSpawner}。四个 trait 统一定义在低层 crate，具体实现由顶层 \texttt{fuxi-cli} 在 daemon 启动时注入；这同时是规避 Rust workspace 循环依赖的标准做法。\texttt{Project} 数据结构新增 \texttt{host\_nodes: Vec<String>} 字段标记项目可执行节点，配合 \texttt{auto\_pin\_from\_project} 入口的双保险守卫保证用户显式 \texttt{@<node>} 不被自动逻辑覆盖。新增字段以 \texttt{\#[serde(default)]} 搭配反回归测试保持跨版本兼容。当前实现已在两节点 sandbox 与少量真实跨机部署中跑通端到端调度，更高节点数（10 节点以上）、更不可靠链路下的故障转移留待后续主线三推进。
+
+工程兑现层面，第四章在 Apple Silicon 平台上对吞吐量、延迟、参数敏感性与事件总线压力进行了多维测量：8 worker 配置下达 \textbf{665.00 tasks/s}，Worker 扩展至 16 时吞吐增长至 \textbf{1288.24 tasks/s}（扩展效率 80.5\%--83.1\%）；任务派发 p50 \textbf{32.93 ms}、进程内事件总线广播 p50 仅 \textbf{0.08 ms}；事件总线 64 subscriber × 10\,000 events/s 持续负载下零丢帧。除定量数据外系统已在作者维护的 ERP 项目中作为日常协作平台运行。
+
+\subsection{局限与不足}
+\label{subsec:limitations}
+
+陈述局限是为让接续这条路线的工作明确接力点所在，而非规避评审。
+
+\textbf{单机优先，跨节点能力仅在 sandbox 中验证。} v2 引入的跨节点调度当前只在两节点 sandbox 与少量真实跨机部署中跑通，尚未在更高节点数（10 节点以上）与更不可靠链路（断网恢复、节点崩溃恢复）下接受充分考验。未引入强一致复制或共识协议——若推广到更大规模或不可靠链路仍需借鉴 Raft\parencite{ongaro2014raft} 或 Spanner TrueTime + Paxos 组合\parencite{corbett2012spanner}。
+
+\textbf{Agent CLI 适配只覆盖 cc 与 codex 两类。} 生态内 Gemini CLI、aider、Cursor agent、opencode 等同类型 CLI 尚未提供官方适配。这并非架构层限制——\texttt{fuxi-core::Agent} trait 已对外开放，添加新 CLI 只需提供 \texttt{launch\_with\_id} 与 stream-json 解析两组实现，参考既有适配器可在数百行内完成。未扩展到全部主流 CLI 的实际原因在于工程精力分配。
+
+\textbf{记忆抽取保守且仍偏关键词检索。} \texttt{fuxi-memory} 自动事实抽取默认关闭。FTS5 关键词匹配在 1 万条事实下足够实用，但当事实库扩展到 10 万条以上、且查询语义偏「相似」而非「相同」时关键词匹配会失效——已为此预留向量检索接口，但当前实现尚未引入混合检索路径。
+
+\textbf{安全模型尚不完整。} 在工作区隔离与跨节点 HMAC 认证上做了基础工作（三层 sandbox、节点间 HMAC-SHA256 签名），但工具调用授权、数据访问控制与跨边界提示注入防护仍较薄弱。当前门客的工具调用授权完全继承自其底层 CLI 设置，编排层尚未实施统一细粒度授权策略。该问题可视为 SWE-agent\parencite{yang2024sweagent} 所讨论的「Agent-Computer Interface」边界安全问题在本平台上的延伸。
+
+\textbf{用户界面密度仍可优化。} TUI 与 IM 端目前以信息密度优先，对非技术用户而言学习成本仍偏高。事件流过密时低价值事件会刷屏，缺少足够的事件流摘要与对话流统一表达——若扩展到非技术用户作为日常生产力工具仍需在界面层进一步收敛。
+
+\textbf{横向 baseline 对比缺失。} 第四章选择以「理论上限对照」作为主要参照，没有与 LangChain、AutoGen、CrewAI 等公开 Agent 编排框架做实测吞吐对比。理由是跨语言、跨抽象层级 baseline 比较容易让数字失去工程意义，但这意味着本文未能给出 Fuxi 在主流框架坐标系下的相对位置。
+
+\textbf{A2A 协议规范跟进与官方 SDK 互通验证待补。} 当前官方规范已切到 PascalCase 方法集，\texttt{Part} 也使用 one-of 字段语义而非 tagged union。本文 \texttt{fuxi-a2a} 沿用早期 A2A JSON-RPC binding，覆盖 5 条核心路径，但尚未与 \texttt{a2a-rs} SDK 做完整 wire-level 互操作验证，也未完全覆盖最新规范中的全部方法、状态（如 \texttt{auth-required}、\texttt{rejected}）。后续工作将把该 crate 升级为当前官方规范兼容层并补 \texttt{a2a-rs} 互通测试。
+
+\subsection{未来工作}
+\label{subsec:future-work}
+
+未来工作可沿四条主线推进。\textbf{主线一：A2A 跨组织联邦与算力交易。} 当前已支持单节点 A2A 服务端与客户端，但跨组织（不同信任域）协作还需更完整的认证、计费与服务发现机制——可在 \texttt{AgentCard} 的 \texttt{security} 字段加入 OIDC 或 mTLS 认证声明，在 \texttt{tasks/send} 路径接入计费 metadata，在 ZooKeeper\parencite{hunt2010zookeeper} 风格协调层基础上实现 fuxi-of-fuxi 服务发现。最远端是构建 fuxi 节点之间的算力交易市场。
+
+\textbf{主线二：Agent CLI 适配框架的扩展。} 后续可把「launch + stream-json 解析 + WS 反连 + env 清理」四件事抽出 \texttt{AgentCliFramework}，让新 CLI 接入只需提供参数模板、stream-json schema、终止信号语义、工具调用语义四组声明式描述。MetaGPT 与 OpenHands\parencite{wang2024openhands} 对统一 Agent 抽象的探索值得借鉴，但本平台不会做到「能跑任何模型」的过度通用化——只服务 CLI 形态的 Agent，是当前最贴近用户实际工具栈的工程节奏。
+
+\textbf{主线三：分布式一致性与故障转移。} 当前跨节点协作建立在「节点链路相对稳定」的假设上。三个方向：引入共识协议对项目元数据、节点注册表、任务终态做多副本复制；在事件总线层支持跨节点事件聚合，思路类似 GFS\parencite{ghemawat2003gfs} 的 master + chunk 分层但不直接复用；在 worker 层支持「热迁移」让任务能在其他健康节点上从最近一次事件 checkpoint 恢复继续执行。
+
+\textbf{主线四：工具市场与角色市场。} \texttt{fuxi-skills} 当前借鉴 Voyager\parencite{wang2023voyager} 持久技能库思路并通过 staging + ledger 双轨为外部贡献做了铺垫。后续可在此基础上构建公开「角色市场」与「工具市场」。两类市场的核心挑战是审计与信任——下载并运行陌生角色相当于在自己机器上启动一个未知行为的 Agent，必须有沙箱级别的执行隔离与权限声明机制。
+
+四条主线在工程节奏上不会同时推进。下一阶段以主线二与主线四的初步雏形为优先级，因为这两条复杂度可控且对用户日常体验提升最直接；主线一与主线三放在更长周期下推进。
+
+\subsection{结语}
+\label{subsec:closing}
+
+回到本文起点：在 Python 多 Agent 框架已百花齐放的当下，为何要重新用 Rust 写一套 fuxi？答案不在于性能数字，而在于「通讯底座是否被当作一等公民来设计」。在大量现有框架中事件流是任务流的副产物，A2A 协议是文档里的 schema 而非可独立使用的 SDK，状态一致性靠 Python 的 \texttt{await} 隐式承担。fuxi 把这三件事显式拆出来——\texttt{fuxi-events} 让事件流可独立观测可独立回放、\texttt{fuxi-a2a} 把协议变成可独立部署的 1321 行 Rust crate、\texttt{fuxi-core} 把 \texttt{Agent}/\texttt{Task}/\texttt{Workspace} 等抽象固化为 trait——这种「把基础设施从应用流程中剥离」的结构选择，是本工作的差异化所在。本论文不试图证明 fuxi 是「最好」或「最快」的多 Agent 平台，而是通过 8.25 万行 Rust 代码、27 个集成测试与第四章可重复的实测数字论证一种工程取向的可行性。fuxi 作为作者长期使用的个人 AI Agent 平台，不会因毕业答辩结束而停止演进；本论文记录的是这条路线 v1 与 v2 阶段的工作。
+
+\subsection{本章小结}
+
+本章按「工作总结—局限不足—未来工作—结语」四节展开：第一节回顾五条核心贡献；第二节坦诚陈述七项局限，承认 fuxi 的设计目标聚焦于本地优先的个人 AI Agent 平台；第三节沿 A2A 跨组织联邦、Agent CLI 适配框架扩展、分布式一致性与故障转移、工具与角色市场四条主线给出未来路线图；第四节回到论文起点，重申「通讯底座作为一等公民」这一差异化定位。
