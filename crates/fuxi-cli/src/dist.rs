@@ -261,12 +261,27 @@ pub struct DistCancelResp {
 /// 声明 "我现在真的在跑这些 job"，controller 以 worker 为准，自动修复漂移。
 ///
 /// 频率约定：worker 每 10s 发一次；controller 30s 未收到视作 dead。
+///
+/// **idempotent metadata（PR-B）**：`tags` + `max_concurrency` 让每次心跳都重申
+/// worker 身份——controller 重启 in-memory `nodes` 表清零时，下次心跳即恢复，无需
+/// worker 端独立 re-register RPC 兜底。老版 worker 不带这俩字段（`#[serde(default)]`
+/// 解成 None），controller 沿用既有 entry 值（或 NodeRuntimeInfo::default 的空值）。
+///
+/// 缘起：home fuxi-im 5/12 00:39 重启后 mac worker 一直 heartbeat 但 `fuxi nodes`
+/// 看到 tags=[] / max_concurrency=1 / registered_at_ms_ago=null——心跳走 `or_default()`
+/// 新建 entry 时 NodeRuntimeInfo 字段全 default，原 register 上报的元数据丢光。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistHeartbeatReq {
     pub node_id: String,
     /// worker 自身视角的 inflight job_ids。空 = 当前空闲。
     #[serde(default)]
     pub inflight: Vec<String>,
+    /// worker 重申的 tags——填充新建 entry 或刷新既有 entry。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// worker 重申的 max_concurrency。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +358,14 @@ impl Default for NodeRuntimeInfo {
             inflight: Vec::new(),
         }
     }
+}
+
+/// 心跳带的身份元数据——worker 每次心跳重申，让 controller 自愈重启丢内存态。
+/// 见 [`DistHeartbeatReq`] doc 解释为何要这条。
+#[derive(Debug, Clone)]
+pub struct NodeHeartbeatMetadata {
+    pub tags: Vec<String>,
+    pub max_concurrency: u32,
 }
 
 #[derive(Default)]
@@ -1104,12 +1127,30 @@ impl DistController {
     ///
     /// 注意：不从 controller.inflight (全局 job 表) 里移除那些 worker 声明已
     /// 不在的 job——移除权归 report（job 结束）和 sweep_stale（worker 死亡）。
-    pub async fn heartbeat(&self, node_id: &str, worker_inflight: Vec<String>) -> Vec<String> {
+    pub async fn heartbeat(
+        &self,
+        node_id: &str,
+        worker_inflight: Vec<String>,
+        metadata: Option<NodeHeartbeatMetadata>,
+    ) -> Vec<String> {
         let mut g = self.inner.lock().await;
         let cancelled = g.cancelled.clone();
         let node = g.nodes.entry(node_id.to_string()).or_default();
-        node.last_seen = Some(Instant::now());
+        let now = Instant::now();
+        node.last_seen = Some(now);
         node.inflight = worker_inflight.clone();
+        // PR-B：心跳 idempotent metadata。新 entry（register 未跑过 / controller 重启
+        // 丢内存态）经此自愈：tags/cap 在心跳后立即正确，无需 worker 端独立 re-register。
+        // 已有 entry 也会被刷新——register 跟心跳一致时无副作用；不一致时心跳是后到
+        // 的"worker 真当前认知"，让它赢。
+        if let Some(meta) = metadata {
+            let normalized = meta.max_concurrency.max(1);
+            node.tags = meta.tags;
+            node.max_concurrency = normalized;
+            if node.registered_at.is_none() {
+                node.registered_at = Some(now);
+            }
+        }
         let inflight_len = node.inflight.len() as i64;
         let inflight_count = node.inflight.len() as u32;
         // P6 采样：仅在 inflight_count 与上次发布不同 OR 状态翻转 (stale→alive)
@@ -1419,7 +1460,15 @@ async fn heartbeat_handler(
     State(ctrl): State<Arc<DistController>>,
     Json(req): Json<DistHeartbeatReq>,
 ) -> impl IntoResponse {
-    let cancel_pending = ctrl.heartbeat(&req.node_id, req.inflight).await;
+    let metadata = match (req.tags, req.max_concurrency) {
+        (Some(tags), Some(max_concurrency)) => Some(NodeHeartbeatMetadata {
+            tags,
+            max_concurrency,
+        }),
+        // 任一字段缺失就当老版 worker 不带 metadata——保留兜底，新版始终成对发。
+        _ => None,
+    };
+    let cancel_pending = ctrl.heartbeat(&req.node_id, req.inflight, metadata).await;
     Json(DistHeartbeatResp {
         ok: true,
         cancel_pending,
@@ -1750,7 +1799,7 @@ async fn run_embedded_worker_with(
         while jobs.len() >= max_concurrency {
             tokio::select! {
                 _ = tokio::time::sleep(heartbeat_interval) => {
-                    embedded_worker_heartbeat(&ctrl, &args.node, &inflight).await;
+                    embedded_worker_heartbeat(&ctrl, &args.node, &args.tags, args.max_concurrency, &inflight).await;
                 }
                 _ = jobs.join_next() => {}
             }
@@ -1758,7 +1807,14 @@ async fn run_embedded_worker_with(
 
         let Some(job) = ctrl.pull(&args.node).await else {
             tokio::time::sleep(Duration::from_millis(args.poll_ms)).await;
-            embedded_worker_heartbeat(&ctrl, &args.node, &inflight).await;
+            embedded_worker_heartbeat(
+                &ctrl,
+                &args.node,
+                &args.tags,
+                args.max_concurrency,
+                &inflight,
+            )
+            .await;
             continue;
         };
 
@@ -1825,6 +1881,8 @@ async fn run_embedded_worker_with(
 async fn embedded_worker_heartbeat(
     ctrl: &DistController,
     node_id: &str,
+    tags: &[String],
+    max_concurrency: u32,
     inflight: &Arc<Mutex<HashMap<String, CancellationToken>>>,
 ) {
     let mut snapshot: Vec<String> = {
@@ -1843,7 +1901,12 @@ async fn embedded_worker_heartbeat(
             }
         }
     }
-    let cancel_pending = ctrl.heartbeat(node_id, snapshot).await;
+    // PR-B：embedded worker 心跳也带 metadata 让 controller 自愈（与 run_worker_with 对称）。
+    let metadata = Some(NodeHeartbeatMetadata {
+        tags: tags.to_vec(),
+        max_concurrency,
+    });
+    let cancel_pending = ctrl.heartbeat(node_id, snapshot, metadata).await;
     if cancel_pending.is_empty() {
         return;
     }
@@ -1913,6 +1976,8 @@ pub(crate) async fn run_worker_with(
     {
         let hb_inflight = inflight.clone();
         let hb_node = args.node.clone();
+        let hb_tags = args.tags.clone();
+        let hb_max_concurrency = args.max_concurrency;
         let hb_controller = controller.clone();
         let hb_client = client.clone();
         let hb_secret = secret.clone();
@@ -1928,6 +1993,10 @@ pub(crate) async fn run_worker_with(
                 let req = DistHeartbeatReq {
                     node_id: hb_node.clone(),
                     inflight: snapshot,
+                    // PR-B：心跳带 metadata 让 controller 自愈重启——首次 register 后
+                    // controller 重启会清掉 in-memory nodes 表，下次心跳即恢复。
+                    tags: Some(hb_tags.clone()),
+                    max_concurrency: Some(hb_max_concurrency),
                 };
                 let resp =
                     crate::dist_auth_client::signed_post(&hb_client, &hb_secret, &hb_url, &req)
@@ -3436,9 +3505,9 @@ mod tests {
         };
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        ctrl.heartbeat("n", vec!["job-A".into()]).await;
-        ctrl.heartbeat("n", vec!["job-A".into()]).await;
-        ctrl.heartbeat("n", vec!["job-A".into()]).await;
+        ctrl.heartbeat("n", vec!["job-A".into()], None).await;
+        ctrl.heartbeat("n", vec!["job-A".into()], None).await;
+        ctrl.heartbeat("n", vec!["job-A".into()], None).await;
         let collected = probe.await.expect("join");
         let hb_events: Vec<_> = collected
             .iter()
@@ -3481,10 +3550,12 @@ mod tests {
         };
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        ctrl.heartbeat("n", vec!["A".into()]).await;
-        ctrl.heartbeat("n", vec!["A".into(), "B".into()]).await;
-        ctrl.heartbeat("n", vec!["A".into(), "B".into()]).await;
-        ctrl.heartbeat("n", vec!["A".into()]).await;
+        ctrl.heartbeat("n", vec!["A".into()], None).await;
+        ctrl.heartbeat("n", vec!["A".into(), "B".into()], None)
+            .await;
+        ctrl.heartbeat("n", vec!["A".into(), "B".into()], None)
+            .await;
+        ctrl.heartbeat("n", vec!["A".into()], None).await;
         let collected = probe.await.expect("join");
         let hb_counts: Vec<u32> = collected
             .iter()
@@ -4255,7 +4326,7 @@ mod tests {
         let ctrl = test_ctrl().await;
         ctrl.register("n".into(), vec![], 1).await;
         let pending = ctrl
-            .heartbeat("n", vec!["job-x".into(), "job-y".into()])
+            .heartbeat("n", vec!["job-x".into(), "job-y".into()], None)
             .await;
         assert!(pending.is_empty());
         let info = ctrl.node_info("n").await.unwrap();
@@ -4280,9 +4351,79 @@ mod tests {
         }
         // worker 心跳只声明 B——表示 A 已经没在跑（可能它已经 report 完、
         // 或者进程重启丢 state）
-        ctrl.heartbeat("n", vec!["B".into()]).await;
+        ctrl.heartbeat("n", vec!["B".into()], None).await;
         let info = ctrl.node_info("n").await.unwrap();
         assert_eq!(info.inflight, vec!["B"]);
+    }
+
+    /// PR-B：controller 重启丢内存 nodes 表后，worker 下次心跳带 metadata
+    /// 自愈 entry——tags / max_concurrency / registered_at 立即恢复，不再需要
+    /// worker 端独立 re-register RPC。
+    ///
+    /// 反演 home 部署的实测 bug：mac worker register 5 天前跑过一次成功；home
+    /// fuxi-im 重启清 nodes 表；之后 mac 心跳走 `or_default()` 重建 entry
+    /// 但 tags=[] / max_concurrency=1 / registered_at=None。修后心跳就能填回。
+    #[tokio::test]
+    async fn heartbeat_with_metadata_restores_entry_after_controller_restart() {
+        let ctrl = test_ctrl().await;
+        // 反演重启：node 从未在本 controller 上 register（旧 controller 死掉了）。
+        assert!(ctrl.node_info("mac").await.is_none());
+
+        let meta = NodeHeartbeatMetadata {
+            tags: vec!["mac".into(), "local".into()],
+            max_concurrency: 2,
+        };
+        ctrl.heartbeat("mac", vec![], Some(meta)).await;
+
+        let info = ctrl.node_info("mac").await.expect("心跳建 entry");
+        assert_eq!(info.tags, vec!["mac".to_string(), "local".to_string()]);
+        assert_eq!(info.max_concurrency, 2);
+        assert!(
+            info.registered_at.is_some(),
+            "registered_at 由 metadata 心跳填充（不再是 None）"
+        );
+    }
+
+    /// PR-B：metadata 反向兼容——老 worker 不带 metadata（None）时，
+    /// `or_default()` 新 entry 仍是默认值（tags=[]、max_concurrency=1）；
+    /// 已注册的 entry 不被覆盖。
+    #[tokio::test]
+    async fn heartbeat_without_metadata_keeps_existing_register_values() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec!["a".into()], 3).await;
+        ctrl.heartbeat("n", vec![], None).await;
+        let info = ctrl.node_info("n").await.unwrap();
+        assert_eq!(info.tags, vec!["a".to_string()]);
+        assert_eq!(info.max_concurrency, 3);
+    }
+
+    /// PR-B：心跳是 worker 真当前认知——metadata 来时刷新 entry。worker 改 tag
+    /// 后无需重启 controller，下个心跳就生效。
+    #[tokio::test]
+    async fn heartbeat_metadata_refreshes_existing_entry() {
+        let ctrl = test_ctrl().await;
+        ctrl.register("n".into(), vec!["old-tag".into()], 1).await;
+        let meta = NodeHeartbeatMetadata {
+            tags: vec!["new-tag".into()],
+            max_concurrency: 4,
+        };
+        ctrl.heartbeat("n", vec![], Some(meta)).await;
+        let info = ctrl.node_info("n").await.unwrap();
+        assert_eq!(info.tags, vec!["new-tag".to_string()]);
+        assert_eq!(info.max_concurrency, 4);
+    }
+
+    /// PR-B：metadata 路径也跑 `max_concurrency.max(1)` 归一——worker 误传 0
+    /// 不能让自己锁死。
+    #[tokio::test]
+    async fn heartbeat_metadata_zero_capacity_clamps_to_one() {
+        let ctrl = test_ctrl().await;
+        let meta = NodeHeartbeatMetadata {
+            tags: vec![],
+            max_concurrency: 0,
+        };
+        ctrl.heartbeat("n", vec![], Some(meta)).await;
+        assert_eq!(ctrl.node_info("n").await.unwrap().max_concurrency, 1);
     }
 
     /// cancel 请求的 job 被 worker 心跳感知——返回给 worker 去杀 child。
@@ -4292,7 +4433,9 @@ mod tests {
         ctrl.register("n".into(), vec![], 2).await;
         ctrl.cancel_job("A").await;
         ctrl.cancel_job("Z").await; // Z 不在 worker 的 inflight 里
-        let pending = ctrl.heartbeat("n", vec!["A".into(), "B".into()]).await;
+        let pending = ctrl
+            .heartbeat("n", vec!["A".into(), "B".into()], None)
+            .await;
         assert_eq!(
             pending,
             vec!["A".to_string()],
@@ -4388,10 +4531,14 @@ mod tests {
         let req = DistHeartbeatReq {
             node_id: "n".into(),
             inflight: vec!["job-1".into(), "job-2".into()],
+            tags: Some(vec!["mac".into()]),
+            max_concurrency: Some(2),
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: DistHeartbeatReq = serde_json::from_str(&s).unwrap();
         assert_eq!(back.inflight.len(), 2);
+        assert_eq!(back.tags.as_deref(), Some(&["mac".to_string()][..]));
+        assert_eq!(back.max_concurrency, Some(2));
     }
 
     /// 老版 worker 没有 inflight 字段——要能兜底空。
@@ -4400,6 +4547,25 @@ mod tests {
         let raw = r#"{"token":"t","node_id":"n"}"#;
         let req: DistHeartbeatReq = serde_json::from_str(raw).unwrap();
         assert!(req.inflight.is_empty());
+        assert!(req.tags.is_none());
+        assert!(req.max_concurrency.is_none());
+    }
+
+    /// PR-B：心跳 metadata 字段对老版 worker 必须 `#[serde(default)]`——
+    /// 缺字段不能 panic，反向兼容性是 wire 协议的硬契约。
+    #[test]
+    fn dist_heartbeat_req_omits_metadata_when_none() {
+        let req = DistHeartbeatReq {
+            node_id: "n".into(),
+            inflight: vec![],
+            tags: None,
+            max_concurrency: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        // `skip_serializing_if = Option::is_none` 让 None 字段不出现在 wire——
+        // 老 controller 解新 worker 的 JSON 看不到这俩 unknown 字段，兼容性 OK。
+        assert!(!s.contains("\"tags\""));
+        assert!(!s.contains("\"max_concurrency\""));
     }
 
     /// 老版 gateway 不带 required_tags/pinned_node，serde 要兜默认。
@@ -5961,6 +6127,8 @@ mod tests {
         let hb_body = serde_json::to_vec(&DistHeartbeatReq {
             node_id: "substituted".into(),
             inflight: vec![],
+            tags: None,
+            max_concurrency: None,
         })
         .unwrap();
         let req = build_signed_attack_request(

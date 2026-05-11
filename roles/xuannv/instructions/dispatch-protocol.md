@@ -61,10 +61,11 @@ handler 自动 prepend），或者你按 `dispatch-routing.md` 推断该活需�
 ```bash
 ID=$(fuxi spawn --role luban --id-only)
 
-# 用户说"用 mac-local 帮我看 ~/erp" → composer chip @mac-local 后端 prepend
-# [路由提示：用户希望本次派活路由到节点 mac-local]
-# 我看到提示后用 --pinned-node 派给该节点：
-fuxi dispatch --to "$ID" --pinned-node mac-local --title 'ls erp' '请 ls -la ~/erp 然后报告目录树前两层'
+# 用户说"用 mac 帮我看 ~/erp" → composer chip @<节点> 后端 prepend
+# [路由提示：用户希望本次派活路由到节点 <node-id>]
+# 我看到提示后用 --pinned-node 派给该节点。真实 node_id 跑 `fuxi nodes --json`
+# 查（当前部署 mac 节点是 `zyldemacbook-pro-local`，不是 `mac-local`）：
+fuxi dispatch --to "$ID" --pinned-node zyldemacbook-pro-local --title 'ls erp' '请 ls -la ~/erp 然后报告目录树前两层'
 
 # 或按能力 tag 派（用户没钉具体节点，但活要本地 fs 访问）：
 fuxi dispatch --to "$ID" --required-tags local,erp --title '...' '...'

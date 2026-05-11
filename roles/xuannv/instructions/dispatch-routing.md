@@ -11,15 +11,17 @@
 - `task.required_tags: Vec<String>` —— **能力 / 资源**约束。例：`["local"]`
   表示需要本地文件系统访问，`["erp"]` 表示需要 ERP 项目代码（蕴含 local），
   `["home"]` 表示需要服务器维护权限（nginx/systemd/docker 等）。
-- `task.pinned_node: Option<String>` —— **指定节点 id**（如 `"mac-local"`、
-  `"mbp-2"`）。比 tags 更强，绕过 tag 匹配直接钉到该节点。
+- `task.pinned_node: Option<String>` —— **指定节点 id**（如 `"zyldemacbook-pro-local"`、
+  `"home"`）。比 tags 更强，绕过 tag 匹配直接钉到该节点。**真实 node id 跑
+  `fuxi nodes --json` 查**——别硬编 `mac-local` 这种 alias，不存在则 enqueue 卡死。
 
 ## 派活规则（5 条决策树）
 
 按下面顺序判定，**路由职责永远在 `dispatch` 上，不在 `spawn` 上**：
 
-1. **用户在 PWA 显式说"用 mac-local"** / `@mac-local` 等带节点名的指令
-   → `fuxi dispatch --to <id> --pinned-node mac-local '...'`；**不要再叠 tag**。
+1. **用户在 PWA 显式说"用 mac"** / `@<node>` 等带节点名的指令
+   → 先 `fuxi nodes --json` 拿真实 node_id（PWA chip 通常是 friendly alias，跟
+   register 上来的 node_id 可能不同）→ `fuxi dispatch --to <id> --pinned-node <真实 node_id> '...'`；**不要再叠 tag**。
 2. **涉及本地文件系统操作**（`~/erp` 等用户 macOS 项目）
    → `fuxi dispatch --to <id> --required-tags local '...'`。
 3. **涉及 ERP 项目**（用户的 ERP 业务代码、~/erp 路径下任何东西）
@@ -29,11 +31,15 @@
 5. **不确定 / 纯调研 / 文字思考类**
    → **不加 tag / 不加 pinned-node**（默认 home 本地 spawn）。
 
-### 完整范本（用户 @mac-local 跑命令）
+### 完整范本（用户说"用 mac 跑"）
 
 ```bash
+# 1. 先查真实 node_id（fuxi nodes --json 输出节点表，找 status=alive 的目标）
+fuxi nodes --json | jq -r '.[] | select(.tags | contains(["mac"])) | .node_id'
+# 当前部署：zyldemacbook-pro-local
+
 ID=$(fuxi spawn --role luban | tail -n1)            # spawn 不带 --node！
-fuxi dispatch --to "$ID" --pinned-node mac-local --title 'ls home' 'ls ~ 然后报告前 10 项'
+fuxi dispatch --to "$ID" --pinned-node zyldemacbook-pro-local --title 'ls home' 'ls ~ 然后报告前 10 项'
 ```
 
 **spawn 是本地起门客**（在我玄女的 home 节点上，不动）。**路由是 dispatch 的事**——
