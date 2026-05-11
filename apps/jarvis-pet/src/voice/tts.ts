@@ -18,21 +18,25 @@ function audioCtx(): AudioContext {
 }
 
 /// 播一段 TTS——返回 Promise 在 wav 播完后 resolve。
-/// 同时只能播一段；新调用会立即停掉旧的。
+/// 同时只能播一段；新调用会立即停掉旧的。onStep 给每步状态便于桌宠 toast 诊断。
 export async function playTts(opts: {
   baseURL: string
   token: string
   text: string
-  /// 播放进度回调（含开始 / 停止）—— Phase 2 用于切 Say 动画
+  /// 调试钩子：每个里程碑回调一次（"fetching" / "got_wav 64324B" /
+  /// "ctx state=running" / "decoded 4.2s" / "playing" / "ended"）
+  onStep?: (msg: string) => void
   onPlay?: (durationSec: number) => void
   onEnd?: () => void
 }): Promise<void> {
+  const step = (m: string) => opts.onStep?.(m)
   // 停旧
   if (_curSrc) {
     try { _curSrc.stop() } catch { /* ignore */ }
     _curSrc = null
   }
 
+  step('fetching')
   const r = await fetch(`${opts.baseURL}/api/tts`, {
     method: 'POST',
     headers: {
@@ -46,13 +50,19 @@ export async function playTts(opts: {
     throw new Error(`tts ${r.status}: ${body.slice(0, 100)}`)
   }
   const wavBuf = await r.arrayBuffer()
+  step(`got_wav ${wavBuf.byteLength}B`)
   const ctx = audioCtx()
+  step(`ctx state=${ctx.state}`)
   if (ctx.state === 'suspended') {
-    // Safari/WebKit 要求用户手势后才能 resume。桌宠用户已点过菜单或说过话才走
-    // 到这里，所以 resume 应该成功。
-    try { await ctx.resume() } catch { /* ignore */ }
+    try {
+      await ctx.resume()
+      step(`ctx resumed -> ${ctx.state}`)
+    } catch (e) {
+      step(`ctx resume fail: ${String(e).slice(0, 40)}`)
+    }
   }
-  const audioBuf = await ctx.decodeAudioData(wavBuf)
+  const audioBuf = await ctx.decodeAudioData(wavBuf.slice(0))
+  step(`decoded ${audioBuf.duration.toFixed(1)}s ${audioBuf.numberOfChannels}ch ${audioBuf.sampleRate}Hz`)
   const src = ctx.createBufferSource()
   src.buffer = audioBuf
   src.connect(ctx.destination)
@@ -64,10 +74,12 @@ export async function playTts(opts: {
   return new Promise(resolve => {
     src.onended = () => {
       if (_curSrc === src) _curSrc = null
+      step('ended')
       opts.onEnd?.()
       resolve()
     }
     src.start()
+    step('playing')
   })
 }
 

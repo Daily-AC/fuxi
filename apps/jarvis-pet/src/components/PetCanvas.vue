@@ -144,16 +144,33 @@ onMounted(async () => {
     baseURL: BASE_URL,
     pairToken: pairToken.value || undefined,
     onEvent: ev => {
+      // 调试：所有事件 type 闪一下，看玄女实际发了啥（say / agent_responded / etc）
+      const evType = ev.kind.type
+      console.log('[wsEvent]', evType, ev.kind)
+      if (evType === 'xuannv_voice_line' || evType === 'agent_responded' ||
+          evType === 'thinking_started' || evType === 'thinking_finished') {
+        flashToast(`ws: ${evType}`, 1500)
+      }
       // 玄女说话：弹气泡 + TTS 播心海音色（Phase 2.D+E）
       if (ev.kind.type === 'xuannv_voice_line' && typeof ev.kind.text === 'string') {
         const sayText = ev.kind.text
         showBubble(sayText)
         if (pairToken.value) {
+          flashToast(`tts: 起播「${sayText.slice(0, 12)}」`, 2500)
           playTts({
             baseURL: BASE_URL,
             token: pairToken.value,
-            text: sayText
-          }).catch(e => flashToast(`tts err: ${String(e).slice(0, 60)}`, 3000))
+            text: sayText,
+            onStep: msg => {
+              console.log('[tts]', msg)
+              flashToast(`tts: ${msg}`, 4000)
+            }
+          }).catch(e => {
+            console.error('[tts err]', e)
+            flashToast(`tts err: ${String(e).slice(0, 80)}`, 5000)
+          })
+        } else {
+          flashToast('tts skipped: token 没设', 2500)
         }
       }
       const update = mapEventToStats(ev)
