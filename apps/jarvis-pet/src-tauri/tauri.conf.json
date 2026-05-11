@@ -31,7 +31,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"],
-    "resources": ["../resources/sprites/**/*"]
+    "icon": ["icons/icon.png"]
   }
 }
