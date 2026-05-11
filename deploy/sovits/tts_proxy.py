@@ -13,10 +13,12 @@ GPT-SoVITS thin proxy —— jarvis 客户端的简化入口。
 启动：
   uvicorn tts_proxy:app --host 127.0.0.1 --port 9881
 环境变量：
-  TTS_REF_PATH        ref audio 绝对路径（必填）
-  TTS_REF_TEXT        ref audio 转写（必填）
+  TTS_REF_PATH        ref audio 绝对路径（必填，作为 normal 默认 ref）
+  TTS_REF_TEXT        ref audio 转写（必填，配 normal）
   TTS_HMAC_KEY_PATH   fuxi-im HMAC key（默认 ~/.fuxi/im_hmac.key）
   SOVITS_BASE         sovits api base（默认 http://127.0.0.1:9880）
+  TTS_REF_DIR         情绪 ref 目录（默认 ~/.fuxi/sovits-ref/）。Phase 3 情绪映射在
+                      此目录下找 `paimon-{emotion}.wav` + `.txt`，缺则 fallback normal。
 """
 from __future__ import annotations
 import base64
@@ -38,9 +40,36 @@ REF_PATH = os.environ["TTS_REF_PATH"]
 REF_TEXT = os.environ["TTS_REF_TEXT"]
 SOVITS_BASE = os.environ.get("SOVITS_BASE", "http://127.0.0.1:9880")
 HMAC_KEY_PATH = os.environ.get("TTS_HMAC_KEY_PATH", os.path.expanduser("~/.fuxi/im_hmac.key"))
+REF_DIR = os.environ.get("TTS_REF_DIR", os.path.expanduser("~/.fuxi/sovits-ref"))
 
 with open(HMAC_KEY_PATH, "rb") as f:
     HMAC_SECRET = f.read().strip()
+
+
+# Phase 3 情绪映射：每情绪一对 (wav 绝对路径, prompt_text)。
+# 启动时扫一遍 REF_DIR/paimon-{emotion}.{wav,txt}，存在的才进字典；不存在就走 normal 兜底。
+# 这样部署时可以增量加 emotion（不重启 proxy 也可；但实测先 systemctl restart 一次更稳）。
+ALLOWED_EMOTIONS = ("happy", "surprise", "worry", "serious", "sad")
+
+
+def _load_emotion_refs() -> dict[str, tuple[str, str]]:
+    refs: dict[str, tuple[str, str]] = {"normal": (REF_PATH, REF_TEXT)}
+    for emo in ALLOWED_EMOTIONS:
+        wav = os.path.join(REF_DIR, f"paimon-{emo}.wav")
+        txt = os.path.join(REF_DIR, f"paimon-{emo}.txt")
+        if os.path.isfile(wav) and os.path.isfile(txt):
+            try:
+                with open(txt, encoding="utf-8") as f:
+                    text = f.read().strip()
+                if text:
+                    refs[emo] = (wav, text)
+                    log.info("emotion ref loaded: %s -> %s", emo, wav)
+            except OSError as e:
+                log.warning("emotion ref %s 读 txt 失败: %s", emo, e)
+    return refs
+
+
+EMOTION_REFS = _load_emotion_refs()
 
 app = FastAPI()
 
@@ -75,7 +104,12 @@ def verify_token(token: str) -> dict:
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "ref_path": REF_PATH, "sovits": SOVITS_BASE}
+    return {
+        "ok": True,
+        "ref_path": REF_PATH,
+        "sovits": SOVITS_BASE,
+        "emotions": sorted(EMOTION_REFS.keys()),
+    }
 
 
 @app.post("/tts")
@@ -94,11 +128,21 @@ async def tts(req: Request, authorization: str | None = Header(default=None)):
     if not text:
         raise HTTPException(status_code=400, detail="text required")
 
+    # Phase 3 情绪映射：未知 emotion / 缺 ref 走 normal——客户端不应感知后端 ref 缺失。
+    raw_emotion = (body.get("emotion") or "").strip().lower()
+    if raw_emotion and raw_emotion in EMOTION_REFS:
+        emotion = raw_emotion
+    else:
+        if raw_emotion:
+            log.info("emotion %r 无 ref，降级 normal", raw_emotion)
+        emotion = "normal"
+    ref_path, prompt_text = EMOTION_REFS[emotion]
+
     payload = {
         "text": text,
         "text_lang": "zh",
-        "ref_audio_path": REF_PATH,
-        "prompt_text": REF_TEXT,
+        "ref_audio_path": ref_path,
+        "prompt_text": prompt_text,
         "prompt_lang": "zh",
         "media_type": "wav",
         "streaming_mode": False,
@@ -109,7 +153,12 @@ async def tts(req: Request, authorization: str | None = Header(default=None)):
         "top_p": 1.0,
         "temperature": 1.0,
     }
-    log.info("tts device=%s text_len=%d", claims.get("name", "?"), len(text))
+    log.info(
+        "tts device=%s emotion=%s text_len=%d",
+        claims.get("name", "?"),
+        emotion,
+        len(text),
+    )
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             resp = await client.post(f"{SOVITS_BASE}/tts", json=payload)
