@@ -65,6 +65,18 @@ export class AnimationPlayer {
     this.onCompleteHandler = handler
   }
 
+  /// 一次性播 set，播完自动 load resumeSet 恢复。常用：触摸/Say 动画 → 回 Default 循环。
+  /// 强制 loop=false 不管传入 set.loop 怎么标。
+  async playOnce(set: SpriteSet, resumeSet: SpriteSet): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.onCompleteHandler = () => {
+        this.onCompleteHandler = undefined
+        this.load(resumeSet).then(resolve).catch(reject)
+      }
+      this.load({ ...set, loop: false }).catch(reject)
+    })
+  }
+
   destroy(): void {
     this.app.ticker.remove(this.tick, this)
     this.sprite.destroy()

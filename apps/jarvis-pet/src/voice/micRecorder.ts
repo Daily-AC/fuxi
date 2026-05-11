@@ -23,12 +23,22 @@ export class MicRecorder {
   private stream: MediaStream | null = null
   private src: MediaStreamAudioSourceNode | null = null
   private proc: ScriptProcessorNode | null = null
-  private onPcm?: (chunk: ArrayBuffer) => void
+  private subscribers: Array<(chunk: ArrayBuffer) => void> = []
 
-  /// 开始录音；onPcm 收 16kHz int16 PCM 二进制 chunk（每个 chunk ~85ms 数据）
-  async start(onPcm: (chunk: ArrayBuffer) => void): Promise<void> {
-    if (this.ctx) throw new Error('MicRecorder 已 start')
-    this.onPcm = onPcm
+  /// 订阅 PCM chunks（16kHz int16 LE，~85ms 数据）。返回 unsubscribe。
+  /// 支持多订阅者：wake client 常驻 + asr client 录音期间并行用同一流，
+  /// 避免重复 getUserMedia 抢占麦克风。
+  subscribe(onPcm: (chunk: ArrayBuffer) => void): () => void {
+    this.subscribers.push(onPcm)
+    return () => {
+      this.subscribers = this.subscribers.filter(s => s !== onPcm)
+    }
+  }
+
+  /// 开始录音；首次调用启动 audio context + mic。多次调用幂等。
+  async start(onPcm?: (chunk: ArrayBuffer) => void): Promise<void> {
+    if (onPcm) this.subscribe(onPcm)
+    if (this.ctx) return  // 已在录音，订阅者已加
 
     // mac 第一次会弹麦克风权限 prompt（前提 Info.plist 有 NSMicrophoneUsageDescription）
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -50,7 +60,7 @@ export class MicRecorder {
     this.src = this.ctx.createMediaStreamSource(this.stream)
     this.proc = this.ctx.createScriptProcessor(BUFFER_SIZE, 1, 1)
     this.proc.onaudioprocess = e => {
-      if (!this.onPcm) return
+      if (this.subscribers.length === 0) return
       const f32 = e.inputBuffer.getChannelData(0)
       const outLen = Math.floor(f32.length / ratio)
       const out = new Int16Array(outLen)
@@ -59,7 +69,9 @@ export class MicRecorder {
         // Float [-1,1] → Int16 LE
         out[i] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)))
       }
-      this.onPcm(out.buffer)
+      // 多订阅者：广播同一 chunk；每个订阅者拿到 same buffer slice，不允许改
+      const buf = out.buffer
+      for (const cb of this.subscribers) cb(buf)
     }
     this.src.connect(this.proc)
     // ScriptProcessor 必须 connect 到 destination 才会触发 onaudioprocess——
@@ -79,7 +91,7 @@ export class MicRecorder {
     this.stream = null
     this.src = null
     this.proc = null
-    this.onPcm = undefined
+    this.subscribers = []
   }
 
   get isRecording(): boolean {

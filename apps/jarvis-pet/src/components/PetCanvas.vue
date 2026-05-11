@@ -10,6 +10,9 @@ import { mapEventToStats } from '@/behavior/statsMapper'
 import { MicRecorder } from '@/voice/micRecorder'
 import { AsrClient } from '@/voice/asrClient'
 import { sendIntervene } from '@/api/intervene'
+import { playTts } from '@/voice/tts'
+import { WakeClient } from '@/voice/wakeClient'
+import { EnergyVad } from '@/voice/vad'
 
 // 8 帧通过 Vite ?url 显式导入：dev 下 vite 直接服务真实文件，build 时 hash 进 dist/assets。
 // 走 publicDir + /sprites 绝对路径在 Tauri release 下会撞「tauri://sprites/...」host 误读
@@ -24,6 +27,19 @@ import f005 from '../../resources/sprites/loris/default/nomal/1/_005_250.png?url
 import f006 from '../../resources/sprites/loris/default/nomal/1/_006_125.png?url'
 import f007 from '../../resources/sprites/loris/default/nomal/1/_007_125.png?url'
 
+// 摸头 B_Nomal 11 帧（VPet vup/Touch_Head/B_Nomal fork，去中文文件名）
+import h000 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_000_125.png?url'
+import h001 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_001_125.png?url'
+import h002 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_002_125.png?url'
+import h003 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_003_125.png?url'
+import h004 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_004_125.png?url'
+import h005 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_005_250.png?url'
+import h006 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_006_125.png?url'
+import h007 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_007_125.png?url'
+import h008 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_008_125.png?url'
+import h009 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_009_125.png?url'
+import h010 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_010_125.png?url'
+
 const canvasContainer = ref<HTMLDivElement | null>(null)
 const stats = useStatsStore()
 const sizeDebug = ref('size: -')
@@ -34,9 +50,15 @@ const voiceState = ref<'idle' | 'recording' | 'transcribing' | 'sending'>('idle'
 
 const BASE_URL = import.meta.env.VITE_FUXI_BASE_URL || 'https://im.qmledmq.cn:8443'
 const TOKEN_LS_KEY = 'jarvis-pet.pairToken'
+const WAKE_TOKEN_LS_KEY = 'jarvis-pet.wakeToken'
+const WAKE_EN_LS_KEY = 'jarvis-pet.wakeEnabled'
 const pairToken = ref<string>(localStorage.getItem(TOKEN_LS_KEY) || '')
+const wakeToken = ref<string>(localStorage.getItem(WAKE_TOKEN_LS_KEY) || '')
+const wakeEnabled = ref<boolean>(localStorage.getItem(WAKE_EN_LS_KEY) === '1')
+const wakeStatus = ref<'off' | 'connecting' | 'ready' | 'disconnected'>('off')
 const showTokenInput = ref(false)
 const tokenDraft = ref('')
+const wakeTokenDraft = ref('')
 
 let toastTimer: number | null = null
 function flashToast(msg: string, ms = 1500) {
@@ -57,6 +79,10 @@ let player: AnimationPlayer | null = null
 let fuxi: FuxiClient | null = null
 let mic: MicRecorder | null = null
 let asr: AsrClient | null = null
+let wake: WakeClient | null = null
+let vad: EnergyVad | null = null
+let asrPcmUnsub: (() => void) | null = null
+let wakePcmUnsub: (() => void) | null = null
 
 const PANEL_W = 200
 const PANEL_H = 360
@@ -81,6 +107,27 @@ const DEFAULT_SET: SpriteSet = {
   ]
 }
 
+/// 摸头 B_Nomal 11 帧 loop（VPet 原作）；playOnce 完后回 DEFAULT_SET
+const TOUCH_HEAD_SET: SpriteSet = {
+  graph: 'Touch_Head',
+  animat: 'B',
+  mode: 'Nomal',
+  loop: false,
+  frames: [
+    { textureUrl: h000, durationMs: 125 },
+    { textureUrl: h001, durationMs: 125 },
+    { textureUrl: h002, durationMs: 125 },
+    { textureUrl: h003, durationMs: 125 },
+    { textureUrl: h004, durationMs: 125 },
+    { textureUrl: h005, durationMs: 250 },
+    { textureUrl: h006, durationMs: 125 },
+    { textureUrl: h007, durationMs: 125 },
+    { textureUrl: h008, durationMs: 125 },
+    { textureUrl: h009, durationMs: 125 },
+    { textureUrl: h010, durationMs: 125 }
+  ]
+}
+
 onMounted(async () => {
   pixiApp = new PixiApp()
   const canvas = await pixiApp.init({ width: PANEL_W, height: PANEL_H })
@@ -97,9 +144,17 @@ onMounted(async () => {
     baseURL: BASE_URL,
     pairToken: pairToken.value || undefined,
     onEvent: ev => {
-      // 玄女说话：弹气泡（Phase 2.D MVP；Phase 2.E 加 TTS + Say 动画）
+      // 玄女说话：弹气泡 + TTS 播心海音色（Phase 2.D+E）
       if (ev.kind.type === 'xuannv_voice_line' && typeof ev.kind.text === 'string') {
-        showBubble(ev.kind.text)
+        const sayText = ev.kind.text
+        showBubble(sayText)
+        if (pairToken.value) {
+          playTts({
+            baseURL: BASE_URL,
+            token: pairToken.value,
+            text: sayText
+          }).catch(e => flashToast(`tts err: ${String(e).slice(0, 60)}`, 3000))
+        }
       }
       const update = mapEventToStats(ev)
       const setterFields: Partial<Record<string, number>> = {}
@@ -120,11 +175,17 @@ onMounted(async () => {
     }
   })
   fuxi.connect()
+
+  // 上次启用过 wake 词且 token 还在 → 自动续上（开机自动监听）
+  if (wakeEnabled.value && wakeToken.value) {
+    enableWake().catch(e => flashToast(`wake 自启失败: ${String(e).slice(0, 50)}`, 3000))
+  }
 })
 
 onBeforeUnmount(() => {
-  mic?.stop()
+  wake?.stop()
   asr?.abort()
+  mic?.stop()
   fuxi?.stop()
   player?.destroy()
   pixiApp?.destroy()
@@ -156,86 +217,204 @@ async function onQuit() {
   }
 }
 
+let touchBusy = false
+/// 双击萝莉斯 → 播 Touch_Head 动画 + 推一条 "[摸了摸头]" 给玄女让她回应
+async function onTouchHead() {
+  if (touchBusy || !player) return
+  touchBusy = true
+  try {
+    showMenu.value = false
+    // 动画跑一遍（11 帧 ~1.4s）+ 自动回 Default
+    await player.playOnce(TOUCH_HEAD_SET, DEFAULT_SET)
+    // 异步发给玄女不阻塞动画
+    if (pairToken.value) {
+      // [语音] 前缀让玄女走 say 走 TTS（公理 #8），桌宠才能拿到 voice_line 事件
+      sendIntervene({
+        baseURL: BASE_URL,
+        token: pairToken.value,
+        text: '[语音] （用户摸了摸你的头）'
+      }).catch(e => flashToast(`摸头消息发失败: ${String(e).slice(0, 50)}`, 2500))
+    }
+  } finally {
+    touchBusy = false
+  }
+}
+
 function onSetToken() {
   // Tauri 2 webview 不支持 window.prompt（静默 noop），用内嵌模态
   tokenDraft.value = pairToken.value
+  wakeTokenDraft.value = wakeToken.value
   showTokenInput.value = true
   showMenu.value = false
 }
 
 function onSaveToken() {
-  const trimmed = tokenDraft.value.trim()
-  if (!trimmed) {
+  const pair = tokenDraft.value.trim()
+  const wk = wakeTokenDraft.value.trim()
+  if (!pair) {
     localStorage.removeItem(TOKEN_LS_KEY)
     pairToken.value = ''
-    flashToast('token 已清')
   } else {
-    localStorage.setItem(TOKEN_LS_KEY, trimmed)
-    pairToken.value = trimmed
-    flashToast('token 已存，重启生效', 2500)
+    localStorage.setItem(TOKEN_LS_KEY, pair)
+    pairToken.value = pair
   }
+  if (!wk) {
+    localStorage.removeItem(WAKE_TOKEN_LS_KEY)
+    wakeToken.value = ''
+  } else {
+    localStorage.setItem(WAKE_TOKEN_LS_KEY, wk)
+    wakeToken.value = wk
+  }
+  flashToast('token 已存，重启生效', 2500)
   showTokenInput.value = false
   tokenDraft.value = ''
+  wakeTokenDraft.value = ''
 }
 
 function onCancelToken() {
   showTokenInput.value = false
   tokenDraft.value = ''
+  wakeTokenDraft.value = ''
 }
 
-async function onTalkToggle() {
+async function ensureMic(): Promise<void> {
+  if (mic) return
+  mic = new MicRecorder()
+  await mic.start()
+}
+
+function disposeMicIfIdle(): void {
+  if (mic && !asrPcmUnsub && !wakePcmUnsub) {
+    mic.stop()
+    mic = null
+  }
+}
+
+/// 起 ASR session（手动 = autoVad:false 用户再点送出；wake 触发 = autoVad:true VAD 1.5s 静音自动断）
+async function startTalking(autoVad: boolean): Promise<void> {
+  if (voiceState.value !== 'idle') return
   if (!pairToken.value) {
-    flashToast('先设 token', 2500)
+    flashToast('先设 fuxi-im token', 2500)
     return
   }
-  if (voiceState.value === 'idle') {
-    // 起录音 + ASR WS
-    try {
-      voiceState.value = 'recording'
-      showMenu.value = false
-      asr = new AsrClient({ baseURL: BASE_URL, token: pairToken.value })
-      await asr.connect()
-      mic = new MicRecorder()
-      await mic.start(chunk => asr?.sendPcm(chunk))
-      flashToast('🎤 录音中（再次点击送出）', 4000)
-    } catch (e) {
-      voiceState.value = 'idle'
-      mic?.stop()
-      asr?.abort()
-      mic = null
-      asr = null
-      flashToast(`录音起失败: ${String(e).slice(0, 50)}`, 3000)
+  try {
+    voiceState.value = 'recording'
+    showMenu.value = false
+    await ensureMic()
+    asr = new AsrClient({ baseURL: BASE_URL, token: pairToken.value })
+    await asr.connect()
+    if (autoVad) {
+      vad = new EnergyVad({
+        onSilence: () => finishTalking().catch(() => {})
+      })
     }
-  } else if (voiceState.value === 'recording') {
-    // 停录音 → finish ASR → intervene
-    try {
-      voiceState.value = 'transcribing'
-      flashToast('转写中...')
-      mic?.stop()
-      mic = null
-      const result = await asr!.finish()
-      asr = null
-      const text = result.text.trim()
-      if (!text) {
-        voiceState.value = 'idle'
-        flashToast('没听到', 1500)
-        return
-      }
-      flashToast(`你：${text}`, 3500)
-      voiceState.value = 'sending'
-      await sendIntervene({ baseURL: BASE_URL, token: pairToken.value, text })
-      voiceState.value = 'idle'
-    } catch (e) {
-      voiceState.value = 'idle'
-      flashToast(`失败：${String(e).slice(0, 60)}`, 3500)
-    }
+    asrPcmUnsub = mic!.subscribe(chunk => {
+      asr?.sendPcm(chunk)
+      vad?.feed(chunk)
+    })
+    flashToast(autoVad ? '🎤 听写中（说完自动断）' : '🎤 录音中（再次点击送出）', 4000)
+  } catch (e) {
+    voiceState.value = 'idle'
+    asrPcmUnsub?.()
+    asrPcmUnsub = null
+    asr?.abort()
+    asr = null
+    vad = null
+    disposeMicIfIdle()
+    flashToast(`录音起失败: ${String(e).slice(0, 50)}`, 3000)
   }
+}
+
+async function finishTalking(): Promise<void> {
+  if (voiceState.value !== 'recording') return
+  voiceState.value = 'transcribing'
+  asrPcmUnsub?.()
+  asrPcmUnsub = null
+  vad = null
+  try {
+    const result = await asr!.finish()
+    asr = null
+    const text = result.text.trim()
+    if (!text) {
+      voiceState.value = 'idle'
+      flashToast('没听到', 1500)
+      disposeMicIfIdle()
+      return
+    }
+    flashToast(`你：${text}`, 3500)
+    voiceState.value = 'sending'
+    // [语音] 前缀触发玄女公理 #8——cc 必调 `fuxi xuannv say` 发 XuannvVoiceLine
+    // 事件，桌宠才能拿到 say 文字 + TTS。不加前缀只走 AgentResponded（PWA 文字流）
+    await sendIntervene({
+      baseURL: BASE_URL,
+      token: pairToken.value,
+      text: `[语音] ${text}`
+    })
+  } catch (e) {
+    flashToast(`失败：${String(e).slice(0, 60)}`, 3500)
+  } finally {
+    voiceState.value = 'idle'
+    disposeMicIfIdle()
+  }
+}
+
+async function onTalkToggle(): Promise<void> {
+  if (voiceState.value === 'idle') {
+    await startTalking(false)
+  } else if (voiceState.value === 'recording') {
+    await finishTalking()
+  }
+}
+
+async function enableWake(): Promise<void> {
+  if (!wakeToken.value) {
+    flashToast('先设 wake.token', 2500)
+    return
+  }
+  wakeEnabled.value = true
+  localStorage.setItem(WAKE_EN_LS_KEY, '1')
+  try {
+    await ensureMic()
+    wake = new WakeClient({
+      baseURL: BASE_URL,
+      token: wakeToken.value,
+      onWake: (kw) => {
+        if (voiceState.value === 'idle') {
+          flashToast(`听见「${kw}」`, 1200)
+          startTalking(true).catch(() => {})
+        }
+      },
+      onStatus: s => { wakeStatus.value = s }
+    })
+    wake.start()
+    wakePcmUnsub = mic!.subscribe(chunk => wake!.sendPcm(chunk))
+  } catch (e) {
+    flashToast(`唤醒启动失败: ${String(e).slice(0, 50)}`, 3000)
+    disableWake()
+  }
+}
+
+function disableWake(): void {
+  wakeEnabled.value = false
+  localStorage.setItem(WAKE_EN_LS_KEY, '0')
+  wakePcmUnsub?.()
+  wakePcmUnsub = null
+  wake?.stop()
+  wake = null
+  wakeStatus.value = 'off'
+  disposeMicIfIdle()
+}
+
+function onWakeToggle(): void {
+  if (wakeEnabled.value) disableWake()
+  else enableWake()
 }
 </script>
 
 <template>
   <div class="pet-canvas" ref="canvasContainer"
        @pointerdown="onPointerDown"
+       @dblclick.prevent="onTouchHead"
        @contextmenu.prevent>
     <!-- 数值菜单：默认隐藏，右键 toggle；mousedown.stop 防止落到外层触发拖动 -->
     <div v-if="showMenu" class="context-menu" @mousedown.stop>
@@ -244,6 +423,13 @@ async function onTalkToggle() {
            voiceState === 'transcribing' ? '⏳ 转写中…' :
            voiceState === 'sending' ? '⏳ 发送中…' :
            '🎤 跟玄女说一句' }}
+      </div>
+      <div class="row clickable wake" @click="onWakeToggle">
+        {{ wakeEnabled
+            ? (wakeStatus === 'ready' ? '🟢 唤醒中（喊「玄女」）'
+              : wakeStatus === 'connecting' ? '🟡 唤醒：连接中…'
+              : '🔴 唤醒：断开（点击重连）')
+            : '⚪ 启用唤醒「玄女」' }}
       </div>
       <div class="row clickable" @click="onSetToken">
         🔑 {{ pairToken ? '换 token' : '设 token' }}
@@ -262,12 +448,20 @@ async function onTalkToggle() {
     </div>
     <!-- Token 设置模态：Tauri 2 webview 没原生 prompt，自己画浮层 -->
     <div v-if="showTokenInput" class="token-modal" @mousedown.stop>
-      <div class="token-title">粘贴 HMAC token</div>
+      <div class="token-title">fuxi-im HMAC token（intervene/asr/tts 共用）</div>
       <textarea
         class="token-input"
         v-model="tokenDraft"
-        rows="6"
-        placeholder="eyJ... (30天有效，home: python3 ~/.fuxi/im-mint-token.py)"
+        rows="3"
+        placeholder="eyJ... (home: python3 ~/.fuxi/im-mint-token.py)"
+        spellcheck="false"
+      />
+      <div class="token-title">wake.token（home: ~/.fuxi/wake.token 64 hex）</div>
+      <textarea
+        class="token-input"
+        v-model="wakeTokenDraft"
+        rows="2"
+        placeholder="74f5990b... (启用唤醒词必填，否则可空)"
         spellcheck="false"
       />
       <div class="token-actions">
@@ -331,6 +525,12 @@ async function onTalkToggle() {
 }
 .row.clickable.talk:hover {
   background: rgba(40, 100, 180, 0.08);
+}
+.row.clickable.wake {
+  color: rgb(80, 130, 80);
+}
+.row.clickable.wake:hover {
+  background: rgba(80, 130, 80, 0.08);
 }
 .row.clickable.quit {
   color: rgb(180, 60, 60);
