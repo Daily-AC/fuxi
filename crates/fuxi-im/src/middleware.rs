@@ -89,7 +89,10 @@ pub async fn cookie_auth_layer(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
         .map(|s| s.trim().to_string())
         .or_else(|| {
             // 解析 query string ?token=...
