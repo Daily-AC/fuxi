@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useStatsStore } from '@/stores/stats'
 import { PixiApp } from '@/pixi/PixiApp'
 import { AnimationPlayer } from '@/sprites/AnimationPlayer'
@@ -73,10 +74,18 @@ onBeforeUnmount(() => {
   player?.destroy()
   pixiApp?.destroy()
 })
+
+function onPointerDown(e: PointerEvent) {
+  if (e.button !== 0) return
+  if ((e.target as HTMLElement).closest('.debug-overlay')) return
+  getCurrentWindow().startDragging().catch(err => {
+    console.warn('[drag] startDragging failed', err)
+  })
+}
 </script>
 
 <template>
-  <div class="pet-canvas" ref="canvasContainer">
+  <div class="pet-canvas" ref="canvasContainer" @pointerdown="onPointerDown">
     <!-- debug overlay：phase 1 显示 6 维数值方便观察 -->
     <div class="debug-overlay">
       <div>体力 {{ stats.strength }}</div>
