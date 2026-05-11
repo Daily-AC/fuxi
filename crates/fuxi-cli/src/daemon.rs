@@ -81,6 +81,24 @@ impl Daemon {
         self
     }
 
+    /// `fuxi im start` 专用构造——home 长跑入口**总是**内嵌 controller
+    /// （`im_dist::build_dist_layer` 无条件装配），所以 dist 句柄不该是 Option。
+    /// 用 required arg 编译期防漏：未来 im.rs 重构者改不到这里就走不通编译。
+    ///
+    /// 缘起：commit 之前 im.rs 调 `Daemon::new(...)` 后**忘了链** `.with_dist(ctrl)`，
+    /// 导致 `fuxi nodes` IPC 拿到 `dist=None` 报"未启用"，把玄女诊断带歪
+    /// （以为 controller 没启）。
+    pub fn new_for_im_start(
+        fuxi: Arc<Fuxi>,
+        bus: EventBus,
+        store: TriggerStore,
+        keeper: Arc<Keeper>,
+        oracle: OracleStore,
+        dist: Arc<crate::dist::DistController>,
+    ) -> Self {
+        Self::new(fuxi, bus, store, keeper, oracle).with_dist(dist)
+    }
+
     /// 阻塞到收到 Shutdown 命令或 serve 循环错误。
     pub async fn serve(self, socket_path: &Path) -> Result<()> {
         // 清理残留 socket——daemon 异常崩后重启会踩到 "Address already in use"
@@ -458,8 +476,12 @@ async fn dispatch_command(
         }
 
         Command::Nodes => match dist {
+            // 措辞历史教训：早期版本写"`fuxi up` 缺 --dist-token / $FUXI_DIST_TOKEN"
+            // 把玄女在 `fuxi im start` 部署上的诊断带歪——她以为 controller 没启，
+            // 真因是 daemon wiring 漏 `.with_dist(...)`。现说"未注入 controller 句柄"
+            // 中性描述实际状态，括号给两条可能入口避免再误导。
             None => Response::err(
-                "dist controller 未启用——`fuxi up` 缺 --dist-token / $FUXI_DIST_TOKEN",
+                "dist controller 未启用——daemon 未注入 controller 句柄（`fuxi up` 需 --dist-token / $FUXI_DIST_TOKEN；`fuxi im start` 走 `Daemon::new_for_im_start`）",
             ),
             Some(ctrl) => {
                 let snapshots = ctrl.nodes_snapshot().await;
@@ -2090,6 +2112,61 @@ mod tests {
                 assert_eq!(nodes[0]["node_id"], "home");
                 assert_eq!(nodes[0]["status"], "alive");
                 assert_eq!(nodes[0]["max_concurrency"], 2);
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// `Daemon::new_for_im_start` 一次性把 dist controller 句柄挂上——`fuxi im start`
+    /// 路径用它替代 `Daemon::new(...).with_dist(...)`，required arg 编译期防漏。
+    /// 反演 commit 之前 `im.rs:521-527` 漏链 `with_dist` 导致 `fuxi nodes` 误报的 bug。
+    #[tokio::test]
+    async fn new_for_im_start_attaches_dist_ctrl() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let ctrl = Arc::new(crate::dist::DistController::new("tok".into(), bus.clone()));
+        ctrl.register("home".into(), vec!["cc".into()], 2).await;
+
+        let daemon = Daemon::new_for_im_start(fuxi, bus, store, keeper, oracle, ctrl.clone());
+        assert!(
+            daemon.dist.is_some(),
+            "new_for_im_start 必须把 dist 写进字段——这是 im.rs daemon wiring 的硬保证"
+        );
+    }
+
+    /// 通过 `new_for_im_start` 构造的 daemon 调 `Command::Nodes` 应返 Ok——
+    /// 端到端验证 im-start 路径上的 `fuxi nodes` IPC 真能拿到 nodes snapshot
+    /// （之前 daemon.dist=None 报"未启用"）。
+    #[tokio::test]
+    async fn nodes_via_new_for_im_start_returns_snapshot() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let ctrl = Arc::new(crate::dist::DistController::new("tok".into(), bus.clone()));
+        ctrl.register("home".into(), vec!["cc".into()], 2).await;
+        let daemon = Daemon::new_for_im_start(
+            fuxi.clone(),
+            bus.clone(),
+            store.clone(),
+            keeper.clone(),
+            oracle.clone(),
+            ctrl.clone(),
+        );
+        let dist_opt = daemon.dist.clone();
+
+        let resp = dispatch_command(
+            fuxi,
+            bus,
+            store,
+            keeper,
+            oracle,
+            dist_opt,
+            Command::Nodes,
+            Arc::new(Notify::new()),
+        )
+        .await;
+        match resp {
+            Response::Ok { data } => {
+                let nodes = data.get("nodes").expect("nodes 字段").as_array().unwrap();
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0]["node_id"], "home");
             }
             other => panic!("expected Ok, got {other:?}"),
         }
