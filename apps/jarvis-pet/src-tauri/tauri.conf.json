@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "玄女",
-        "width": 280,
-        "height": 420,
+        "width": 200,
+        "height": 360,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,

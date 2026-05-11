@@ -10,27 +10,32 @@ import { mapEventToStats } from '@/behavior/statsMapper'
 
 const canvasContainer = ref<HTMLDivElement | null>(null)
 const stats = useStatsStore()
+const sizeDebug = ref('size: -')
 
 let pixiApp: PixiApp | null = null
 let player: AnimationPlayer | null = null
 let fuxi: FuxiClient | null = null
 
-const PANEL_W = 280
-const PANEL_H = 420
+const PANEL_W = 200
+const PANEL_H = 360
 
 // Phase 1 hardcode 一组 Default sprite set；后续 manifest.lps 走 ManifestLoader 加载
+// 资源来自 VPet 0000_core mod 的 Default/Nomal/1（萝莉斯默认 idle 循环）
+// 帧时长按 VPet 原文件名 `_<idx>_<dur>.png` 解出（250/125 不齐——VPet 原作美术节奏）
 const DEFAULT_SET: SpriteSet = {
   graph: 'Default',
   animat: 'Single',
-  mode: 'Normal',
+  mode: 'Nomal',
   loop: true,
   frames: [
-    { textureUrl: '/sprites/xuannv/default/default_001_120.png', durationMs: 120 },
-    { textureUrl: '/sprites/xuannv/default/default_002_120.png', durationMs: 120 },
-    { textureUrl: '/sprites/xuannv/default/default_003_120.png', durationMs: 120 },
-    { textureUrl: '/sprites/xuannv/default/default_004_120.png', durationMs: 120 },
-    { textureUrl: '/sprites/xuannv/default/default_005_120.png', durationMs: 120 },
-    { textureUrl: '/sprites/xuannv/default/default_006_120.png', durationMs: 120 }
+    { textureUrl: '/sprites/loris/default/nomal/1/_000_250.png', durationMs: 250 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_001_125.png', durationMs: 125 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_002_125.png', durationMs: 125 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_003_375.png', durationMs: 375 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_004_125.png', durationMs: 125 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_005_250.png', durationMs: 250 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_006_125.png', durationMs: 125 },
+    { textureUrl: '/sprites/loris/default/nomal/1/_007_125.png', durationMs: 125 }
   ]
 }
 
@@ -41,6 +46,9 @@ onMounted(async () => {
 
   player = new AnimationPlayer(pixiApp.pixi)
   await player.load(DEFAULT_SET)
+  // size debug：写到 overlay 给 headless agent 通过截图回传 PIXI 实际尺寸
+  const px = pixiApp.pixi
+  sizeDebug.value = `screen ${px.screen.width}x${px.screen.height} canvas ${px.canvas.width}x${px.canvas.height} client ${px.canvas.clientWidth}x${px.canvas.clientHeight} dpr ${window.devicePixelRatio}`
 
   // 接 fuxi —— Phase 1 不带 token，本地连或公开 ws
   fuxi = new FuxiClient({
@@ -95,6 +103,7 @@ function onPointerDown(e: PointerEvent) {
       <div>健康 {{ stats.health }}</div>
       <div>好感 {{ stats.likability }}</div>
       <div>金钱 {{ stats.money }}</div>
+      <div>{{ sizeDebug }}</div>
     </div>
   </div>
 </template>
@@ -102,8 +111,13 @@ function onPointerDown(e: PointerEvent) {
 <style scoped>
 .pet-canvas {
   position: relative;
-  width: 280px;
-  height: 420px;
+  width: 200px;
+  height: 360px;
+  background: transparent !important;
+}
+.pet-canvas :deep(canvas) {
+  background: transparent !important;
+  display: block;
 }
 .debug-overlay {
   position: absolute;

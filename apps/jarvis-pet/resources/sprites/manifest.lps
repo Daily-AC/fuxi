@@ -1,0 +1,9 @@
+pet#loris:|intro#VPet 默认人物 萝莉斯 fork：v0.4 Phase 1 idle 循环只接 Default/Nomal/1:|path#loris:|petname#萝莉斯:|
+tag#all,vup,girl:|
+
+graph#Default:|mode#Nomal:|loop#true:|frames#8:|path#default/nomal/1:|prefix#_:|
+graph#Default:|mode#Happy:|loop#true:|frames#13:|path#default/happy/1:|prefix#循环A_:|note#Phase 1 暂未启用，等 calMode 接入再加资源:|
+graph#Default:|mode#PoorCondition:|loop#true:|frames#TBD:|path#default/poorcondition/1:|note#Phase 1 暂未启用:|
+graph#Default:|mode#Ill:|loop#true:|frames#TBD:|path#default/ill/1:|note#Phase 1 暂未启用:|
+
+attribution:|source#https://github.com/LorisYounger/VPet:|author#LorisYounger:|license#Apache-2.0:|note#Sprite assets forked from VPet 0000_core mod (Default/Nomal/1)。Attribution required per upstream README。:|

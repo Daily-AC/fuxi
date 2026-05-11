@@ -7,6 +7,7 @@ export default defineConfig(async () => ({
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') }
   },
+  publicDir: path.resolve(__dirname, './resources'),
   clearScreen: false,
   server: {
     port: 1420,
