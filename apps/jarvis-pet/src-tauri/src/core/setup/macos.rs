@@ -29,6 +29,10 @@ pub fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     behaviour.insert(NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces);
     behaviour.insert(NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary);
     behaviour.insert(NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle);
+    // FullScreenAuxiliary：fullscreen app（Chrome/Safari/Xcode etc）开新 Space 时
+    // CanJoinAllSpaces 不覆盖，panel 只在普通桌面 Space 出现。Auxiliary 这条让
+    // panel 能浮在 fullscreen 应用之上，跟桌宠语义对齐。
+    behaviour.insert(NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary);
     panel.set_collection_behaviour(behaviour);
 
     panel.set_floating_panel(true);
