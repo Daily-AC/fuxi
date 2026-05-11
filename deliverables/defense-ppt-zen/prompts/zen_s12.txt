@@ -1,0 +1,30 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 12 of 13, presenting THREE quantified performance results as the heroes of the page. Each number is a giant numeral with a small caption underneath. The three numbers stack vertically on the left half, balanced by a single vertical flying-white ink stroke on the right edge. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette, NO bar charts, NO line graphs. Mood is restrained and scholarly.
+
+INK MARK
+ONE vertical flying-white brush stroke running down the right edge of the canvas, from near top to near bottom — about 70% of slide height, 3-4% of slide width — visually like a calligraphy ruler against which the three numbers are measured. Confident single-pass calligraphy with visible dry-brush flying-white texture, especially toward the bottom. Pure deep ink black. NO second mark anywhere.
+
+LAYOUT
+A "three-tier number hero" layout. A short slide title sits at the top-LEFT corner with a small subtitle directly underneath. Below the title block, the LEFT 65% of the canvas holds three number-caption pairs stacked vertically with even spacing. Each pair has: a giant numeral set in IBM Plex Mono Bold or similar bold mono serif (deep ink black, 80-90pt for numbers 1 and 2, slightly smaller for the third multiplicative expression), followed on the line below by a small caption in 思源宋体 Medium (~17pt). The vertical flying-white ink stroke on the right edge balances the text mass. Generous whitespace between number rows. NO bar charts, NO axes, NO icons.
+
+TEXT CONTENT (each string renders EXACTLY as written; numbers in heavy bold mono serif typeface; Chinese in 思源宋体 — ExtraBold for the title, Medium for subtitle and number captions; deep ink black #0E0E0E; full-width Chinese punctuation; mid-dot "·" between caption fragments; en-dash "–" in percentage range; no emoji, no decorative glyphs):
+- Slide title (top-left, ~30pt, ExtraBold, single line): "高性能 · 三道边界"
+- Slide subtitle directly under title (~14pt, Medium, single line): "合成任务 5 min · Apple Silicon"
+- Number 1 hero (giant, ~88pt, mono Bold, left-aligned, single line): "1288.24"
+- Number 1 caption (~17pt, Medium, single line, just below the number): "tasks/s · 16 worker · 扩展效率 80.5%–83.1%"
+- Number 2 hero (giant, ~88pt, mono Bold, left-aligned, single line): "32.93 ms"
+- Number 2 caption (~17pt, Medium, single line, just below the number): "任务派发 p50"
+- Number 3 hero (large, ~78pt, mono Bold, left-aligned, single line): "64 × 10k"
+- Number 3 caption (~17pt, Medium, single line, just below the number): "subscriber × events/s 持续负载，零丢帧"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 50% of the slide must be empty paper. Numbers should feel like inscriptions on stone — heavy, weighted, surrounded by air.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

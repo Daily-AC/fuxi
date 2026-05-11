@@ -1,0 +1,28 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 4 of 12, listing the five engineering constraints chosen for this work. The visual anchor is a vertical numbered list of five items on the left, balanced by a single vertical ink stroke on the right. The reference image is the previous slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE vertical flying-white brush stroke running down the right margin of the canvas, from near top to near bottom — about 65% of slide height, 3-4% of slide width. Confident single-pass calligraphy with visible dry-brush flying-white texture. Pure deep ink black. NO second mark anywhere.
+
+LAYOUT
+A vertical enumerated list. A short slide title sits at the top-left, left-aligned. Below it, occupying the lower 70-75% of the slide, FIVE numbered items run as a vertical list in the LEFT 60% of the canvas. Each item line has THREE inline parts: a small Chinese numeral (一 / 二 / 三 / 四 / 五) in 思源宋体 Medium (slightly muted feel), then a wider gap, then a 4-6 char heading in 思源宋体 ExtraBold, then a small em-dash separator (——), then a one-line elaboration in 思源宋体 Medium. Items are separated only by line spacing (~2.0 em), with NO bullets, NO horizontal rules between items, NO boxes. The vertical ink stroke (described above) sits in the right margin, balancing the text mass on the left. NO icons.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for headings, Medium for numerals and elaborations; deep ink black #0E0E0E; full-width punctuation; no emoji, no decorative glyphs; em-dashes "——" must render as TWO connected long horizontal dashes):
+- Slide title (top-left, ~28pt, ExtraBold, single line): "本工作的五项约束"
+- Item 1 (single line, numeral ~18pt, heading ~24pt ExtraBold, body ~16pt Medium): "一  Rust 工作区　——　13 crate，编译期保证内存安全"
+- Item 2 (same scale, single line): "二  本地优先　——　离线能跑，数据在用户机器上"
+- Item 3 (same scale, single line): "三  非阻塞事件驱动　——　EventBus 是单一真相源（高性能基础）"
+- Item 4 (same scale, single line): "四  可观测　——　所有 Agent 协作可审计可回放"
+- Item 5 (same scale, single line): "五  可跨节点扩展　——　钩子化设计，单机非分布式分裂"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 55% of the slide must be empty paper. The right side of the canvas (after the vertical ink stroke) and the lower-right quadrant should feel airy.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

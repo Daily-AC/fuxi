@@ -1,0 +1,28 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 6 of 13, presenting the first engineering contribution: the A2A protocol adapter, with a single-sentence thesis claim and three small footer notes. The visual anchor is the central two-line statement on warm off-white paper. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE small ink mark only — a short horizontal flying-white brush stroke (短横笔) at the LOWER-LEFT of the canvas, no longer than 8% of slide width, with visible dry-brush texture, like a punctuation flourish or an end-of-paragraph mark. Pure deep ink black. NO second mark anywhere.
+
+LAYOUT
+A "single statement with footer notes" layout. A small contribution-counter sits at the top-RIGHT corner, right-aligned. The two-line main statement sits in the optical center of the slide (vertically between 38% and 62% from top), centered horizontally. Below the statement, generous whitespace. At the bottom of the slide (lower 15%), three small right-aligned footer notes stack vertically with tight line spacing. The lower-left short horizontal ink mark sits in the empty lower-left corner. NO title.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the main statement, Medium for the contribution counter and footer notes; deep ink black #0E0E0E; full-width Chinese punctuation; no emoji, no decorative glyphs):
+- Top-right contribution counter (~14pt, Medium, single line): "贡献一 / 共五"
+- Statement line 1 (very large, ~50pt, ExtraBold, centered, single line): "把 input-required"
+- Statement line 2 (very large, ~50pt, ExtraBold, centered, single line): "提升为平台级人工介入信号。"
+- Footer note 1 (~16pt, Medium, right-aligned, single line): "fuxi-a2a · 1321 行 · 早期 JSON-RPC binding"
+- Footer note 2 (~16pt, Medium, right-aligned, single line): "单端点 HTTP+SSE · 五条核心路径"
+- Footer note 3 (~16pt, Medium, right-aligned, single line): "不主张 v1.0 完全兼容，平台层做了平台才该做的"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 60% of the slide must be empty paper. Wide breathing space above and below the central statement.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.
