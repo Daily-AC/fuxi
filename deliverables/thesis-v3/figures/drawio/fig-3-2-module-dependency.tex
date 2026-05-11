@@ -1,0 +1,104 @@
+% 图 3-1 模块依赖 DAG v4 — 摘要式依赖图：画层级与关键边，不画全量穿越边
+\documentclass[border=4pt]{standalone}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds}
+\input{_style.tex}
+
+\begin{document}
+\begin{tikzpicture}[font=\sffamily, node distance=8mm and 10mm]
+
+% ── Layer rows ─────────────────────────────────────
+% 先放 L4 行（cc 在原点），cli 再 above=cc 自动居中
+\node[modBox, minimum width=31mm, minimum height=10mm] (cc)
+  {fuxi-agent-cc};
+\node[modBox, left=8mm of cc, minimum width=31mm, minimum height=10mm] (codex)
+  {fuxi-agent-codex};
+\node[modBox, right=8mm of cc, minimum width=31mm, minimum height=10mm] (sched)
+  {fuxi-scheduler\\\scriptsize cron};
+
+% 显式 at(cc.north + 上方 10mm) 并锚 south, 强制 cli 中心 x = cc 中心 x
+\node[highlightBox, anchor=south, minimum width=36mm, minimum height=11mm] (cli)
+  at ($(cc.north)+(0,10mm)$) {fuxi-cli\\\scriptsize daemon + binaries};
+
+\node[highlightBox, below=12mm of cc, minimum width=36mm, minimum height=11mm] (orch)
+  {fuxi-orchestrator\\\scriptsize Fuxi + Shelf};
+\node[modBox, left=10mm of orch, minimum width=31mm, minimum height=10mm] (firehose)
+  {fuxi-firehose\\\scriptsize WS hub + TUI};
+\node[modBox, right=10mm of orch, minimum width=31mm, minimum height=10mm] (im)
+  {fuxi-im\\\scriptsize PWA 后端};
+
+\node[modBox, below left=12mm and 12mm of orch, minimum width=32mm, minimum height=10mm] (events)
+  {fuxi-events\\\scriptsize EventBus + WAL};
+\node[modBox, below=12mm of orch, minimum width=32mm, minimum height=10mm] (memory)
+  {fuxi-memory\\\scriptsize 抽取/召回};
+\node[modBox, below right=12mm and 12mm of orch, minimum width=32mm, minimum height=10mm] (a2a)
+  {fuxi-a2a\\\scriptsize wire + SSE};
+
+\node[highlightBox, below=14mm of memory, minimum width=38mm, minimum height=11mm] (core)
+  {fuxi-core\\\scriptsize trait + 基础类型};
+
+% ── Layer backgrounds ──────────────────────────────
+\begin{scope}[on background layer]
+  \node[layerBg, fit=(cli), inner sep=5pt,
+    label={[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark]left:{L5 顶层}}] {};
+  \node[layerBg, fit=(codex) (cc) (sched), inner sep=5pt,
+    label={[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark]left:{L4 适配/触发}}] {};
+  \node[layerBg, fit=(firehose) (orch) (im), inner sep=5pt,
+    label={[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark]left:{L3 编排/观测}}] {};
+  \node[layerBg, fit=(events) (memory) (a2a), inner sep=5pt,
+    label={[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark]left:{L2 基础设施}}] {};
+  \node[layerBg, fit=(core), inner sep=5pt,
+    label={[anchor=east, font=\scriptsize\itshape, text=fuxiGrayDark]left:{L1 核心}}] {};
+\end{scope}
+
+% ── Dependency edges：树形布局 — trunk + rail + 单箭头进中心,不再贴边 ──
+
+% L5 → L4：fan-out 树（cli 单干 → 横 rail → 3 条下垂分支）
+\coordinate (cliRailY) at ($(cli.south)+(0,-4mm)$);
+\draw[color=fuxiGrayDark, line width=0.7pt] (cli.south) -- (cliRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (codex.north |- cliRailY) -- (sched.north |- cliRailY);
+\draw[flow] (codex.north |- cliRailY) -- (codex.north);
+\draw[flow] (cc.north    |- cliRailY) -- (cc.north);
+\draw[flow] (sched.north |- cliRailY) -- (sched.north);
+
+% L4 → L3：fan-in 树（3 条上升 stem → 横 rail → 单箭头进 orch.north 中心）
+\coordinate (orchRailY) at ($(orch.north)+(0,4mm)$);
+\draw[color=fuxiGrayDark, line width=0.7pt] (codex.south) -- (codex.south |- orchRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (cc.south)    -- (cc.south    |- orchRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (sched.south) -- (sched.south |- orchRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (codex.south |- orchRailY) -- (sched.south |- orchRailY);
+\draw[flow] (orch.north |- orchRailY) -- (orch.north);
+
+% L3 同层（peer）
+\draw[flow] (orch.west) -- (firehose.east);
+\draw[flow] (orch.east) -- (im.west);
+
+% L3 → L2：fan-out 树（orch 单干 → 横 rail → 3 条下垂分支）
+\coordinate (orchOutY) at ($(orch.south)+(0,-4mm)$);
+\draw[color=fuxiGrayDark, line width=0.7pt] (orch.south) -- (orchOutY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (events.north |- orchOutY) -- (a2a.north |- orchOutY);
+\draw[flow] (events.north |- orchOutY) -- (events.north);
+\draw[flow] (memory.north |- orchOutY) -- (memory.north);
+\draw[flow] (a2a.north    |- orchOutY) -- (a2a.north);
+
+% L2 → L1：fan-in 树（3 条上升 stem → 横 rail → 单箭头进 core.north 中心）
+\coordinate (coreRailY) at ($(core.north)+(0,4mm)$);
+\draw[color=fuxiGrayDark, line width=0.7pt] (events.south) -- (events.south |- coreRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (memory.south) -- (memory.south |- coreRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (a2a.south)    -- (a2a.south    |- coreRailY);
+\draw[color=fuxiGrayDark, line width=0.7pt] (events.south |- coreRailY) -- (a2a.south |- coreRailY);
+\draw[flow] (core.north |- coreRailY) -- (core.north);
+
+% ── Key invariant note ──────────────────────────────
+\node[anchor=north, font=\scriptsize\itshape, text=fuxiOrange, align=center,
+      draw=fuxiOrange!40, fill=fuxiOrange!6, rounded corners=2pt, inner sep=4pt]
+  at ($(core.south)+(0,-8mm)$) {%
+    关键约束：\texttt{fuxi-memory}\,$\not\to$\,\texttt{fuxi-orchestrator}；
+    adapter 实现统一放在 \texttt{fuxi-cli} 顶层
+  };
+
+\end{tikzpicture}
+\end{document}

@@ -172,6 +172,9 @@ pub enum EventKindPayload {
     /// 否则 `/api/conv` WS（按 `meta.agent==xuannv` 过滤）不会透传给 macOS App。
     XuannvVoiceLine {
         text: String,
+        /// Phase 3 情绪映射：可选；`None` 走默认 normal。
+        #[serde(default)]
+        emotion: Option<String>,
     },
 }
 
@@ -193,7 +196,9 @@ impl EventKindPayload {
             Self::SkillRejected { role, reason } => EventKind::SkillRejected { role, reason },
             Self::SkillActivated { role } => EventKind::SkillActivated { role },
             Self::NoRoleMatched { need } => EventKind::NoRoleMatched { need },
-            Self::XuannvVoiceLine { text } => EventKind::XuannvVoiceLine { text },
+            Self::XuannvVoiceLine { text, emotion } => {
+                EventKind::XuannvVoiceLine { text, emotion }
+            }
         }
     }
 }
@@ -466,15 +471,35 @@ mod tests {
     fn xuannv_voice_line_payload_roundtrips() {
         let p = EventKindPayload::XuannvVoiceLine {
             text: "好的，已派给鲁班".into(),
+            emotion: Some("happy".into()),
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["type"], "xuannv_voice_line");
         assert_eq!(v["text"], "好的，已派给鲁班");
+        assert_eq!(v["emotion"], "happy");
         let back: EventKindPayload = serde_json::from_value(v).unwrap();
         let kind = back.into_event_kind();
         match kind {
-            fuxi_core::EventKind::XuannvVoiceLine { text } => {
+            fuxi_core::EventKind::XuannvVoiceLine { text, emotion } => {
                 assert_eq!(text, "好的，已派给鲁班");
+                assert_eq!(emotion.as_deref(), Some("happy"));
+            }
+            other => panic!("expect XuannvVoiceLine, got {other:?}"),
+        }
+    }
+
+    /// Phase 3：老 wire（无 emotion 字段）反序列化保兼容。
+    #[test]
+    fn xuannv_voice_line_payload_legacy_without_emotion() {
+        let raw = serde_json::json!({
+            "type": "xuannv_voice_line",
+            "text": "我在，你说。"
+        });
+        let p: EventKindPayload = serde_json::from_value(raw).unwrap();
+        match p {
+            EventKindPayload::XuannvVoiceLine { text, emotion } => {
+                assert_eq!(text, "我在，你说。");
+                assert!(emotion.is_none());
             }
             other => panic!("expect XuannvVoiceLine, got {other:?}"),
         }

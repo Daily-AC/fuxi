@@ -3,8 +3,11 @@
 /// 协议（见 deploy/sovits/tts_proxy.py）：
 ///   POST /api/tts
 ///   Authorization: Bearer <token>
-///   Body: {"text": "玄女要念的内容"}
+///   Body: {"text": "玄女要念的内容", "emotion": "happy" | ...?}
 ///   → wav binary (Content-Type: audio/wav)
+///
+/// Phase 3 情绪映射：emotion 可选，未传 / 未知 / 后端缺 ref 均 fallback normal。
+/// 桌宠端不校验 emotion 字符串——后端是 single source of truth。
 ///
 /// 桌宠用 AudioContext 解码 wav → AudioBufferSourceNode 播。声学跟药丸 v0.2
 /// 一样的链路（同一颗 sovits-proxy），所以音色一致。
@@ -23,6 +26,8 @@ export async function playTts(opts: {
   baseURL: string
   token: string
   text: string
+  /// Phase 3：可选 emotion 透传到后端 sovits-proxy；undefined / 空串 → 后端走 normal
+  emotion?: string
   /// 调试钩子：每个里程碑回调一次（"fetching" / "got_wav 64324B" /
   /// "ctx state=running" / "decoded 4.2s" / "playing" / "ended"）
   onStep?: (msg: string) => void
@@ -43,7 +48,11 @@ export async function playTts(opts: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${opts.token}`
     },
-    body: JSON.stringify({ text: opts.text })
+    body: JSON.stringify(
+      opts.emotion
+        ? { text: opts.text, emotion: opts.emotion }
+        : { text: opts.text }
+    )
   })
   if (!r.ok) {
     const body = await r.text().catch(() => '')

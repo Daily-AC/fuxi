@@ -1,0 +1,27 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 8 of 13, presenting the third engineering contribution: the 玄女—门客 hierarchy and the non-bypassable orchestration layer. The visual anchor is a central two-line statement on warm off-white paper, with two short footer notes underneath. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE small ink mark only — a single short slanted brush stroke (斜墨点) at the UPPER-RIGHT of the canvas, no longer than 5% of slide width, at roughly a 30-degree angle, like a hand-written annotation mark. Pure deep ink black with subtle dry-brush texture. NO second mark anywhere.
+
+LAYOUT
+A "single statement with footer" layout, similar in feel to slide 6 but inverted (slide 6 had three footer notes right-aligned; this slide has two footer notes centered). A small contribution-counter sits at the top-RIGHT corner, right-aligned. The two-line main statement sits in the optical center of the slide (vertically between 38% and 60% from top), centered horizontally. Below the statement, generous whitespace. At the bottom of the slide (lower 18%), TWO short footer notes stack vertically, centered horizontally, with tight line spacing. The upper-right slanted ink dot sits in the empty upper-right corner. NO title.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the main statement, Medium for the contribution counter and footer notes; deep ink black #0E0E0E; full-width Chinese punctuation; no emoji, no decorative glyphs):
+- Top-right contribution counter (~14pt, Medium, single line): "贡献三 / 共五"
+- Statement line 1 (very large, ~50pt, ExtraBold, centered, single line): "玄女是唯一对话入口，"
+- Statement line 2 (very large, ~50pt, ExtraBold, centered, single line): "门客协作必经编排层抄送。"
+- Footer note 1 (~18pt, Medium, centered, single line): "避免 Agent 私下通讯导致事实流断裂"
+- Footer note 2 (~18pt, Medium, centered, single line): "用户视角永远只跟玄女讲话"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 60% of the slide must be empty paper. Wide breathing space above and below the central statement.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

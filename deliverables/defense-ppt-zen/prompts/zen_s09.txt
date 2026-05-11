@@ -1,0 +1,29 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 9 of 13, presenting the fourth engineering contribution: TWO faces of isolation (filesystem isolation via three-layer sandbox, AND inter-process communication via WebSocket reverse-connect). The visual anchor is two parallel columns sharing the same rhythm. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE small ink mark only — a short horizontal flying-white brush stroke (短横笔) at the LOWER-LEFT of the canvas, no longer than 8% of slide width, with visible dry-brush texture. Pure deep ink black. NO second mark anywhere.
+
+LAYOUT
+A "two-faced couplet" layout. A short slide title sits at the top-LEFT corner, left-aligned. Below the title, occupying the lower 70% of the slide, TWO equal-width vertical columns share the canvas, separated by ONE thin hairline rule in deep ink black (NOT colored), running vertically through the full column height at the canvas horizontal center. Each column has, from top to bottom: a small Chinese category label in 思源宋体 Medium (~18pt, slightly muted feel), then a 4-7 character bold heading in 思源宋体 ExtraBold (~30pt) below the category, then a single horizontal body line in 思源宋体 Medium (~17pt). Generous whitespace inside each column above and below the text triplet. NO icons of any kind. The hairline rule is 1px deep ink, vertical, full column-height.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the title and column headings, Medium for category labels and body lines; deep ink black #0E0E0E; full-width punctuation; no emoji, no decorative glyphs):
+- Slide title (top-left, ~28pt, ExtraBold, single line): "贡献四 / 隔离的两面"
+- Column 1 category (~18pt, Medium): "文件系统"
+- Column 1 heading (~30pt, ExtraBold): "三层沙箱 L1 L2 L3"
+- Column 1 body (~17pt, Medium, single line): "worktree 让多门客同时操作互不撞锁"
+- Column 2 category (~18pt, Medium): "进程通讯"
+- Column 2 heading (~30pt, ExtraBold): "WebSocket 反连模式"
+- Column 2 body (~17pt, Medium, single line): "编排层主动推送，不等门客 poll stdio"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 55% of the slide must be empty paper, mostly inside each column above and below the text triplet.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

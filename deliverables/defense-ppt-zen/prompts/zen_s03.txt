@@ -1,0 +1,32 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 3 of 12, presenting three parallel weaknesses of existing multi-agent frameworks. The visual anchor is three vertical text columns separated by hairline rules, on warm off-white paper. The reference image is the previous slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE small ink mark only — a short horizontal dry-brush ink wash (淡墨晕) at the upper-LEFT of the canvas just above the slide title, no longer than 8% of slide width and very thin. Pure deep ink black with visible flying-white edge. NO second mark.
+
+LAYOUT
+Three-column parallel layout. A short slide title sits at the top-left, left-aligned. Below it, occupying the lower 70% of the slide, three equal-width vertical columns share the canvas, separated by two thin hairline rules in deep ink black (NOT colored). Each column has, from top to bottom: a small Chinese numeral (一 / 二 / 三) in 思源宋体 Medium, then a 4-6 character bold column heading in 思源宋体 ExtraBold below the numeral, then below that a single horizontal body line in 思源宋体 Medium. Generous whitespace inside each column. NO icons of any kind in any column. Hairlines are 1px deep ink, vertical, full column-height.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the title and column headings, Medium for numerals and body lines; deep ink black #0E0E0E; full-width Chinese punctuation; no emoji, no decorative glyphs):
+- Slide title (top-left, ~30pt, ExtraBold, single line): "现有框架的三个共性短板"
+- Column 1 numeral (~22pt, Medium): "一"
+- Column 1 heading (~30pt, ExtraBold): "协议不统一"
+- Column 1 body (~16pt, Medium, single line): "跨进程通讯靠各家私约"
+- Column 2 numeral (~22pt, Medium): "二"
+- Column 2 heading (~30pt, ExtraBold): "生命周期缺位"
+- Column 2 body (~16pt, Medium, single line): "任务无回放，无终态语义"
+- Column 3 numeral (~22pt, Medium): "三"
+- Column 3 heading (~30pt, ExtraBold): "运行时不可观测"
+- Column 3 body (~16pt, Medium, single line): "事件流断裂，靠日志事后拼"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 60% of the slide must be empty paper, with most of the whitespace inside each column above and below the text triplet. The two hairline rules between columns are very thin (1px feel).
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

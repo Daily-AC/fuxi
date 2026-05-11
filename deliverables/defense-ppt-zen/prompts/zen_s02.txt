@@ -1,0 +1,24 @@
+OVERVIEW
+A 16:9 minimalist editorial slide — the second slide of a Chinese academic thesis defense, stating the central thesis claim in ONE strong two-line sentence. The visual anchor is the centered statement on warm off-white paper. The reference image is the previous slide of the same deck — match its paper tone, ink-wash style, and serif Chinese typography exactly, but the layout and ink mark on this slide are entirely different.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained, scholarly, contemplative.
+
+INK MARK
+ONE small ink mark only — a single dry-brush ink dot (墨点) at the far bottom-right corner of the canvas, like a seal mark or end-punctuation flourish, no larger than 3% of slide width. Pure deep ink black. NO vertical strokes, NO horizontal strokes, NO second mark. The dot has visible dry-brush texture.
+
+LAYOUT
+A "single statement" layout. The two-line main statement sits in the optical center of the slide (vertically between 40% and 65% from top), centered horizontally on the canvas. Two balanced lines of large heavy serif Chinese typography. The remaining 80%+ of the slide is completely empty paper. The single ink dot sits at the far bottom-right corner, well away from the statement. NO subtitle, NO caption, NO title, NO footer.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 ExtraBold deep ink black #0E0E0E; full-width Chinese punctuation; no emoji, no decorative glyphs):
+- Statement line 1 (very large, ~50pt, centered, single horizontal line, no wrapping): "把多 Agent 的高性能通讯底座，"
+- Statement line 2 (very large, ~50pt, centered, single horizontal line, no wrapping): "从应用流程里显式剥离出来。"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 80% of the slide must be empty paper. The two-line statement is the only typographic element; the single bottom-right ink dot is the only mark.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds, NO plum blossoms. The background is just paper, nothing more.

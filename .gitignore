@@ -32,3 +32,24 @@ data/
 Linux_ivw_*/
 deploy/wake/sdk/
 
+# LaTeX 主文档编译产物 —— main.tex 系列只入仓 .tex/.pdf，不入辅助文件
+# （子图 figures/drawio/fig-*.aux/.log 是历史惯例已 tracked，保留不动）
+deliverables/thesis-v*/main.aux
+deliverables/thesis-v*/main.bbl
+deliverables/thesis-v*/main.bcf
+deliverables/thesis-v*/main.blg
+deliverables/thesis-v*/main.log
+deliverables/thesis-v*/main.out
+deliverables/thesis-v*/main.toc
+deliverables/thesis-v*/main.run.xml
+deliverables/thesis-v*/texput.log
+deliverables/thesis-v*/build.log
+
+# pandoc / docx 中间产物（main.md 是 pandoc 输出，main.docx 是中转）
+deliverables/thesis-v*/main.md
+deliverables/thesis-v*/main.docx
+deliverables/thesis-v*/.~*.docx
+# 个人草稿 docx —— 只入仓 *-final.docx / 历史归档版
+deliverables/thesis-v*/zyl.docx
+deliverables/thesis-v*/thesis-v3.docx
+

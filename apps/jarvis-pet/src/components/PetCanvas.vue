@@ -47,6 +47,40 @@ import s001 from '../../resources/sprites/loris/say/serious/b/say_001_125.png?ur
 import s002 from '../../resources/sprites/loris/say/serious/b/say_002_125.png?url'
 import s003 from '../../resources/sprites/loris/say/serious/b/say_003_125.png?url'
 
+// Phase 3 情绪 idle 帧 —— Default/Happy/1 共 13 帧（高兴 + 惊喜走这套）
+import hp000 from '../../resources/sprites/loris/default/happy/1/_000_125.png?url'
+import hp001 from '../../resources/sprites/loris/default/happy/1/_001_125.png?url'
+import hp002 from '../../resources/sprites/loris/default/happy/1/_002_125.png?url'
+import hp003 from '../../resources/sprites/loris/default/happy/1/_003_125.png?url'
+import hp004 from '../../resources/sprites/loris/default/happy/1/_004_125.png?url'
+import hp005 from '../../resources/sprites/loris/default/happy/1/_005_250.png?url'
+import hp006 from '../../resources/sprites/loris/default/happy/1/_006_125.png?url'
+import hp007 from '../../resources/sprites/loris/default/happy/1/_007_125.png?url'
+import hp008 from '../../resources/sprites/loris/default/happy/1/_008_125.png?url'
+import hp009 from '../../resources/sprites/loris/default/happy/1/_009_125.png?url'
+import hp010 from '../../resources/sprites/loris/default/happy/1/_010_125.png?url'
+import hp011 from '../../resources/sprites/loris/default/happy/1/_011_125.png?url'
+import hp012 from '../../resources/sprites/loris/default/happy/1/_012_250.png?url'
+
+// Phase 3 · Default/PoorCondition/1 共 17 帧（担心 + 难过走这套）
+import pc000 from '../../resources/sprites/loris/default/poorcondition/1/_000_125.png?url'
+import pc001 from '../../resources/sprites/loris/default/poorcondition/1/_001_125.png?url'
+import pc002 from '../../resources/sprites/loris/default/poorcondition/1/_002_125.png?url'
+import pc003 from '../../resources/sprites/loris/default/poorcondition/1/_003_125.png?url'
+import pc004 from '../../resources/sprites/loris/default/poorcondition/1/_004_375.png?url'
+import pc005 from '../../resources/sprites/loris/default/poorcondition/1/_005_125.png?url'
+import pc006 from '../../resources/sprites/loris/default/poorcondition/1/_006_125.png?url'
+import pc007 from '../../resources/sprites/loris/default/poorcondition/1/_007_125.png?url'
+import pc008 from '../../resources/sprites/loris/default/poorcondition/1/_008_500.png?url'
+import pc009 from '../../resources/sprites/loris/default/poorcondition/1/_009_125.png?url'
+import pc010 from '../../resources/sprites/loris/default/poorcondition/1/_010_125.png?url'
+import pc011 from '../../resources/sprites/loris/default/poorcondition/1/_011_125.png?url'
+import pc012 from '../../resources/sprites/loris/default/poorcondition/1/_012_375.png?url'
+import pc013 from '../../resources/sprites/loris/default/poorcondition/1/_013_375.png?url'
+import pc014 from '../../resources/sprites/loris/default/poorcondition/1/_014_125.png?url'
+import pc015 from '../../resources/sprites/loris/default/poorcondition/1/_015_125.png?url'
+import pc016 from '../../resources/sprites/loris/default/poorcondition/1/_016_125.png?url'
+
 const canvasContainer = ref<HTMLDivElement | null>(null)
 const stats = useStatsStore()
 const sizeDebug = ref('size: -')
@@ -129,6 +163,56 @@ const SAY_SET: SpriteSet = {
   ]
 }
 
+/// Phase 3 · Default/Happy/1 13 帧 loop（高兴 / 惊喜 idle）
+const HAPPY_SET: SpriteSet = {
+  graph: 'Default',
+  animat: 'Single',
+  mode: 'Happy',
+  loop: true,
+  frames: [
+    { textureUrl: hp000, durationMs: 125 },
+    { textureUrl: hp001, durationMs: 125 },
+    { textureUrl: hp002, durationMs: 125 },
+    { textureUrl: hp003, durationMs: 125 },
+    { textureUrl: hp004, durationMs: 125 },
+    { textureUrl: hp005, durationMs: 250 },
+    { textureUrl: hp006, durationMs: 125 },
+    { textureUrl: hp007, durationMs: 125 },
+    { textureUrl: hp008, durationMs: 125 },
+    { textureUrl: hp009, durationMs: 125 },
+    { textureUrl: hp010, durationMs: 125 },
+    { textureUrl: hp011, durationMs: 125 },
+    { textureUrl: hp012, durationMs: 250 }
+  ]
+}
+
+/// Phase 3 · Default/PoorCondition/1 17 帧 loop（担心 / 难过 idle）
+const POOR_CONDITION_SET: SpriteSet = {
+  graph: 'Default',
+  animat: 'Single',
+  mode: 'PoorCondition',
+  loop: true,
+  frames: [
+    { textureUrl: pc000, durationMs: 125 },
+    { textureUrl: pc001, durationMs: 125 },
+    { textureUrl: pc002, durationMs: 125 },
+    { textureUrl: pc003, durationMs: 125 },
+    { textureUrl: pc004, durationMs: 375 },
+    { textureUrl: pc005, durationMs: 125 },
+    { textureUrl: pc006, durationMs: 125 },
+    { textureUrl: pc007, durationMs: 125 },
+    { textureUrl: pc008, durationMs: 500 },
+    { textureUrl: pc009, durationMs: 125 },
+    { textureUrl: pc010, durationMs: 125 },
+    { textureUrl: pc011, durationMs: 125 },
+    { textureUrl: pc012, durationMs: 375 },
+    { textureUrl: pc013, durationMs: 375 },
+    { textureUrl: pc014, durationMs: 125 },
+    { textureUrl: pc015, durationMs: 125 },
+    { textureUrl: pc016, durationMs: 125 }
+  ]
+}
+
 /// 摸头 B_Nomal 11 帧 loop（VPet 原作）；playOnce 完后回 DEFAULT_SET
 const TOUCH_HEAD_SET: SpriteSet = {
   graph: 'Touch_Head',
@@ -180,11 +264,17 @@ onMounted(async () => {
           evType === 'thinking_started' || evType === 'thinking_finished') {
         flashToast(`ws: ${evType}`, 1500)
       }
-      // 玄女说话：弹气泡 + 嘴动 + TTS 心海音（Phase 2.D+E）
+      // 玄女说话：弹气泡 + 嘴动 + TTS 派蒙音（Phase 2.D+E）+ 情绪 ref/sprite 切（Phase 3）
       if (ev.kind.type === 'xuannv_voice_line' && typeof ev.kind.text === 'string') {
         const sayText = ev.kind.text
+        // emotion 可能 undefined / null / string——只在是非空 string 时透传，
+        // 后端缺 ref 时也会 fallback normal，所以这里宽松收
+        const rawEmotion = ev.kind.emotion
+        const emotion = typeof rawEmotion === 'string' && rawEmotion.length > 0
+          ? rawEmotion
+          : undefined
         showBubble(sayText)
-        speakWithMouth(sayText).catch(e => {
+        speakWithMouth(sayText, emotion).catch(e => {
           flashToast(`tts err: ${String(e).slice(0, 80)}`, 5000)
         })
       }
@@ -312,22 +402,42 @@ function onCancelToken() {
   wakeTokenDraft.value = ''
 }
 
-/// 播一段心海音 + 嘴动 loop；播完自动切回 Default。
+/// 播一段派蒙音 + 嘴动 loop；播完按 emotion 切回对应 idle sprite mode。
 /// 喷头：xuannv_voice_line 自然 say 用、唤醒后「我在，你说」也用。
-async function speakWithMouth(text: string): Promise<void> {
+/// Phase 3：emotion 透到 sovits-proxy 切 ref + onEnd 切 idle sprite mode；
+/// 未传 / 未知 emotion → DEFAULT_SET（Nomal）兜底。
+async function speakWithMouth(text: string, emotion?: string): Promise<void> {
   if (!pairToken.value || !text.trim()) return
+  const idleSet = emotionToIdleSet(emotion)
   player?.load(SAY_SET).catch(() => {})
   try {
     await playTts({
       baseURL: BASE_URL,
       token: pairToken.value,
       text,
-      onStep: msg => console.log('[tts]', msg),
-      onEnd: () => { player?.load(DEFAULT_SET).catch(() => {}) }
+      emotion,
+      onStep: msg => console.log('[tts]', msg, emotion ? `emo=${emotion}` : ''),
+      onEnd: () => { player?.load(idleSet).catch(() => {}) }
     })
   } catch (e) {
-    player?.load(DEFAULT_SET).catch(() => {})
+    player?.load(idleSet).catch(() => {})
     throw e
+  }
+}
+
+/// Phase 3 情绪 → idle sprite set：happy/surprise → HAPPY_SET；
+/// worry/sad → POOR_CONDITION_SET；normal/serious/未知 → DEFAULT_SET。
+/// 这套映射跟 VPet 原 vup mod 的「Default/{Nomal,Happy,PoorCondition,Ill}」对齐。
+function emotionToIdleSet(emotion?: string): SpriteSet {
+  switch (emotion) {
+    case 'happy':
+    case 'surprise':
+      return HAPPY_SET
+    case 'worry':
+    case 'sad':
+      return POOR_CONDITION_SET
+    default:
+      return DEFAULT_SET
   }
 }
 

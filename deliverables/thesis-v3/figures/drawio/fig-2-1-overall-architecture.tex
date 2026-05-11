@@ -1,77 +1,79 @@
-% 图 2-1 顶层架构 v2 — 修：删 ①②③ 流程编号（架构图非时序图）/ 重排 3 条 agent→bus 箭头错开 endpoint
+% 图 2-1 顶层架构 v4 — 分层布局，控制流水平、事件流垂直，禁止箭头穿字/重叠
 \documentclass[border=4pt]{standalone}
 \usepackage{xeCJK}
 \setCJKmainfont{Songti SC}
 \setCJKsansfont{Heiti SC}
 \usepackage{tikz}
-\usepackage{amsmath}
-\usetikzlibrary{arrows.meta, positioning, calc, shapes.geometric, fit, backgrounds}
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds}
 \input{_style.tex}
 
 \begin{document}
-\begin{tikzpicture}[node distance=8mm and 14mm, font=\sffamily]
+\begin{tikzpicture}[font=\sffamily, node distance=8mm and 13mm]
 
-% ── 用户面（最左）───────────────────────────────────────
-\node[modBox, minimum width=24mm] (im) {IM/PWA\\\scriptsize 浏览器/手机};
-\node[modBox, below=8mm of im, minimum width=24mm] (tui) {Firehose TUI\\\scriptsize 终端实时观察};
+% ── Top control plane ───────────────────────────────
+\node[modBox, minimum width=27mm, minimum height=12mm] (im)
+  {IM/PWA\\\scriptsize 浏览器/手机};
+\node[modBox, below=6mm of im, minimum width=27mm, minimum height=12mm] (tui)
+  {Firehose TUI\\\scriptsize 终端实时观察};
 
-% ── 编排层核心（中间，三层）──────────────────────────
-\node[highlightBox, right=24mm of im, minimum width=30mm] (xuannv) {玄女 (xuannv)\\\scriptsize 顶层 agent};
-\node[modBox, below=8mm of xuannv, minimum width=30mm] (shelf) {Shelf 橱柜\\\scriptsize 门客注册表};
-\node[highlightBox, below=8mm of shelf, minimum width=30mm] (bus) {EventBus\\\scriptsize broadcast + WAL};
+\node[highlightBox, right=20mm of im, minimum width=31mm, minimum height=12mm] (xuannv)
+  {玄女 (xuannv)\\\scriptsize 顶层 agent};
+\node[modBox, below=6mm of xuannv, minimum width=31mm, minimum height=12mm] (shelf)
+  {Shelf 橱柜\\\scriptsize 门客注册表};
 
-% ── 门客（最右）─────────────────────────────────────
-\node[modBox, right=24mm of xuannv, minimum width=26mm] (cc1) {cc 门客 \#1\\\scriptsize claude-code};
-\node[modBox, below=4mm of cc1, minimum width=26mm] (cc2) {cc 门客 \#2\\\scriptsize claude-code};
-\node[modBox, below=4mm of cc2, minimum width=26mm] (codex) {codex 门客\\\scriptsize OpenAI codex};
+\node[modBox, right=22mm of xuannv, minimum width=30mm, minimum height=11mm] (cc1)
+  {cc 门客 \#1\\\scriptsize claude-code};
+\node[modBox, below=5mm of cc1, minimum width=30mm, minimum height=11mm] (cc2)
+  {cc 门客 \#2\\\scriptsize claude-code};
+\node[modBox, below=5mm of cc2, minimum width=30mm, minimum height=11mm] (codex)
+  {codex 门客\\\scriptsize OpenAI codex};
 
-% ── 持久化层（最下，居中）─────────────────────────
-\node[ghostBox, below=10mm of bus, minimum width=30mm] (sqlite) {SQLite WAL\\\scriptsize 单一真相源};
+% ── Fact plane ──────────────────────────────────────
+\node[highlightBox, below=20mm of shelf, minimum width=38mm, minimum height=12mm] (bus)
+  {EventBus\\\scriptsize broadcast + WAL};
+\node[ghostBox, below=8mm of bus, minimum width=32mm, minimum height=11mm] (sqlite)
+  {SQLite WAL\\\scriptsize 单一真相源};
 
-% ── 跨进程边界（虚线）─────────────────────────────
+% ── Boundaries ──────────────────────────────────────
 \begin{scope}[on background layer]
-  \node[externalBoundary, fit=(cc1) (cc2) (codex), inner sep=5pt,
-    label={[font=\scriptsize\itshape, text=fuxiGrayDark, yshift=1pt]above:{子进程（CLI 头无 GUI）}}] (subprocs) {};
-  \node[externalBoundary, fit=(im) (tui), inner sep=5pt,
-    label={[font=\scriptsize\itshape, text=fuxiGrayDark, yshift=1pt]above:{用户终端/浏览器}}] (clients) {};
+  \node[externalBoundary, fit=(im) (tui), inner sep=6pt,
+    label={[font=\scriptsize\itshape, text=fuxiGrayDark, yshift=1pt]above:{用户终端/浏览器}}] {};
+  \node[externalBoundary, fit=(cc1) (cc2) (codex), inner sep=6pt,
+    label={[font=\scriptsize\itshape, text=fuxiGrayDark, yshift=1pt]above:{子进程（CLI 头无 GUI）}}] {};
 \end{scope}
 
-% ── 控制流（灰，bidir）────────────────────────────
-% 用户 → 玄女
-\draw[flow] (im.east) -- node[above=0.5pt, font=\scriptsize] {REST/WS} (xuannv.west);
-
-% 玄女 → 门客（A2A，bidir 但只一条主线，避免分叉乱）
-\draw[bidir] (xuannv.east) -- node[above=0.5pt, font=\scriptsize] {A2A} (cc1.west);
-\draw[bidir] (xuannv.east) -| ($(cc2.west)+(-5mm,0)$) -- (cc2.west);
-\draw[bidir] (xuannv.east) -| ($(codex.west)+(-5mm,0)$) -- (codex.west);
-
-% 玄女 ↔ Shelf, Shelf ↔ EventBus
+% ── Control flow: horizontal and local vertical only ─
+\draw[flow] (im.east) -- node[above=1pt, font=\scriptsize] {REST/WS} (xuannv.west);
 \draw[bidir] (xuannv.south) -- (shelf.north);
-\draw[bidir] (shelf.south) -- (bus.north);
 
-% ── 事件流（蓝）：3 条 agent → bus 错开 endpoint，避免堆叠 ──
-% cc1 进 bus 上沿
-\draw[flowEvent] (cc1.west) -| ($(bus.east)+(8mm,0)$) |- ($(bus.east)+(0,4mm)$);
-% cc2 进 bus 中
-\draw[flowEvent] (cc2.west) -| ($(bus.east)+(6mm,0)$) |- (bus.east);
-% codex 进 bus 下沿
-\draw[flowEvent] (codex.west) -| ($(bus.east)+(4mm,0)$) |- ($(bus.east)+(0,-4mm)$);
+\coordinate (workerHub) at ($(cc1.west)!0.5!(codex.west)+(-6mm,0)$);
+\draw[bidir] (xuannv.east) -- node[above=1pt, font=\scriptsize] {A2A} (workerHub);
+\draw[flow] (workerHub) |- (cc1.west);
+\draw[flow] (workerHub) -- (cc2.west);
+\draw[flow] (workerHub) |- (codex.west);
 
-% Firehose TUI → bus（订阅）
-\draw[flow] (tui.east) -| ($(bus.west)+(-3mm,0)$) -- (bus.west);
+% ── Event flow: 编排层 publish — shelf 单一通路（玄女经 shelf 间接发布）─
+\draw[flowEvent] (shelf.south) -- node[right=1pt, font=\scriptsize, color=fuxiBlue] {publish} (bus.north);
 
-% bus → SQLite（持久化）
+% ── 3 条 worker → bus 错开列与入口 y，避免共线 + 无 U 拐 ─
+% cc1（顶）：列 +10mm, 入 bus 上沿 +4mm — 路径最长
+\draw[flowEvent] (cc1.east) -- ++(10mm,0) |- ($(bus.east)+(0,4mm)$);
+% cc2（中）：列 +7mm, 入 bus 中线
+\draw[flowEvent] (cc2.east) -- ++(7mm,0)  |- (bus.east);
+% codex（底）：列 +4mm, 入 bus 下沿 -4mm — 路径最短
+\draw[flowEvent] (codex.east) -- ++(4mm,0) |- ($(bus.east)+(0,-4mm)$);
+
+% ── Subscription and storage paths ──────────────────
+\draw[flowDup] (bus.west) -| ($(im.south west)+(-4mm,-4mm)$) |- (im.west);
+\draw[flow] (tui.east) -| ($(bus.west)+(-5mm,0)$) -- (bus.west);
 \draw[flowEvent] (bus.south) -- (sqlite.north);
 
-% bus → IM/PWA（loopback 订阅，浅蓝点线）
-\draw[flowDup] (bus.west) -| ($(im.south)+(-4mm,0)$) -- ($(im.south)+(-4mm,3mm)$);
-
-% ── 图例（右下角，紧凑）──────────────────────────
-\node[anchor=north west, font=\scriptsize, align=left, draw=fuxiGrayLine!40, fill=white,
-      inner sep=4pt, line width=0.3pt] (legend) at ($(sqlite.south east)+(8mm,0)$) {
-\textcolor{fuxiGrayDark}{$\rightarrow$ 控制流 \quad}
-\textcolor{fuxiBlue}{$\rightarrow$ 事件流（publish）\quad}
-\textcolor{fuxiBlue!70}{$\cdots\!\rightarrow$ 订阅广播}
+% ── Legend ─────────────────────────────────────────
+\node[anchor=north east, font=\scriptsize, align=left, draw=fuxiGrayLine!40, fill=white,
+      inner sep=4pt, line width=0.3pt] at ($(sqlite.south east)+(44mm,-1mm)$) {
+  \textcolor{fuxiGrayDark}{$\rightarrow$ 控制流 \quad}
+  \textcolor{fuxiBlue}{$\rightarrow$ 事件流（publish）\quad}
+  \textcolor{fuxiBlue!70}{$\cdots\!\rightarrow$ 订阅广播}
 };
 
 \end{tikzpicture}

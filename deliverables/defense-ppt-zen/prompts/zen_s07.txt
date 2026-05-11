@@ -1,0 +1,27 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 7 of 13, presenting the second engineering contribution: the non-blocking event bus dual-path architecture. The visual anchor is two large English/serif terms ("broadcast" and "WAL") set side-by-side as a couplet on warm off-white paper. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE horizontal ink mark with a deliberate gap in the middle — a long flying-white horizontal brush stroke that traverses the upper-third of the canvas, BUT split into TWO segments with a clear empty gap (~6% of slide width) at the horizontal center, so the visual reads as "two parallel paths". Both segments have visible dry-brush flying-white texture. Pure deep ink black. NO second mark anywhere else, NO seal, NO vertical strokes.
+
+LAYOUT
+A "couplet" layout. A short slide title sits at the top-LEFT corner, left-aligned. The split horizontal ink mark (described above) sits below the title, occupying the upper third. A short single-line caption sits just under the ink mark, centered. In the slide's vertical mid-band (40% to 65% from top), TWO large words — "broadcast" on the left HALF and "WAL" on the right HALF — share equal weight, separated by generous whitespace, both centered within their respective half. Below the two words, in the lower 20% of the slide, a single horizontal short caption line, centered. NO icons of any kind.
+
+TEXT CONTENT (each string renders EXACTLY as written; English words in serif typeface — Source Han Serif / 思源宋体 ExtraBold or Times-style serif Bold; Chinese in 思源宋体 — ExtraBold for title and the captions, Medium for the one-line note; deep ink black #0E0E0E; full-width Chinese punctuation; no emoji, no decorative glyphs):
+- Top-left slide title (~24pt, ExtraBold, single line): "贡献二 / EventBus 双路径"
+- Mid-band caption above the two words (~24pt, ExtraBold, centered, single line): "两路同时，各走最优"
+- Left half giant word (~80pt, serif Bold, single horizontal line, centered in left half): "broadcast"
+- Right half giant word (~80pt, serif Bold, single horizontal line, centered in right half): "WAL"
+- Bottom caption (~18pt, Medium, single horizontal line, centered): "lag 哨兵把背压从隐形死锁变成显式信号"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 55% of the slide must be empty paper. Generous gap between "broadcast" and "WAL" — they should read as a couplet, not a single phrase.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.
