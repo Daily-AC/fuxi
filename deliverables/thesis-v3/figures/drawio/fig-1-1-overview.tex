@@ -1,0 +1,86 @@
+% 图 1-1 论文概览图 — 学术风格版本：平台视角而非装饰性树状图
+\documentclass[border=4pt]{standalone}
+\usepackage{xeCJK}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds}
+\input{_style.tex}
+
+\begin{document}
+\begin{tikzpicture}[font=\sffamily, node distance=8mm and 13mm]
+
+% ── 主执行闭环 ─────────────────────────────────────
+\node[modBox, minimum width=26mm, minimum height=12mm] (user) {
+  用户入口\\[-1pt]\scriptsize IM/PWA · REPL
+};
+
+\node[highlightBox, right=16mm of user, minimum width=30mm, minimum height=13mm] (xuannv) {
+  玄女编排层\\[-1pt]\scriptsize intent · task · state
+};
+
+\node[modBox, right=16mm of xuannv, minimum width=30mm, minimum height=13mm] (a2a) {
+  A2A 协议适配\\[-1pt]\scriptsize JSON-RPC · SSE
+};
+
+\node[modBox, right=16mm of a2a, minimum width=30mm, minimum height=13mm] (workers) {
+  门客执行层\\[-1pt]\scriptsize Claude Code · Codex
+};
+
+% ── 事件与审计平面 ─────────────────────────────────
+\node[highlightBox, below=16mm of a2a, minimum width=42mm, minimum height=13mm] (bus) {
+  EventBus 事实流\\[-1pt]\scriptsize live broadcast + WAL append
+};
+
+\node[ghostBox, below left=10mm and 8mm of bus, minimum width=30mm, minimum height=11mm] (wal) {
+  SQLite WAL\\[-1pt]\scriptsize replay · audit
+};
+
+\node[modBox, below right=10mm and 8mm of bus, minimum width=30mm, minimum height=11mm] (obs) {
+  多端观测\\[-1pt]\scriptsize Firehose · SSE · IM
+};
+
+% ── 执行隔离 ───────────────────────────────────────
+\node[ghostBox, below=10mm of workers, minimum width=30mm, minimum height=11mm] (sandbox) {
+  三层沙箱\\[-1pt]\scriptsize L1 · L2 worktree · L3
+};
+
+% ── 主控制流 ───────────────────────────────────────
+\draw[flow] (user.east) -- node[above=1pt, font=\scriptsize] {任务/人工回复} (xuannv.west);
+\draw[flow] (xuannv.east) -- node[above=1pt, font=\scriptsize] {dispatch} (a2a.west);
+\draw[flow] (a2a.east) -- node[above=1pt, font=\scriptsize] {send/stream} (workers.west);
+\draw[flow] (workers.south) -- node[right=1pt, font=\scriptsize] {隔离执行} (sandbox.north);
+
+% ── 事件流：汇入 EventBus，再分发/持久化 ──────────────
+% 门客 → bus：起点下移 4mm 避开灰色 send/stream 箭头，左拐再下到 bus 右沿
+\draw[flowEvent] ($(workers.west)+(0,-4mm)$) -- ++(-6mm,0) |- ($(bus.east)+(0,3mm)$);
+\draw[flowEvent] (xuannv.south) |- ($(bus.west)+(0,3mm)$);
+
+\draw[flowEvent] (bus.south west) -- (wal.north east);
+\draw[flowDup] (bus.south east) -- (obs.north west);
+
+% ── input-required 回环 ────────────────────────────
+\draw[flow, color=fuxiPurple] (bus.west) -| ($(xuannv.south)+(-8mm,0)$)
+  node[pos=0.18, below=1pt, font=\scriptsize, color=fuxiPurple] {input-required};
+% 玄女 → 用户：直接一条平行短线（不再折角），起点在 xuannv 左沿下 4mm
+\draw[flow, color=fuxiPurple] ($(xuannv.west)+(0,-4mm)$) -- ($(user.east)+(0,-4mm)$);
+
+% ── 背景分区 ───────────────────────────────────────
+\begin{scope}[on background layer]
+  \node[layerBg, fit=(user) (xuannv) (a2a) (workers), inner sep=5pt,
+    label={[font=\scriptsize\itshape, text=fuxiGrayDark]above:{控制平面：从用户意图到门客执行}}] {};
+  \node[layerBg, fit=(bus) (wal) (obs), inner sep=5pt,
+    label={[font=\scriptsize\itshape, text=fuxiGrayDark]below:{事实平面：可观测、可回放、可审计的事件序列}}] {};
+\end{scope}
+
+% ── 图例 ───────────────────────────────────────────
+\node[anchor=north east, font=\scriptsize, align=left, draw=fuxiGrayLine!40, fill=white,
+      inner sep=4pt, line width=0.3pt] at ($(workers.north east)+(0,11mm)$) {
+  \textcolor{fuxiGrayDark}{$\rightarrow$ 控制流 \quad}
+  \textcolor{fuxiBlue}{$\rightarrow$ 事件流 \quad}
+  \textcolor{fuxiPurple}{$\rightarrow$ 人工介入回环}
+};
+
+\end{tikzpicture}
+\end{document}

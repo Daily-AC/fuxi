@@ -29,9 +29,12 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import soundfile as sf
@@ -47,6 +50,13 @@ MODEL_ID = os.environ.get("ASR_MODEL_ID", "iic/SenseVoiceSmall")
 DEVICE = os.environ.get("ASR_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000
 MAX_AUDIO_SECONDS = int(os.environ.get("ASR_MAX_SECONDS", "60"))
+# 热词文件——`fuxi xuannv hotword add/rm/list` CLI 操作的目标。每次 transcribe
+# 前 mtime check 自动 reload，不需要 systemctl restart。SenseVoiceSmall 不支持
+# 模型级 hotword，靠后处理正则替换；详见 _Hotwords.apply()。
+HOTWORDS_PATH = Path(os.environ.get(
+    "ASR_HOTWORDS_PATH",
+    os.path.expanduser("~/.fuxi/asr-hotwords.json"),
+))
 
 with open(HMAC_KEY_PATH, "rb") as f:
     HMAC_SECRET = f.read().strip()
@@ -56,6 +66,96 @@ app = FastAPI()
 # 模型懒加载——首次 WS 请求时加载，避免 systemd 启动超时（模型首次下载 ~400MB）
 _model = None
 _model_lock = asyncio.Lock()
+
+
+class _Hotwords:
+    """ASR 后处理热词替换。
+
+    JSON 形态（用户/玄女通过 `fuxi xuannv hotword add` 写入；也可手写）：
+        {
+          "rules": [
+            {"match": "克劳德[寇口扣][德的]?", "replace": "claude code",
+             "comment": "..."},
+            {"match": "麦克(?![布风斯尔])", "replace": "mac",
+             "comment": "..."}
+          ]
+        }
+
+    `match` 一律按 Python `re` 正则解释；字面字符串不含特殊字符时也安全。
+    规则按数组顺序匹配；首个匹配的替换后**不再回头**——后续规则继续在新文本上跑。
+    这避免 A 替换的结果触发 B 的二次替换（链式串改风险）。
+
+    mtime check 让 transcribe 路径自动 reload，无需 systemctl restart。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._mtime_ns: int = -1
+        self._compiled: list[tuple[re.Pattern[str], str, str]] = []
+        self._lock = asyncio.Lock()
+
+    async def _reload_if_changed(self) -> None:
+        try:
+            mtime = self.path.stat().st_mtime_ns
+        except FileNotFoundError:
+            if self._mtime_ns != 0:
+                self._compiled = []
+                self._mtime_ns = 0
+                log.info("hotwords: 配置文件不存在 %s（无替换规则）", self.path)
+            return
+        if mtime == self._mtime_ns:
+            return
+        async with self._lock:
+            # double-check inside lock：两条 transcribe 路径并发 reload 时只跑一次
+            try:
+                mtime = self.path.stat().st_mtime_ns
+            except FileNotFoundError:
+                self._compiled = []
+                self._mtime_ns = 0
+                return
+            if mtime == self._mtime_ns:
+                return
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    data = json.load(f)
+                rules = data.get("rules", [])
+                compiled: list[tuple[re.Pattern[str], str, str]] = []
+                for i, r in enumerate(rules):
+                    pat = r.get("match")
+                    repl = r.get("replace")
+                    if not isinstance(pat, str) or not isinstance(repl, str):
+                        log.warning("hotwords: rule #%d 缺 match/replace，跳过", i)
+                        continue
+                    try:
+                        compiled.append((
+                            re.compile(pat),
+                            repl,
+                            (r.get("comment") or "").strip(),
+                        ))
+                    except re.error as e:
+                        log.warning("hotwords: rule #%d 正则无效 %r: %s", i, pat, e)
+                        continue
+                self._compiled = compiled
+                self._mtime_ns = mtime
+                log.info("hotwords: reloaded %d rules from %s", len(compiled), self.path)
+            except (OSError, json.JSONDecodeError) as e:
+                log.warning("hotwords: 读 %s 失败 %s（保留旧规则）", self.path, e)
+
+    async def apply(self, text: str) -> str:
+        await self._reload_if_changed()
+        if not self._compiled or not text:
+            return text
+        out = text
+        for pat, repl, comment in self._compiled:
+            new = pat.sub(repl, out)
+            if new != out:
+                log.debug("hotword hit %r → %r%s",
+                          pat.pattern, repl, f" ({comment})" if comment else "")
+                out = new
+        return out
+
+
+_hotwords = _Hotwords(HOTWORDS_PATH)
 
 
 def _b64u_decode(s: str) -> bytes:
@@ -106,11 +206,14 @@ async def get_model():
 
 @app.get("/healthz")
 async def healthz():
+    await _hotwords._reload_if_changed()
     return JSONResponse({
         "ok": True,
         "model_loaded": _model is not None,
         "model_id": MODEL_ID,
         "device": DEVICE,
+        "hotwords_path": str(HOTWORDS_PATH),
+        "hotwords_count": len(_hotwords._compiled),
     })
 
 
@@ -200,6 +303,12 @@ async def asr_ws(ws: WebSocket):
         if isinstance(result, list) and result:
             raw = result[0].get("text", "") or ""
             text = _strip_sensevoice_tags(raw)
+        # 热词后处理：模型出文本 → 正则替换。失败兜底走原文，不要因为 hotword
+        # 配置写错就让整条 transcribe 报错。
+        try:
+            text = await _hotwords.apply(text)
+        except Exception as e:
+            log.warning("hotword apply 失败 %s（用原文）", e)
         log.info("ws %s done %d ms text_len=%d", ws.client, elapsed_ms, len(text))
         await ws.send_text(json.dumps({
             "type": "final",

@@ -1,0 +1,28 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 10 of 13, presenting the fifth (final) engineering contribution: cross-node extension points abstracted as four trait hooks. This is the slide where "distributed" gets its proper visual anchor in the deck. The visual anchor is a central two-line thesis statement on warm off-white paper, with three small footer notes underneath. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE small ink mark only — a single short slanted brush stroke (斜墨笔) at the UPPER-RIGHT of the canvas, no longer than 6% of slide width, at roughly a 30-degree angle, like a hand-written annotation mark. This mirrors slide 8's upper-right ink stroke (deck rhythm). Pure deep ink black with subtle dry-brush texture. NO second mark anywhere.
+
+LAYOUT
+A "single statement with footer notes" layout, mirroring slide 6 (which presented contribution 1) — a deliberate first-and-last spotlight pairing for the deck's contribution arc. A small contribution-counter sits at the top-RIGHT corner, right-aligned. The two-line main statement sits in the optical center of the slide (vertically between 38% and 62% from top), centered horizontally. Below the statement, generous whitespace. At the bottom of the slide (lower 18%), THREE small right-aligned footer notes stack vertically with tight line spacing. The upper-right slanted ink stroke sits in the empty upper-right corner. NO title.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the main statement, Medium for the contribution counter and footer notes; deep ink black #0E0E0E; full-width Chinese punctuation; mid-dot "·" between trait names; no emoji, no decorative glyphs):
+- Top-right contribution counter (~14pt, Medium, single line): "贡献五 / 共五"
+- Statement line 1 (very large, ~50pt, ExtraBold, centered, single line): "跨节点的扩展点，"
+- Statement line 2 (very large, ~50pt, ExtraBold, centered, single line): "用四个 trait 钩子定义出来。"
+- Footer note 1 (~16pt, Medium, right-aligned, single line): "RecallSink · DistEnqueuer · NodeLoadProvider · ExtractorSpawner"
+- Footer note 2 (~16pt, Medium, right-aligned, single line): "HMAC-SHA256 + nonce cache · 常量时间比较"
+- Footer note 3 (~16pt, Medium, right-aligned, single line): "两节点 sandbox 已跑通端到端调度"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 60% of the slide must be empty paper. Wide breathing space above and below the central statement.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

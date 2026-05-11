@@ -157,6 +157,24 @@ enum XuannvCmd {
     /// 一两句口语，≤500 字（CLI 硬上限会拒），不带 markdown / 代码 / emoji。
     /// `fuxi xuannv say "好的，派给鲁班了"`
     Say(xuannv_cmd::SayArgs),
+    /// ASR 热词管理——SenseVoiceSmall 不支持模型级 hotword，靠后处理正则替换。
+    /// 玄女遇到用户说「这个词总被识别错」时，自己跑 `hotword add` 加规则，
+    /// home asr.service 下次 transcribe 自动 reload（不用 restart 服务）。
+    /// 规则文件：`~/.fuxi/asr-hotwords.json`，asr_server.py mtime watch 自动生效。
+    #[command(subcommand)]
+    Hotword(HotwordCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum HotwordCmd {
+    /// 加/更新一条规则（同 match 视为更新）。
+    /// 例：`fuxi xuannv hotword add --match '克劳德[寇口扣][德的]?' --replace 'claude code'`
+    /// 或纯字面：`fuxi xuannv hotword add --literal --match '麦克' --replace 'mac'`（小心歧义）
+    Add(xuannv_cmd::HotwordAddArgs),
+    /// 列所有当前规则 + 编号（rm 用）。
+    List,
+    /// 删第 N 条（先 list 看编号）。
+    Rm(xuannv_cmd::HotwordRmArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -288,6 +306,11 @@ async fn main() -> anyhow::Result<()> {
                 HandoffCmd::Read => xuannv_cmd::run_handoff_read().await,
             },
             XuannvCmd::Say(args) => xuannv_cmd::run_say(args).await,
+            XuannvCmd::Hotword(h) => match h {
+                HotwordCmd::Add(args) => xuannv_cmd::run_hotword_add(args).await,
+                HotwordCmd::List => xuannv_cmd::run_hotword_list().await,
+                HotwordCmd::Rm(args) => xuannv_cmd::run_hotword_rm(args).await,
+            },
         },
         Some(Command::Bug(args)) => bug_cmd::run(args).await,
         Some(Command::Issue(args)) => issue_cmd::run(args).await,

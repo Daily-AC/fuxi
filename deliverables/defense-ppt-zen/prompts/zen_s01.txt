@@ -1,0 +1,26 @@
+OVERVIEW
+A 16:9 minimalist editorial cover slide for a Chinese academic thesis defense. The reference image is provided ONLY for paper-texture / off-white tone cue — completely ignore its cartoon characters, water-droplet mascots, pastel colors, or chibi style. Produce only the editorial typography layout described below.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. A single hand-painted Chinese ink-wash brush stroke (sumi / 水墨) — monochrome deep ink black only, with visible flying-white (飞白). NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO shadows, NO pastel palette. Mood is restrained, scholarly, contemplative.
+
+INK MARK
+ONE tall flying-white vertical brush stroke running down the left third of the canvas, from near top to near bottom — about 60% of slide height, 4-5% of slide width. Confident single-pass calligraphy energy, with visible dry-brush flying-white texture especially in the lower half. Pure deep ink black on warm paper. Absolutely no second mark anywhere.
+
+LAYOUT
+Hanging-scroll feel. The vertical ink stroke fills the left third (described above). To its right (the right two-thirds of the canvas), the title appears as TWO stacked horizontal lines with wide line spacing (1.6 line-height). Below the title, ONE smaller subtitle line. At the far bottom-right corner, a very small author/date stamp in tiny type. At least 60% of the slide is blank paper.
+
+TEXT CONTENT (each Chinese string below renders EXACTLY as written, in heavy Source Han Serif / 思源宋体 ExtraBold for the title, Source Han Serif Medium for subtitle and stamp; all text in deep ink black #0E0E0E; no emoji, no decorative glyphs, no extra characters):
+- Title row 1 (very large, 思源宋体 ExtraBold, approx 80pt, single horizontal line): "伏羲"
+- Title row 2 (large, 思源宋体 ExtraBold, approx 26pt, single horizontal line, no wrapping): "基于 AI Agent 的高性能分布式通讯系统"
+- Subtitle (small, Medium, approx 16pt, single line): "一个本地优先的多 Agent 协作平台"
+- Bottom-right stamp (tiny Medium, approx 11pt, single line): "张以琳　2026 · 05 · 09"
+
+ACCENT
+None on this slide. The two-tier title and the single ink stroke carry it.
+
+WHITESPACE
+At least 60% of the canvas must be empty paper. The composition should feel like a 装裱过的 hanging scroll — title condensed to the right of the ink stroke, large breathing room above, below, and to the far right.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and a very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink dots, NO clouds, NO plum blossoms. The background is just a piece of paper, nothing more.

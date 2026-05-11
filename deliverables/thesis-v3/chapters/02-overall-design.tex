@@ -1,24 +1,19 @@
 % ============================================================================
 % 第 2 章 · 总体设计
-% 目标：~6000 中文字 / 需求-设计映射表 / 形式化模块边界 / SLA 公式 / 三张占位图
 % ============================================================================
 
 \section{系统总体设计}
 
-第一章把多 Agent 协作场景下的工程缺口归结为「真实时观测、跨 CLI 异构、单机本地优先、跨节点可扩展、历史可回放」五条诉求。本章把这五条诉求落到伏羲（fuxi）系统的总体架构上，自顶向下给出设计目标与约束、整体结构、模块划分与依赖关系、关键数据流、跨节点扩展与性能预算。本章不展开具体 Rust 实现，只把架构层面的取舍——为何选择事件驱动而非 RPC 主导、为何把 A2A 与事件总线视为正交而非合并、为何编排层在玄女与门客之间硬性插一层而非走对等图——逐项说清楚。
+第一章把多 Agent 协作场景的工程缺口归结为「真实时观测、跨 CLI 异构、单机本地优先、跨节点可扩展、历史可回放」五条诉求。本章把这五条诉求落到伏羲（fuxi）的总体架构上：自顶向下给出设计目标与约束、整体结构、关键数据流、跨节点扩展与性能预算。本章不展开 Rust 实现，只把架构层面的取舍——为何选择事件驱动而非 RPC 主导、为何把 A2A 与事件总线视为正交、为何编排层在玄女与门客之间硬性插一层而非走对等图——逐项说明。
 
 \subsection{设计目标与约束}
 \label{subsec:design-goals}
 
-伏羲的总体设计围绕三组矛盾展开。第一组是「真实时」与「不丢消息」的矛盾——观测端要求事件从产生到抵达的延迟尽可能低，审计与回放要求事件不能在拥塞时被悄悄丢弃；第二组是「多门客并发」与「文件系统隔离」的矛盾——多个 CLI 门客同时改一个项目目录会撞 git 锁与文件覆盖，而完全独立的目录又会让 \texttt{cargo build} 与 \texttt{node\_modules} 这类大型构建产物每次重生；第三组是「跨节点扩展」与「单机本地优先」的矛盾——分布式调度要求节点间通过网络共享调度状态，本地优先又要求单节点离线时仍能完整运行。这三组矛盾的解法共同决定了系统的形态。
+伏羲的总体设计需化解三组矛盾。第一组「真实时」与「不丢消息」——观测端要求事件抵达延迟尽可能低，审计与回放要求事件不能在拥塞时被悄悄丢弃；第二组「多门客并发」与「文件系统隔离」——多个 CLI 门客同时改一个项目目录会撞 git 锁，而完全独立的目录又会让 \texttt{cargo build} 与 \texttt{node\_modules} 这类大型构建产物每次重生；第三组「跨节点扩展」与「单机本地优先」——分布式调度要求节点间共享调度状态，本地优先又要求单节点离线时仍能完整运行。
 
-第一组矛盾通过事件总线的「双路径 + 哨兵」架构解决。事件在每次 \texttt{publish()} 时同时进入广播路径与持久化路径——广播路径基于 Tokio 的 \texttt{broadcast} channel~\parencite{tokio2024broadcast}，零拷贝扇出给所有订阅者；持久化路径走异步 \texttt{mpsc} 队列由后台 writer 串行落库到 SQLite WAL~\parencite{sqlite2024wal}。当 writer 拥塞时不阻塞调用方，而是 \texttt{spawn} 一个后台 task 等待慢车位，并在堆积超阈值时发出哨兵事件让运维侧感知。这种「不阻塞但不丢」的设计参考了 LinkedIn 在 Kafka 之上做日志驱动事件流的工程经验~\parencite{kreps2011kafka}，但不引入 Kafka 这种重型外部组件，而是在本地 SQLite 之上自行实现等价语义。
+第一组通过事件总线的双路径架构解决：事件在每次 \texttt{publish()} 同时进入广播路径（Tokio broadcast\parencite{tokio2024broadcast} 零拷贝扇出）与持久化路径（异步 mpsc 队列由后台 writer 串行落库到 SQLite WAL\parencite{sqlite2024wal}）；writer 拥塞时不阻塞调用方，而是 spawn 后台任务等待，并在堆积超阈值时发出哨兵事件让运维侧感知。该设计借鉴 Kafka 的日志驱动事件流经验\parencite{kreps2011kafka}，但不引入 Kafka 这种重型外部组件。第二组通过 git worktree\parencite{git2024worktree} 多工作树机制与 L1/L2/L3 三层沙箱解决：多个门客并发执行时各自在独立 worktree 上写改动，最终合并回主线；只读场景跳过 worktree 创建直接挂载；持久角色级沙箱跨任务复用构建缓存。第三组通过「单机优先 + 钩子化扩展」解决：系统默认在单节点完整运行，所有持久状态都在本地 SQLite；当用户启动多节点部署时，\texttt{fuxi-cli} 注入 \texttt{DistEnqueuer} 与 \texttt{NodeLoadProvider} 两个 trait 对象到编排层，编排层自身不感知分布式细节。
 
-第二组矛盾通过 \texttt{git worktree}~\parencite{git2024worktree} 的多工作树机制与三层沙箱（L1 只读 / L2 临时 / L3 持久）解决。多个门客并发执行时各自在独立 worktree 上写改动，最终通过分支合并回主线；只读场景跳过 worktree 创建直接挂载源码，启动延迟降到十毫秒级；持久角色级沙箱跨任务复用构建缓存，避免 \texttt{target/} 反复重生。这种分层与 SWE-agent 的 Agent-Computer Interface 抽象~\parencite{yang2024sweagent} 一致，把「Agent 与文件系统的交互」显式提到协议层面。
-
-第三组矛盾通过「单机优先 + 钩子化扩展」解决。系统默认在单节点完整运行，所有持久状态都在本地 SQLite 中；当用户启动多节点部署时，\texttt{fuxi-cli} 注入 \texttt{DistEnqueuer} 与 \texttt{NodeLoadProvider} 两个 trait 对象到编排层，把跨节点路由逻辑加挂到原有 dispatch 路径上，编排层自身不感知分布式细节。这一思路与 ZooKeeper 把分布式协调抽象成独立服务的做法~\parencite{hunt2010zookeeper} 一致，但伏羲把协调层做成可注入的 Rust trait 而非独立进程，避免引入额外运行时依赖。
-
-围绕上述矛盾，本节把设计目标与功能/非功能需求做成一份可校对的清单，并将每条需求与本章后续节次的设计决策一一映射，列于表~\ref{tab:requirement-design-mapping}。这张映射表是本章相对前作（v2 总体设计）最重要的增量——它强制设计决策对需求负责，避免「为做而做」的过度工程。
+把功能与非功能需求与设计决策做成可校对清单，列于表~\ref{tab:requirement-design-mapping}。这张映射表强制设计决策对需求负责，避免「为做而做」的过度工程。
 
 \begin{table}[H]
 \centering
@@ -29,35 +24,35 @@
 \toprule
 \textbf{需求类别} & \textbf{具体诉求} & \textbf{对应设计决策} \\
 \midrule
-多 Agent 调度 & 玄女把任务派给合适门客；同角色多门客并发；异构 CLI（cc / codex）统一调度 & \autoref{subsec:overall-arch} 玄女—门客分层；\autoref{subsec:dataflow} dispatch pump；\texttt{Agent} trait 抽象 \\
+多 Agent 调度 & 玄女把任务派给合适门客；同角色多门客并发；异构 CLI 统一调度 & \autoref{subsec:overall-arch} 玄女—门客分层；\autoref{subsec:dataflow} dispatch pump \\
 \addlinespace
-真实时观测 & 用户在 TUI / IM / PWA 看到任务进展无轮询；事件从产生到抵达 P99 $\le$ 50\,ms & \autoref{subsec:overall-arch} EventBus + Firehose；\autoref{subsec:sla} 公式 (2-4) \\
+真实时观测 & 用户在 TUI/IM/PWA 看到任务进展无轮询；事件 P99 $\le$ 50\,ms & EventBus + Firehose；\autoref{subsec:sla} 公式 (2-4) \\
 \addlinespace
-单一真相源 & 所有事件 append-only 落 SQLite；崩溃恢复后能完整重放历史 & \autoref{subsec:dataflow} 双路径架构；\texttt{ReplayCursor} 接口 \\
+单一真相源 & 所有事件 append-only 落 SQLite；崩溃后能完整重放 & 双路径架构；\texttt{ReplayCursor} 接口 \\
 \addlinespace
-工作区隔离 & 多门客并发不撞 git 锁；构建缓存可复用；只读场景轻量化 & \autoref{subsec:overall-arch} 三层沙箱 L1/L2/L3 \\
+工作区隔离 & 多门客并发不撞 git 锁；构建缓存可复用；只读场景轻量化 & L1/L2/L3 三层沙箱 \\
 \addlinespace
-人工介入 & 门客遇到歧义可悬挂等待；用户回复后能续跑同一任务 & \autoref{subsec:dataflow} A2A \texttt{input-required} 语义的平台映射 \\
+人工介入 & 门客遇到歧义可悬挂等待；用户回复后能续跑 & A2A \texttt{input-required} 平台映射 \\
 \addlinespace
-跨节点扩展 & 跨机器部署门客；按节点负载自动选择执行点；用户显式 \texttt{@<node>} 钉死任务 & \autoref{subsec:cross-node} \texttt{Project.host\_nodes} + auto-pin + 钩子注入 \\
+跨节点扩展 & 跨机部署门客；按节点负载自动选择；用户显式 \texttt{@<node>} 钉死 & \autoref{subsec:cross-node} \texttt{host\_nodes} + auto-pin + 钩子注入 \\
 \addlinespace
-历史回放 & 任意时间点开始重放；回放与 live tail 无缝衔接 & \autoref{subsec:dataflow} EventStore + 先订阅后查询的回放协议 \\
+历史回放 & 任意时间点开始重放；回放与 live tail 无缝衔接 & EventStore + 先订阅后查询 \\
 \addlinespace
-长期记忆 & Agent 间共享事实与角色技能；扩展独立模块不绑定主链 & \autoref{subsec:module-decomposition} \texttt{fuxi-memory} / \texttt{fuxi-skills} 横向接入 \\
+长期记忆 & Agent 间共享事实与角色技能；扩展独立模块不绑主链 & \texttt{fuxi-memory}/\texttt{fuxi-skills} 横向接入 \\
 \addlinespace
-轻量部署 & 单二进制；无外部数据库；单机离线可用 & \autoref{subsec:overall-arch} 选 SQLite + Tokio + Axum 自包含栈 \\
+轻量部署 & 单二进制；无外部数据库；单机离线可用 & SQLite + Tokio + Axum 自包含栈 \\
 \addlinespace
-可观测背压 & 拥塞不悄悄丢消息；运维侧能看到滞后趋势 & \autoref{subsec:dataflow} lag 哨兵事件；\autoref{subsec:sla} 公式 (2-4) \\
+可观测背压 & 拥塞不悄悄丢消息；运维侧能看到滞后趋势 & lag 哨兵事件；公式 (2-4) \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-表中没有列入的还有两条隐性约束：第一，所有 Agent 之间的协作必须经过编排层显式记录，不允许 Agent 直接互相 RPC 绕过玄女——这是公理「玄女永远有知情权，无否决权」的工程化表达；第二，观测层只读不写，任何业务状态变化都不允许从观测端反向修改主链——这条约束让观测端可以被替换或并存（同一时刻浏览器、TUI、PWA 三端共看一份事件流）而不破坏系统正确性。这两条隐性约束在 \autoref{subsec:overall-arch} 与 \autoref{subsec:module-decomposition} 中分别落到具体模块边界上。
+除上表外还有两条隐性约束：所有 Agent 间协作必须经编排层显式记录，不允许 Agent 直接 RPC 绕过玄女——这是公理「玄女永远有知情权，无否决权」的工程化表达；观测层只读不写，任何业务状态变化不允许从观测端反向修改主链——这条让观测端可被替换或并存（同一时刻浏览器、TUI、PWA 三端共看一份事件流）而不破坏正确性。
 
 \subsection{总体架构}
 \label{subsec:overall-arch}
 
-伏羲采用「核心—通讯—编排—执行—观测」五层架构，每一层只依赖更下一层暴露的稳定接口，依赖方向严格自下而上，禁止循环引用。整体架构如图~\ref{fig:overall-architecture} 所示。
+伏羲采用「核心—通讯—编排—执行—观测」五层架构，每层只依赖更下一层暴露的稳定接口，依赖方向严格自下而上，禁止循环引用。整体如图~\ref{fig:overall-architecture} 所示。
 
 \begin{figure}[H]
   \centering
@@ -66,69 +61,18 @@
   \label{fig:overall-architecture}
 \end{figure}
 
-最底层是\textbf{核心层}（\texttt{fuxi-core}），集中定义 \texttt{Agent}、\texttt{Workspace}、\texttt{Event}、\texttt{Task} 四个 trait 与对应的值对象。这一层不引入任何外部 IO，只描述数据结构与基本契约，确保上层在演进过程中能保持类型层面的稳定~\parencite{wooldridge2009mas}。所有 50+ 种 \texttt{EventKind} 变体、五态 \texttt{TaskState} 状态机、\texttt{AgentProfile} 与 \texttt{AgentCard} 双视图都在这一层定义。
+最底层\textbf{核心层}（\texttt{fuxi-core}）集中定义 \texttt{Agent}、\texttt{Workspace}、\texttt{Event}、\texttt{Task} 四个 trait 与对应值对象，不引入任何外部 IO。\textbf{通讯层}由 \texttt{fuxi-events}（事件总线）与 \texttt{fuxi-a2a}（A2A 协议）共同构成，两者职责互补但语义正交——事件总线描述「系统内部已经发生了什么」，是事实流；A2A 协议描述「Agent 之间应当传递什么」\parencite{a2aproject2025a2a}，是契约语义。这一边界划分是伏羲与 AutoGen\parencite{wu2023autogen}、CAMEL\parencite{li2023camel} 这类把协议与状态合并的系统最显著的差异：在伏羲中 A2A 信封只承担最小契约，所有运行时状态都走事件总线。
 
-向上一层是\textbf{通讯层}，由 \texttt{fuxi-events}（事件总线）与 \texttt{fuxi-a2a}（A2A 协议）共同构成。两者职责互补但语义正交——事件总线描述「系统内部已经发生了什么」，是事实流；A2A 协议描述「Agent 之间应当传递什么」~\parencite{a2aproject2025a2a}，是契约语义。它们各自仅依赖核心层，相互之间无引用关系，避免协议层堆砌过多状态语义。这一边界划分是伏羲与 AutoGen~\parencite{wu2023autogen}、CAMEL~\parencite{li2023camel} 这类把协议与状态合并到对话流的系统最显著的差异：在伏羲中，A2A 信封只承担最小契约，所有运行时状态都走事件总线。
+\textbf{编排层}（\texttt{fuxi-orchestrator}）是中枢，维护门客注册表 \texttt{Shelf}、把任务派给合适的门客、提供事件 republish 通路让门客私有事件流进入公共总线。该层借鉴 MetaGPT\parencite{hong2023metagpt} 的角色分工但更强调「编排不可绕过」——所有门客之间通讯必须经编排层透明记录。\textbf{执行层}由两个适配器（\texttt{fuxi-agent-cc}、\texttt{fuxi-agent-codex}）与隔离层（\texttt{fuxi-workspace}）构成：cc 适配器走 WebSocket 反连\parencite{fette2011websocket} 长连接复用进程，codex 适配器走 spawn-per-dispatch；隔离层基于 git worktree 提供 L1/L2/L3 三层沙箱。\textbf{观测与服务层}由 \texttt{fuxi-firehose}（事件流四端输出）与 \texttt{fuxi-im}（IM 后端）构成：Firehose 把同一份 EventBus 通过 WebSocket、SSE\parencite{whatwg2024sse}、REST 与终端 TUI 四种形态对外暴露；IM 后端面向 PWA 与桌面客户端提供 REST 任务管理与双向消息流。两者均对编排层只读不写。
 
-向上一层是\textbf{编排层}（\texttt{fuxi-orchestrator}），是整个系统的中枢。该层维护门客注册表 \texttt{Shelf}（橱柜）、把任务派给合适的门客、提供事件 republish 通路让门客私有事件流进入公共事件总线。编排层借鉴了 MetaGPT 的角色分工思想~\parencite{hong2023metagpt}，但更强调编排不可绕过——所有 Agent 之间的通讯必须经过编排层的事件透明记录，不允许门客两两直连~\parencite{jennings2001agentbased}。这一层还承担着「玄女顶层 Agent」的特殊地位：玄女是唯一与用户直接对话的 Agent，所有外部输入都先经她调度再分发给门客。
+横向支撑模块（\texttt{fuxi-memory}、\texttt{fuxi-skills}、\texttt{fuxi-scheduler}）通过事件订阅与显式 API 与编排层交互，自身不参与主链调度。\texttt{fuxi-memory} 提供长期记忆，思路源自 Voyager 持久技能库\parencite{wang2023voyager}；\texttt{fuxi-skills} 是角色玉牒加载器；\texttt{fuxi-scheduler} 提供 cron/once/webhook/文件变化四类触发器，统一通过发出 \texttt{TriggerFired} 事件接入主链。最顶层 \texttt{fuxi-cli} 把所有 crate 装配成可执行二进制 \texttt{fuxi}，内部分成 REPL、daemon、dist、im 等十余个子模块。
 
-\textbf{执行层}由两个适配器（\texttt{fuxi-agent-cc}、\texttt{fuxi-agent-codex}）与隔离层（\texttt{fuxi-workspace}）构成，把抽象的 \texttt{Agent} trait 落到具体 CLI 进程上。两个适配器各自独立——cc 适配器走 WebSocket 反连~\parencite{fette2011websocket} 长连接复用进程，codex 适配器走「spawn-per-dispatch」每次启动新进程；隔离层基于 \texttt{git worktree}~\parencite{git2024worktree} 提供三层沙箱，让多门客并发的文件操作不互相干扰~\parencite{wang2024openhands}。
-
-\textbf{观测与服务层}由 \texttt{fuxi-firehose}（事件流四端输出）与 \texttt{fuxi-im}（IM 后端）构成。Firehose 把同一份 EventBus 同时通过 WebSocket~\parencite{fette2011websocket}、Server-Sent Events~\parencite{whatwg2024sse}、REST 与终端 TUI 四种形态对外暴露，订阅者按场景选择最合适的形态；IM 后端面向 PWA 与桌面客户端提供 REST 任务管理与双向消息流。两者对编排层只读不写，所有业务变化都通过 \texttt{Fuxi::intervene} 等显式 API 反向触发，避免观测端「悄悄改写状态」破坏系统正确性。
-
-横向支撑模块（\texttt{fuxi-memory}、\texttt{fuxi-skills}、\texttt{fuxi-scheduler}）通过事件订阅与显式 API 与编排层交互，自身不参与主链调度决策。\texttt{fuxi-memory} 提供长期记忆（甲骨事实表 + 河图洛书技能库 + 身份卡），思路源自 Voyager 的持久技能库~\parencite{wang2023voyager}；\texttt{fuxi-skills} 是角色玉牒加载器，负责从文件系统读出每个角色的 system prompt 与 tag；\texttt{fuxi-scheduler} 提供 cron / once / webhook / 文件变化四类触发器，统一通过发出 \texttt{TriggerFired} 事件接入主链。
-
-最顶层 \texttt{fuxi-cli} 把所有 crate 装配成一个可执行二进制 \texttt{fuxi}。该层占整个工作区代码量近 44\%——这反映了大型 Rust 项目的工程现实：协议、抽象与基础设施虽然概念上是「重头戏」，但把它们装配成一个能跑、能被实测的产品需要大量胶水代码~\parencite{russell2020aima}。\texttt{fuxi-cli} 内部进一步分成 REPL、daemon、dist、im、xuannv\_cmd、ipc 等十余个垂直子模块，每个子模块负责一个用户可见的入口。
-
-这一架构的核心优势在三处。第一，每一层都建立在其下层提供的抽象之上，每一层都为其上层留出可观测、可注入、可扩展的接口；当某一层需要升级（例如把 SQLite 换成 PostgreSQL）时，只需保证暴露的 trait 接口不变，上层完全无感。第二，编排层与协议层正交分离让协议本身保持轻量——A2A 字段瘦身的多次评审中，团队反复重申「不要把运行时状态塞进协议」，让 A2A 信封始终只承载最小契约。第三，观测层只读不写让多个观测端可以并存且互不影响，用户在手机、桌面、TUI 上看到的事件流是同一份。
-
-\subsection{模块划分与形式化边界}
-\label{subsec:module-decomposition}
-
-伏羲在 crate 粒度上划分了 13 个模块，总代码规模约 8.25 万行（统计自 \texttt{find crates -name "*.rs" \textbar{} xargs wc -l}，结果为 82\,515 行；仅计 Rust 源文件）。表~\ref{tab:crate-boundary} 列出每个 crate 的职责、对外暴露的核心类型与依赖范围。
-
-\begin{table}[H]
-\centering
-\caption{13 个 crate 的形式化边界与依赖范围}
-\label{tab:crate-boundary}
-\footnotesize
-\begin{tabularx}{\textwidth}{p{3.2cm} p{3.4cm} X p{3.0cm}}
-\toprule
-\textbf{Crate} & \textbf{对外类型/trait} & \textbf{职责} & \textbf{依赖} \\
-\midrule
-\texttt{fuxi-core} & \texttt{Agent}, \texttt{Workspace}, \texttt{Event}, \texttt{Task} & 核心 trait 与值对象，零外部 IO & 无（仅 serde / chrono） \\
-\texttt{fuxi-events} & \texttt{EventBus}, \texttt{EventStore}, \texttt{ReplayCursor} & 事件实时分发 + WAL 持久化 + 历史回放 & \texttt{fuxi-core} \\
-\texttt{fuxi-a2a} & \texttt{wire::*}, \texttt{Server}, \texttt{Client} & A2A v1.0 协议 wire 层 + axum 服务器 + reqwest 客户端 & \texttt{fuxi-core} \\
-\texttt{fuxi-workspace} & \texttt{Git\-Worktree\-Workspace}, \texttt{Project\-Registry} & git worktree 隔离 + L1/L2/L3 沙箱 & \texttt{fuxi-core} \\
-\texttt{fuxi-orchestrator} & \texttt{Fuxi}, \texttt{Shelf}, \texttt{RecallSink} (trait) & 编排中枢：注册表 + dispatch + republish & \texttt{fuxi-core}, \texttt{events}, \texttt{a2a}, \texttt{workspace} \\
-\texttt{fuxi-agent-cc} & \texttt{CcAgent} & Claude Code 适配器，WS 反连 & \texttt{fuxi-core}, \texttt{orchestrator} \\
-\texttt{fuxi-agent-codex} & \texttt{CodexAgent} & Codex 适配器，spawn-per-dispatch & \texttt{fuxi-core}, \texttt{orchestrator} \\
-\texttt{fuxi-firehose} & \texttt{Hub}, axum routes & 事件流四端输出（WS/SSE/REST/TUI） & \texttt{fuxi-core}, \texttt{events} \\
-\texttt{fuxi-im} & axum app, REST/WS handlers & IM 后端：任务/对话/intervene 端点 & \texttt{fuxi-core}, \texttt{orchestrator}, \texttt{events} \\
-\texttt{fuxi-memory} & \texttt{OracleStore}, \texttt{ExtractorSpawner} (trait) & 长期记忆：事实/技能/身份 & \texttt{fuxi-core}（不依赖 orchestrator） \\
-\texttt{fuxi-skills} & \texttt{RoleLoader}, \texttt{SkillLedger} & 角色玉牒加载与招贤流程 & \texttt{fuxi-core} \\
-\texttt{fuxi-scheduler} & \texttt{Keeper}, \texttt{Watcher}, \texttt{TriggerSpec} & cron/once/webhook/fs 触发器 & \texttt{fuxi-core}, \texttt{events} \\
-\texttt{fuxi-cli} & 二进制入口 & REPL + daemon + dist controller + 钩子注入点 & 全部其他 crate \\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-依赖关系构成一张严格的有向无环图（DAG）。形式化地说，若令 $C = \{c_1, c_2, \ldots, c_{13}\}$ 表示所有 crate 集合，关系 $c_i \to c_j$ 表示 $c_i$ 依赖 $c_j$，则伏羲约束：
-\begin{equation}
-\forall c_i, c_j \in C: \quad (c_i \to c_j) \wedge (c_j \to^* c_i) \Rightarrow \bot
-\end{equation}
-其中 $\to^*$ 表示 $\to$ 的传递闭包。式 (2-1) 表达「依赖图无环」这一硬约束——若两个 crate 之间存在循环依赖，则编译失败。这条约束由 Cargo 在编译期强制检查，比注释规约或代码审查更可靠。
-
-依赖图中存在一个看似要破环的需求：\texttt{fuxi-memory} 在「召回结果回传」时需要往 \texttt{fuxi-orchestrator} 持有的事件总线 publish 事件，但若让 memory 反向依赖 orchestrator 会形成循环。本设计采用「trait 在低层、impl 在高层」的反向依赖模式——在 \texttt{fuxi-orchestrator} 中定义 \texttt{RecallSink} trait，由顶层 \texttt{fuxi-cli} 提供实现并在 daemon 启动时注入；在 \texttt{fuxi-memory} 中定义 \texttt{ExtractorSpawner} trait，同样由 \texttt{fuxi-cli} 注入实现。这与 Robert Martin 提出的依赖反转原则一致，是规避循环依赖的标准 Rust 工程惯用法，伏羲在 \texttt{RecallSink}、\texttt{DistEnqueuer}、\texttt{NodeLoadProvider}、\texttt{ExtractorSpawner} 四个扩展点上反复使用了它。
-
-模块边界的设计还有一条隐含原则：把会高频变化的「策略」与会长期稳定的「机制」分开放在不同 crate。\texttt{fuxi-core} 中的 trait 与 \texttt{EventKind} 枚举属于稳定层，一旦发布就不轻易破坏二进制兼容；\texttt{fuxi-orchestrator} 内部的调度策略、\texttt{fuxi-agent-cc} 内的事件翻译规则属于策略层，迭代频率高但不影响其他 crate。这一划分让伏羲在快速演进 worker 适配器或调度策略时，不会触发整个工作区的重编译；也让审计层（事件总线、Firehose）可以稳定地观察任意策略层的运行效果。
-
-值得明确的一条反例约束是：\texttt{fuxi-memory} $\not\to$ \texttt{fuxi-orchestrator}。这条反向边一旦存在就会破坏依赖 DAG，所以即使语义上 memory 需要触达 orchestrator 的事件总线，也必须通过 trait 注入而非直接 use。类似的反例还有 \texttt{fuxi-events} $\not\to$ \texttt{fuxi-firehose}（事件总线不感知它有哪些观测端）、\texttt{fuxi-a2a} $\not\to$ \texttt{fuxi-orchestrator}（协议层不感知调度策略）。这些「不允许的依赖」与「允许的依赖」同等重要——前者是隔离的承诺，后者是组装的合同。
+13 个 crate 总代码规模约 8.25 万行，每个的形式化边界、职责、依赖范围与具体实现细节在第三章 §3.1 模块布局中以表格形式列出，本章只点出依赖关系约束：若令 $C$ 表示所有 crate 集合，关系 $c_i \to c_j$ 表示 $c_i$ 依赖 $c_j$，则系统约束 $\forall c_i, c_j \in C: (c_i \to c_j) \wedge (c_j \to^* c_i) \Rightarrow \bot$（依赖图无环）。这条由 Cargo 在编译期强制检查，比注释规约或代码审查更可靠。\texttt{fuxi-memory} 的「召回结果回传」需要 orchestrator 持有的事件总线，但若让 memory 反向依赖 orchestrator 会形成循环——本设计采用「trait 在低层、impl 在高层」的反向依赖：在 orchestrator 中定义 \texttt{RecallSink} trait，由顶层 \texttt{fuxi-cli} 提供实现并注入。这是规避循环依赖的标准 Rust 工程惯用法，伏羲在四个跨 crate 钩子上一致采用。
 
 \subsection{关键数据流}
 \label{subsec:dataflow}
 
-把架构层面的静态分层落到运行时的动态行为，最有效的方式是沿一次完整的用户请求把数据流走一遍。图~\ref{fig:dataflow} 给出从用户输入到事件多端扇出的核心数据流。
+为把架构层面的静态分层映射到运行时动态行为，本节沿一次完整用户请求展示核心数据流。图~\ref{fig:dataflow} 给出从用户输入到事件多端扇出的核心数据流。
 
 \begin{figure}[H]
   \centering
@@ -137,22 +81,14 @@
   \label{fig:dataflow}
 \end{figure}
 
-数据流分七步。第一步，用户在 IM、PWA 或 TUI 端发出文本指令，端到端通过 WebSocket 或 REST 抵达 \texttt{fuxi-im} 的 \texttt{intervene} handler。第二步，handler 调用 \texttt{Fuxi::intervene(xuannv\_id, text)}，编排层先检查玄女当前 \texttt{ShelfStatus}：若 Idle 则退化为 \texttt{dispatch} 起一轮新 turn（避免 send\_message 在无 active receiver 时被 drop），若 Busy 则把消息推入 \texttt{PendingOutbox} 等下次 turn 边界 drain~\parencite{karpas2022mrkl}。第三步，玄女根据 system prompt 与上下文产出工具调用，或选择把子任务派给某个门客。若是后者，编排层在 \texttt{Shelf} 中按角色与负载选门客（\autoref{subsec:cross-node} 给出选择函数），调用 \texttt{Agent::dispatch(task)} 拿到该门客的私有事件 \texttt{mpsc::Receiver<Event>}。
+数据流分七步。第一步用户在 IM/PWA/TUI 端发出文本指令通过 WebSocket 或 REST 抵达 \texttt{fuxi-im} 的 \texttt{intervene} handler。第二步 handler 调用 \texttt{Fuxi::intervene(xuannv\_id, text)}，编排层先检查玄女当前 \texttt{ShelfStatus}：Idle 则退化为 \texttt{dispatch} 起一轮新 turn（避免 send\_message 在无 active receiver 时被 drop），Busy 则把消息推入 \texttt{PendingOutbox} 等下次 turn 边界 drain。第三步玄女根据 system prompt 与上下文产出工具调用，或选择把子任务派给某个门客。第四步编排层 spawn 后台 pump task，把私有 receiver 的每个事件补上 \texttt{task\_id}/\texttt{agent\_id} 元数据再 republish 到公共总线。第五步 \texttt{EventBus::publish()} 同时投递到广播路径（broadcast 零拷贝扇出）与持久化路径（mpsc + WAL 串行落库）。第六步所有订阅者从广播路径实时收到事件——Firehose 转发四端、IM 路由到对应任务客户端、记忆抽取器订阅 \texttt{DeliverableProduced} 触发候选事实抽取。第七步任务终态抵达后 pump 的 terminal 检测加 500\,ms 缓冲窗口结束 republish，编排层把门客 \texttt{ShelfStatus} 摊回 Idle。
 
-第四步，编排层 \texttt{spawn} 一个后台 pump task，把私有 receiver 的每个事件补上 \texttt{task\_id} / \texttt{agent\_id} 元数据，再 republish 到公共 \texttt{EventBus}。门客内部的工作循环（cc 走 WebSocket 反连维持长连接，codex 走 spawn-per-dispatch 短生命）产生 \texttt{ToolCallStarted}、\texttt{AgentResponded}、\texttt{DeliverableProduced} 等过程事件，全部通过 republish 流入公共总线。第五步，\texttt{EventBus::publish()} 同时把事件投递到两条路径：广播路径走 Tokio \texttt{broadcast} channel 零拷贝扇出给所有订阅者；持久化路径走异步 \texttt{mpsc} 队列由后台 writer 串行落库到 SQLite WAL。两条路径各走最优形态，避免「单条通道既当广播又当持久化」的拥塞反模式。
-
-第六步，所有订阅者从广播路径实时收到事件——\texttt{fuxi-firehose::Hub} 把事件转发给 WebSocket / SSE / REST / TUI 四端订阅者；\texttt{fuxi-im} 后端把事件路由到对应任务的 IM 客户端；\texttt{fuxi-memory} 的抽取器订阅 \texttt{DeliverableProduced} 与 \texttt{TaskCompleted} 事件触发候选事实抽取。第七步，任务终态（\texttt{Completed} / \texttt{Failed} / \texttt{Cancelled}）抵达后，pump 的 terminal 检测 + 500\,ms 缓冲窗口结束 republish；编排层把门客 \texttt{ShelfStatus} 摊回 Idle，等待下一轮调度。
-
-整条数据流的关键设计点在三处。其一是\textbf{先订阅后查询}的回放协议：当某订阅者通过 \texttt{EventBus::replay(cursor, live\_tail=true)} 请求从历史游标开始接收事件时，必须先 \texttt{subscribe}() 拿到 broadcast Receiver，再去 SQLite 拉历史流，最后无缝拼接两段。反过来「先查历史再订阅」会留出窗口，期间产生的事件既未入历史快照、也未被订阅者收到，形成漏接。这条顺序规则看似细节，却是回放正确性的关键。
-
-其二是\textbf{lag 哨兵}与背压可观测性。当 writer 拥塞超过阈值（默认 512 条），\texttt{publish()} 通过同一个 broadcast 路径发出 \texttt{Custom \{ "event\_store\_lagged", pending \}} 哨兵事件，订阅者据此感知到底层 writer 已经堆了多少未落库事件。哨兵自身有去重逻辑（同一拥塞窗口内只发一次），不会反向加剧拥塞。这一机制把背压（backpressure）从「不可见的死锁」变成「可见的告警」，为运维侧提供了介入窗口~\parencite{lamport1978time}。
-
-其三是 \textbf{input-required 状态在 Fuxi 平台的端到端流转}。当门客遇到歧义需要人工答复时，Fuxi 通过早期 A2A binding 在 wire 上发出 \texttt{state: "input-required"}~\parencite{a2aproject2025a2a}；该语义对应当前 A2A 规范 ProtoJSON 枚举 \texttt{TASK\_STATE\_INPUT\_REQUIRED}，是规范已有的 interrupted task state。当前规范还包含 \texttt{TASK\_STATE\_AUTH\_REQUIRED} 这一授权中断态，以及 \texttt{TASK\_STATE\_REJECTED} 这一拒绝执行终态——后者与 \texttt{Completed}、\texttt{Failed}、\texttt{Canceled} 一样属于不可恢复的终态，不再回到 \texttt{Working}。伏羲在编排层把这一状态映射为 \texttt{ShelfStatus::AwaitingInput}，让整体调度器（包括跨节点 \texttt{NodeLoadProvider}）能正确把「在等用户」的门客从「在工作」剥离出来。这条路径的端到端流转——用户回复 $\to$ task send 同 Task ID $\to$ 状态转回 Working $\to$ 门客继续——把规范层的 \texttt{input-required} 状态提升为平台级可观测事件流转，是伏羲在工程层面对 A2A 已有语义的具体落地。
+整条数据流有三处关键设计点。其一\textbf{先订阅后查询}的回放协议：当订阅者通过 \texttt{EventBus::replay(cursor, live\_tail=true)} 请求从历史游标接收事件时必须先 \texttt{subscribe} 拿到 broadcast Receiver，再去 SQLite 拉历史，最后无缝拼接。反过来「先查历史再订阅」会留出窗口，期间产生的事件既未入历史快照也未被订阅者收到。其二\textbf{lag 哨兵与背压可观测性}：当 writer 拥塞超阈值（默认 512 条），\texttt{publish()} 通过 broadcast 路径发出 \texttt{Custom \{ "event\_store\_lagged", pending \}} 哨兵事件。哨兵自身有去重逻辑（同一拥塞窗口只发一次），不会反向加剧拥塞。这把背压从「不可见的死锁」变成「可见的告警」\parencite{lamport1978time}。其三 \texttt{input-required} 在伏羲平台的端到端流转：当门客遇到歧义需要人工答复时，伏羲在 wire 上发出 \texttt{state: "input-required"}\parencite{a2aproject2025a2a}，对应当前 A2A 规范 ProtoJSON 枚举 \texttt{TASK\_STATE\_INPUT\_REQUIRED}。编排层把这一状态映射为 \texttt{ShelfStatus::AwaitingInput}，让整体调度器（包括跨节点 \texttt{NodeLoadProvider}）把「在等用户」的门客从「在工作」剥离。这条端到端流转把规范层语义提升为平台级可观测事件流转。
 
 \subsection{跨节点扩展}
 \label{subsec:cross-node}
 
-伏羲默认在单节点完整运行，但通过显式扩展点支持多节点部署。当用户开启分布式模式时，\texttt{fuxi-cli} 在 daemon 启动阶段实例化一个 \texttt{DistController}，把它注入到编排层的 \texttt{DistEnqueuer} 与 \texttt{NodeLoadProvider} 两个 trait 槽位上。跨节点架构如图~\ref{fig:cross-node} 所示。
+伏羲默认单节点完整运行，但通过显式扩展点支持多节点。当用户开启分布式模式时 \texttt{fuxi-cli} 在 daemon 启动阶段实例化 \texttt{DistController}，注入到编排层 \texttt{DistEnqueuer} 与 \texttt{NodeLoadProvider} 两个 trait 槽位。架构如图~\ref{fig:cross-node}。
 
 \begin{figure}[H]
   \centering
@@ -161,49 +97,35 @@
   \label{fig:cross-node}
 \end{figure}
 
-跨节点的核心数据是项目（\texttt{Project}）的 \texttt{host\_nodes} 字段——每个项目可以声明它只能在哪些节点上跑（例如某个项目的源码只在家里那台机上有完整 git 历史，办公室节点只有镜像）。当一个任务关联到某项目时，\texttt{Fuxi::auto\_pin\_from\_project} 会读出该项目的 \texttt{host\_nodes}，结合各节点当前负载选择最合适的节点。这条 auto-pin 逻辑遵循一条铁律：当用户已经显式 \texttt{@<node>} 钉死任务到某节点时，auto-pin 必须立即返回 \texttt{None}——不能再悄悄改写 \texttt{pinned\_node} 字段。这条守卫在调用方处再加一层 \texttt{task.pinned\_node.is\_none()} 判断作为双保险。这是「自动启发式 vs 用户显式意图」边界的明确化：自动逻辑只在用户未显式介入时才生效。
-
-跨节点调度的负载选择函数定义为：给定项目 $p$、候选节点集合 $\mathcal{N}_p = p.\text{host\_nodes}$、节点 $n$ 的 \texttt{inflight} 与 \texttt{max\_concurrency}，选择饱和度最低的节点：
+跨节点核心数据是 \texttt{Project} 的 \texttt{host\_nodes} 字段——每个项目可声明只能在哪些节点上跑。当任务关联到某项目时 \texttt{Fuxi::auto\_pin\_from\_project} 读出 \texttt{host\_nodes}，结合各节点当前负载选最合适节点。这条 auto-pin 遵循一条规约：当用户已显式 \texttt{@<node>} 钉死任务时，auto-pin 必须立即返回 \texttt{None}，调用方再加 \texttt{task.pinned\_node.is\_none()} 守卫双保险。这是「自动启发式 vs 用户显式意图」边界的明确化。负载选择函数为：
 \begin{equation}
 \text{node}(p) = \arg\min_{n \in \mathcal{N}_p} \frac{n.\text{inflight}}{\max(n.\text{max\_concurrency},\ 1)}
 \end{equation}
-式 (2-2) 中 $\max(\cdot, 1)$ 处理 \texttt{max\_concurrency = 0} 的边界——若节点因配置错误把上限设为 0，归一化为 1 避免除零~\parencite{dean2004mapreduce}。这个公式与 \autoref{subsec:overall-arch} 提到的单节点门客选择函数（按 \texttt{inflight / max\_concurrency} 选最低饱和门客）形式相同——伏羲把同一套饱和度比较逻辑既用在节点层也用在门客层，让上下两级调度的语义一致。
+$\max(\cdot, 1)$ 处理 \texttt{max\_concurrency = 0} 边界。这与单节点门客选择函数形式相同——伏羲把同一套饱和度比较逻辑既用在节点层也用在门客层。
 
-跨节点的事件流通过分布式控制器双向打通。home 节点通过 reqwest + JSON-RPC 把任务投递到 worker 节点的 \texttt{DistEnqueuer} 接收端；worker 节点产生的事件通过同一通道反向 republish 回 home 节点的 EventBus。所有跨节点事件在 \texttt{EventMeta.source\_node\_id} 字段上打标，让本地订阅者能区分本机事件与远端事件。这一设计与 ZooKeeper 把跨进程协调抽象成独立服务的做法~\parencite{hunt2010zookeeper} 一致，但伏羲的「控制器」是嵌入式的——它就是 \texttt{fuxi-cli} 中一个 4000 余行的子模块，不需要独立运行时。未来若需要更强的一致性保障（例如 home 节点崩溃时 worker 选主），可以在该控制器内部接入 Raft~\parencite{ongaro2014raft}，但当前规模（用户的家庭部署不超过 3 个节点）下成本不划算。
-
-跨节点工程实现还有两条易被忽视的兼容性约束。第一，\texttt{Project} 与 \texttt{Task} 的所有新增字段必须 \texttt{\#[serde(default)]}，否则旧版 \texttt{meta.json} 与旧 \texttt{events.db} 中的 task JSON 在 \texttt{registry.list()} 时会全部反序列化失败。\texttt{fuxi-core} 中专门维护两个反回归单测——\texttt{project\_meta\_deserializes\_legacy\_without\_host\_nodes} 与 \texttt{task\_deserializes\_legacy\_without\_project\_id}——兜底这条规约。第二，worker 节点 pre-spawn 时执行的 \texttt{git fetch} 必须是 best-effort，失败只 log warn 不挂断 dispatch——否则 worker 短暂掉线（VPN 抖、ssh tunnel 断）时硬挂调度会让用户体感「任务无故消失」。这两条都是伏羲在 v2 跨节点 sandbox 实装阶段的真实工程教训。
+跨节点事件流通过分布式控制器双向打通：home 通过 reqwest + JSON-RPC 把任务投递到 worker 的 \texttt{DistEnqueuer}；worker 产生的事件通过同一通道反向 republish 回 home 的 EventBus，所有跨节点事件在 \texttt{EventMeta.source\_node\_id} 字段打标。控制器是嵌入式的——它就是 \texttt{fuxi-cli} 中一个子模块，不需要独立运行时。未来若需更强一致性保障可在控制器内部接入 Raft\parencite{ongaro2014raft}，但当前规模（家庭部署不超过 3 节点）下成本不划算。两条易被忽视的兼容性约束：\texttt{Project} 与 \texttt{Task} 所有新增字段必须 \texttt{\#[serde(default)]}，否则旧版 \texttt{meta.json} 与旧 \texttt{events.db} 中的 task JSON 在 \texttt{registry.list()} 时会全部反序列化失败；worker 节点 pre-spawn 的 \texttt{git fetch} 必须 best-effort，失败只 log warn 不挂断 dispatch。
 
 \subsection{SLA 与性能预算}
 \label{subsec:sla}
 
-为了让「高性能」一词从主观印象变成可度量约束，本节给出端到端任务派发延迟与 EventBus republish 滞后的形式化预算公式，并把每个分量与第五章的实测数据点关联起来。
-
-记一次任务从用户输入到结果回传的端到端延迟为 $L_{e2e}$，把它分解为四个分量：
+为让「高性能」从主观印象变成可度量约束，本节给出端到端任务派发延迟与 EventBus republish 滞后的形式化预算。记一次任务从用户输入到结果回传的端到端延迟为 $L_{e2e}$，分解为四分量：
 \begin{equation}
 L_{e2e} = L_{enq} + L_{disp} + L_{exec} + L_{evt}
 \end{equation}
-其中 $L_{enq}$ 是任务入派发队列的开销（\texttt{Fuxi::dispatch} 的同步路径），$L_{disp}$ 是编排层选门客并发出派发指令的开销（\texttt{Shelf} 查询 + \texttt{Agent::dispatch} 调用），$L_{exec}$ 是门客实际执行任务的耗时（包括模型推理与工具调用，由 LLM 上下文长度与工具数量主导），$L_{evt}$ 是事件从产生到抵达观测端的传播开销。
+其中 $L_{enq}$ 是任务入派发队列开销，$L_{disp}$ 是编排层选门客并发派发指令开销，$L_{exec}$ 是门客实际执行任务耗时（包括模型推理与工具调用），$L_{evt}$ 是事件从产生到抵达观测端的传播开销。在大多数实际工作负载中 $L_{exec}$ 由模型推理时间主导（数秒至数十秒）。本设计为系统层分量设置 P99 预算：$L_{enq}^{P99} \le 5\,\text{ms}$、$L_{disp}^{P99} \le 10\,\text{ms}$、$L_{evt}^{P99} \le 50\,\text{ms}$。$L_{exec}$ 因受模型推理影响不在系统层 SLA 范围。
 
-在大多数实际工作负载中，$L_{exec}$ 由模型推理时间主导（量级数秒至数十秒），$L_{enq}$ 与 $L_{disp}$ 通常各自只占数毫秒。但当任务粒度变细或门客并发量增加时，$L_{enq}$ 与 $L_{disp}$ 的相对占比会上升，影响用户的交互流畅度。本设计为四个分量分别设置 P99 预算：$L_{enq}^{P99} \le 5\,\text{ms}$、$L_{disp}^{P99} \le 10\,\text{ms}$、$L_{evt}^{P99} \le 50\,\text{ms}$。$L_{exec}$ 因受模型推理影响不在系统层 SLA 范围。第五章的端到端实测拆解将以这三个预算为基准，定量评估各分量在并发度变化下的表现，详见第 5 章 §5.4 端到端延迟分解实验。
-
-事件总线 republish 的滞后预算可以从 \autoref{subsec:dataflow} 的双路径架构推出。设事件 $e$ 在 $t_0$ 时刻被 \texttt{publish}，第 $i$ 个订阅者在 $t_i$ 收到，则 republish 滞后下界由式 (2-4) 给出：
+事件总线 republish 滞后下界由式给出：
 \begin{equation}
 L_{evt} \geq \max_{i \in \mathcal{S}} \left( T_{\text{serialize}} + T_{\text{broadcast}} + T_{\text{consume},i} \right)
 \end{equation}
-式 (2-4) 中 $\mathcal{S}$ 是订阅者集合，$T_{\text{serialize}}$ 是事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 是 channel 内部分发耗时，$T_{\text{consume},i}$ 是第 $i$ 个订阅者的消费耗时~\parencite{lamport1978time}。该不等式表明端到端延迟受最慢订阅者制约。伏羲的应对策略是：广播路径上设置 lag 容忍阈值（默认 512 条），超过则丢弃该订阅者的旧事件并发出 \texttt{RecvError::Lagged}——业务侧的全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
+$\mathcal{S}$ 是订阅者集合，$T_{\text{serialize}}$ 是事件 JSON 序列化耗时，$T_{\text{broadcast}}$ 是 channel 内部分发耗时，$T_{\text{consume},i}$ 是第 $i$ 个订阅者消费耗时\parencite{lamport1978time}。该不等式表明端到端延迟受最慢订阅者制约。伏羲的应对是：广播路径设置 lag 容忍阈值（默认 512 条），超过则丢弃旧事件并发出 \texttt{RecvError::Lagged}——业务侧全量历史走 replay 路径补齐，broadcast 不为慢消费者承担拖累快消费者的代价。
 
-吞吐量与调度损耗的形式化定义为：
+吞吐量与调度损耗形式化为：
 \begin{equation}
 T = \frac{N}{W_{total}}, \qquad \eta = 1 - \frac{T}{T_{ideal}}, \quad T_{ideal} = \frac{K}{\tau}
 \end{equation}
-式 (2-5) 中 $N$ 是测量窗口内完成的任务数，$W_{total}$ 是该窗口的总耗时（wall clock），$K$ 是门客数，$\tau$ 是单任务理想耗时。$\eta$ 反映通讯链路、调度逻辑与同步开销在整体吞吐中的占比~\parencite{kreps2011kafka}：当 $\eta$ 接近零时系统接近理论上限，当 $\eta$ 显著增大则意味着通讯或调度成为瓶颈。第五章 §5.2 吞吐量实验将以 $\eta < 0.15$ 作为 1$\sim$8 门客并发场景下的设计目标，定量验证伏羲的工程表现。
-
-公式 (2-3) $\sim$ (2-5) 共同构成本论文对「高性能分布式通讯系统」中「高性能」一词的可度量定义。本章给出预算与下界，第三章给出每个分量在模块内部的具体优化（事件总线非阻塞发布、调度函数无锁查询、双路径架构），第五章给出实测数据验证预算是否被满足。这条「设计 $\to$ 实现 $\to$ 实验」的论证闭环把整篇论文的工程主张串成一条可校对的链条。
+$N$ 是测量窗口内完成的任务数，$W_{total}$ 是该窗口总耗时，$K$ 是门客数，$\tau$ 是单任务理想耗时。$\eta$ 反映通讯链路、调度逻辑与同步开销在整体吞吐中的占比\parencite{kreps2011kafka}。第四章 §4.2 吞吐实验以 $\eta < 0.15$ 作为 1$\sim$8 门客并发场景下的设计目标。公式 (2-2)$\sim$(2-4) 共同给出本文对「高性能」的可度量定义，第三章给每个分量在模块内部的具体优化，第四章给实测数据验证预算是否被满足。
 
 \subsection{本章小结}
 
-本章自顶向下给出了伏羲的总体设计。\autoref{subsec:design-goals} 明确了三组核心矛盾——真实时与不丢消息、多门客并发与文件隔离、跨节点扩展与单机本地优先——以及它们各自的解法，并把功能/非功能需求与设计决策做成一一对应的映射表。\autoref{subsec:overall-arch} 给出五层架构与横向支撑模块的整体布局，强调编排层与协议层正交分离让 A2A 协议保持轻量、观测层只读不写让多端订阅可以并存。\autoref{subsec:module-decomposition} 把架构落到 13 个 crate 的形式化边界上，明确依赖 DAG 与「trait 在低层、impl 在高层」的反向依赖模式。\autoref{subsec:dataflow} 沿一次完整用户请求把数据流走了一遍，揭示「先订阅后查询」「lag 哨兵」「\texttt{InputRequired} 端到端流转」三条关键设计点。\autoref{subsec:cross-node} 给出跨节点扩展的钩子化设计与节点选择函数，并强调 auto-pin 守用户显式意图、新字段必须 \texttt{\#[serde(default)]} 兼容旧持久化两条工程铁律。\autoref{subsec:sla} 给出端到端延迟分解、广播滞后下界与吞吐损耗三组形式化公式，把「高性能」从主观印象变成可度量约束，为第五章实验提供基准。
-
-整体上，伏羲的总体设计与 AutoGen、MetaGPT、OpenHands 等同类工作的最大差异在三处：第一，把协议（A2A）与事件（EventBus）视为正交而非合并的两个层次，让协议保持最小契约的同时把所有运行时状态都透明记录到事件流；第二，把所有 Agent 之间的通讯硬性收敛到编排层，玄女有知情权但无否决权，所有调度决策都以事件形式向多端扇出；第三，把跨节点扩展做成可注入的 trait 钩子而非内置耦合，单机部署时零成本、多节点部署时由 \texttt{fuxi-cli} 注入分布式控制器，编排层自身不感知拓扑变化。这三条架构级承诺为后续章节的模块设计与实现细节给出了统一的工程纪律——每个模块都必须沿事件流暴露状态，每个跨模块依赖都必须经过 trait 注入，每个性能优化都必须能落到 SLA 公式的某个分量上。
-
-下一章将基于本章的总体设计，沿模块依赖自下而上展开七个核心模块（核心类型、A2A 协议、事件总线、编排调度、执行适配器与工作区、观测与 IM、记忆角色与触发器）的内部设计，把每个模块的关键数据结构、接口签名与设计取舍以可贴的 Rust 代码片段与公式呈现，让架构层面的承诺一一兑现到代码层面。
+本章自顶向下给出了伏羲的总体设计：明确三组核心矛盾的解法并把功能/非功能需求与设计决策做成映射表；给出五层架构与横向支撑模块的整体布局，强调编排层与协议层正交分离让 A2A 保持轻量、观测层只读不写让多端订阅可以并存；沿一次完整用户请求揭示「先订阅后查询」「lag 哨兵」「\texttt{input-required} 端到端流转」三条关键设计点；给出跨节点扩展的钩子化设计与节点选择函数；给出端到端延迟分解、广播滞后下界与吞吐损耗三组形式化公式。下一章基于本章总体设计沿模块依赖自下而上展开核心模块的内部设计与实现。

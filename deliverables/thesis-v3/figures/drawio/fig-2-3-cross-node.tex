@@ -48,14 +48,14 @@
 
 % ── 跨节点通道（粗虚线 + HMAC 标签）──
 % 编号气泡放在 home_dist 右侧紧贴出口，远离 worker box
-\node[numBubble] at ($(home_dist.east)+(4mm,2mm)$) {1};
+\node[numBubble] at ($(home_dist.east)+(5mm,6mm)$) {1};
 \draw[flowEvent, very thick, dash pattern=on 3pt off 2pt]
-  (home_dist.east) -- node[above=2pt, font=\scriptsize, color=fuxiBlue, sloped, midway] {HMAC + ssh tunnel}
+  ($(home_dist.east)+(0,2mm)$) -- node[above=2pt, font=\scriptsize, color=fuxiBlue, sloped, midway] {HMAC + ssh tunnel}
   (worker1_relay.west);
 
-\node[numBubble] at ($(home_dist.east)+(4mm,-2mm)$) {2};
+\node[numBubble] at ($(home_dist.east)+(5mm,-6mm)$) {2};
 \draw[flowEvent, very thick, dash pattern=on 3pt off 2pt]
-  (home_dist.east) to[bend right=15] node[below=2pt, font=\scriptsize, color=fuxiBlue, sloped, pos=0.4] {/dist/* HMAC}
+  ($(home_dist.east)+(0,-2mm)$) to[bend right=15] node[below=2pt, font=\scriptsize, color=fuxiBlue, sloped, pos=0.4] {/dist/* HMAC}
   (worker2_relay.west);
 
 % ── auto-pin 注释（右下角小框）──

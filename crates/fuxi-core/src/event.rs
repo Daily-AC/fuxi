@@ -617,6 +617,11 @@ pub enum EventKind {
         /// 要念的文本，玄女自己控制简短（一两句）。CLI 不做硬上限——
         /// 极端长的内容由 TTS 端自己决定截断或拒绝。
         text: String,
+        /// Phase 3 情绪映射：可选情绪标签，TTS 端按情绪换 ref audio + 桌宠
+        /// 换 idle sprite mode。`None` 走默认 normal 兜底。
+        /// `#[serde(default)]` 保 SQLite WAL 里老事件（无 emotion 字段）反序列化不挂。
+        #[serde(default)]
+        emotion: Option<String>,
     },
 
     // ── escape hatch ────────────────────────────────────────
@@ -1305,16 +1310,37 @@ mod tests {
     fn xuannv_voice_line_tag_and_roundtrip() {
         let kind = EventKind::XuannvVoiceLine {
             text: "好的，已派给鲁班".into(),
+            emotion: Some("happy".into()),
         };
         let v = serde_json::to_value(&kind).expect("ser");
         assert_eq!(
             v.get("type").and_then(|x| x.as_str()),
             Some("xuannv_voice_line")
         );
+        assert_eq!(v.get("emotion").and_then(|x| x.as_str()), Some("happy"));
         let back: EventKind = serde_json::from_value(v).expect("de");
         match back {
-            EventKind::XuannvVoiceLine { text } => {
+            EventKind::XuannvVoiceLine { text, emotion } => {
                 assert_eq!(text, "好的，已派给鲁班");
+                assert_eq!(emotion.as_deref(), Some("happy"));
+            }
+            other => panic!("expect XuannvVoiceLine, got {other:?}"),
+        }
+    }
+
+    /// Phase 3 加 `emotion` 字段后，老 wire（pre-emotion）反序列化必须不挂——
+    /// `#[serde(default)]` 给 `emotion` 兜 `None`。
+    #[test]
+    fn xuannv_voice_line_legacy_payload_without_emotion_deserializes() {
+        let raw = serde_json::json!({
+            "type": "xuannv_voice_line",
+            "text": "我在，你说。"
+        });
+        let kind: EventKind = serde_json::from_value(raw).expect("legacy de");
+        match kind {
+            EventKind::XuannvVoiceLine { text, emotion } => {
+                assert_eq!(text, "我在，你说。");
+                assert!(emotion.is_none(), "老事件 emotion 应回 None");
             }
             other => panic!("expect XuannvVoiceLine, got {other:?}"),
         }

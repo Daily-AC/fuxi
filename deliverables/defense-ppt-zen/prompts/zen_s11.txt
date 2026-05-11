@@ -1,0 +1,25 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 11 of 13, framing the experimental methodology as a self-posed rhetorical question (since this is what the audience will ask first). The visual anchor is a two-line question on warm off-white paper, with one explanatory caption near the bottom. The reference image is the cover slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette. Mood is restrained and scholarly.
+
+INK MARK
+ONE small ink mark only — a single dry-brush ink dot (墨点) at the FAR UPPER-RIGHT corner of the canvas, no larger than 2.5% of slide width, like a paper seal stamp. Pure deep ink black. NO second mark anywhere.
+
+LAYOUT
+A "rhetorical question with answer" layout. The two-line question sits aligned to the left at the canvas's optical golden-ratio horizontal position (about 30% from the left edge), with the question's vertical center at roughly 45% from the top. Below the question, generous whitespace. Near the bottom of the slide (around 78% from top), a single one-line caption sits centered horizontally, providing the answer in muted weight. The upper-right ink dot sits in the empty upper-right corner. NO title, NO contribution counter, NO footer.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the question, Medium for the bottom caption; deep ink black #0E0E0E; full-width Chinese punctuation; question mark "?" rendered as full-width "？"; no emoji, no decorative glyphs):
+- Question line 1 (large, ~46pt, ExtraBold, left-aligned, single line): "为什么用 10 ms sleep，"
+- Question line 2 (large, ~46pt, ExtraBold, left-aligned, single line): "而不是真实 LLM 任务？"
+- Bottom caption (~26pt, Medium, centered, single line): "把 LLM 推理剥离，单独测通讯与编排层上限"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 70% of the slide must be empty paper. The composition feels like a piece of paper with one breath of speech written on it.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

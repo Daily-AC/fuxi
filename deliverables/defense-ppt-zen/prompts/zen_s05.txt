@@ -1,0 +1,34 @@
+OVERVIEW
+A 16:9 minimalist editorial slide for a Chinese academic thesis defense — slide 5 of 12, presenting the system's overall architecture as TWO orthogonal axes that cross at the slide's center. The visual anchor is a clean ink cross-diagram (一横一纵) with four endpoint labels. The reference image is the previous slide of the same deck — match its paper tone, deep ink black, and serif Chinese typography exactly.
+
+STYLE
+Oriental whitespace aesthetic on warm off-white paper (#FCFAF6) with subtle paper-grain texture. Monochrome deep ink black ink only — NO colored accents, NO icons, NO cartoon elements, NO rounded boxes, NO drop shadows, NO pastel palette, NO grid lines, NO arrows. Mood is restrained and scholarly.
+
+INK MARK
+The diagram's two crossing strokes ARE the ink marks — count them as the slide's ink budget. Both are confident hand-painted ink-wash strokes with subtle dry-brush flying-white texture. Pure deep ink black. NO additional brush marks anywhere else on the slide. NO seal mark, NO third stroke.
+
+LAYOUT
+A cross-diagram layout. The two strokes:
+  (1) ONE horizontal ink stroke spans roughly 65% of canvas width, centered horizontally, located at vertical center (50% from top). Both ends taper slightly as if hand-drawn.
+  (2) ONE vertical ink stroke spans roughly 70% of canvas height, centered vertically, located at horizontal center (50% from left). Both ends taper slightly.
+  (3) At the exact crossing point, a small filled deep-ink dot, ~1.5% of slide width, marks the intersection.
+A short slide title sits at the top-left corner. Each axis end has ONE short Chinese label in 思源宋体, positioned just past the stroke's tip with a small gap. The four whitespace quadrants formed by the cross stay COMPLETELY EMPTY except for ONE small phrase in the lower-right quadrant near the crossing point. NO arrows on the axes, NO grid, NO axis ticks, NO bounding box.
+
+TEXT CONTENT (each Chinese string renders EXACTLY as written, in 思源宋体 — ExtraBold for the title and the four endpoint labels, Medium for the parenthetical small notes and the center caption; deep ink black #0E0E0E; full-width punctuation; no emoji, no decorative glyphs):
+- Slide title (top-left corner, ~24pt, ExtraBold, single line): "两轴正交"
+- Horizontal axis LEFT end label (~26pt ExtraBold, single line, just past left tip): "A2A 协作契约"
+- Horizontal axis LEFT end small note (~13pt Medium, single line, directly under the label): "（Agent 之间）"
+- Horizontal axis RIGHT end label (~26pt ExtraBold, single line, just past right tip): "..."
+- Vertical axis TOP end label (~26pt ExtraBold, single line, just above top tip): "EventBus 事实流"
+- Vertical axis TOP end small note (~13pt Medium, single line, directly under the label): "（系统之内）"
+- Vertical axis BOTTOM end label (~26pt ExtraBold, single line, just below bottom tip): "..."
+- Lower-right quadrant caption (~16pt Medium, two short lines if needed, or single line): "相互正交，互不绑死"
+
+ACCENT
+None.
+
+WHITESPACE
+At least 60% of the slide must be empty paper. Each of the four quadrants formed by the cross is mostly blank.
+
+BACKGROUND
+Warm off-white paper (#FCFAF6) with faint hand-made paper-grain texture and very subtle vignette toward the edges. NO landscape, NO petals, NO bamboo, NO mountains, NO scattered ink, NO clouds. The background is just paper.

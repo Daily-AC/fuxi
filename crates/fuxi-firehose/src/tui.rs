@@ -588,7 +588,10 @@ fn summarize(k: &EventKind) -> String {
         XuannvHandoffWritten { length_chars, .. } => {
             format!("xuannv handoff ↓ {length_chars} chars")
         }
-        XuannvVoiceLine { text } => format!("xuannv say {}", one_line(text, 40)),
+        XuannvVoiceLine { text, emotion } => {
+            let tag = emotion.as_deref().unwrap_or("normal");
+            format!("xuannv say [{tag}] {}", one_line(text, 40))
+        }
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
