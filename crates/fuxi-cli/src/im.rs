@@ -312,8 +312,9 @@ pub async fn run(args: StartArgs) -> Result<()> {
 
     // v2 跨节点 sandbox：NodeLoadProvider 包 Arc<DistController>，注入 Fuxi 让
     // dispatch 在 task 关联到 project 但未显式 pin 时按 inflight/concurrency 选最闲。
+    // 这里 clone 而非 move——`dist_ctrl` 后面 `Daemon::new_for_im_start` 还要消费一份。
     fuxi.set_node_load_provider(Arc::new(crate::im_dist::DistNodeLoadProvider::new(
-        dist_ctrl,
+        dist_ctrl.clone(),
     )))
     .await;
     tracing::info!("Fuxi.node_load_provider 已注入——v2 跨节点 sandbox auto-pin 启用");
@@ -518,12 +519,16 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 return Err(e).with_context(|| format!("玄女自启失败（role={xuannv_role}）"));
             }
         };
-    let daemon = Daemon::new(
+    // `new_for_im_start` required-arg 写法编译期防漏 dist_ctrl——commit 之前漏
+    // `.with_dist(dist_ctrl)` 让 `fuxi nodes` IPC 报"未启用"误导诊断（玄女 issue
+    // #64655b8e/#42184579）。重构这里前先去 `daemon.rs::new_for_im_start` 看注释。
+    let daemon = Daemon::new_for_im_start(
         fuxi.clone(),
         bus.clone(),
         sched_store.clone(),
         keeper.clone(),
         oracle,
+        dist_ctrl.clone(),
     );
     let daemon_shutdown = daemon.shutdown_handle();
     let sock_for_task = sock_path.clone();
