@@ -60,10 +60,12 @@ export class WakeClient {
     u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:'
     u.pathname = '/wake/api/wake'
     u.searchParams.set('token', this.opts.token)
+    console.log('[wake] connecting', u.toString().replace(/token=[^&]+/, 'token=***'))
     const ws = new WebSocket(u.toString())
     this.ws = ws
 
     ws.addEventListener('open', () => {
+      console.log('[wake] ws open, sending hello')
       ws.send(JSON.stringify({ type: 'hello', client: 'jarvis-pet', version: '0.4.0' }))
     })
 
@@ -74,9 +76,11 @@ export class WakeClient {
         switch (m.type) {
           case 'ready':
             this.reconnectMs = 1000
+            console.log('[wake] ready, keywords', m.keywords)
             this.opts.onStatus?.('ready')
             break
           case 'wake':
+            console.log('[wake] HEARD', m.keyword, 'score', m.score)
             this.opts.onWake(m.keyword || '玄女', typeof m.score === 'number' ? m.score : 0)
             break
           case 'ping':
@@ -85,6 +89,8 @@ export class WakeClient {
           case 'error':
             console.warn('[wake] server error', m.code, m.message)
             break
+          default:
+            console.log('[wake] msg', m.type)
         }
       } catch {
         /* ignore non-json */
@@ -92,6 +98,7 @@ export class WakeClient {
     })
 
     ws.addEventListener('close', e => {
+      console.warn('[wake] ws closed', e.code, e.reason)
       this.opts.onStatus?.('disconnected')
       this.ws = null
       if (this.stopped) return

@@ -40,6 +40,13 @@ import h008 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_00
 import h009 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_009_125.png?url'
 import h010 from '../../resources/sprites/loris/touch_head/nomal/b/touch_head_010_125.png?url'
 
+// Say/Serious/B 4 帧嘴动 loop（VPet 原 0000_core/pet/vup/Say/Serious/B fork）
+// TTS 播放期间循环这 4 帧，播完 onEnd 切回 Default
+import s000 from '../../resources/sprites/loris/say/serious/b/say_000_125.png?url'
+import s001 from '../../resources/sprites/loris/say/serious/b/say_001_125.png?url'
+import s002 from '../../resources/sprites/loris/say/serious/b/say_002_125.png?url'
+import s003 from '../../resources/sprites/loris/say/serious/b/say_003_125.png?url'
+
 const canvasContainer = ref<HTMLDivElement | null>(null)
 const stats = useStatsStore()
 const sizeDebug = ref('size: -')
@@ -107,6 +114,21 @@ const DEFAULT_SET: SpriteSet = {
   ]
 }
 
+/// 说话嘴动 4 帧 loop（VPet vup/Say/Serious/B）；TTS 播放期间持续 loop，
+/// onEnd 时 load 回 DEFAULT_SET
+const SAY_SET: SpriteSet = {
+  graph: 'Say',
+  animat: 'B',
+  mode: 'Serious',
+  loop: true,
+  frames: [
+    { textureUrl: s000, durationMs: 125 },
+    { textureUrl: s001, durationMs: 125 },
+    { textureUrl: s002, durationMs: 125 },
+    { textureUrl: s003, durationMs: 125 }
+  ]
+}
+
 /// 摸头 B_Nomal 11 帧 loop（VPet 原作）；playOnce 完后回 DEFAULT_SET
 const TOUCH_HEAD_SET: SpriteSet = {
   graph: 'Touch_Head',
@@ -129,14 +151,21 @@ const TOUCH_HEAD_SET: SpriteSet = {
 }
 
 onMounted(async () => {
-  pixiApp = new PixiApp()
-  const canvas = await pixiApp.init({ width: PANEL_W, height: PANEL_H })
-  canvasContainer.value!.appendChild(canvas)
-
-  player = new AnimationPlayer(pixiApp.pixi)
-  await player.load(DEFAULT_SET)
-  const px = pixiApp.pixi
-  sizeDebug.value = `${px.screen.width}x${px.screen.height} dpr ${window.devicePixelRatio}`
+  console.log('[boot] onMounted start')
+  try {
+    pixiApp = new PixiApp()
+    const canvas = await pixiApp.init({ width: PANEL_W, height: PANEL_H })
+    console.log('[boot] pixi init done')
+    canvasContainer.value!.appendChild(canvas)
+    player = new AnimationPlayer(pixiApp.pixi)
+    await player.load(DEFAULT_SET)
+    console.log('[boot] player loaded default')
+    const px = pixiApp.pixi
+    sizeDebug.value = `${px.screen.width}x${px.screen.height} dpr ${window.devicePixelRatio}`
+  } catch (e) {
+    console.error('[boot] init err:', String(e))
+    throw e
+  }
 
   // 接 fuxi —— pairToken 从 localStorage 读，没的话 WS 仍连（开发期降级，
   // 生产用户在菜单设 token 后 reconnect 拿到鉴权）
@@ -151,27 +180,13 @@ onMounted(async () => {
           evType === 'thinking_started' || evType === 'thinking_finished') {
         flashToast(`ws: ${evType}`, 1500)
       }
-      // 玄女说话：弹气泡 + TTS 播心海音色（Phase 2.D+E）
+      // 玄女说话：弹气泡 + 嘴动 + TTS 心海音（Phase 2.D+E）
       if (ev.kind.type === 'xuannv_voice_line' && typeof ev.kind.text === 'string') {
         const sayText = ev.kind.text
         showBubble(sayText)
-        if (pairToken.value) {
-          flashToast(`tts: 起播「${sayText.slice(0, 12)}」`, 2500)
-          playTts({
-            baseURL: BASE_URL,
-            token: pairToken.value,
-            text: sayText,
-            onStep: msg => {
-              console.log('[tts]', msg)
-              flashToast(`tts: ${msg}`, 4000)
-            }
-          }).catch(e => {
-            console.error('[tts err]', e)
-            flashToast(`tts err: ${String(e).slice(0, 80)}`, 5000)
-          })
-        } else {
-          flashToast('tts skipped: token 没设', 2500)
-        }
+        speakWithMouth(sayText).catch(e => {
+          flashToast(`tts err: ${String(e).slice(0, 80)}`, 5000)
+        })
       }
       const update = mapEventToStats(ev)
       const setterFields: Partial<Record<string, number>> = {}
@@ -194,8 +209,11 @@ onMounted(async () => {
   fuxi.connect()
 
   // 上次启用过 wake 词且 token 还在 → 自动续上（开机自动监听）
+  console.log('[boot] wakeEnabled=', wakeEnabled.value, 'wakeTokenLen=', wakeToken.value.length, 'pairTokenLen=', pairToken.value.length)
   if (wakeEnabled.value && wakeToken.value) {
     enableWake().catch(e => flashToast(`wake 自启失败: ${String(e).slice(0, 50)}`, 3000))
+  } else if (wakeEnabled.value && !wakeToken.value) {
+    console.warn('[boot] wakeEnabled but no wakeToken — 设置里第二行没填')
   }
 })
 
@@ -294,6 +312,25 @@ function onCancelToken() {
   wakeTokenDraft.value = ''
 }
 
+/// 播一段心海音 + 嘴动 loop；播完自动切回 Default。
+/// 喷头：xuannv_voice_line 自然 say 用、唤醒后「我在，你说」也用。
+async function speakWithMouth(text: string): Promise<void> {
+  if (!pairToken.value || !text.trim()) return
+  player?.load(SAY_SET).catch(() => {})
+  try {
+    await playTts({
+      baseURL: BASE_URL,
+      token: pairToken.value,
+      text,
+      onStep: msg => console.log('[tts]', msg),
+      onEnd: () => { player?.load(DEFAULT_SET).catch(() => {}) }
+    })
+  } catch (e) {
+    player?.load(DEFAULT_SET).catch(() => {})
+    throw e
+  }
+}
+
 async function ensureMic(): Promise<void> {
   if (mic) return
   mic = new MicRecorder()
@@ -355,7 +392,6 @@ async function finishTalking(): Promise<void> {
     if (!text) {
       voiceState.value = 'idle'
       flashToast('没听到', 1500)
-      disposeMicIfIdle()
       return
     }
     flashToast(`你：${text}`, 3500)
@@ -371,7 +407,13 @@ async function finishTalking(): Promise<void> {
     flashToast(`失败：${String(e).slice(0, 60)}`, 3500)
   } finally {
     voiceState.value = 'idle'
-    disposeMicIfIdle()
+    // talk 流程结束——若启用唤醒就把 wake mic 重新订上，让用户能再次喊「玄女」
+    if (wakeEnabled.value && wake && mic && !wakePcmUnsub) {
+      console.log('[wake] resubscribe mic after talk')
+      wakePcmUnsub = mic.subscribe(chunk => wake!.sendPcm(chunk))
+    }
+    // 没开 wake 才考虑关 mic（开 wake 时 mic 永驻）
+    if (!wakeEnabled.value) disposeMicIfIdle()
   }
 }
 
@@ -384,6 +426,7 @@ async function onTalkToggle(): Promise<void> {
 }
 
 async function enableWake(): Promise<void> {
+  console.log('[wake] enableWake called, token len:', wakeToken.value.length)
   if (!wakeToken.value) {
     flashToast('先设 wake.token', 2500)
     return
@@ -392,19 +435,50 @@ async function enableWake(): Promise<void> {
   localStorage.setItem(WAKE_EN_LS_KEY, '1')
   try {
     await ensureMic()
+    console.log('[wake] mic ready, creating WakeClient')
     wake = new WakeClient({
       baseURL: BASE_URL,
       token: wakeToken.value,
-      onWake: (kw) => {
-        if (voiceState.value === 'idle') {
-          flashToast(`听见「${kw}」`, 1200)
-          startTalking(true).catch(() => {})
+      onWake: async (kw) => {
+        if (voiceState.value !== 'idle') return
+        console.log('[wake] onWake fired, pause wake sub + play 我在你说')
+        flashToast(`听见「${kw}」`, 1500)
+        // 1. 暂停 wake mic 上推——TTS 自己的声从喇叭播会被 mic 拾到，避免 wake
+        //    在自己说话时又触发 wake 自激
+        wakePcmUnsub?.()
+        wakePcmUnsub = null
+        // 2. 占位 sending 防 wake 重入
+        voiceState.value = 'sending'
+        try {
+          await speakWithMouth('我在，你说。')
+        } catch (e) {
+          console.warn('[wake response tts]', e)
         }
+        // 3. TTS ended 后 500ms 缓冲——让扬声器残响沉、麦克风缓冲清。
+        //    不加这条 mac echoCancellation 偶尔拦不住「我在你说」尾音进 ASR
+        await new Promise(r => setTimeout(r, 500))
+        voiceState.value = 'idle'
+        // 4. 起 ASR + VAD 听用户说话
+        startTalking(true).catch(() => {})
+        // wake 重订 mic 在 finishTalking 里 finally 段做（先确保 talk 流程完整）
       },
       onStatus: s => { wakeStatus.value = s }
     })
     wake.start()
-    wakePcmUnsub = mic!.subscribe(chunk => wake!.sendPcm(chunk))
+    let pcmCount = 0
+    wakePcmUnsub = mic!.subscribe(chunk => {
+      wake!.sendPcm(chunk)
+      pcmCount++
+      // 头 5 个 chunk + 每 50 个（~4s）打一次，确认数据流活
+      if (pcmCount <= 5 || pcmCount % 50 === 0) {
+        // 算 RMS 大致看音量
+        const i16 = new Int16Array(chunk)
+        let sumSq = 0
+        for (let i = 0; i < i16.length; i++) sumSq += i16[i] * i16[i]
+        const rms = Math.round(Math.sqrt(sumSq / i16.length))
+        console.log(`[wake] pcm #${pcmCount} bytes=${chunk.byteLength} rms=${rms}`)
+      }
+    })
   } catch (e) {
     flashToast(`唤醒启动失败: ${String(e).slice(0, 50)}`, 3000)
     disableWake()
