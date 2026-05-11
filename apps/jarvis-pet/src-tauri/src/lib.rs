@@ -2,8 +2,14 @@ mod core;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_os::init())
+    let mut builder = tauri::Builder::default().plugin(tauri_plugin_os::init());
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
+    builder
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
