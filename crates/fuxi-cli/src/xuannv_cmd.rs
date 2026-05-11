@@ -148,10 +148,19 @@ pub async fn run_handoff_read() -> Result<()> {
 /// 大概率是她把整段 IM 回复也塞过来了——拒并提示她精简。
 const SAY_MAX_CHARS: usize = 500;
 
+/// Phase 3 情绪映射：合法 emotion 标签——TTS 端 / 桌宠端按这套切 ref / sprite。
+/// 留 `normal` 是为了让 cc 显式传也合法；不传 = `None` daemon publish 兜底，
+/// 跟 `--emotion normal` 行为等价。
+const ALLOWED_EMOTIONS: &[&str] = &["normal", "happy", "surprise", "worry", "serious", "sad"];
+
 #[derive(Debug, Args)]
 pub struct SayArgs {
     /// 要念出口的话；传 `-` 从 stdin 读（兼容长字符串里有引号、换行等场景）。
     pub text: String,
+    /// Phase 3 情绪：happy / surprise / worry / serious / sad / normal。
+    /// 不传 = normal（TTS 走默认派蒙 ref + 桌宠 idle 走 Nomal）。
+    #[arg(long)]
+    pub emotion: Option<String>,
 }
 
 pub async fn run_say(args: SayArgs) -> Result<()> {
@@ -176,18 +185,30 @@ pub async fn run_say(args: SayArgs) -> Result<()> {
         );
     }
 
+    // emotion 校验：传了就必须是已知值（白名单 fail-fast，避免 cc 编错 typo 静默走 default）
+    let emotion = match args.emotion.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(e) if ALLOWED_EMOTIONS.contains(&e) => Some(e.to_string()),
+        Some(e) => anyhow::bail!(
+            "未知 emotion `{e}`，合法值：{}",
+            ALLOWED_EMOTIONS.join(" / ")
+        ),
+    };
+
     // 走 daemon —— daemon 端 EmitEvent handler 会注入 meta.agent=xuannv_id，
     // CLI 进程拿不到运行时 xuannv_id，必须 daemon 兜底。
     let resp = crate::client::send(crate::ipc::Command::EmitEvent {
         kind: crate::ipc::EventKindPayload::XuannvVoiceLine {
             text: trimmed.to_string(),
+            emotion: emotion.clone(),
         },
     })
     .await
     .context("daemon 通讯失败——是否在 `fuxi up` 或 `fuxi im start` 进程下")?;
     match resp {
         crate::ipc::Response::Ok { .. } => {
-            println!("✓ 已上发 ({} chars)", len);
+            let tag = emotion.as_deref().unwrap_or("normal");
+            println!("✓ 已上发 ({} chars, emotion={})", len, tag);
             Ok(())
         }
         crate::ipc::Response::Pong => anyhow::bail!("daemon 返回 Pong（异常）"),

@@ -1,7 +1,7 @@
 /// fuxi EventKind wire 形式（按 #[serde(tag="type")] tagged union）
 /// 仅列 jarvis-pet 关心的子集；其它走 WireKind.other
 export type WireKind =
-  | { type: 'xuannv_voice_line'; text: string }
+  | { type: 'xuannv_voice_line'; text: string; emotion?: string | null }
   | { type: 'thinking_started' }
   | { type: 'thinking_finished' }
   | { type: 'agent_responded'; text: string }
