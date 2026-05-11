@@ -335,15 +335,6 @@ final class AppState: ObservableObject {
         enterIdle()
     }
 
-    /// 切 UI 形态——AppDelegate 依此 swap NSPanel。
-    /// 持久化到 UserDefaults，重启后保留。
-    func setUIMode(_ mode: Settings.UIMode) {
-        guard settings.uiMode != mode else { return }
-        settings.uiMode = mode
-        settings.save()
-        logger.notice("uiMode 切到 \(mode.rawValue, privacy: .public)")
-    }
-
     /// 任何路径回到 idle 都走这——核心是恢复 wake 链路（不然下次「玄女」喊不出来）。
     func enterIdle() {
         phase = .idle

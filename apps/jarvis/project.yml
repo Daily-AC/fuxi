@@ -52,10 +52,6 @@ targets:
     resources:
       - path: Resources/Assets.xcassets
         optional: true
-      # v0.3 立绘桌宠资产——SwiftPM Bundle.module 走 Sources/Resources/Pet 自动注入，
-      # xcodegen 这边显式声明让 xcodebuild 也把 Pet 拷进 .app/Contents/Resources/Pet
-      - path: Sources/Resources/Pet
-        optional: true
     info:
       path: Resources/Info.plist
       properties:

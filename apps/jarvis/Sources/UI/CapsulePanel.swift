@@ -112,16 +112,6 @@ final class CapsulePanel: NSPanel {
 
         menu.addItem(NSMenuItem.separator())
 
-        let switchItem = NSMenuItem(
-            title: "切到立绘",
-            action: #selector(AppDelegate.switchToPet),
-            keyEquivalent: ""
-        )
-        switchItem.target = NSApp.delegate
-        menu.addItem(switchItem)
-
-        menu.addItem(NSMenuItem.separator())
-
         let quitItem = NSMenuItem(
             title: "退出玄女",
             action: #selector(AppDelegate.quitApp),
