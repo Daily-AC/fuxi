@@ -377,6 +377,27 @@ async fn dispatch_command(
         } => match parse_agent_id(&agent_id) {
             Err(e) => Response::err(e),
             Ok(id) => {
+                // PR-C 反演 issue 5b7c99a7：pinned_node 落到 controller 不认识
+                // 的 node_id（玄女把 "mac-local" 当 alias 用，但实际 node 叫
+                // "zyldemacbook-pro-local"）会让 task 入 dist queue 永远 queued。
+                // 这里早早拒绝，错误信息明示让玄女去 `fuxi nodes` 查真实 id。
+                //
+                // `dist=None` 时不挡——`fuxi up` 无 --dist-token 是另一条 bug
+                // (issue 42184579 已 awaiting_test)；本检查只覆盖 controller 启用
+                // 但 node_id 拼错的场景。
+                if let Some(pinned) = pinned_node.as_deref()
+                    && let Some(ctrl) = &dist
+                {
+                    let snapshots = ctrl.nodes_snapshot().await;
+                    let alive_match = snapshots
+                        .iter()
+                        .any(|n| n.node_id == pinned && n.status == "alive");
+                    if !alive_match {
+                        return Response::err(format!(
+                            "no alive node matches pinned_node={pinned}——用 `fuxi nodes` 查可用 node_id"
+                        ));
+                    }
+                }
                 let desc = body.as_deref().unwrap_or("");
                 if let Some(parent_raw) = task_id {
                     // β · #70 v1 限制：dispatch_in_task 走 dispatch_to_any 路径，
@@ -2169,6 +2190,81 @@ mod tests {
                 assert_eq!(nodes[0]["node_id"], "home");
             }
             other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// PR-C 反演 issue #5b7c99a7：dispatch `--pinned-node` 拿到 controller registry
+    /// 里没有的 node_id（如玄女把 `mac-local` 当了 alias），daemon 必须立刻 4xx
+    /// 拒绝，而不是把 task 入队让 worker 永远拉不到。
+    #[tokio::test]
+    async fn dispatch_with_unknown_pinned_node_returns_err() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let ctrl = Arc::new(crate::dist::DistController::new("tok".into(), bus.clone()));
+        ctrl.register("real-node".into(), vec![], 1).await;
+
+        let resp = dispatch_command(
+            fuxi,
+            bus,
+            store,
+            keeper,
+            oracle,
+            Some(ctrl),
+            Command::Dispatch {
+                agent_id: uuid::Uuid::new_v4().to_string(),
+                task_id: None,
+                title: "test".into(),
+                body: Some("echo hi".into()),
+                pinned_node: Some("ghost-node".into()),
+                required_tags: vec![],
+            },
+            Arc::new(Notify::new()),
+        )
+        .await;
+        match resp {
+            Response::Err { error } => {
+                assert!(
+                    error.contains("pinned_node") && error.contains("ghost-node"),
+                    "error 应明示 pinned_node 名字让玄女能纠正；got: {error}"
+                );
+            }
+            other => panic!("expected Err for unknown pinned_node, got {other:?}"),
+        }
+    }
+
+    /// PR-C 配套：pinned_node 是 controller 已知的 alive 节点 → 不被 pinned_node
+    /// 校验挡住，继续走 dispatch 路径（最终因 mock agent 不在 shelf 上失败，
+    /// 但**那是别的错**——本测试只确认 pinned_node 校验放行）。
+    #[tokio::test]
+    async fn dispatch_with_known_pinned_node_passes_validation() {
+        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
+        let ctrl = Arc::new(crate::dist::DistController::new("tok".into(), bus.clone()));
+        ctrl.register("real-node".into(), vec![], 1).await;
+
+        let resp = dispatch_command(
+            fuxi,
+            bus,
+            store,
+            keeper,
+            oracle,
+            Some(ctrl),
+            Command::Dispatch {
+                agent_id: uuid::Uuid::new_v4().to_string(),
+                task_id: None,
+                title: "test".into(),
+                body: Some("echo hi".into()),
+                pinned_node: Some("real-node".into()),
+                required_tags: vec![],
+            },
+            Arc::new(Notify::new()),
+        )
+        .await;
+        // 期望：要么 Ok（如果 mock fuxi 接得住 dispatch），要么 Err 但**不含**
+        // pinned_node 字样（pinned_node 校验已放行，挂在别的链路）。
+        if let Response::Err { error } = resp {
+            assert!(
+                !error.contains("no alive node matches"),
+                "pinned_node 校验不该拦真节点；got: {error}"
+            );
         }
     }
 

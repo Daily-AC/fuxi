@@ -486,6 +486,12 @@ mod tests {
             txt.contains("fuxi nodes"),
             "addendum 必须教玄女查真实 node_id；硬编 alias 会让 enqueue 卡死"
         );
+        // PR-C 反演 issue c67260d2：spawn 范本必须用 --id-only flag，否则玄女
+        // 拿到 JSON {"agent_id":"..."} 整串塞 `--to` 直接 invalid uuid 报错。
+        assert!(
+            txt.contains("--id-only"),
+            "spawn 范本必须用 --id-only（issue c67260d2）"
+        );
     }
 
     #[test]
