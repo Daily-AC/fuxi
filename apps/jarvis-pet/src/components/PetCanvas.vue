@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref } from 'vue'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { useStatsStore } from '@/stores/stats'
 import { PixiApp } from '@/pixi/PixiApp'
 import { AnimationPlayer } from '@/sprites/AnimationPlayer'
@@ -13,6 +13,7 @@ import { sendIntervene } from '@/api/intervene'
 import { playTts } from '@/voice/tts'
 import { WakeClient } from '@/voice/wakeClient'
 import { EnergyVad } from '@/voice/vad'
+import { captureForSeconds, pcmToWav, uploadEnroll, uploadVerify, SAMPLE_TEXT } from '@/voice/voiceprint'
 
 // 8 帧通过 Vite ?url 显式导入：dev 下 vite 直接服务真实文件，build 时 hash 进 dist/assets。
 // 走 publicDir + /sprites 绝对路径在 Tauri release 下会撞「tauri://sprites/...」host 误读
@@ -88,6 +89,15 @@ const showMenu = ref(false)
 const toast = ref('')
 const bubble = ref('')         // 玄女回话气泡，>0s 显示，淡出
 const voiceState = ref<'idle' | 'recording' | 'transcribing' | 'sending'>('idle')
+
+// 声纹注册 modal 状态
+type VpStage = 'idle' | 'guide' | 'recording' | 'uploading' | 'verifying' | 'done' | 'error'
+const vpStage = ref<VpStage>('idle')
+const vpElapsedSec = ref(0)
+const vpRms = ref(0)
+const vpResult = ref<string>('')
+const VP_DURATION_SEC = 20
+const VP_SAMPLE_TEXT = SAMPLE_TEXT
 
 const BASE_URL = import.meta.env.VITE_FUXI_BASE_URL || 'https://im.qmledmq.cn:8443'
 const TOKEN_LS_KEY = 'jarvis-pet.pairToken'
@@ -396,6 +406,75 @@ function onSaveToken() {
   wakeTokenDraft.value = ''
 }
 
+/// 注册声纹入口——菜单点击。Modal 三阶段：guide → recording → done。
+/// 临时把 panel 放大到 360×540 给指引文字 + 按钮足够空间，结束恢复 200×360。
+async function onStartVoiceprint() {
+  if (!pairToken.value) {
+    flashToast('先设 fuxi-im token', 2500)
+    return
+  }
+  if (vpStage.value !== 'idle' && vpStage.value !== 'done' && vpStage.value !== 'error') return
+  showMenu.value = false
+  vpResult.value = ''
+  vpElapsedSec.value = 0
+  vpRms.value = 0
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(360, 540))
+  } catch (e) {
+    console.warn('[vp] setSize 失败', e)
+  }
+  vpStage.value = 'guide'
+}
+
+async function onRunVoiceprintRecord() {
+  vpStage.value = 'recording'
+  vpElapsedSec.value = 0
+  vpRms.value = 0
+  try {
+    await ensureMic()
+    const pcm = await captureForSeconds({
+      mic: mic!,
+      seconds: VP_DURATION_SEC,
+      onTick: ({ elapsedSec, rms }) => {
+        vpElapsedSec.value = elapsedSec
+        vpRms.value = rms
+      },
+    })
+    vpStage.value = 'uploading'
+    const wav = pcmToWav(pcm)
+    const enr = await uploadEnroll({
+      baseURL: BASE_URL,
+      token: pairToken.value,
+      wavBytes: wav,
+    })
+    if (!enr.enrolled) throw new Error('服务端 enrolled=false')
+    // sanity verify：用同段 wav 跑一次 /verify 看 score（应 ≥ 0.5 远超阈值）
+    vpStage.value = 'verifying'
+    const ver = await uploadVerify({
+      baseURL: BASE_URL,
+      token: pairToken.value,
+      wavBytes: wav,
+    })
+    vpResult.value = `score ${ver.score.toFixed(3)} / 阈值 ${ver.threshold} · ${ver.match ? '✓ 匹配' : '⚠ 不匹配（重录）'}`
+    vpStage.value = 'done'
+  } catch (e) {
+    vpResult.value = String(e).slice(0, 200)
+    vpStage.value = 'error'
+  } finally {
+    disposeMicIfIdle()
+  }
+}
+
+async function onCloseVoiceprint() {
+  vpStage.value = 'idle'
+  vpResult.value = ''
+  try {
+    await getCurrentWindow().setSize(new LogicalSize(PANEL_W, PANEL_H))
+  } catch (e) {
+    console.warn('[vp] restore setSize 失败', e)
+  }
+}
+
 function onCancelToken() {
   showTokenInput.value = false
   tokenDraft.value = ''
@@ -635,6 +714,9 @@ function onWakeToggle(): void {
       <div class="row clickable" @click="onSetToken">
         🔑 {{ pairToken ? '换 token' : '设 token' }}
       </div>
+      <div class="row clickable" @click="onStartVoiceprint">
+        🆔 注册声纹
+      </div>
       <div class="sep"></div>
       <div class="row">体力 {{ stats.strength }}</div>
       <div class="row">饱腹 {{ stats.strengthFood }}</div>
@@ -670,6 +752,73 @@ function onWakeToggle(): void {
         <button class="btn save" @click="onSaveToken">保存</button>
       </div>
     </div>
+    <!-- 声纹注册 modal：覆盖全屏（panel 已临时放大到 360×540） -->
+    <div v-if="vpStage !== 'idle'" class="vp-modal" @mousedown.stop>
+      <!-- 阶段 1：指引 -->
+      <template v-if="vpStage === 'guide'">
+        <div class="vp-title">注册声纹</div>
+        <div class="vp-desc">
+          点开始后，请自然朗读下方文字 <b>{{ VP_DURATION_SEC }} 秒</b>。
+          注册后，陌生人喊「玄女」桌宠将不再响应——只听你说话。
+        </div>
+        <div class="vp-sample">{{ VP_SAMPLE_TEXT }}</div>
+        <div class="vp-tips">
+          建议：安静环境、距离麦克 20-30cm、用日常语气念（不要刻意压低 / 唱腔）。
+        </div>
+        <div class="vp-actions">
+          <button class="btn cancel" @click="onCloseVoiceprint">取消</button>
+          <button class="btn save" @click="onRunVoiceprintRecord">开始录音</button>
+        </div>
+      </template>
+
+      <!-- 阶段 2：录音中 -->
+      <template v-else-if="vpStage === 'recording'">
+        <div class="vp-title">🎤 录音中…</div>
+        <div class="vp-sample tight">{{ VP_SAMPLE_TEXT }}</div>
+        <div class="vp-progress-wrap">
+          <div class="vp-progress" :style="{ width: (vpElapsedSec / VP_DURATION_SEC * 100) + '%' }"></div>
+        </div>
+        <div class="vp-meter-row">
+          <span>{{ vpElapsedSec.toFixed(1) }}s / {{ VP_DURATION_SEC }}s</span>
+          <span class="vp-rms" :style="{ opacity: Math.min(1, vpRms * 8 + 0.2) }">
+            音量 {{ (vpRms * 100).toFixed(0) }}
+          </span>
+        </div>
+        <div class="vp-tips">说话中……请保持自然语气。</div>
+      </template>
+
+      <!-- 阶段 3：上传 / 验证 -->
+      <template v-else-if="vpStage === 'uploading' || vpStage === 'verifying'">
+        <div class="vp-title">{{ vpStage === 'uploading' ? '上传中…' : '验证中…' }}</div>
+        <div class="vp-desc">正在把声纹送到 home GPU，提取 192 维 embedding。</div>
+        <div class="vp-spinner"></div>
+      </template>
+
+      <!-- 阶段 4：完成 -->
+      <template v-else-if="vpStage === 'done'">
+        <div class="vp-title">✓ 注册成功</div>
+        <div class="vp-desc">{{ vpResult }}</div>
+        <div class="vp-tips">
+          下次有陌生人喊「玄女」桌宠完全静默；你自己喊正常响应。
+          想换声纹（感冒 / 重感冒后）随时重跑「注册声纹」即可，覆盖式更新。
+        </div>
+        <div class="vp-actions">
+          <button class="btn save" @click="onCloseVoiceprint">完成</button>
+        </div>
+      </template>
+
+      <!-- 阶段 5：失败 -->
+      <template v-else-if="vpStage === 'error'">
+        <div class="vp-title">⚠ 注册失败</div>
+        <div class="vp-desc vp-err">{{ vpResult }}</div>
+        <div class="vp-tips">检查：token 有效？home 上 sv.service / asr.service 起着？麦克权限给了？</div>
+        <div class="vp-actions">
+          <button class="btn cancel" @click="onCloseVoiceprint">关闭</button>
+          <button class="btn save" @click="vpStage = 'guide'">重试</button>
+        </div>
+      </template>
+    </div>
+
     <!-- 玄女回话气泡：xuannv_voice_line 事件触发，自动 fade 6s -->
     <div v-if="bubble" class="bubble">{{ bubble }}</div>
     <!-- 短暂提示：drag 异常 / 操作反馈 -->
@@ -839,5 +988,95 @@ function onWakeToggle(): void {
 }
 .btn:hover {
   filter: brightness(1.05);
+}
+
+/* 声纹注册 modal —— panel 临时放大到 360×540 时占满 */
+.vp-modal {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(255, 255, 255, 0.97);
+  backdrop-filter: blur(8px);
+  font-family: -apple-system, sans-serif;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  z-index: 100;
+}
+.vp-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: rgba(20, 20, 20, 0.95);
+}
+.vp-desc {
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(40, 40, 40, 0.85);
+}
+.vp-sample {
+  font-size: 13px;
+  line-height: 1.7;
+  color: rgba(30, 30, 30, 0.92);
+  background: rgba(245, 245, 245, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 6px;
+  padding: 10px 12px;
+  white-space: pre-line;
+}
+.vp-sample.tight {
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.vp-tips {
+  font-size: 11px;
+  color: rgba(80, 80, 80, 0.75);
+  line-height: 1.45;
+}
+.vp-err {
+  color: rgba(180, 40, 40, 0.9);
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+.vp-actions {
+  margin-top: auto;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.vp-progress-wrap {
+  height: 8px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.vp-progress {
+  height: 100%;
+  background: rgb(40, 140, 80);
+  transition: width 100ms linear;
+}
+.vp-meter-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: rgba(40, 40, 40, 0.8);
+  font-variant-numeric: tabular-nums;
+}
+.vp-rms {
+  font-family: ui-monospace, monospace;
+}
+.vp-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(0, 0, 0, 0.1);
+  border-top-color: rgb(40, 100, 180);
+  border-radius: 50%;
+  animation: vp-spin 0.8s linear infinite;
+  margin: 12px auto;
+}
+@keyframes vp-spin {
+  to { transform: rotate(360deg); }
 }
 </style>
