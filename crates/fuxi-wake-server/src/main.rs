@@ -47,6 +47,17 @@ struct Cli {
     /// 关键词列表——逗号分隔。默认 `玄女`。
     #[arg(long, env = "FUXI_WAKE_KEYWORDS", value_delimiter = ',', default_values_t = vec!["玄女".to_string()])]
     keywords: Vec<String>,
+
+    /// Phase 5-B SV：声纹验证服务地址。设了就在 IVW 命中后调 /verify，
+    /// non-match 静默丢 wake event；不设 = wake 行为跟 Phase 5-A 前一致。
+    /// 例：`http://127.0.0.1:9883`（home localhost）。
+    #[arg(long, env = "FUXI_WAKE_SV_URL")]
+    sv_url: Option<String>,
+
+    /// SV 用的 HMAC key 文件（跟 fuxi-im / sv_server 同款）。默认 `~/.fuxi/im_hmac.key`。
+    /// 仅 `--sv-url` 设置时才读；wake-server systemd User= 必须有读权限。
+    #[arg(long, env = "FUXI_WAKE_SV_HMAC_KEY")]
+    sv_hmac_key: Option<PathBuf>,
 }
 
 fn default_work_dir() -> Result<PathBuf> {
@@ -111,6 +122,29 @@ async fn main() -> Result<()> {
         AppState::new(token, || {
             Box::new(XfyunEngine::new()) as Box<dyn WakeEngine>
         })
+    };
+
+    // Phase 5-B SV：仅在 --sv-url 显式设了时启用。HMAC key 默认 ~/.fuxi/im_hmac.key
+    // —— 跟 fuxi-im / sv_server.py 同款，确保 token 互验通过。fail-open 由
+    // server.rs 命中分支兜底。
+    let state = match cli.sv_url {
+        Some(url) => {
+            let key_path = cli
+                .sv_hmac_key
+                .clone()
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fuxi").join("im_hmac.key")))
+                .context("HOME 未设置 + 没显式 --sv-hmac-key——无法定位 HMAC key")?;
+            info!(%url, key_path = %key_path.display(), "wake-server: 启用 SV 拒陌生人");
+            let client = fuxi_wake_server::sv::SvClient::from_key_file(url, &key_path)
+                .context("加载 SV HMAC key 失败")?;
+            state.with_sv(fuxi_wake_server::sv::SvConfig {
+                client: Arc::new(client),
+            })
+        }
+        None => {
+            warn!("wake-server: 未配 --sv-url，任何人喊「玄女」都会触发 wake");
+            state
+        }
     };
 
     let app = router(Arc::new(state));
