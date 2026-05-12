@@ -32,11 +32,16 @@ pub const INBOUND_IDLE_LIMIT: Duration = Duration::from_secs(15);
 /// 应用状态：token + 引擎工厂 + awake 计数（health 用）。
 ///
 /// 引擎工厂：每个连接拿一个独立 engine 实例（讯飞 SDK 通常是单 session 设计）。
+///
+/// Phase 5-B 新增 `sv`：optional 声纹验证客户端。Some → wake 命中后调
+/// sv_server `/verify`，非主人静默丢 wake event。None → 行为跟 Phase 5-A 前一致
+/// （任何人喊「玄女」都触发）。systemd 部署默认 Some，dev/mock 通常 None。
 pub struct AppState {
     pub token: String,
     pub engine_factory: Box<dyn Fn() -> Box<dyn WakeEngine> + Send + Sync>,
     pub awake_count: AtomicU64,
     pub sdk_status: parking_lot_lite::Atomic,
+    pub sv: Option<crate::sv::SvConfig>,
 }
 
 /// 极简 atomic 字符串状态——避免引入 parking_lot/dashmap 重依赖。
@@ -101,7 +106,14 @@ impl AppState {
             engine_factory: Box::new(engine_factory),
             awake_count: AtomicU64::new(0),
             sdk_status: parking_lot_lite::Atomic::new(SdkStatus::Ready),
+            sv: None,
         }
+    }
+
+    /// 链式接 SV 客户端——`main.rs` 启动时若拿到 `--sv-url` 和 HMAC key 文件就装上。
+    pub fn with_sv(mut self, sv: crate::sv::SvConfig) -> Self {
+        self.sv = Some(sv);
+        self
     }
 }
 
@@ -250,6 +262,11 @@ async fn run_wake_loop_inner(
     let mut idle_check = tokio::time::interval(Duration::from_secs(1));
     idle_check.tick().await;
 
+    // Phase 5-B：3s PCM ring buffer——IVW 命中时拿当前 3s 音频做声纹比对。
+    // 3s × 16000 samples/s = 48000 i16；客户端 chunk 100-400ms，溢出旧的丢前面。
+    // 仅 sv 配置时维护——None 时 push 也 push（轻量），保证逻辑一致。
+    let mut pcm_ring = crate::sv::PcmRing::new(16000 * 3);
+
     loop {
         tokio::select! {
             biased;
@@ -288,10 +305,31 @@ async fn run_wake_loop_inner(
                 last_inbound = tokio::time::Instant::now();
                 match msg {
                     Message::Binary(pcm) => {
+                        // Phase 5-B：PCM 同时入 ring（用于 SV）和 IVW engine。
+                        // 顺序无所谓——ring 是 owner 端拷贝，engine.feed 是 SDK 自己缓冲。
+                        pcm_ring.push_pcm_bytes(&pcm);
                         match engine.feed(&pcm).await {
                             Ok(Some((keyword, score))) => {
                                 state.awake_count.fetch_add(1, Ordering::Relaxed);
-                                info!(%client_id, %keyword, %score, "wake ws: 命中");
+                                info!(%client_id, %keyword, %score, "wake ws: IVW 命中");
+
+                                // Phase 5-B SV 拒：sv 配了就调 verify，非主人静默丢
+                                // wake event（客户端完全感知不到唤醒）。
+                                // fail-open：SV 不通时放行（旁路故障别让用户喊不动玄女）。
+                                let allow = match &state.sv {
+                                    Some(sv) => {
+                                        let snapshot = pcm_ring.snapshot();
+                                        sv.should_emit_wake(&snapshot, client_id).await
+                                    }
+                                    None => true,
+                                };
+                                if !allow {
+                                    // 静默丢——不发 Wake event，也不通知客户端。
+                                    // awake_count 已 +1（用于 health 看 IVW 真实触发次数），
+                                    // 用 nginx/journal 看 wake-server log 才知道被 SV 挡了。
+                                    continue;
+                                }
+
                                 let evt = ServerMessage::Wake { keyword, score, at: Utc::now() };
                                 let s = serde_json::to_string(&evt)?;
                                 if socket.send(Message::Text(s.into())).await.is_err() {

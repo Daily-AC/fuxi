@@ -26,6 +26,14 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 futures-util = { workspace = true }
+# Phase 5-B SV：wake 触发后调 sv_server /verify 做 owner 声纹拒。
+# reqwest 调 HTTP + base64 编 wav body + hmac/sha2 自签 SV token（复用 fuxi-im
+# HMAC key 但不依赖 fuxi-im crate——wake-server 是独立 systemd 单元，依赖越少越稳）。
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
+hmac = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [build-dependencies]
 # 仅在 target_os=linux + target_arch=x86_64 + ENV `FUXI_XFYUN_SDK_DIR` 存在时才 bindgen。
