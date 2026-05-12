@@ -38,7 +38,7 @@
 fuxi nodes --json | jq -r '.[] | select(.tags | contains(["mac"])) | .node_id'
 # 当前部署：zyldemacbook-pro-local
 
-ID=$(fuxi spawn --role luban | tail -n1)            # spawn 不带 --node！
+ID=$(fuxi spawn --role luban --id-only)             # spawn 不带 --node！
 fuxi dispatch --to "$ID" --pinned-node zyldemacbook-pro-local --title 'ls home' 'ls ~ 然后报告前 10 项'
 ```
 
