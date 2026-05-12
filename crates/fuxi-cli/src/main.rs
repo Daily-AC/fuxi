@@ -163,6 +163,24 @@ enum XuannvCmd {
     /// 规则文件：`~/.fuxi/asr-hotwords.json`，asr_server.py mtime watch 自动生效。
     #[command(subcommand)]
     Hotword(HotwordCmd),
+    /// 声纹（speaker verification）—— 注册主人声纹后，ASR / wake 可拒陌生人触发。
+    /// home 上 sv_server.py 跑 CAM++ 中文 SV 模型；用户用 mac sox 录一段 wav
+    /// 上传到 home，玄女跑 `voiceprint enroll` 提 embedding 存 ~/.fuxi/voiceprint/。
+    /// fail-open：未注册时全放行（开机即用，注册后才严格）。
+    #[command(subcommand)]
+    Voiceprint(VoiceprintCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum VoiceprintCmd {
+    /// 注册主人声纹（覆盖式 —— 重新跑会覆盖旧 embedding，便于重录更准音色）。
+    /// 例：`fuxi xuannv voiceprint enroll --wav /tmp/yilin.wav`
+    Enroll(xuannv_cmd::VoiceprintEnrollArgs),
+    /// 测试某段 wav 是否匹配主人（不存盘，纯比对）。
+    /// 例：`fuxi xuannv voiceprint verify --wav /tmp/test.wav`
+    Verify(xuannv_cmd::VoiceprintVerifyArgs),
+    /// 看 sv_server 状态：模型是否 loaded、是否已 enrolled、threshold。
+    Status(xuannv_cmd::VoiceprintStatusArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -310,6 +328,11 @@ async fn main() -> anyhow::Result<()> {
                 HotwordCmd::Add(args) => xuannv_cmd::run_hotword_add(args).await,
                 HotwordCmd::List => xuannv_cmd::run_hotword_list().await,
                 HotwordCmd::Rm(args) => xuannv_cmd::run_hotword_rm(args).await,
+            },
+            XuannvCmd::Voiceprint(v) => match v {
+                VoiceprintCmd::Enroll(args) => xuannv_cmd::run_voiceprint_enroll(args).await,
+                VoiceprintCmd::Verify(args) => xuannv_cmd::run_voiceprint_verify(args).await,
+                VoiceprintCmd::Status(args) => xuannv_cmd::run_voiceprint_status(args).await,
             },
         },
         Some(Command::Bug(args)) => bug_cmd::run(args).await,

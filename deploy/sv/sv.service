@@ -1,0 +1,20 @@
+[Unit]
+Description=Speaker Verification server for jarvis-pet (port 9883, CAM++ 中文)
+After=network.target
+# 不依赖 asr.service —— SV 跟 ASR 并行加载，互相不挂
+
+[Service]
+Type=simple
+User=e0-7
+Environment=HOME=/home/e0-7
+Environment=PATH=/home/e0-7/miniforge3/envs/funasr-asr/bin:/usr/bin:/bin
+Environment=HF_ENDPOINT=https://hf-mirror.com
+Environment=MODELSCOPE_DOMAIN=modelscope.cn
+EnvironmentFile=-/home/e0-7/.fuxi/sv-server.env
+WorkingDirectory=/home/e0-7/funasr-asr
+ExecStart=/home/e0-7/miniforge3/envs/funasr-asr/bin/python -m uvicorn sv_server:app --host 127.0.0.1 --port 9883
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

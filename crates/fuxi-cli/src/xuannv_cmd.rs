@@ -399,6 +399,142 @@ pub async fn run_hotword_rm(args: HotwordRmArgs) -> Result<()> {
     Ok(())
 }
 
+// ── 声纹（Phase 5 SV）─────────────────────────────────────────────────
+//
+// home 上 sv_server.py 端口 9883 跑 CAM++ 中文声纹模型；用户 mac 录一段 wav
+// 上传到 home 后调 /enroll 提 embedding 存 ~/.fuxi/voiceprint/owner.npy。
+// asr_server.py / wake_server 后续 transcribe / 唤醒时都调 /verify 拦截
+// 陌生人声音。fail-open：未注册时所有 verify 全 match=true，注册后才严格。
+//
+// CLI 端默认 base_url = http://127.0.0.1:9883——玄女在 home 上 cc 进程跑就直
+// 连 localhost；要从 mac 跑透 nginx 用 `--base-url https://im.qmledmq.cn:8443/api/sv`。
+
+#[derive(Debug, Args)]
+pub struct VoiceprintEnrollArgs {
+    /// 16kHz mono wav 文件路径——5-30 秒自然说话语料（不要默念，越多角度越好）。
+    /// mac 录：`sox -d -r 16000 -c 1 ~/Downloads/yilin.wav trim 0 20`，
+    /// 然后 `scp ~/Downloads/yilin.wav home:/tmp/`，玄女在 home 跑这命令。
+    #[arg(long)]
+    pub wav: PathBuf,
+    /// sv_server base url，默认 localhost；远端调走 nginx 入口（带 /api/sv 前缀）。
+    #[arg(long, default_value = "http://127.0.0.1:9883")]
+    pub base_url: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VoiceprintVerifyArgs {
+    /// wav 文件路径——同 enroll 要求 16kHz mono。
+    #[arg(long)]
+    pub wav: PathBuf,
+    #[arg(long, default_value = "http://127.0.0.1:9883")]
+    pub base_url: String,
+}
+
+#[derive(Debug, Args)]
+pub struct VoiceprintStatusArgs {
+    #[arg(long, default_value = "http://127.0.0.1:9883")]
+    pub base_url: String,
+}
+
+fn mint_sv_token() -> Result<String> {
+    use fuxi_im::auth::{HmacSecret, TokenClaims, sign_token};
+    let secret = HmacSecret::load_or_create_default()
+        .context("加载 ~/.fuxi/im_hmac.key 失败——home 上 sv_server 用同款 HMAC")?;
+    let claims = TokenClaims {
+        device_id: format!("voiceprint-cli-{}", uuid::Uuid::new_v4()),
+        name: "voiceprint-cli".into(),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
+    };
+    sign_token(&secret, &claims).context("HMAC 签 token 失败")
+}
+
+async fn sv_post(url: &str, body: serde_json::Value, token: &str) -> Result<serde_json::Value> {
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url} 失败"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("sv {} → {}: {}", url, status, text);
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text})))
+}
+
+async fn sv_get(url: &str, token: &str) -> Result<serde_json::Value> {
+    let resp = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .with_context(|| format!("GET {url} 失败"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("sv {} → {}: {}", url, status, text);
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(serde_json::json!({"raw": text})))
+}
+
+fn read_wav_b64(path: &std::path::Path) -> Result<String> {
+    use base64::Engine;
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读 {} 失败", path.display()))?;
+    if bytes.len() < 8 || &bytes[0..4] != b"RIFF" {
+        anyhow::bail!(
+            "{} 不像 wav（无 RIFF header）——必须 16kHz mono wav，先用 sox / ffmpeg 转",
+            path.display()
+        );
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+pub async fn run_voiceprint_enroll(args: VoiceprintEnrollArgs) -> Result<()> {
+    if !args.wav.exists() {
+        anyhow::bail!("wav 不存在：{}", args.wav.display());
+    }
+    let wav_b64 = read_wav_b64(&args.wav)?;
+    let token = mint_sv_token()?;
+    let url = format!("{}/enroll", args.base_url.trim_end_matches('/'));
+    let resp = sv_post(&url, serde_json::json!({"wav_b64": wav_b64}), &token).await?;
+    println!("✓ 注册 OK");
+    println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+    Ok(())
+}
+
+pub async fn run_voiceprint_verify(args: VoiceprintVerifyArgs) -> Result<()> {
+    if !args.wav.exists() {
+        anyhow::bail!("wav 不存在：{}", args.wav.display());
+    }
+    let wav_b64 = read_wav_b64(&args.wav)?;
+    let token = mint_sv_token()?;
+    let url = format!("{}/verify", args.base_url.trim_end_matches('/'));
+    let resp = sv_post(&url, serde_json::json!({"wav_b64": wav_b64}), &token).await?;
+    let score = resp.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let threshold = resp.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
+    let match_ = resp.get("match").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enrolled = resp.get("enrolled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mark = if match_ { "✓" } else { "✗" };
+    println!(
+        "{mark} match={match_} score={score:.3} threshold={threshold} enrolled={enrolled}"
+    );
+    if !enrolled {
+        println!("  → 未注册：所有 verify 强制返 true（fail-open）。先跑 voiceprint enroll。");
+    }
+    Ok(())
+}
+
+pub async fn run_voiceprint_status(args: VoiceprintStatusArgs) -> Result<()> {
+    let token = mint_sv_token()?;
+    let url = format!("{}/healthz", args.base_url.trim_end_matches('/'));
+    let resp = sv_get(&url, &token).await?;
+    println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+    Ok(())
+}
+
 pub async fn run_refresh() -> Result<()> {
     let path = std::env::var("FUXI_EVENTS_DB")
         .map(std::path::PathBuf::from)

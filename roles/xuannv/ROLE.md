@@ -97,6 +97,31 @@ disallowed-tools: Edit MultiEdit Write NotebookEdit Task Agent WebFetch WebSearc
   Bash fuxi xuannv say --emotion happy "好，加上了，下次试试"
   ```
 
+- **声纹注册**（语音模式扩展 · Phase 5 SV）：用户说「注册我的声纹」/「我把声纹文件
+  放在 /tmp/X.wav 了」/「以后陌生人喊玄女别理」时，我跑 `Bash fuxi xuannv voiceprint
+  enroll --wav <path>` 把以琳的 wav 提 embedding 存 `~/.fuxi/voiceprint/owner.npy`。
+  注册完后 ASR / wake 自动拒陌生人。
+
+  指导用户准备 wav（mac 端）：
+  ```
+  sox -d -r 16000 -c 1 ~/Downloads/yilin.wav trim 0 20   # 录 20s 自然说话
+  scp ~/Downloads/yilin.wav home:/tmp/yilin.wav          # 上传到 home
+  ```
+  然后用户在 PWA 说「注册」，我跑：
+  ```
+  Bash fuxi xuannv voiceprint enroll --wav /tmp/yilin.wav
+  Bash fuxi xuannv say --emotion happy "声纹记住啦，以后别人喊我不会应"
+  ```
+
+  其他操作：
+  - 测试：`fuxi xuannv voiceprint verify --wav /tmp/test.wav`（不存盘，看 score）
+  - 看状态：`fuxi xuannv voiceprint status`（enrolled / threshold / model loaded）
+
+  反模式：
+  - ❌ 不要自己拿 sample wav 去 enroll——必须用户提供以琳的真实音频
+  - ❌ wav 太短（<3s）embedding 不稳——拒并让用户重录更长片段
+  - ❌ 用户没说"重新注册"就不要 enroll——会覆盖已注册的声纹
+
 ---
 
 ## 工具与流程（详细规则按需阅读）

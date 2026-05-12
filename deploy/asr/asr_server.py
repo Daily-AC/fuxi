@@ -50,6 +50,11 @@ MODEL_ID = os.environ.get("ASR_MODEL_ID", "iic/SenseVoiceSmall")
 DEVICE = os.environ.get("ASR_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000
 MAX_AUDIO_SECONDS = int(os.environ.get("ASR_MAX_SECONDS", "60"))
+# Phase 5 SV：transcribe 后 in-process 调声纹服务，不通过则返空 text → 桌宠端
+# 看到空 transcript 不发 intervene（陌生人喊话被静默丢弃）。
+# fail-open：sv_server 不通 / SV 服务挂掉时走原文（不因为旁路故障让桌宠瘫痪）。
+SV_ENABLED = os.environ.get("ASR_SV_ENABLED", "1") not in ("0", "false", "")
+SV_URL = os.environ.get("ASR_SV_URL", "http://127.0.0.1:9883")
 # 热词文件——`fuxi xuannv hotword add/rm/list` CLI 操作的目标。每次 transcribe
 # 前 mtime check 自动 reload，不需要 systemctl restart。SenseVoiceSmall 不支持
 # 模型级 hotword，靠后处理正则替换；详见 _Hotwords.apply()。
@@ -214,6 +219,8 @@ async def healthz():
         "device": DEVICE,
         "hotwords_path": str(HOTWORDS_PATH),
         "hotwords_count": len(_hotwords._compiled),
+        "sv_enabled": SV_ENABLED,
+        "sv_url": SV_URL,
     })
 
 
@@ -309,7 +316,27 @@ async def asr_ws(ws: WebSocket):
             text = await _hotwords.apply(text)
         except Exception as e:
             log.warning("hotword apply 失败 %s（用原文）", e)
-        log.info("ws %s done %d ms text_len=%d", ws.client, elapsed_ms, len(text))
+
+        # Phase 5 SV：transcribe 完后调 sv_server 比对声纹。non-match → 返空 text
+        # 让桌宠端不发 intervene。fail-open：SV 服务不通 → 返原 text + warning。
+        sv_score: float | None = None
+        sv_enrolled = False
+        if SV_ENABLED and text:  # 空 text 没必要再 verify
+            try:
+                sv = await _sv_verify(audio_i16, token)
+                sv_score = sv.get("score")
+                sv_enrolled = sv.get("enrolled", False)
+                if sv_enrolled and not sv.get("match", True):
+                    log.info(
+                        "ws %s SV reject text='%s' score=%.3f → 返空 text",
+                        ws.client, text[:30], sv_score or 0.0,
+                    )
+                    text = ""
+            except Exception as e:
+                log.warning("SV 调用失败 %s（fail-open 走原文）", e)
+
+        log.info("ws %s done %d ms text_len=%d sv_score=%s enrolled=%s",
+                 ws.client, elapsed_ms, len(text), sv_score, sv_enrolled)
         await ws.send_text(json.dumps({
             "type": "final",
             "text": text,
@@ -333,3 +360,23 @@ def _strip_sensevoice_tags(s: str) -> str:
     """SenseVoiceSmall 输出形如 `<|zh|><|NEUTRAL|><|Speech|><|woitn|>正文` —— 去 tags。"""
     import re
     return re.sub(r"<\|[^|]*\|>", "", s).strip()
+
+
+async def _sv_verify(audio_i16: np.ndarray, token: str) -> dict:
+    """把 PCM int16 转 wav bytes（in-memory）→ b64 → POST sv_server /verify。
+    用 httpx async client 调 localhost；token 直接透传，sv_server 验同款 HMAC。
+    返 sv_server 完整 response（含 match / score / threshold / enrolled）。
+    """
+    import httpx
+    buf = io.BytesIO()
+    sf.write(buf, audio_i16, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+    wav_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{SV_URL}/verify",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"wav_b64": wav_b64},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"sv {resp.status_code}: {resp.text[:120]}")
+    return resp.json()
