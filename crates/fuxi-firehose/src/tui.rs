@@ -592,6 +592,21 @@ fn summarize(k: &EventKind) -> String {
             let tag = emotion.as_deref().unwrap_or("normal");
             format!("xuannv say [{tag}] {}", one_line(text, 40))
         }
+        VisionRequest {
+            target,
+            hint,
+            request_id,
+        } => {
+            let h = hint.as_deref().unwrap_or("");
+            let suffix = if h.is_empty() {
+                String::new()
+            } else {
+                format!(" hint={}", one_line(h, 40))
+            };
+            // request_id 截 8 位足够 firehose 串联同一帧 capture 周期
+            let rid: String = request_id.chars().take(8).collect();
+            format!("vision look [{target}] req={rid}{suffix}")
+        }
         Custom { label, .. } => format!("custom[{label}]"),
     }
 }
@@ -698,6 +713,10 @@ fn color_for(k: &EventKind) -> Color {
         // Jarvis 语音侧副本——青色，跟 inline message 一族近但更冷，
         // 提示"这是给 TTS 的"不抢正常对话流。
         XuannvVoiceLine { .. } => Color::Cyan,
+
+        // 玄女眼睛——LightBlue 与 ToolCall 家族（Blue）相邻又区分，
+        // 视觉提示"这是 IO 类事件且短促一次性"。
+        VisionRequest { .. } => Color::LightBlue,
 
         Custom { .. } => Color::DarkGray,
     }
