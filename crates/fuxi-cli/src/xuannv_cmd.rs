@@ -366,8 +366,14 @@ pub async fn run_look(args: LookArgs) -> Result<()> {
         .build()
         .context("构造 reqwest client 失败")?;
 
+    // fuxi-im middleware /api/* 全要 Bearer——CLI 在 home 上跟 fuxi-im 同机，
+    // 复用 ~/.fuxi/im_hmac.key（同 sv_post 路径）签 60s 短票。本地无 key 时
+    // bail 友好提示而不是裸跑被 401（玄女拿"看不见"会瞎猜）。
+    let token = mint_im_token("xuannv-look")
+        .context("加载 ~/.fuxi/im_hmac.key 失败——home 上 sv_server 用同款 HMAC")?;
     let resp = client
         .post(&url)
+        .bearer_auth(token)
         .json(&body)
         .send()
         .await
@@ -615,12 +621,19 @@ pub struct VoiceprintStatusArgs {
 }
 
 fn mint_sv_token() -> Result<String> {
+    mint_im_token("voiceprint-cli")
+}
+
+/// 用 ~/.fuxi/im_hmac.key 签一张 60s 的 Bearer 票，给 home 上同机的 fuxi-im
+/// /api/* 全套用。`name_prefix` 仅作 device_id/name 标签（非鉴权要素），
+/// 方便服务端 audit log 看出"是哪条 CLI 路径在调"。
+fn mint_im_token(name_prefix: &str) -> Result<String> {
     use fuxi_im::auth::{HmacSecret, TokenClaims, sign_token};
     let secret = HmacSecret::load_or_create_default()
         .context("加载 ~/.fuxi/im_hmac.key 失败——home 上 sv_server 用同款 HMAC")?;
     let claims = TokenClaims {
-        device_id: format!("voiceprint-cli-{}", uuid::Uuid::new_v4()),
-        name: "voiceprint-cli".into(),
+        device_id: format!("{name_prefix}-{}", uuid::Uuid::new_v4()),
+        name: name_prefix.to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::seconds(60),
     };
     sign_token(&secret, &claims).context("HMAC 签 token 失败")
