@@ -229,9 +229,12 @@ pub async fn run_say(args: SayArgs) -> Result<()> {
 
 const VISION_DEFAULT_BASE_URL: &str = "http://127.0.0.1:9100";
 
-/// spec 错误兜底矩阵：服务端 `error` code → CLI 退出码。
+/// spec 错误兜底矩阵 + β 桌宠端 frame error 扩展：服务端 ErrorBody.error → CLI 退出码。
 /// CLI 由 `process::exit(...)` 直退，绕开 anyhow 的 1（默认 panic 码同 1
 /// 跟 `no_pet_connected` 重叠就读不准）。
+///
+/// `no_device` / `capture_failed` 是 β 上报的桌宠侧 frame 失败 code（spec
+/// §错误兜底矩阵 v1.1 扩展），`upload_failed` 留给 PWA / 网络层后续报。
 fn exit_code_for_vision_error(code: &str) -> i32 {
     match code {
         "no_pet_connected" => 2,
@@ -239,6 +242,8 @@ fn exit_code_for_vision_error(code: &str) -> i32 {
         "permission_denied" => 4,
         "timeout" => 5,
         "upload_failed" => 6,
+        "no_device" => 7,
+        "capture_failed" => 8,
         _ => 1,
     }
 }
@@ -252,6 +257,8 @@ fn stderr_for_vision_error(code: &str) -> &'static str {
         "permission_denied" => "需要你在系统设置→隐私→屏幕录制里给我权限",
         "timeout" => "拍帧太慢，重新让我看一次？",
         "upload_failed" => "图传不上去，可能网断了",
+        "no_device" => "桌宠那边找不到摄像头/屏幕设备",
+        "capture_failed" => "拍帧失败，可能桌宠崩了或者权限刚被撤",
         _ => "看不见——服务端拒了请求",
     }
 }
@@ -289,19 +296,41 @@ struct LookOk {
 
 #[derive(serde::Deserialize)]
 struct LookErr {
-    #[allow(dead_code)]
+    /// 服务端 ErrorBody.error 字段。
+    /// - typed Vision 错误（user_denied / permission_denied / no_device /
+    ///   capture_failed / no_pet_connected）已经是 spec code 字面量
+    /// - 其它泛型错误（如 Timeout）走旧 `bad_request` / `timeout` 字面量，
+    ///   需要从 message 兜底切 code（见 [`extract_code`]）
     error: String,
-    /// `BadRequest("user_denied")` Display 形如 `"bad request: user_denied"`，
-    /// 取字段后在 client 侧从 message 末段切出 code（见 [`extract_code`]）。
+    /// `Error::Display` 形如 `"timeout: timeout"`——typed Vision 路径下不重要
+    /// （error 已是 code），泛型错误走 fallback 用。
+    #[serde(default)]
     message: String,
 }
 
-/// `Error::Display` 形如 `"bad request: user_denied"` / `"timeout: timeout"`
-/// —— 取冒号空格后的尾巴当 spec error code。无冒号时整段当 code。
-fn extract_code(message: &str) -> &str {
+/// 已知 typed Vision code 白名单——`error` 字段直接命中其一就用那个；否则
+/// fallback 到从 message 切 spec code。这套兜底覆盖：
+/// (1) 后端老版本（α v1）把所有错误都塞进 BadRequest message 的旧响应；
+/// (2) Timeout 这类后端通用错误 ErrorBody.error="timeout"（恰好命中白名单）。
+const TYPED_VISION_CODES: &[&str] = &[
+    "no_pet_connected",
+    "user_denied",
+    "permission_denied",
+    "no_device",
+    "capture_failed",
+    "timeout",
+    "upload_failed",
+];
+
+/// 从 ErrorBody 提取 spec code：先看 `error` 字段是否已是已知 code；否则
+/// 兜底 parse `message`（"bad request: user_denied" 形态切尾段）。
+fn extract_code<'a>(error: &'a str, message: &'a str) -> &'a str {
+    if TYPED_VISION_CODES.contains(&error) {
+        return error;
+    }
     match message.split_once(": ") {
-        Some((_, code)) => code,
-        None => message,
+        Some((_, tail)) if TYPED_VISION_CODES.contains(&tail) => tail,
+        _ => error,
     }
 }
 
@@ -353,12 +382,13 @@ pub async fn run_look(args: LookArgs) -> Result<()> {
         println!("{}", parsed.path);
         Ok(())
     } else {
-        // 服务端错误体里 `message` 是 `Error::Display`——剥前缀得 spec code。
+        // 服务端 ErrorBody.error 已经是 spec code（typed Vision 路径）；
+        // 老版本 / 泛型错误走 message 兜底。
         let err_body: LookErr = resp.json().await.unwrap_or(LookErr {
             error: "unknown".into(),
             message: format!("服务端返回 {status}"),
         });
-        let code = extract_code(&err_body.message);
+        let code = extract_code(&err_body.error, &err_body.message);
         eprintln!("{}", stderr_for_vision_error(code));
         std::process::exit(exit_code_for_vision_error(code));
     }
@@ -729,8 +759,9 @@ pub async fn run_refresh() -> Result<()> {
 mod vision_tests {
     use super::*;
 
-    /// spec §错误兜底矩阵：每个 code 严格映射到固定退出码——玄女靠这个判断
-    /// 「该说哪句兜底中文」。改这表必须同步 spec + roles/xuannv 提示词。
+    /// spec §错误兜底矩阵 + β 桌宠端 frame error 扩展：
+    /// 每个 code 严格映射到固定退出码——玄女靠这个判断「该说哪句兜底中文」。
+    /// 改这表必须同步 spec + roles/xuannv 提示词。
     #[test]
     fn exit_codes_match_spec_table() {
         assert_eq!(exit_code_for_vision_error("no_pet_connected"), 2);
@@ -738,6 +769,8 @@ mod vision_tests {
         assert_eq!(exit_code_for_vision_error("permission_denied"), 4);
         assert_eq!(exit_code_for_vision_error("timeout"), 5);
         assert_eq!(exit_code_for_vision_error("upload_failed"), 6);
+        assert_eq!(exit_code_for_vision_error("no_device"), 7);
+        assert_eq!(exit_code_for_vision_error("capture_failed"), 8);
         assert_eq!(
             exit_code_for_vision_error("totally_unknown_code"),
             1,
@@ -769,19 +802,39 @@ mod vision_tests {
             stderr_for_vision_error("upload_failed"),
             "图传不上去，可能网断了"
         );
+        assert_eq!(
+            stderr_for_vision_error("no_device"),
+            "桌宠那边找不到摄像头/屏幕设备"
+        );
+        assert_eq!(
+            stderr_for_vision_error("capture_failed"),
+            "拍帧失败，可能桌宠崩了或者权限刚被撤"
+        );
     }
 
-    /// `Error::Display` 形如 `"bad request: user_denied"`——剥前缀拿 spec code。
-    /// 服务端 ErrorBody.message 由 `thiserror` 拼接，client 端必须复原 code。
+    /// extract_code 双路径：
+    /// (1) typed Vision 直接命中 ErrorBody.error 字段（α v1.1+ 后端走这条）
+    /// (2) 老版本走 message 兜底切尾段（"bad request: user_denied"）
+    /// 服务端契约升级后两条都要 work，避免新旧 client/server 错配静默退化。
     #[test]
-    fn extract_code_strips_error_prefix() {
-        assert_eq!(extract_code("bad request: user_denied"), "user_denied");
-        assert_eq!(extract_code("timeout: timeout"), "timeout");
+    fn extract_code_prefers_typed_error_then_falls_back_to_message() {
+        // typed 路径：error 字段已是 spec code
+        assert_eq!(extract_code("user_denied", ""), "user_denied");
+        assert_eq!(extract_code("no_device", ""), "no_device");
+        assert_eq!(extract_code("capture_failed", ""), "capture_failed");
+        assert_eq!(extract_code("no_pet_connected", ""), "no_pet_connected");
+        assert_eq!(extract_code("timeout", "timeout: timeout"), "timeout");
+        // 老 fallback：error 字段是泛型 kind（"bad_request"），切 message 尾段
         assert_eq!(
-            extract_code("bad request: no_pet_connected"),
+            extract_code("bad_request", "bad request: user_denied"),
+            "user_denied"
+        );
+        assert_eq!(
+            extract_code("bad_request", "bad request: no_pet_connected"),
             "no_pet_connected"
         );
-        assert_eq!(extract_code("plain_no_colon"), "plain_no_colon");
+        // 都不命中 → 返 error 字段（兜底，至少有点信息）
+        assert_eq!(extract_code("internal", "internal: 啥也不是"), "internal");
     }
 }
 
