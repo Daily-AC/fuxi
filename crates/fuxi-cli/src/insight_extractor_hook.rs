@@ -55,25 +55,34 @@ impl CangjieSpawner for FuxiCangjieSpawner {
         prompt: String,
         timeout: Duration,
     ) -> CangjieSpawnerResult<String> {
-        // 1. 订阅 bus——必须在 dispatch_to_any 之前，否则 broadcast 漏发。
+        // 1. 订阅 bus——必须在 dispatch 之前，否则 broadcast 漏发。
         let mut sub = self.bus.subscribe();
 
-        // 2. 派活：task-bound spawn 一个新仓颉门客。每次抽取 / judge 都挂在
-        //    独立 task_id 下，保证不复用 idle、防 status 错配。
+        // 2. 派活：先 claim 一只 idle cangjie 复用；找不到再 spawn 新的。
+        //    issue eebe38ef：cangjie 是单 turn 无状态抽取，每次都 spawn 新的
+        //    导致 shelf 累积（idle GC 600s 才回收，spawn 速度 >> GC 速度）。
+        //    复用 idle 让稳态门客数趋近 1，与 cangjie 实际并发上限对齐。
         let task = Task::new("cangjie-extract", &prompt);
         let task_id = task.id;
-        let agent_id = self
-            .fuxi
-            .dispatch_to_any_in_task(
-                &self.profile.role,
-                task_id,
-                "cangjie-extract",
-                &prompt,
-                self.profile.clone(),
-                WorkerKind::Cc(self.cc_cfg.clone()),
-            )
-            .await
-            .map_err(|e| Box::new(e) as CangjieSpawnerError)?;
+        let agent_id = if let Some(idle) = self.fuxi.claim_idle_by_role(&self.profile.role).await {
+            self.fuxi
+                .dispatch_in_task(idle, task_id, "cangjie-extract", &prompt)
+                .await
+                .map_err(|e| Box::new(e) as CangjieSpawnerError)?;
+            idle
+        } else {
+            self.fuxi
+                .dispatch_to_any_in_task(
+                    &self.profile.role,
+                    task_id,
+                    "cangjie-extract",
+                    &prompt,
+                    self.profile.clone(),
+                    WorkerKind::Cc(self.cc_cfg.clone()),
+                )
+                .await
+                .map_err(|e| Box::new(e) as CangjieSpawnerError)?
+        };
 
         // 3. 带 timeout 等 Done。期间累积 AgentResponded 文本——仓颉 prompt 要求
         //    单 turn 直接出 JSON，但保险起见拼多段。
