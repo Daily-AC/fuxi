@@ -134,6 +134,16 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
+        // 玄女眼睛 v1（spec 2026-05-14）—— /look 召唤桌宠拍帧 + 阻塞等结果，
+        // /look/frame 桌宠 multipart 回传一帧。两者通过 oneshot 配对（state.vision_pairs）。
+        // /look/frame 用 `image/png` 中等图，body limit 与 /api/upload 同口径，
+        // 避免 axum 默认 2MB 拦截。
+        .route("/api/xuannv/look", post(handlers::vision::look))
+        .route(
+            "/api/xuannv/look/frame",
+            post(handlers::vision::look_frame)
+                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT_BYTES)),
+        )
         // v1-session17 task #9 「更多」hub 三个新页：策府事实 / 角色卡 / 更漏 trigger
         .route("/api/memory", get(handlers::memory::list))
         .route("/api/roles", get(handlers::roles::list))

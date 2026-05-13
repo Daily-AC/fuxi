@@ -42,6 +42,11 @@ pub enum Error {
     #[error("service unavailable: {0}")]
     Unavailable(String),
 
+    /// 请求超时——服务端等下游响应（如桌宠回传 vision frame）超过 deadline。
+    /// 走 408，调用方可重试。玄女眼睛 v1 唯一发起者。
+    #[error("timeout: {0}")]
+    Timeout(String),
+
     /// 未实装——给 β/γ/δ 的 stub handler 用，避免 panic。
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
@@ -76,6 +81,7 @@ impl Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Error::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             // 玄女不在 → 503（让 PWA 区分"路由错"和"暂时不可用，请重试"）；
             // 其余编排错走 500。
             Error::Unavailable(_)
@@ -105,6 +111,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => "not_found",
             Error::Conflict(_) => "conflict",
             Error::Unavailable(_) => "unavailable",
+            Error::Timeout(_) => "timeout",
             Error::NotImplemented(_) => "not_implemented",
             Error::Json(_) => "json",
             Error::Events(_) => "events",
