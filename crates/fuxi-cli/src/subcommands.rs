@@ -761,6 +761,22 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
             let tag = emotion.as_deref().unwrap_or("normal");
             format!("玄女 say [{tag}] {preview}")
         }
+        VisionRequest {
+            target,
+            hint,
+            request_id,
+        } => {
+            let rid: String = request_id.chars().take(8).collect();
+            match hint.as_deref() {
+                Some(h) if !h.is_empty() => {
+                    format!(
+                        "玄女 look [{target}] req={rid} hint={}",
+                        truncate_preview(h, 60)
+                    )
+                }
+                _ => format!("玄女 look [{target}] req={rid}"),
+            }
+        }
     }
 }
 
