@@ -10,7 +10,7 @@
 use crate::auth::HmacSecret;
 use crate::conv_store::ConvStore;
 use crate::devices::DeviceStore;
-use crate::handlers::vision::{FrameError, FrameRecord};
+use crate::handlers::vision::VisionPairResult;
 use crate::lockout::LoginGuard;
 use crate::nodes_provider::NodesProvider;
 use crate::notifications::NotificationStore;
@@ -32,8 +32,7 @@ use tokio::sync::{Mutex, oneshot};
 /// 走 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：handler 跨 await 持锁时
 /// std mutex 不安全（虽然这里不该跨 await，但 tokio mutex 是 axum 共享 state
 /// 的常规选择，clippy 也鼓励）。
-pub type VisionPairs =
-    Arc<Mutex<HashMap<String, oneshot::Sender<std::result::Result<FrameRecord, FrameError>>>>>;
+pub type VisionPairs = Arc<Mutex<HashMap<String, oneshot::Sender<VisionPairResult>>>>;
 
 /// 共享给所有 handler 的应用状态。`Clone` 廉价（内部都是 `Arc`）。
 #[derive(Clone)]

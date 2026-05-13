@@ -64,7 +64,7 @@ pub struct FrameAck {
     pub request_id: String,
 }
 
-/// oneshot 携带的载荷：成功时 `Ok(FrameRecord)`，失败时 `Err(reason)`。
+/// oneshot 携带的载荷：成功时 `Ok(FrameRecord)`，失败时 `Err(FrameErrorKind)`。
 #[derive(Debug, Clone)]
 pub struct FrameRecord {
     pub path: PathBuf,
@@ -72,11 +72,75 @@ pub struct FrameRecord {
     pub bytes: u64,
 }
 
-/// 桌宠端上报的 frame 错误——目前只 `user_denied`，留枚举给后续扩。
-/// 字符串挂在 multipart `error` 字段里，handler 看到非空就走错误路径完成 oneshot。
-#[derive(Debug, Clone)]
-pub struct FrameError {
-    pub code: String,
+/// `look` ↔ `look_frame` 之间的 oneshot 载荷别名——AppState 配对表用。
+pub type VisionPairResult = std::result::Result<FrameRecord, FrameErrorKind>;
+
+/// 玄女眼睛 v1 错误 code——枚举既给桌宠端 multipart `error` 字段做反序列化，
+/// 也给 [`Error::Vision`] 路由 HTTP 状态码。
+///
+/// **wire 契约**（与 β 桌宠端 spec 对齐 2026-05-14）：
+/// - `user_denied` (403) — 用户在右键菜单里禁眼了
+/// - `permission_denied` (403) — macOS 系统级拒授权（屏幕录制 / 摄像头）
+/// - `no_device` (503) — 桌宠端找不到 webcam / display 可用设备
+/// - `capture_failed` (500) — 拿到 stream 但 grab 单帧失败
+/// - `no_pet_connected` (400) — 桌宠根本没连进 EventBus（look 入口检 receiver_count）
+///
+/// 加新 code 必须同步：
+/// 1. β 桌宠端上报字段
+/// 2. `code()` / `http_status()` / `parse()` 三方法
+/// 3. `xuannv_cmd::exit_code_for_vision_error` + `stderr_for_vision_error`
+/// 4. spec §错误兜底矩阵 + roles/xuannv 提示词
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameErrorKind {
+    UserDenied,
+    PermissionDenied,
+    NoDevice,
+    CaptureFailed,
+    NoPetConnected,
+}
+
+impl FrameErrorKind {
+    /// wire `error` code（与 multipart `error=<这个字符串>` 字面对应）。
+    pub fn code(self) -> &'static str {
+        match self {
+            FrameErrorKind::UserDenied => "user_denied",
+            FrameErrorKind::PermissionDenied => "permission_denied",
+            FrameErrorKind::NoDevice => "no_device",
+            FrameErrorKind::CaptureFailed => "capture_failed",
+            FrameErrorKind::NoPetConnected => "no_pet_connected",
+        }
+    }
+
+    /// HTTP 状态码——按 spec 与 team-lead 升级请求 wire 对齐。
+    pub fn http_status(self) -> axum::http::StatusCode {
+        use axum::http::StatusCode;
+        match self {
+            FrameErrorKind::UserDenied | FrameErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+            FrameErrorKind::NoDevice => StatusCode::SERVICE_UNAVAILABLE,
+            FrameErrorKind::CaptureFailed => StatusCode::INTERNAL_SERVER_ERROR,
+            FrameErrorKind::NoPetConnected => StatusCode::BAD_REQUEST,
+        }
+    }
+
+    /// 从桌宠端 multipart `error` 字段字符串反序列化。未知 code → None。
+    /// handler 拿到 None 时按 `capture_failed` 兜底（保护后端不被乱字符串卡死）。
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "user_denied" => FrameErrorKind::UserDenied,
+            "permission_denied" => FrameErrorKind::PermissionDenied,
+            "no_device" => FrameErrorKind::NoDevice,
+            "capture_failed" => FrameErrorKind::CaptureFailed,
+            // no_pet_connected 不该来自桌宠端（语义矛盾——能上传的桌宠肯定连着）
+            // 故意不识别，让 handler 兜成 capture_failed
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for FrameErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
 }
 
 /// `target` 白名单——v1 严格只接 `"webcam"` / `"screen"`，
@@ -131,13 +195,13 @@ pub async fn look(
 
     let bus = state.fuxi.bus();
     if bus.receiver_count() == 0 {
-        // 0 个观察者 → 必然无桌宠。错误体里 `error` 字段 = `no_pet_connected`
-        // 让 CLI 退出码映射拿到原因。
-        return Err(Error::BadRequest("no_pet_connected".into()));
+        // 0 个观察者 → 必然无桌宠。走 typed Vision 错误，CLI 直接读
+        // ErrorBody.error="no_pet_connected" 不必再 parse message。
+        return Err(Error::Vision(FrameErrorKind::NoPetConnected));
     }
 
     let request_id = Uuid::new_v4().to_string();
-    let (tx, rx) = oneshot::channel::<std::result::Result<FrameRecord, FrameError>>();
+    let (tx, rx) = oneshot::channel::<VisionPairResult>();
     {
         let mut map = state.vision_pairs.lock().await;
         map.insert(request_id.clone(), tx);
@@ -169,17 +233,15 @@ pub async fn look(
     // 等 oneshot——超时 / pet 报错 / 通道断都要兜。
     let frame_result = match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(Ok(rec))) => rec,
-        Ok(Ok(Err(frame_err))) => {
-            warn!(request_id = %request_id, code = %frame_err.code, "桌宠端报错");
-            // 用 BadRequest 把 error code 透回客户端——CLI 按 code 映射 stderr 中文。
-            return Err(Error::BadRequest(frame_err.code));
+        Ok(Ok(Err(kind))) => {
+            warn!(request_id = %request_id, code = %kind, "桌宠端报错");
+            // typed Vision 错误：CLI 直接 ErrorBody.error 拿 spec code，HTTP 状态匹配。
+            return Err(Error::Vision(kind));
         }
         Ok(Err(_recv_err)) => {
             // sender drop 但没发——只可能 frame handler 把 sender 拿走又没 send 就 drop。
-            // 当作 upload_failed 兜底。
-            return Err(Error::Internal(
-                "oneshot 通道断（frame handler bug？）".into(),
-            ));
+            // 当作 capture_failed 兜底（典型「拿到通道但没成功上 frame」）。
+            return Err(Error::Vision(FrameErrorKind::CaptureFailed));
         }
         Err(_elapsed) => {
             // 撤回 oneshot——避免 frame 后到时塞个孤儿 sender 给已退出的 caller。
@@ -274,11 +336,19 @@ pub async fn look_frame(
         )));
     };
 
-    // 错误路径：error 字段非空 → 直接传错给等待方，不写文件。
+    // 错误路径：error 字段非空 → typed parse → 传给等待方，不写文件。
+    // 未识别 code 兜成 `capture_failed`：保护后端不被乱字符串卡死，让 CLI 至少
+    // 拿到「拍帧失败」体验而不是 timeout 干等 10s。
     if let Some(code) = error_code.as_deref().filter(|s| !s.is_empty()) {
-        let _ = sender.send(Err(FrameError {
-            code: code.to_string(),
-        }));
+        let kind = FrameErrorKind::parse(code).unwrap_or_else(|| {
+            warn!(
+                request_id = %request_id,
+                raw_code = %code,
+                "桌宠端上报未知 error code，兜成 capture_failed"
+            );
+            FrameErrorKind::CaptureFailed
+        });
+        let _ = sender.send(Err(kind));
         return Ok(Json(FrameAck {
             ok: true,
             request_id,
@@ -599,9 +669,111 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    /// 桌宠端「禁眼」时上传 error 字段——handler 应把错误透给 look 调用方。
+    /// `FrameErrorKind` wire 契约——code 串、HTTP 状态、parse 三方法都不能漂。
+    /// 与 β 桌宠端 multipart `error` 字段、CLI 退出码映射共契约。
+    #[test]
+    fn frame_error_kind_wire_contract() {
+        use axum::http::StatusCode;
+        for (kind, code, status) in [
+            (
+                FrameErrorKind::UserDenied,
+                "user_denied",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                FrameErrorKind::PermissionDenied,
+                "permission_denied",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                FrameErrorKind::NoDevice,
+                "no_device",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                FrameErrorKind::CaptureFailed,
+                "capture_failed",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                FrameErrorKind::NoPetConnected,
+                "no_pet_connected",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            assert_eq!(kind.code(), code, "code 漂了：{kind:?}");
+            assert_eq!(kind.http_status(), status, "status 漂了：{kind:?}");
+        }
+        // parse 反向 round-trip——桌宠 multipart `error` 字段直接进
+        for s in [
+            "user_denied",
+            "permission_denied",
+            "no_device",
+            "capture_failed",
+        ] {
+            let kind = FrameErrorKind::parse(s).unwrap_or_else(|| panic!("应识别 {s}"));
+            assert_eq!(kind.code(), s);
+        }
+        assert!(
+            FrameErrorKind::parse("totally_unknown").is_none(),
+            "未知 code 应回 None 让 handler 兜成 capture_failed"
+        );
+        assert!(
+            FrameErrorKind::parse("no_pet_connected").is_none(),
+            "no_pet_connected 不该来自桌宠端 frame 上传，parse 拒"
+        );
+    }
+
+    /// 桌宠端「禁眼」时上传 error=user_denied —— 应回 403 + ErrorBody.error="user_denied"。
+    /// 跟 spec §错误兜底矩阵 + team-lead 升级请求 wire 直接对齐。
     #[tokio::test]
-    async fn frame_with_error_propagates_to_look_caller() {
+    async fn frame_with_user_denied_returns_403_with_typed_error() {
+        let (status, body) = run_frame_error_e2e("user_denied").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "user_denied");
+    }
+
+    /// macOS 系统级拒授权——同 user_denied 走 403 但 code 区分给玄女选措辞。
+    #[tokio::test]
+    async fn frame_with_permission_denied_returns_403_with_typed_error() {
+        let (status, body) = run_frame_error_e2e("permission_denied").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"], "permission_denied");
+    }
+
+    /// 桌宠端找不到 webcam / display —— 503，PWA / CLI 可重试。
+    #[tokio::test]
+    async fn frame_with_no_device_returns_503_with_typed_error() {
+        let (status, body) = run_frame_error_e2e("no_device").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "no_device");
+    }
+
+    /// 拿到 stream 但 grab 失败 —— 500，写不上日志的服务端兜底。
+    #[tokio::test]
+    async fn frame_with_capture_failed_returns_500_with_typed_error() {
+        let (status, body) = run_frame_error_e2e("capture_failed").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "capture_failed");
+    }
+
+    /// 未识别 code（β 将来扩了我们没跟）兜成 capture_failed，**不能**让 caller
+    /// 干等到 timeout。本测试是反回归：spec 加新 code 必须同步两边。
+    #[tokio::test]
+    async fn frame_with_unknown_code_falls_back_to_capture_failed() {
+        let (status, body) = run_frame_error_e2e("future_unknown_code").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "capture_failed");
+    }
+
+    // look 入口的 NoPetConnected 闸——因 fuxi 内部订阅永远 ≥1，本测试只能
+    // 用 status 表断言不能在真实路径触发；行为靠
+    // `fuxi_internal_observers_keep_receiver_count_above_zero` +
+    // `frame_error_kind_wire_contract` 联合保护。
+
+    /// 端到端跑一遍：mock pet 订 EventBus → 收到 vision_request → 上传 multipart
+    /// 带 error 字段 → look 阻塞退出后断言 status + ErrorBody。返 (status, body)。
+    async fn run_frame_error_e2e(error_code: &str) -> (StatusCode, serde_json::Value) {
         let (_ws_dir, state) = make_state().await;
         let xuannv = AgentId::new();
         state.fuxi.set_xuannv(xuannv).await;
@@ -615,6 +787,7 @@ mod tests {
             .with_state(state.clone());
 
         let app_clone = app.clone();
+        let code = error_code.to_string();
         let pet = tokio::spawn(async move {
             use futures_util::StreamExt;
             let req_id;
@@ -625,13 +798,14 @@ mod tests {
                     break;
                 }
             }
-            let boundary = "X-DENY";
+            let boundary = "X-ERR";
             let body = format!(
                 "--{b}\r\nContent-Disposition: form-data; name=\"request_id\"\r\n\r\n{rid}\r\n\
-                 --{b}\r\nContent-Disposition: form-data; name=\"error\"\r\n\r\nuser_denied\r\n\
+                 --{b}\r\nContent-Disposition: form-data; name=\"error\"\r\n\r\n{c}\r\n\
                  --{b}--\r\n",
                 b = boundary,
-                rid = req_id
+                rid = req_id,
+                c = code,
             );
             let req = Request::builder()
                 .method("POST")
@@ -643,7 +817,7 @@ mod tests {
                 .body(Body::from(body))
                 .unwrap();
             let resp = app_clone.oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.status(), StatusCode::OK, "frame upload 自身应 200");
         });
 
         let resp = app
@@ -653,10 +827,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let status = resp.status();
         let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["message"], "bad request: user_denied");
         pet.await.unwrap();
+        (status, body)
     }
 }
