@@ -16,6 +16,7 @@ export type WireKind =
   | { type: 'xuannv_context_watermark'; threshold_pct: number; action: string }
   | { type: 'xuannv_handoff_written'; path: string; length_chars: number }
   | { type: 'user_prompted'; text: string }
+  | { type: 'vision_request'; request_id: string; target: 'webcam' | 'screen'; hint?: string | null }
   | { type: string; [key: string]: unknown }   // unknown fallback
 
 export interface WireEvent {
