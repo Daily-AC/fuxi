@@ -216,6 +216,154 @@ pub async fn run_say(args: SayArgs) -> Result<()> {
     }
 }
 
+// ── 玄女眼睛 v1（spec 2026-05-14-xuannv-vision-design.md）──────────────
+//
+// `fuxi xuannv look --target webcam|screen [--hint <str>] [--timeout-secs N]`
+//
+// 阻塞 CLI：HTTP POST `/api/xuannv/look`，stdout = 一行绝对 path，玄女随后
+// `Read(path)` 把图带进上下文。错误 → 非零退出 + stderr 中文提示，对应 spec
+// §错误兜底矩阵的退出码 / 文案表。
+//
+// fuxi-im 默认 loopback `127.0.0.1:9100`，CLI 在 home 上跟 systemd 同机，
+// `FUXI_IM_BASE_URL` env 可覆盖（远程调试 / mac 端手测）。
+
+const VISION_DEFAULT_BASE_URL: &str = "http://127.0.0.1:9100";
+
+/// spec 错误兜底矩阵：服务端 `error` code → CLI 退出码。
+/// CLI 由 `process::exit(...)` 直退，绕开 anyhow 的 1（默认 panic 码同 1
+/// 跟 `no_pet_connected` 重叠就读不准）。
+fn exit_code_for_vision_error(code: &str) -> i32 {
+    match code {
+        "no_pet_connected" => 2,
+        "user_denied" => 3,
+        "permission_denied" => 4,
+        "timeout" => 5,
+        "upload_failed" => 6,
+        _ => 1,
+    }
+}
+
+/// 把 spec 错误 code 翻成中文 stderr 提示——与 `roles/xuannv` prelude 教学
+/// 同口径，方便玄女拿到原文直接转给用户而不必再二次润色。
+fn stderr_for_vision_error(code: &str) -> &'static str {
+    match code {
+        "no_pet_connected" => "我现在看不见你（桌宠没连）",
+        "user_denied" => "你把我眼睛蒙了，先去右键菜单解锁",
+        "permission_denied" => "需要你在系统设置→隐私→屏幕录制里给我权限",
+        "timeout" => "拍帧太慢，重新让我看一次？",
+        "upload_failed" => "图传不上去，可能网断了",
+        _ => "看不见——服务端拒了请求",
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct LookArgs {
+    /// 看哪只眼睛：`webcam` 或 `screen`。v1 仅这俩；window/region 留 v1.1。
+    #[arg(long)]
+    pub target: String,
+    /// 给桌宠端 toast 的备忘文本（"看看用户的报错"），可省。
+    #[arg(long)]
+    pub hint: Option<String>,
+    /// 等帧上传超时（秒）。默认走服务端 10s；上限服务端 clamp 到 30s。
+    #[arg(long = "timeout-secs")]
+    pub timeout_secs: Option<u64>,
+    /// 覆盖 fuxi-im base url——默认 `http://127.0.0.1:9100`（home loopback）。
+    /// 没显式传时回 `FUXI_IM_BASE_URL` 环境变量，mac 端手测时可指
+    /// `https://im.qmledmq.cn:8443` 之类的远端地址。
+    #[arg(long = "base-url")]
+    pub base_url: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct LookOk {
+    #[allow(dead_code)]
+    ok: bool,
+    #[allow(dead_code)]
+    request_id: String,
+    path: String,
+    #[allow(dead_code)]
+    mime: String,
+    #[allow(dead_code)]
+    bytes: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct LookErr {
+    #[allow(dead_code)]
+    error: String,
+    /// `BadRequest("user_denied")` Display 形如 `"bad request: user_denied"`，
+    /// 取字段后在 client 侧从 message 末段切出 code（见 [`extract_code`]）。
+    message: String,
+}
+
+/// `Error::Display` 形如 `"bad request: user_denied"` / `"timeout: timeout"`
+/// —— 取冒号空格后的尾巴当 spec error code。无冒号时整段当 code。
+fn extract_code(message: &str) -> &str {
+    match message.split_once(": ") {
+        Some((_, code)) => code,
+        None => message,
+    }
+}
+
+pub async fn run_look(args: LookArgs) -> Result<()> {
+    if args.target != "webcam" && args.target != "screen" {
+        anyhow::bail!(
+            "未知 target `{}`；v1 仅支持 webcam / screen（v1.1 加 window/region）",
+            args.target
+        );
+    }
+    let env_base = std::env::var("FUXI_IM_BASE_URL").ok();
+    let base = args
+        .base_url
+        .as_deref()
+        .or(env_base.as_deref())
+        .unwrap_or(VISION_DEFAULT_BASE_URL)
+        .trim_end_matches('/');
+    let url = format!("{base}/api/xuannv/look");
+
+    let mut body = serde_json::json!({ "target": args.target });
+    if let Some(h) = args.hint.as_deref().filter(|s| !s.is_empty()) {
+        body["hint"] = serde_json::Value::String(h.to_string());
+    }
+    if let Some(t) = args.timeout_secs {
+        body["timeout_secs"] = serde_json::Value::Number(serde_json::Number::from(t));
+    }
+
+    // reqwest 自身超时给 server timeout + 5s buffer——server 已 clamp 30s，
+    // client 留余量等 server 走完返 408 而不是 client 自己 timeout 提前断。
+    let client_timeout = args.timeout_secs.unwrap_or(10) + 5;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(client_timeout))
+        .build()
+        .context("构造 reqwest client 失败")?;
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url} 失败——fuxi-im 是否在运行（127.0.0.1:9100）？"))?;
+    let status = resp.status();
+    if status.is_success() {
+        let parsed: LookOk = resp
+            .json()
+            .await
+            .context("解析 /look 200 响应 JSON 失败——服务端返回不符约定格式")?;
+        // 关键约定：stdout 一行 = 绝对 path，给玄女 cc 自动 `Read`。
+        println!("{}", parsed.path);
+        Ok(())
+    } else {
+        // 服务端错误体里 `message` 是 `Error::Display`——剥前缀得 spec code。
+        let err_body: LookErr = resp.json().await.unwrap_or(LookErr {
+            error: "unknown".into(),
+            message: format!("服务端返回 {status}"),
+        });
+        let code = extract_code(&err_body.message);
+        eprintln!("{}", stderr_for_vision_error(code));
+        std::process::exit(exit_code_for_vision_error(code));
+    }
+}
+
 // ── ASR 热词（hotword）后处理 ───────────────────────────────────────────
 //
 // SenseVoiceSmall（home asr.service）不支持模型级 hotword，靠 Python 后处理
@@ -481,8 +629,7 @@ async fn sv_get(url: &str, token: &str) -> Result<serde_json::Value> {
 
 fn read_wav_b64(path: &std::path::Path) -> Result<String> {
     use base64::Engine;
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("读 {} 失败", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("读 {} 失败", path.display()))?;
     if bytes.len() < 8 || &bytes[0..4] != b"RIFF" {
         anyhow::bail!(
             "{} 不像 wav（无 RIFF header）——必须 16kHz mono wav，先用 sox / ffmpeg 转",
@@ -501,7 +648,10 @@ pub async fn run_voiceprint_enroll(args: VoiceprintEnrollArgs) -> Result<()> {
     let url = format!("{}/enroll", args.base_url.trim_end_matches('/'));
     let resp = sv_post(&url, serde_json::json!({"wav_b64": wav_b64}), &token).await?;
     println!("✓ 注册 OK");
-    println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -514,13 +664,17 @@ pub async fn run_voiceprint_verify(args: VoiceprintVerifyArgs) -> Result<()> {
     let url = format!("{}/verify", args.base_url.trim_end_matches('/'));
     let resp = sv_post(&url, serde_json::json!({"wav_b64": wav_b64}), &token).await?;
     let score = resp.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let threshold = resp.get("threshold").and_then(|v| v.as_f64()).unwrap_or(0.3);
+    let threshold = resp
+        .get("threshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.3);
     let match_ = resp.get("match").and_then(|v| v.as_bool()).unwrap_or(false);
-    let enrolled = resp.get("enrolled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enrolled = resp
+        .get("enrolled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let mark = if match_ { "✓" } else { "✗" };
-    println!(
-        "{mark} match={match_} score={score:.3} threshold={threshold} enrolled={enrolled}"
-    );
+    println!("{mark} match={match_} score={score:.3} threshold={threshold} enrolled={enrolled}");
     if !enrolled {
         println!("  → 未注册：所有 verify 强制返 true（fail-open）。先跑 voiceprint enroll。");
     }
@@ -531,7 +685,10 @@ pub async fn run_voiceprint_status(args: VoiceprintStatusArgs) -> Result<()> {
     let token = mint_sv_token()?;
     let url = format!("{}/healthz", args.base_url.trim_end_matches('/'));
     let resp = sv_get(&url, &token).await?;
-    println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -566,6 +723,66 @@ pub async fn run_refresh() -> Result<()> {
     println!("（触发 ensure_xuannv 走 fresh session 路径，cc 重读");
     println!("  `--append-system-prompt`，含 dispatch-routing.md 最新版）");
     Ok(())
+}
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+
+    /// spec §错误兜底矩阵：每个 code 严格映射到固定退出码——玄女靠这个判断
+    /// 「该说哪句兜底中文」。改这表必须同步 spec + roles/xuannv 提示词。
+    #[test]
+    fn exit_codes_match_spec_table() {
+        assert_eq!(exit_code_for_vision_error("no_pet_connected"), 2);
+        assert_eq!(exit_code_for_vision_error("user_denied"), 3);
+        assert_eq!(exit_code_for_vision_error("permission_denied"), 4);
+        assert_eq!(exit_code_for_vision_error("timeout"), 5);
+        assert_eq!(exit_code_for_vision_error("upload_failed"), 6);
+        assert_eq!(
+            exit_code_for_vision_error("totally_unknown_code"),
+            1,
+            "unknown 兜底退 1"
+        );
+    }
+
+    /// stderr 提示文本——玄女按 prelude 教学应原文转告用户，
+    /// 文案不允许 silent 改动（破坏 prelude 教学一致性）。
+    #[test]
+    fn stderr_messages_match_spec_table() {
+        assert_eq!(
+            stderr_for_vision_error("no_pet_connected"),
+            "我现在看不见你（桌宠没连）"
+        );
+        assert_eq!(
+            stderr_for_vision_error("user_denied"),
+            "你把我眼睛蒙了，先去右键菜单解锁"
+        );
+        assert_eq!(
+            stderr_for_vision_error("permission_denied"),
+            "需要你在系统设置→隐私→屏幕录制里给我权限"
+        );
+        assert_eq!(
+            stderr_for_vision_error("timeout"),
+            "拍帧太慢，重新让我看一次？"
+        );
+        assert_eq!(
+            stderr_for_vision_error("upload_failed"),
+            "图传不上去，可能网断了"
+        );
+    }
+
+    /// `Error::Display` 形如 `"bad request: user_denied"`——剥前缀拿 spec code。
+    /// 服务端 ErrorBody.message 由 `thiserror` 拼接，client 端必须复原 code。
+    #[test]
+    fn extract_code_strips_error_prefix() {
+        assert_eq!(extract_code("bad request: user_denied"), "user_denied");
+        assert_eq!(extract_code("timeout: timeout"), "timeout");
+        assert_eq!(
+            extract_code("bad request: no_pet_connected"),
+            "no_pet_connected"
+        );
+        assert_eq!(extract_code("plain_no_colon"), "plain_no_colon");
+    }
 }
 
 #[cfg(test)]
