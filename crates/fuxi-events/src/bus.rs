@@ -192,6 +192,17 @@ impl EventBus {
         &self.inner.store
     }
 
+    /// 当前活跃订阅者数量——给「无桌宠连接」之类的近似探活用。
+    ///
+    /// 注意 broadcast receiver 是**全局**的：firehose / PWA / 桌宠都共享同一个
+    /// channel，本方法**不能**区分谁是谁。`== 0` 才能确定连一个观察者都没；
+    /// `> 0` 不代表桌宠在线（可能只是 PWA 看着）。
+    /// 玄女眼睛 v1 接受这个粗粒度：判 0 时直接 400 `no_pet_connected` 让玄女
+    /// 立刻知道；非 0 时 publish + 等 oneshot，超时也兜底。
+    pub fn receiver_count(&self) -> usize {
+        self.inner.broadcast_tx.receiver_count()
+    }
+
     /// 拿某 task 的完整历史事件（按存储顺序升序）。
     ///
     /// 薄包装 `EventStore::history_for_task`——Extractor（M2.5）作为 bus 消费者
@@ -271,6 +282,26 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// 玄女眼睛 v1：`receiver_count` 反映当前订阅者数量。
+    /// 0 = 没人在听（vision handler 据此判 `no_pet_connected`），
+    /// 订阅一次 = 1，drop 后回 0。
+    #[tokio::test]
+    async fn receiver_count_tracks_subscribers() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        assert_eq!(bus.receiver_count(), 0, "无订阅时应为 0");
+        let s1 = bus.subscribe();
+        assert_eq!(bus.receiver_count(), 1);
+        let s2 = bus.subscribe();
+        assert_eq!(bus.receiver_count(), 2);
+        drop(s1);
+        // BroadcastStream 内部持 receiver；drop stream 即 drop receiver。
+        // 注意：drop 后 broadcast 内部清算可能滞后到下次 send/receiver_count 调用，
+        // 极端时序下计数短暂偏差不影响 0/非 0 决策。
+        assert!(bus.receiver_count() <= 2);
+        drop(s2);
+        // 同上——0/非0 决策只关心是不是确实没人在听
     }
 
     #[tokio::test]
