@@ -302,6 +302,16 @@ impl Fuxi {
         self.shelf.list_cards().await
     }
 
+    /// 原子地按 role 找一只 Idle 门客并标记为 Busy；找不到返 None。
+    ///
+    /// issue eebe38ef：cangjie spawner 之前走 `dispatch_to_any_in_task` 路径
+    /// **不复用 idle**，每个 task done / batch judge 都净新增 2 只。暴露这条
+    /// 公开 API 让 spawner adapter 自己判断"先认领 idle、否则 spawn 新的"。
+    /// 普通 dispatch 路径仍走 task-bound 不复用（语义不变）。
+    pub async fn claim_idle_by_role(&self, role: &str) -> Option<AgentId> {
+        self.shelf.claim_idle_by_role(role).await
+    }
+
     /// 把一个已经实例化的 `Agent` 直接塞进 shelf——主要给测试 / stub agent
     /// 用（也是未来 adapter 外置时的扩展点）。
     ///

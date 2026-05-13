@@ -59,13 +59,16 @@ use tracing::{debug, info, warn};
 /// 当前 sum = 1700ms（200+500+1000），delta 用 2.5s 留余量。
 pub(crate) const REVIEW_RETRY_BACKOFF_MS: &[u64] = &[200, 500, 1000];
 
-/// 内部 role 黑名单：这些门客的 [`EventKind::AgentDead`] **不抄送**给玄女。
+/// 内部 role 黑名单：这些门客的 [`EventKind::AgentDead`] **不抄送**给玄女，
+/// 且 a58e45b4 引入的 TaskDone 兜底注入也对其静默。
 ///
-/// 为什么：extractor 是 M2.5 自动后台跑的"幕后工"——其生死属平台级
-/// 自管理（spawn/reap 由 hook 控制），玄女不应被这种噪音占 attention。
-/// 历史上 TaskStateChanged Done 路径也走这层过滤，但 Decision 13 之后
-/// TaskDone 整段不再触发 intervene，故仅 AgentDead 一处用得到。
-const INTERNAL_ROLES: &[&str] = &["extractor"];
+/// 为什么：extractor / cangjie 都是平台后台自管理的"幕后工"——其生死与 task
+/// 完结属系统层信号，玄女不应被这种噪音占 attention。
+/// - extractor：M2.5 hook 自动 spawn/reap
+/// - cangjie（issue eebe38ef）：insight extractor 短任务，每个 task done /
+///   batch judge 都会派一只，bridge 之前把它当用户级 worker 抄送 "[TASK_DONE]
+///   role=cangjie" 给玄女，是高频噪音。
+const INTERNAL_ROLES: &[&str] = &["extractor", "cangjie"];
 
 fn is_internal_role(role: &str) -> bool {
     INTERNAL_ROLES.contains(&role)
@@ -223,11 +226,35 @@ impl Intervener for Fuxi {
     }
 
     async fn role_of(&self, agent_id: AgentId) -> Option<String> {
-        self.list_workers()
+        // 本地 shelf 优先（最权威，含 live role）。
+        if let Some(role) = self
+            .list_workers()
             .await
             .into_iter()
             .find(|c| c.id == agent_id)
             .map(|c| c.profile.role.clone())
+        {
+            return Some(role);
+        }
+        // issue c63eb2ca · dist 路径：远端 worker 不在本地 shelf 但
+        // AgentSpawning 已落 events.db（worker 端 publish + controller 透传）。
+        // 走 events_by_kind 索引扫描——v1 spawning 事件总量小，毫秒级。
+        // 跟 fuxi-im::tasks_view 的 role 兜底同款思路（#51）。
+        let events = self
+            .bus()
+            .store()
+            .events_by_kind("agent_spawning")
+            .await
+            .ok()?;
+        events.into_iter().rev().find_map(|ev| {
+            if ev.meta.agent != Some(agent_id) {
+                return None;
+            }
+            match ev.kind {
+                EventKind::AgentSpawning { role, .. } => Some(role),
+                _ => None,
+            }
+        })
     }
 
     async fn worktree_of(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
@@ -1832,6 +1859,40 @@ mod tests {
         assert!(
             calls.iter().all(|(_, _, t)| !t.contains("[TASK_DONE]")),
             "extractor task done 不应触发 [TASK_DONE]：{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_skips_cangjie_role_task_done() {
+        // issue eebe38ef：cangjie 是 insight extractor 短任务，每个 task done /
+        // batch judge 都派一只——若不静默，玄女被高频 "[TASK_DONE] role=cangjie"
+        // 占 attention，与 extractor 同 noise pattern。
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let cangjie = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(cangjie, "cangjie").await;
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(cangjie);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            calls.iter().all(|(_, _, t)| !t.contains("[TASK_DONE]")),
+            "cangjie task done 不应触发 [TASK_DONE]：{calls:?}"
         );
     }
 
