@@ -398,6 +398,7 @@ fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         XuannvContextWatermark { .. } => "xuannv_context_watermark",
         XuannvHandoffWritten { .. } => "xuannv_handoff_written",
         XuannvVoiceLine { .. } => "xuannv_voice_line",
+        VisionRequest { .. } => "vision_request",
         Custom { .. } => "custom",
     }
 }
@@ -1350,5 +1351,41 @@ mod tests {
             .await
             .expect("filtered");
         assert!(got.is_empty(), "无匹配应返空 vec");
+    }
+
+    /// 玄女眼睛 v1：`VisionRequest` kind_tag = `vision_request` + SQLite roundtrip。
+    /// 反回归保护「6 处同步」第一处——store.rs::kind_tag。
+    #[tokio::test]
+    async fn persists_vision_request_variant() {
+        let store = EventStore::connect_memory().await.expect("connect");
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::VisionRequest {
+                request_id: "req-eye-1".into(),
+                target: "screen".into(),
+                hint: Some("看看用户的报错".into()),
+            },
+        };
+        store.append(&ev).await.expect("append");
+        let row = sqlx::query("SELECT kind_tag, payload FROM events")
+            .fetch_one(store.pool())
+            .await
+            .expect("fetch");
+        let tag: String = row.try_get("kind_tag").expect("kind_tag");
+        assert_eq!(tag, "vision_request");
+        let payload: String = row.try_get("payload").expect("payload");
+        let back: Event = serde_json::from_str(&payload).expect("payload de");
+        match back.kind {
+            EventKind::VisionRequest {
+                request_id,
+                target,
+                hint,
+            } => {
+                assert_eq!(request_id, "req-eye-1");
+                assert_eq!(target, "screen");
+                assert_eq!(hint.as_deref(), Some("看看用户的报错"));
+            }
+            other => panic!("expect VisionRequest, got {other:?}"),
+        }
     }
 }

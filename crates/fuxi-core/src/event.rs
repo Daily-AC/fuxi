@@ -624,6 +624,24 @@ pub enum EventKind {
         emotion: Option<String>,
     },
 
+    // ── 玄女眼睛（vision · 2026-05-14）──────────────────────
+    /// 玄女通过 `fuxi xuannv look` 召唤桌宠拍一帧——后端 fuxi-im 收 HTTP 后
+    /// publish 此事件 + `meta.agent = xuannv_id`，桌宠订 `/api/conv` WS 拿到
+    /// 即触发 webcam / screen capture，把 PNG/JPEG 通过 `/api/xuannv/look/frame`
+    /// multipart 回传。`request_id` 是 oneshot 配对键——HTTP handler 等帧时
+    /// 拿这把钥匙塞响应。
+    ///
+    /// `target` ∈ `"webcam"` | `"screen"`（v1 只这俩；`window` / `region` 留 v1.1）。
+    /// `hint` 是给桌宠端显示的备忘（"看看用户说的报错"），UI 可一闪而过；
+    /// 为啥用 String 不 enum：玄女自己写自然语言，加新意图不用动协议。
+    /// `#[serde(default)]` 给老事件回放兜 None，向后兼容。
+    VisionRequest {
+        request_id: String,
+        target: String,
+        #[serde(default)]
+        hint: Option<String>,
+    },
+
     // ── escape hatch ────────────────────────────────────────
     /// For events not yet promoted to their own variant. Keep use to a
     /// minimum—prefer adding a typed variant.
@@ -1343,6 +1361,68 @@ mod tests {
                 assert!(emotion.is_none(), "老事件 emotion 应回 None");
             }
             other => panic!("expect XuannvVoiceLine, got {other:?}"),
+        }
+    }
+
+    /// 玄女眼睛 v1：`VisionRequest` tag = `vision_request` + 三字段保真。
+    /// 桌宠端 TS 解码这个 wire 形式，必须稳定。
+    #[test]
+    fn vision_request_tag_and_roundtrip() {
+        let kind = EventKind::VisionRequest {
+            request_id: "req-abc-123".into(),
+            target: "webcam".into(),
+            hint: Some("看看用户说的报错".into()),
+        };
+        let v = serde_json::to_value(&kind).expect("ser");
+        assert_eq!(
+            v.get("type").and_then(|x| x.as_str()),
+            Some("vision_request")
+        );
+        assert_eq!(
+            v.get("request_id").and_then(|x| x.as_str()),
+            Some("req-abc-123")
+        );
+        assert_eq!(v.get("target").and_then(|x| x.as_str()), Some("webcam"));
+        assert_eq!(
+            v.get("hint").and_then(|x| x.as_str()),
+            Some("看看用户说的报错")
+        );
+        let back: EventKind = serde_json::from_value(v).expect("de");
+        match back {
+            EventKind::VisionRequest {
+                request_id,
+                target,
+                hint,
+            } => {
+                assert_eq!(request_id, "req-abc-123");
+                assert_eq!(target, "webcam");
+                assert_eq!(hint.as_deref(), Some("看看用户说的报错"));
+            }
+            other => panic!("expect VisionRequest, got {other:?}"),
+        }
+    }
+
+    /// `hint` 字段 `#[serde(default)]`：玄女只传 target 不传 hint 也合法，
+    /// 反序列化回 `None`。同时校验老事件回放（无 hint key）兼容。
+    #[test]
+    fn vision_request_legacy_payload_without_hint_deserializes() {
+        let raw = serde_json::json!({
+            "type": "vision_request",
+            "request_id": "r1",
+            "target": "screen"
+        });
+        let kind: EventKind = serde_json::from_value(raw).expect("legacy de");
+        match kind {
+            EventKind::VisionRequest {
+                request_id,
+                target,
+                hint,
+            } => {
+                assert_eq!(request_id, "r1");
+                assert_eq!(target, "screen");
+                assert!(hint.is_none(), "缺 hint 应回 None");
+            }
+            other => panic!("expect VisionRequest, got {other:?}"),
         }
     }
 }

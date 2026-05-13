@@ -340,6 +340,7 @@ pub(crate) fn kind_tag(kind: &fuxi_core::EventKind) -> &'static str {
         XuannvContextWatermark { .. } => "xuannv_context_watermark",
         XuannvHandoffWritten { .. } => "xuannv_handoff_written",
         XuannvVoiceLine { .. } => "xuannv_voice_line",
+        VisionRequest { .. } => "vision_request",
         Custom { .. } => "custom",
     }
 }

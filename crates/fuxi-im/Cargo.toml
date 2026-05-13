@@ -55,6 +55,9 @@ web-push = { version = "0.11", default-features = false, features = ["hyper-clie
 mime = "0.3"
 # β · Task #17 文件上传 + sha256 流式 hash（sha2 已在 hmac 路径引入复用）
 hex = "0.4"
+# 玄女眼睛 v1：vision frame 落档到 XDG data_local_dir
+# （macOS = ~/Library/Application Support，Linux = ~/.local/share）
+dirs = "5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
