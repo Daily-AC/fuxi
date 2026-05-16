@@ -6,7 +6,8 @@ Speaker Verification server —— 桌宠（jarvis-pet）的「这是不是以�
 - ASR 端 / wake 端各自调 /verify 拦一道——只有声纹匹配 owner 才放行。
 
 模型：iic/speech_campplus_sv_zh-cn_16k-common（CAM++ 中文 SV，27MB，CPU/GPU 都跑得动；
-同说话人 cos ≈ 0.7，不同说话人 cos ≈ 0.0，阈值 0.3 安全）。
+same-speaker cos ≈ 0.6~0.8；不同说话人里「明显不同」≈0.0，但「同性同口音音色相近」
+常落 0.3~0.5。默认阈值 0.5（见 sv_decision.py），把相近音色挡在外面。
 
 接口（HTTP）：
 - POST /enroll   body {"wav_b64": "..."}  → 提 192 维 embedding 存 owner.npy
@@ -37,6 +38,9 @@ import torch.nn.functional as F
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+# 判别逻辑（阈值 + 比对）抽到零依赖模块，便于在无 torch/funasr 的开发机上单测。
+from sv_decision import DEFAULT_THRESHOLD, decide_match
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("sv_server")
 
@@ -44,7 +48,10 @@ HMAC_KEY_PATH = os.environ.get("SV_HMAC_KEY_PATH", os.path.expanduser("~/.fuxi/i
 MODEL_ID = os.environ.get("SV_MODEL_ID", "iic/speech_campplus_sv_zh-cn_16k-common")
 DEVICE = os.environ.get("SV_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu")
 SAMPLE_RATE = 16000
-THRESHOLD = float(os.environ.get("SV_THRESHOLD", "0.3"))  # 同人 0.7 / 不同人 0.0，0.3 安全
+# issue d22400a1：原 default 0.3 对同性同口音相近音色过松——CAM++ 对这类他人
+# cos 常落 0.3~0.5（并非注释假设的 ≈0.0），全被放行。default 提到 0.5（见
+# sv_decision.py docstring 的取值依据）；SV_THRESHOLD 仍可按部署机实测 FAR/FRR 覆盖。
+THRESHOLD = float(os.environ.get("SV_THRESHOLD", str(DEFAULT_THRESHOLD)))
 OWNER_PATH = Path(os.environ.get(
     "SV_OWNER_PATH",
     os.path.expanduser("~/.fuxi/voiceprint/owner.npy"),
@@ -214,6 +221,6 @@ async def verify(req: Request, authorization: Optional[str] = Header(default=Non
     emb = await _extract_embedding(audio)
     owner_t = torch.from_numpy(owner)
     score = F.cosine_similarity(owner_t.unsqueeze(0), emb.unsqueeze(0)).item()
-    match = score >= THRESHOLD
+    match = decide_match(score, THRESHOLD)
     log.info("verify by %s: score=%.3f match=%s", claims.get("name", "?"), score, match)
     return {"match": match, "score": score, "threshold": THRESHOLD, "enrolled": True}
