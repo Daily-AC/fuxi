@@ -1304,6 +1304,15 @@ impl Fuxi {
                     } | EventKind::AgentDead { .. }
                         | EventKind::TaskBlocked { .. }
                 );
+                // issue 8ebff743：terminal 后的 wind-down 事件——`UsageReport`
+                // （cc result 几乎必带 usage）/ `ThinkingFinished`（ws_pump 在 turn
+                // terminal 处兜底追加）——是**同一 turn 的收尾**，绝不代表新 turn
+                // 启动。它们不得重置 `saw_terminal`，否则 pump 退回无超时
+                // `rx.recv()`，cc 持久 WS 仍活、rx 不关时永久卡死、shelf 锁死 Busy。
+                let is_winddown = matches!(
+                    &ev.kind,
+                    EventKind::UsageReport { .. } | EventKind::ThinkingFinished
+                );
                 // #79 兜底：track sentinel + final text + done state
                 if matches!(&ev.kind, EventKind::AgentRequestReview { .. }) {
                     saw_review_request = true;
@@ -1326,8 +1335,11 @@ impl Fuxi {
                 }
                 if is_terminal {
                     saw_terminal = true;
-                } else if saw_terminal {
-                    // terminal 后收到新事件 = drain 的新 turn 启动了；重置等再次 terminal
+                } else if saw_terminal && !is_winddown {
+                    // terminal 后收到**非 wind-down** 新事件 = M2.1 pending-drain
+                    // 的新 turn 启动了（cc 收 follow-up 后重新 thinking/响应）；
+                    // 重置回无超时等待，追到新 turn 的 terminal。wind-down 事件
+                    // 走 is_winddown 豁免不触发重置（issue 8ebff743）。
                     saw_terminal = false;
                 }
             }
@@ -2334,6 +2346,76 @@ mod pump_orphan_recovery_tests {
         assert!(
             found,
             "pump 无终态退出时应兜底发 TaskStateChanged{{Cancelled}}"
+        );
+    }
+
+    /// Bug 修（issue 8ebff743）：terminal 后的 wind-down 事件（`UsageReport` /
+    /// `ThinkingFinished`）不得把 `saw_terminal` 重置。cc `ResultSuccess` 翻译产物
+    /// 就是「`TaskStateChanged{Done}` + 紧跟 `UsageReport`（cc result 几乎必带
+    /// usage）+ `ThinkingFinished`」。旧逻辑把这些同 turn 收尾事件误判成「新 turn
+    /// 启动」→ pump 退回无超时 `rx.recv()` 阻塞。cc 进程持久 WS 仍活、rx 永不关闭
+    /// → pump 永久卡死 → shelf 锁死 `Busy` → idle GC 的 `idle_longer_than`（只看
+    /// `Idle`）永不命中 → 门客无限累积（home 实测 54 worker / 17GB RSS）。
+    #[tokio::test]
+    async fn pump_exits_when_terminal_followed_by_winddown_events() {
+        let fuxi = make_fuxi().await;
+
+        // sender 全程留着——模拟 cc 进程跑完 turn 后仍活（persistent WS idle）。
+        let (agent, tx) = ControllableAgent::new("cangjie");
+        let agent_id = fuxi.insert_agent(agent.clone(), None).await;
+
+        let task = Task::new("extract", "noop");
+        let task_id = task.id;
+        fuxi.dispatch(agent_id, task).await.expect("dispatch");
+
+        // dispatch 立即把 shelf 置 Busy
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            fuxi.status_of(agent_id).await,
+            Some(ShelfStatus::Busy),
+            "dispatch 后 shelf 应为 Busy"
+        );
+
+        let mk = |kind: EventKind| {
+            let mut m = EventMeta::now();
+            m.agent = Some(agent_id);
+            m.task = Some(task_id);
+            Event { meta: m, kind }
+        };
+        // cc ResultSuccess 翻译产物的真实顺序：terminal 先发，wind-down 紧跟。
+        tx.send(mk(EventKind::TaskStateChanged {
+            from: fuxi_core::task::TaskState::Delivering,
+            to: fuxi_core::task::TaskState::Done,
+        }))
+        .await
+        .unwrap();
+        tx.send(mk(EventKind::UsageReport {
+            input_tokens: 100,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 50,
+            total_tokens: 150,
+            window_size: 200_000,
+            pct: 0.001,
+        }))
+        .await
+        .unwrap();
+        tx.send(mk(EventKind::ThinkingFinished)).await.unwrap();
+
+        // pump 看到 terminal + grace 窗口内只剩 wind-down → 应退出、摊回 Idle。
+        let mut idle = false;
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if fuxi.status_of(agent_id).await == Some(ShelfStatus::Idle) {
+                idle = true;
+                break;
+            }
+        }
+        // tx 始终持有——若仍 Busy 即证明 pump 卡死在 rx.recv()。
+        drop(tx);
+        assert!(
+            idle,
+            "terminal 后只剩 wind-down 事件时 pump 应退出、shelf 摊回 Idle"
         );
     }
 
