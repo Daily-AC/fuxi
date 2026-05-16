@@ -961,7 +961,7 @@ impl Agent for DistGatewayAgent {
                     if chunk.seq > cursor {
                         cursor = chunk.seq;
                     }
-                    let kind = progress_chunk_to_event_kind(chunk);
+                    let kind = progress_chunk_to_event_kind(chunk, aid, task.id);
                     let _ = emit_event(&tx, aid, task.id, kind).await;
                 }
                 if !status.done {
@@ -1055,14 +1055,36 @@ impl Agent for DistGatewayAgent {
     }
 }
 
-/// progress chunk → EventKind 映射。当前所有 kind 都走 `AgentResponded` 通道，
+/// progress chunk → EventKind 映射。普通 kind 都走 `AgentResponded` 通道，
 /// 仅靠 `[tool]` / `[thinking]` / `[error]` 文本前缀区分；TUI 将来可以据此上色。
 ///
 /// 为什么不映射到 `ThinkingStarted` / `ToolCallStarted`：那两条都是独立 lifecycle
 /// 事件，codex wire 里我们只拿得到 **completed** 阶段（reasoning/item），缺
 /// started 就让 TUI 状态机为难。全走 AgentResponded + 前缀是最少破坏的选择，
 /// Phase 3+ 真要分层渲染时再细化。
-fn progress_chunk_to_event_kind(chunk: &crate::dist::ProgressChunk) -> EventKind {
+///
+/// **例外（issue 18dfccea）**：`AssistantText` chunk 若是 `_fuxi:request_review`
+/// sentinel，必须翻成 `AgentRequestReview`——dist gateway 路径不经本地 cc
+/// parser，sentinel 识别逻辑在这里复用 `fuxi_agent_cc::parser`。漏掉这一步则
+/// 跨节点门客的交付 nudge 被当普通 `AgentResponded` 透传，bridge 白名单不含
+/// `AgentResponded`，玄女永远收不到 `[REVIEW_REQUEST]`。
+fn progress_chunk_to_event_kind(
+    chunk: &crate::dist::ProgressChunk,
+    agent_id: AgentId,
+    task_id: TaskId,
+) -> EventKind {
+    if matches!(chunk.kind, crate::dist::ProgressKind::AssistantText)
+        && let Some(sentinel) =
+            fuxi_agent_cc::parser::try_parse_request_review_sentinel(&chunk.text)
+    {
+        return EventKind::AgentRequestReview {
+            agent: agent_id,
+            task: task_id,
+            deliverable_kind: sentinel.kind,
+            summary: sentinel.summary,
+            artifact_ref: sentinel.artifact_ref,
+        };
+    }
     let text = match chunk.kind {
         crate::dist::ProgressKind::AssistantText => chunk.text.clone(),
         crate::dist::ProgressKind::Thinking => format!("[thinking] {}", chunk.text),
@@ -1929,10 +1951,11 @@ mod tests {
 
     #[test]
     fn progress_chunk_assistant_text_is_raw() {
-        let ev = progress_chunk_to_event_kind(&mk_chunk(
-            crate::dist::ProgressKind::AssistantText,
-            "hello world",
-        ));
+        let ev = progress_chunk_to_event_kind(
+            &mk_chunk(crate::dist::ProgressKind::AssistantText, "hello world"),
+            AgentId::new(),
+            TaskId::new(),
+        );
         let EventKind::AgentResponded { text } = ev else {
             panic!("expected AgentResponded");
         };
@@ -1946,13 +1969,70 @@ mod tests {
             (crate::dist::ProgressKind::ToolCall, "[tool] "),
             (crate::dist::ProgressKind::Error, "[error] "),
         ];
+        let aid = AgentId::new();
+        let tid = TaskId::new();
         for (kind, prefix) in cases {
-            let ev = progress_chunk_to_event_kind(&mk_chunk(kind, "x"));
+            let ev = progress_chunk_to_event_kind(&mk_chunk(kind, "x"), aid, tid);
             let EventKind::AgentResponded { text } = ev else {
                 panic!("expected AgentResponded");
             };
             assert!(text.starts_with(prefix), "{:?}: got {}", kind, text);
         }
+    }
+
+    /// issue 18dfccea：跨节点门客发的 `_fuxi:request_review` sentinel 走 dist
+    /// gateway 路径——这里收到的是远端透传的 `ProgressKind::AssistantText`，不经
+    /// 本地 cc parser。若 `progress_chunk_to_event_kind` 不识别 sentinel，sentinel
+    /// 被当普通 `AgentResponded` 透传 → bridge 白名单不含 AgentResponded → 玄女
+    /// 永远收不到 `[REVIEW_REQUEST]`。修复后此路径必须翻成 `AgentRequestReview`。
+    #[test]
+    fn progress_chunk_assistant_text_sentinel_becomes_request_review() {
+        let aid = AgentId::new();
+        let tid = TaskId::new();
+        let sentinel = r#"{"_fuxi":"request_review","kind":"code_change","summary":"重构完工待审","artifact_ref":"sha:abc"}"#;
+        let ev = progress_chunk_to_event_kind(
+            &mk_chunk(crate::dist::ProgressKind::AssistantText, sentinel),
+            aid,
+            tid,
+        );
+        let EventKind::AgentRequestReview {
+            agent,
+            task,
+            deliverable_kind,
+            summary,
+            artifact_ref,
+        } = ev
+        else {
+            panic!("sentinel chunk 应翻成 AgentRequestReview，got {ev:?}");
+        };
+        assert_eq!(agent, aid);
+        assert_eq!(task, tid);
+        assert_eq!(
+            deliverable_kind,
+            fuxi_core::event::DeliverableKind::CodeChange
+        );
+        assert_eq!(summary, "重构完工待审");
+        assert_eq!(artifact_ref.as_deref(), Some("sha:abc"));
+    }
+
+    /// 防误触：非 sentinel 的普通 AssistantText（含碰巧以 `{` 开头的 JSON）
+    /// 仍走 `AgentResponded`——sentinel 识别必须严格，不能误吞门客正常输出。
+    #[test]
+    fn progress_chunk_assistant_text_non_sentinel_stays_responded() {
+        let aid = AgentId::new();
+        let tid = TaskId::new();
+        let ev = progress_chunk_to_event_kind(
+            &mk_chunk(
+                crate::dist::ProgressKind::AssistantText,
+                r#"{"some":"normal json"}"#,
+            ),
+            aid,
+            tid,
+        );
+        assert!(
+            matches!(ev, EventKind::AgentResponded { .. }),
+            "非 sentinel JSON 不该翻成 AgentRequestReview，got {ev:?}"
+        );
     }
 
     // ── M3.7 · `Command::Kill` 实装 ──
