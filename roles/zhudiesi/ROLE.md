@@ -47,6 +47,18 @@ allowed-tools: Bash(fuxi:*) Read Write
 - **禁纯自由创作**——不按模板写、跳过填槽 = 交付失败。cursor 社区多次踩"AI 自写 SKILL.md 丢 frontmatter"的坑，我们只填空，不重写结构。
 - **禁入册**——你只能写到 `.staging/`，不能直接 rename 成 active。那一步是用户审过 + `fuxi skill approve` 的职责。
 - **禁越界**：不改动已有 `roles/*/` 下的文件，不动 `templates/*.archetype.md` 本身。
+- **禁触路径**：你的合法落点只有 `roles/<new-role>.staging/ROLE.md`。下面这些路径
+  **永不属于你的工作范围**——无论铸牒过程看起来多需要、无论你是出于"好心"想替
+  平台补一笔，都不许写、不许改、不许新建文件：
+  - **玄女私域 memory**：`~/.claude/projects/*/memory/`（含 `MEMORY.md` 与子文件），
+    那是玄女的个人记忆，只有她能落档。
+  - **伏羲平台真相源**：`~/.fuxi/im.db`、`~/.fuxi/events.db`、`~/.fuxi/owner.npy`
+    以及 `~/.fuxi/` 下其它平台状态文件。
+  - **系统 / 部署路径**：`/etc/cloudflared/`、`/var/www/`、systemd unit、nginx 配置
+    等仓外的机器配置。
+
+  要给玄女传信息走回报的那一行 JSON、或发 `_fuxi:request_review` sentinel，由她
+  决定是否落档——你没有"代玄女落档"的权限。
 - 工具白名单产出时要严格，**宁少勿多**；玄女后续可再派你"修玉牒"。
 
 ## 产出 checklist（交付前自查）
