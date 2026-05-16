@@ -20,21 +20,27 @@ use serde_json::Value;
 ///
 /// 防误触：parser 必须严格判 `text.trim().starts_with('{')`——markdown ``` ```
 /// 围栏内的、缩进过的、引号包裹的 JSON 都不会被识别。
+///
+/// `pub`：dist gateway 路径（`fuxi-cli/daemon.rs::progress_chunk_to_event_kind`）
+/// 收到的是远端 worker 透传的 `ProgressKind::AssistantText`，**不经**本地 cc
+/// parser，必须复用同一套 sentinel 识别逻辑——否则跨节点门客的
+/// `_fuxi:request_review` 永远翻不成 `AgentRequestReview`，玄女收不到
+/// `[REVIEW_REQUEST]`（issue 18dfccea）。
 #[derive(Debug, Deserialize)]
-struct RequestReviewSentinel {
+pub struct RequestReviewSentinel {
     /// 必须等于 `"request_review"`——否则不是 fuxi 控制消息。
     #[serde(rename = "_fuxi")]
     kind_marker: String,
-    kind: DeliverableKind,
-    summary: String,
+    pub kind: DeliverableKind,
+    pub summary: String,
     #[serde(default)]
-    artifact_ref: Option<String>,
+    pub artifact_ref: Option<String>,
 }
 
 /// 尝试把一段 `AssistantText` 解析为 sentinel；只有**整段单行裸 JSON object** +
 /// `_fuxi == "request_review"` + `kind` 是合法枚举值 + `summary` 非空 才算命中。
 /// 不命中（含解析失败）返 None，调用方退化为 `AgentResponded`。
-fn try_parse_request_review_sentinel(text: &str) -> Option<RequestReviewSentinel> {
+pub fn try_parse_request_review_sentinel(text: &str) -> Option<RequestReviewSentinel> {
     let trimmed = text.trim();
     if !trimmed.starts_with('{') {
         return None;
