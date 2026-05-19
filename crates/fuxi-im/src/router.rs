@@ -190,6 +190,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/push/subscribe", post(handlers::push::subscribe))
         .route("/api/push/silence", post(handlers::push::silence))
         .route("/api/push/vapid-pub", get(handlers::push::vapid_public_key))
+        // FCM 原生 Android 推送注册——与 /subscribe（Web Push）平行的另一条通道。
+        .route("/api/push/fcm-register", post(handlers::push::fcm_register))
         // 鉴权 layer 在最外侧——所有 /api/* 都过它；is_exempt 内部豁免
         // /api/auth/login + /api/auth/pair + /healthz（这三条本身就是签发 cookie /
         // upstream check 的入口，自然不能要求带已有的 cookie）。

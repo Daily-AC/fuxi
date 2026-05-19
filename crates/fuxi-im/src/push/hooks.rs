@@ -12,7 +12,12 @@
 //! 公理 #3 真实时——纯 `bus.subscribe()` 推送，无 polling。
 //! 公理 #5 SQLite 单一真相——hooks 不持自己的状态表，dedup map 是
 //! in-mem，进程重启即清（合理：首启没人订阅 push）。
+//!
+//! WHY 两路一起推：自 `feat/fuxi-im-android` 起，每个触发点同时 fan-out
+//! Web Push（[`notify`]）和 FCM（[`notify_fcm`]）——PWA 用户和原生 Android
+//! app 用户各走各的通道，hooks 不区分。任一路失败只 log，不影响另一路。
 
+use crate::push::fcm::{FcmPusher, notify_fcm};
 use crate::push::notify::{PushPayload, PushSender, notify};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
@@ -35,19 +40,23 @@ pub const TASK_DONE_DEDUP_TTL: Duration = Duration::from_secs(60);
 /// 启动钩子任务——返回 JoinHandle 以便测试 awati / 生产 abort。
 ///
 /// `pool`：通知子系统持的 im.db pool。
-/// `sender`：fan-out 实装（生产用 [`super::notify::HyperPushSender`]，
+/// `sender`：Web Push fan-out 实装（生产用 [`super::notify::HyperPushSender`]，
 /// 测试注 mock）。
+/// `fcm_sender`：FCM fan-out 实装（生产用 [`super::fcm::HttpFcmSender`]，
+/// 无凭据时退化 [`super::fcm::NoopFcmSender`]；测试注 mock）。
 /// `bus`：EventBus 句柄（玄女订阅源）。
 /// `xuannv_id`：玄女 AgentId——只关心她的 AgentResponded。
 pub fn spawn(
     pool: SqlitePool,
     sender: Arc<dyn PushSender>,
+    fcm_sender: Arc<dyn FcmPusher>,
     bus: EventBus,
     xuannv_id: AgentId,
 ) -> JoinHandle<()> {
     spawn_with_windows(
         pool,
         sender,
+        fcm_sender,
         bus,
         xuannv_id,
         XUANNV_IDLE_WINDOW,
@@ -59,6 +68,7 @@ pub fn spawn(
 pub fn spawn_with_windows(
     pool: SqlitePool,
     sender: Arc<dyn PushSender>,
+    fcm_sender: Arc<dyn FcmPusher>,
     bus: EventBus,
     xuannv_id: AgentId,
     idle_window: Duration,
@@ -74,6 +84,7 @@ pub fn spawn_with_windows(
             handle_event(
                 &pool,
                 sender.clone(),
+                fcm_sender.clone(),
                 &state,
                 xuannv_id,
                 idle_window,
@@ -96,9 +107,11 @@ struct HookState {
     task_done_last_at: HashMap<TaskId, DateTime<Utc>>,
 }
 
+#[allow(clippy::too_many_arguments)] // 两路 sender + 两个 window 注入——拆 struct 收益不抵可读性损失
 async fn handle_event(
     pool: &SqlitePool,
     sender: Arc<dyn PushSender>,
+    fcm_sender: Arc<dyn FcmPusher>,
     state: &Arc<Mutex<HookState>>,
     xuannv_id: AgentId,
     idle_window: Duration,
@@ -118,11 +131,15 @@ async fn handle_event(
             }
             let pool2 = pool.clone();
             let sender2 = sender.clone();
+            let fcm_sender2 = fcm_sender.clone();
             let h = tokio::spawn(async move {
                 tokio::time::sleep(idle_window).await;
                 let payload = PushPayload::new("玄女在等你", "她已停下，等你回话", "/#/conv");
                 if let Err(e) = notify(&pool2, sender2, &payload).await {
-                    tracing::warn!(error = %e, "玄女 idle 推送失败");
+                    tracing::warn!(error = %e, "玄女 idle Web Push 推送失败");
+                }
+                if let Err(e) = notify_fcm(&pool2, fcm_sender2, &payload).await {
+                    tracing::warn!(error = %e, "玄女 idle FCM 推送失败");
                 }
             });
             s.xuannv_idle_timer = Some(h);
@@ -161,7 +178,10 @@ async fn handle_event(
                 format!("/#/task/{task_id}"),
             );
             if let Err(e) = notify(pool, sender, &payload).await {
-                tracing::warn!(error = %e, %task_id, "task done 推送失败");
+                tracing::warn!(error = %e, %task_id, "task done Web Push 推送失败");
+            }
+            if let Err(e) = notify_fcm(pool, fcm_sender, &payload).await {
+                tracing::warn!(error = %e, %task_id, "task done FCM 推送失败");
             }
         }
         _ => {}
@@ -180,6 +200,7 @@ mod tests {
     use super::*;
     use crate::db::init_at;
     use crate::error::Result;
+    use crate::push::fcm::{FcmSendOutcome, upsert_token};
     use crate::push::store::upsert;
     use async_trait::async_trait;
     use fuxi_core::event::{EventKind, EventMeta};
@@ -215,12 +236,33 @@ mod tests {
         }
     }
 
+    /// FCM 侧的计数 sender——仿 [`CountingSender`]，验证 hooks 两路都推。
+    #[derive(Default)]
+    struct CountingFcmSender {
+        sent: StdMutex<Vec<PushPayload>>,
+    }
+
+    #[async_trait]
+    impl FcmPusher for CountingFcmSender {
+        async fn send_one(&self, _token: &str, payload: &PushPayload) -> Result<FcmSendOutcome> {
+            self.sent.lock().unwrap().push(payload.clone());
+            Ok(FcmSendOutcome::Delivered)
+        }
+    }
+
+    impl CountingFcmSender {
+        fn snapshot(&self) -> Vec<PushPayload> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
     async fn fresh_pool() -> SqlitePool {
         let dir = tempdir().expect("tmp");
         let path = dir.path().join("im.db");
         let pool = init_at(&path).await.expect("init");
-        // 至少一条订阅，notify 才有 fan-out 目标
+        // 至少一条 Web Push 订阅 + 一条 FCM token，两路 notify 才有 fan-out 目标
         upsert(&pool, "d1", "https://e/1", "k", "a").await.unwrap();
+        upsert_token(&pool, "fcm-tok-1", "Pixel").await.unwrap();
         std::mem::forget(dir);
         pool
     }
@@ -249,10 +291,12 @@ mod tests {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let pool = fresh_pool().await;
         let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
             xuannv,
             Duration::from_millis(50), // idle window
@@ -275,6 +319,9 @@ mod tests {
         let pushes = sender.snapshot();
         assert_eq!(pushes.len(), 1);
         assert_eq!(pushes[0].title, "玄女在等你");
+        // 同一触发也应 fan-out 到 FCM 那路。
+        assert_eq!(fcm.snapshot().len(), 1, "FCM 也应收到玄女 idle 推送");
+        assert_eq!(fcm.snapshot()[0].title, "玄女在等你");
     }
 
     /// 玄女响应后立刻 user 开口 → idle 推送被取消。
@@ -283,10 +330,12 @@ mod tests {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let pool = fresh_pool().await;
         let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
             xuannv,
             Duration::from_millis(80),
@@ -319,6 +368,7 @@ mod tests {
             "用户开口后不应触发 idle 推送，实推 {:?}",
             sender.snapshot()
         );
+        assert!(fcm.snapshot().is_empty(), "用户开口后 FCM 那路也不该推");
     }
 
     /// 门客 AgentResponded 不计 idle（公理：只关心玄女对用户的输出）。
@@ -327,11 +377,13 @@ mod tests {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let pool = fresh_pool().await;
         let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let worker = AgentId::new();
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
             xuannv,
             Duration::from_millis(50),
@@ -351,6 +403,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(sender.snapshot().is_empty(), "门客响应不该触发 玄女idle");
+        assert!(fcm.snapshot().is_empty(), "门客响应 FCM 那路也不该推");
     }
 
     /// task → Done 触发"任务 N 完成"一条。
@@ -359,10 +412,12 @@ mod tests {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let pool = fresh_pool().await;
         let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
             xuannv,
             Duration::from_secs(60),
@@ -391,6 +446,10 @@ mod tests {
             pushes[0].title
         );
         assert!(pushes[0].url.contains(&task.to_string()), "url 含 task id");
+        // task done 也应 fan-out 到 FCM。
+        let fcm_pushes = fcm.snapshot();
+        assert_eq!(fcm_pushes.len(), 1, "FCM 也应收到 task done 推送");
+        assert!(fcm_pushes[0].title.starts_with("任务 "));
     }
 
     /// 同一 task done 60s（这里短 ttl）内不重推。
@@ -399,10 +458,12 @@ mod tests {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let pool = fresh_pool().await;
         let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
             xuannv,
             Duration::from_secs(60),
@@ -428,6 +489,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
         let pushes = sender.snapshot();
         assert_eq!(pushes.len(), 1, "60s 内 dedup 同 task_id：实推 {pushes:?}");
+        // dedup 在 notify 之前——FCM 那路同样只推 1 条。
+        assert_eq!(fcm.snapshot().len(), 1, "dedup 对 FCM 路也生效");
     }
 
     /// 不同 task_id 各自推。
@@ -436,10 +499,12 @@ mod tests {
         let bus = EventBus::with_memory_store().await.expect("bus");
         let pool = fresh_pool().await;
         let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
             xuannv,
             Duration::from_secs(60),
@@ -463,5 +528,7 @@ mod tests {
 
         wait_pushes(&sender, 3, 500).await;
         assert_eq!(sender.snapshot().len(), 3);
+        // FCM 那路也各推一次。
+        assert_eq!(fcm.snapshot().len(), 3, "三个不同 task FCM 各推一次");
     }
 }
