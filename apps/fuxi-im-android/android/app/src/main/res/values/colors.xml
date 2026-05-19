@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 通知强调色——与 PWA 暗色主题底色族一致的暖紫。 -->
+    <color name="notify_accent">#7C6CF0</color>
+</resources>

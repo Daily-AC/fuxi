@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "927714756334",
+    "project_id": "fuxi-im",
+    "storage_bucket": "fuxi-im.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:927714756334:android:99d16caf53ed2f95de95ff",
+        "android_client_info": {
+          "package_name": "cn.qmledmq.fuxi.im"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCNo1IwBgfwIreNJMAijPKFC6M51iy8Mes"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
