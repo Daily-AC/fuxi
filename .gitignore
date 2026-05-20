@@ -53,3 +53,8 @@ deliverables/thesis-v*/.~*.docx
 deliverables/thesis-v*/zyl.docx
 deliverables/thesis-v*/thesis-v3.docx
 
+
+# 项目根 .fuxi/ —— clipboard-image / paste-image skill 会话期截图，不入仓
+.fuxi/
+# 计划文档 —— feedback_no_ceremonies 禁止 plan 文档；规范流程见 CLAUDE.md
+docs/plans/
