@@ -83,6 +83,25 @@ fuxi/
 - **质量门禁**：`cargo fmt --check` + `cargo clippy -D warnings` + `cargo test` 全绿才能 merge
 - **新增 migration**：SQL 文件 + schema 代码同步，缺一不可
 
+## Git 流程公理（2026-05-20 立，因 vision + 安卓孤悬 mac 一个月、home 跑着但 main 没有踩坑）
+
+1. **`main` = 当前 home 正在跑的代码**。任何 ship 的 feature 必须 land 到 main + push origin，**不允许 feature 分支孤悬超过 48h**。
+2. **开新活只从 `origin/main` 起**：`git fetch origin && git checkout main && git pull --ff-only && git checkout -b feat/<topic>`。**禁止**从随机 feature 分支接力，否则你看到的世界跟实际部署对不上。
+3. **ship 完闭环**：验证（测试 + home 实测）→ `git checkout main && git merge --no-ff feat/<topic>` → `git push origin main` → 部署（见下）。`--no-ff` 保留 merge commit，history 可读、回滚有抓手。
+4. **worktree 子分支**（`.claude/worktrees/...` 下的 vision-alpha/beta 那种）：子 agent 完成后**先 merge 回母 feature 分支**，再走母分支的 ship 流程。**禁止**子分支直接合 main。
+5. **不留孤本**：本地分支没 push 过 = 单点失败（mac 死 = 工作蒸发）。任何超 24h 的 feature 分支必须 `git push -u origin <branch>` 留档。
+6. **未提交 WIP 不要打扰 merge**：合并到 main 时若工作区有 WIP，用 `git worktree add /tmp/<path> main` 在另一个 worktree 做 merge，原工作区原样不动；不要用 `git stash` 来回切（容易漏 untracked）。
+
+## 部署流程（当前事实）
+
+- home 部署用 **rsync from mac**，不是 git pull（详见 memory `reference_home_deploy`）：
+  1. mac 改完代码，**先 commit + push**（按上面 §3）。
+  2. `env -u HTTPS_PROXY -u https_proxy rsync -az --exclude=node_modules --exclude=target --exclude=dist --exclude=web crates/ home:fuxi/crates/`（外加 `Cargo.toml` `Cargo.lock`）。
+  3. `ssh home '~/.cargo/bin/cargo build --release -p fuxi-cli'`。
+  4. `sudo systemctl stop fuxi-im.service`（**必须先停，运行中的 binary cp 会报"文本文件忙"**）→ `cp ~/fuxi/target/release/fuxi ~/.local/bin/fuxi && cp ... ~/.cargo/bin/fuxi` → `sudo systemctl start fuxi-im.service`。
+  5. `journalctl -u fuxi-im.service -n 20` 看启动 log + curl 烟测改动的端点。
+- **未来想改**：home 升级到 `git pull origin main && cargo build && restart`，把 main 升为唯一真相源，杜绝"home 跑的跟 main 不一样"。当前未做。
+
 ## 常见陷阱
 
 - 不要在 library crate 里 `unwrap()` / `panic!`——返回 `Result`。panic 只允许在 bin 里的顶层错误边界。
