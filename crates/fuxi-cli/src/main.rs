@@ -157,6 +157,13 @@ enum XuannvCmd {
     /// 一两句口语，≤500 字（CLI 硬上限会拒），不带 markdown / 代码 / emoji。
     /// `fuxi xuannv say "好的，派给鲁班了"`
     Say(xuannv_cmd::SayArgs),
+    /// 玄女眼睛 v1（spec 2026-05-14）——召唤桌宠拍一帧 webcam / screen，
+    /// stdout 输出绝对 path 给玄女后续 `Read` 看图。HTTP 阻塞，timeout 默认 10s。
+    ///
+    /// 触发时机：用户主动说「看看」/「这是什么」/「报错啥意思」时玄女才用，
+    /// 不在 idle 期偷看（spec §边界 + roles/xuannv prelude）。
+    /// `fuxi xuannv look --target webcam --hint "看看用户的报错"`
+    Look(xuannv_cmd::LookArgs),
     /// ASR 热词管理——SenseVoiceSmall 不支持模型级 hotword，靠后处理正则替换。
     /// 玄女遇到用户说「这个词总被识别错」时，自己跑 `hotword add` 加规则，
     /// home asr.service 下次 transcribe 自动 reload（不用 restart 服务）。
@@ -324,6 +331,7 @@ async fn main() -> anyhow::Result<()> {
                 HandoffCmd::Read => xuannv_cmd::run_handoff_read().await,
             },
             XuannvCmd::Say(args) => xuannv_cmd::run_say(args).await,
+            XuannvCmd::Look(args) => xuannv_cmd::run_look(args).await,
             XuannvCmd::Hotword(h) => match h {
                 HotwordCmd::Add(args) => xuannv_cmd::run_hotword_add(args).await,
                 HotwordCmd::List => xuannv_cmd::run_hotword_list().await,

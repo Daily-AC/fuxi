@@ -134,6 +134,16 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/api/intervene", post(handlers::intervene::intervene))
         .route("/api/dispatch", post(handlers::dispatch::dispatch))
+        // 玄女眼睛 v1（spec 2026-05-14）—— /look 召唤桌宠拍帧 + 阻塞等结果，
+        // /look/frame 桌宠 multipart 回传一帧。两者通过 oneshot 配对（state.vision_pairs）。
+        // /look/frame 用 `image/png` 中等图，body limit 与 /api/upload 同口径，
+        // 避免 axum 默认 2MB 拦截。
+        .route("/api/xuannv/look", post(handlers::vision::look))
+        .route(
+            "/api/xuannv/look/frame",
+            post(handlers::vision::look_frame)
+                .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT_BYTES)),
+        )
         // v1-session17 task #9 「更多」hub 三个新页：策府事实 / 角色卡 / 更漏 trigger
         .route("/api/memory", get(handlers::memory::list))
         .route("/api/roles", get(handlers::roles::list))
@@ -180,6 +190,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/push/subscribe", post(handlers::push::subscribe))
         .route("/api/push/silence", post(handlers::push::silence))
         .route("/api/push/vapid-pub", get(handlers::push::vapid_public_key))
+        // FCM 原生 Android 推送注册——与 /subscribe（Web Push）平行的另一条通道。
+        .route("/api/push/fcm-register", post(handlers::push::fcm_register))
         // 鉴权 layer 在最外侧——所有 /api/* 都过它；is_exempt 内部豁免
         // /api/auth/login + /api/auth/pair + /healthz（这三条本身就是签发 cookie /
         // upstream check 的入口，自然不能要求带已有的 cookie）。

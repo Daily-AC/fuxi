@@ -55,6 +55,14 @@ web-push = { version = "0.11", default-features = false, features = ["hyper-clie
 mime = "0.3"
 # β · Task #17 文件上传 + sha256 流式 hash（sha2 已在 hmac 路径引入复用）
 hex = "0.4"
+# 玄女眼睛 v1：vision frame 落档到 XDG data_local_dir
+# （macOS = ~/Library/Application Support，Linux = ~/.local/share）
+dirs = "5"
+# FCM 推送通道：HTTP v1 API + OAuth2。reqwest 发 OAuth2 token 兑换 +
+# messages:send（跟 a2a/cli 同 0.12+json）；jsonwebtoken 9 用 service
+# account RSA 私钥签 RS256 JWT 换 access_token。
+reqwest = { version = "0.12", features = ["json"] }
+jsonwebtoken = "9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -63,5 +71,4 @@ tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 # γ WS 端到端测试：起真实 axum + 真实 ws/http 客户端，照抄 firehose/tests 模式。
 tokio-tungstenite.workspace = true
-reqwest = { version = "0.12", features = ["json"] }
 url = "2"

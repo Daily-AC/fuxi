@@ -25,10 +25,28 @@ echo "[3/5] cp 到 $TARGET"
 rm -rf "$TARGET"
 cp -R "$SOURCE" "$TARGET"
 
-echo "[4/5] 注入 macOS 权限 keys（mic + LSUIElement）"
-plutil -insert NSMicrophoneUsageDescription \
+echo "[4/5] 注入 macOS 权限 keys（mic + camera + screen + LSUIElement）"
+# -insert 已存在会失败；用 -replace 兜——重装 / 升级时不踩 plutil exit 1。
+plutil -replace NSMicrophoneUsageDescription \
     -string "玄女桌宠需要麦克风权限以听你说话——语音通过 home 服务转写后发给玄女门客。" \
-    "$TARGET/Contents/Info.plist"
+    "$TARGET/Contents/Info.plist" 2>/dev/null \
+  || plutil -insert NSMicrophoneUsageDescription \
+       -string "玄女桌宠需要麦克风权限以听你说话——语音通过 home 服务转写后发给玄女门客。" \
+       "$TARGET/Contents/Info.plist"
+# 玄女眼睛 v1：webcam + screen 单帧采集（spec 2026-05-14-xuannv-vision-design.md）
+plutil -replace NSCameraUsageDescription \
+    -string "玄女需要在你说「看看我」时拍一张你的样子，不会持续录像。" \
+    "$TARGET/Contents/Info.plist" 2>/dev/null \
+  || plutil -insert NSCameraUsageDescription \
+       -string "玄女需要在你说「看看我」时拍一张你的样子，不会持续录像。" \
+       "$TARGET/Contents/Info.plist"
+# macOS 屏幕录制权限：首次拒绝后只能去 系统设置→隐私→屏幕录制 手动开 + 重启 app
+plutil -replace NSScreenCaptureUsageDescription \
+    -string "玄女需要在你说「看看屏幕」时截一张当前屏幕，不会持续录屏。" \
+    "$TARGET/Contents/Info.plist" 2>/dev/null \
+  || plutil -insert NSScreenCaptureUsageDescription \
+       -string "玄女需要在你说「看看屏幕」时截一张当前屏幕，不会持续录屏。" \
+       "$TARGET/Contents/Info.plist"
 plutil -replace LSUIElement -bool true "$TARGET/Contents/Info.plist" 2>/dev/null \
   || plutil -insert LSUIElement -bool true "$TARGET/Contents/Info.plist"
 

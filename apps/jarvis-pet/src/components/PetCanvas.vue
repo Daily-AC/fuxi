@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { useStatsStore } from '@/stores/stats'
+import { useVisionStore } from '@/stores/vision'
 import { PixiApp } from '@/pixi/PixiApp'
 import { AnimationPlayer } from '@/sprites/AnimationPlayer'
 import type { SpriteSet } from '@/sprites/SpriteSet'
@@ -14,6 +15,8 @@ import { playTts } from '@/voice/tts'
 import { WakeClient } from '@/voice/wakeClient'
 import { EnergyVad } from '@/voice/vad'
 import { captureForSeconds, pcmToWav, uploadEnroll, uploadVerify, SAMPLE_TEXT } from '@/voice/voiceprint'
+import { captureWebcamFrame, captureScreenFrame, PermissionDeniedError, NoDeviceError } from '@/voice/visionCapture'
+import { uploadVisionFrame } from '@/api/visionFrame'
 
 // 8 帧通过 Vite ?url 显式导入：dev 下 vite 直接服务真实文件，build 时 hash 进 dist/assets。
 // 走 publicDir + /sprites 绝对路径在 Tauri release 下会撞「tauri://sprites/...」host 误读
@@ -84,6 +87,8 @@ import pc016 from '../../resources/sprites/loris/default/poorcondition/1/_016_12
 
 const canvasContainer = ref<HTMLDivElement | null>(null)
 const stats = useStatsStore()
+const vision = useVisionStore()
+const visionError = ref(false)   // 红色短暂提示位（capture / upload 失败 2s 内置 true）
 const sizeDebug = ref('size: -')
 const showMenu = ref(false)
 const toast = ref('')
@@ -274,6 +279,20 @@ onMounted(async () => {
           evType === 'thinking_started' || evType === 'thinking_finished') {
         flashToast(`ws: ${evType}`, 1500)
       }
+      // 玄女眼睛：召唤式抓帧请求。禁眼时静默不上传——后端 timeout 退化成 stderr，
+      // 玄女按 spec 错误兜底矩阵告诉用户「眼睛被蒙了」
+      if (ev.kind.type === 'vision_request' &&
+          typeof (ev.kind as { request_id?: unknown }).request_id === 'string' &&
+          ((ev.kind as { target?: unknown }).target === 'webcam' ||
+           (ev.kind as { target?: unknown }).target === 'screen')) {
+        const reqId = (ev.kind as { request_id: string }).request_id
+        const target = (ev.kind as { target: 'webcam' | 'screen' }).target
+        handleVisionRequest(reqId, target).catch(e => {
+          console.error('[vision] handle err', e)
+          visionError.value = true
+          window.setTimeout(() => { visionError.value = false }, 2000)
+        })
+      }
       // 玄女说话：弹气泡 + 嘴动 + TTS 派蒙音（Phase 2.D+E）+ 情绪 ref/sprite 切（Phase 3）
       if (ev.kind.type === 'xuannv_voice_line' && typeof ev.kind.text === 'string') {
         const sayText = ev.kind.text
@@ -372,6 +391,25 @@ async function onTouchHead() {
     }
   } finally {
     touchBusy = false
+  }
+}
+
+function onEyeAllow() {
+  vision.enable()
+  flashToast('眼睛已允许', 1200)
+}
+function onEyeDisable15() {
+  vision.disableFor(15 * 60_000)
+  flashToast('眼睛禁 15 分钟', 1500)
+}
+function onEyeDisableForever() {
+  // 切回 toggle：已永久禁 → 解禁；否则永久禁
+  if (vision.disabledUntil === 'forever') {
+    vision.enable()
+    flashToast('眼睛已恢复', 1200)
+  } else {
+    vision.disableForever()
+    flashToast('眼睛永久禁（重启失效）', 2000)
   }
 }
 
@@ -501,6 +539,65 @@ async function speakWithMouth(text: string, emotion?: string): Promise<void> {
   } catch (e) {
     player?.load(idleSet).catch(() => {})
     throw e
+  }
+}
+
+/// 玄女眼睛 vision_request 处理：禁眼 → 上传 user_denied 占位（让后端 oneshot
+/// 立即结束而不是 10s timeout，玄女更快拿到错误说人话）；正常 → capture →
+/// upload。期间 vision.markCapturing/markIdle 让左下状态点变蓝/灰。
+async function handleVisionRequest(reqId: string, target: 'webcam' | 'screen'): Promise<void> {
+  if (!pairToken.value) {
+    console.warn('[vision] 无 pairToken，跳 vision_request')
+    return
+  }
+  if (vision.disabled) {
+    // 禁眼时直接告诉后端「user_denied」让 oneshot 立即解，比 10s timeout 友好
+    try {
+      await uploadVisionFrame({
+        baseURL: BASE_URL,
+        token: pairToken.value,
+        requestId: reqId,
+        error: 'user_denied',
+      })
+    } catch (e) {
+      console.warn('[vision] user_denied 占位上传失败（不阻塞）', e)
+    }
+    flashToast('眼睛被蒙了（菜单可解）', 2000)
+    return
+  }
+  vision.markCapturing()
+  try {
+    const blob = target === 'webcam'
+      ? await captureWebcamFrame()
+      : await captureScreenFrame()
+    await uploadVisionFrame({
+      baseURL: BASE_URL,
+      token: pairToken.value,
+      requestId: reqId,
+      blob,
+      mime: 'image/png',
+    })
+    flashToast(`已拍 ${target === 'webcam' ? '摄像头' : '屏幕'}`, 1500)
+  } catch (e) {
+    // 失败时仍要 ack 后端：上传 error 字段让 oneshot 立解，玄女说人话
+    let errCode = 'capture_failed'
+    if (e instanceof PermissionDeniedError) errCode = 'permission_denied'
+    else if (e instanceof NoDeviceError) errCode = 'no_device'
+    try {
+      await uploadVisionFrame({
+        baseURL: BASE_URL,
+        token: pairToken.value,
+        requestId: reqId,
+        error: errCode,
+      })
+    } catch (e2) {
+      console.warn('[vision] error 占位上传也失败', e2)
+    }
+    flashToast(`眼睛失败: ${errCode}`, 2500)
+    visionError.value = true
+    window.setTimeout(() => { visionError.value = false }, 2000)
+  } finally {
+    vision.markIdle()
   }
 }
 
@@ -718,6 +815,23 @@ function onWakeToggle(): void {
         🆔 注册声纹
       </div>
       <div class="sep"></div>
+      <!-- 玄女眼睛 · 隐私 sub-section（不用 emoji，用 unicode ◉ / ✕ 跟整体审美对齐） -->
+      <div class="row eye-title">◉ 眼睛</div>
+      <div class="row clickable eye"
+           :class="{ on: !vision.disabled }"
+           @click="onEyeAllow">
+        {{ !vision.disabled ? '◉ 允许（默认）' : '○ 切到 允许' }}
+      </div>
+      <div class="row clickable eye"
+           @click="onEyeDisable15">
+        ◐ 禁眼 15 分钟{{ vision.remainingSec !== null ? ` （剩 ${Math.ceil(vision.remainingSec / 60)} 分）` : '' }}
+      </div>
+      <div class="row clickable eye"
+           :class="{ on: vision.disabledUntil === 'forever' }"
+           @click="onEyeDisableForever">
+        {{ vision.disabledUntil === 'forever' ? '● 永久禁眼（已开）' : '○ 永久禁眼' }}
+      </div>
+      <div class="sep"></div>
       <div class="row">体力 {{ stats.strength }}</div>
       <div class="row">饱腹 {{ stats.strengthFood }}</div>
       <div class="row">口渴 {{ stats.strengthDrink }}</div>
@@ -821,6 +935,16 @@ function onWakeToggle(): void {
 
     <!-- 玄女回话气泡：xuannv_voice_line 事件触发，自动 fade 6s -->
     <div v-if="bubble" class="bubble">{{ bubble }}</div>
+    <!-- 玄女眼睛状态点：左下角，灰=idle 蓝=capturing(脉冲) 红=禁眼 / 错误 -->
+    <div class="vision-dot"
+         :class="{
+           capturing: vision.capturing,
+           disabled: vision.disabled,
+           error: visionError
+         }"
+         :title="vision.disabled
+           ? (vision.disabledUntil === 'forever' ? '眼睛永久禁' : `禁眼 (剩 ${vision.remainingSec ?? 0}s)`)
+           : (vision.capturing ? '眼睛采帧中…' : '眼睛 idle')"></div>
     <!-- 短暂提示：drag 异常 / 操作反馈 -->
     <div v-if="toast" class="toast">{{ toast }}</div>
   </div>
@@ -887,6 +1011,48 @@ function onWakeToggle(): void {
 }
 .row.clickable.quit:hover {
   background: rgba(180, 60, 60, 0.08);
+}
+.row.eye-title {
+  font-weight: 600;
+  color: rgba(40, 40, 40, 0.75);
+  margin-top: 2px;
+}
+.row.clickable.eye {
+  color: rgba(40, 40, 40, 0.85);
+  font-variant-numeric: tabular-nums;
+}
+.row.clickable.eye.on {
+  color: rgb(40, 100, 180);
+}
+.row.clickable.eye:hover {
+  background: rgba(40, 100, 180, 0.06);
+}
+.vision-dot {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #999;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  transition: background 0.25s ease;
+}
+.vision-dot.capturing {
+  background: #3b82f6;
+  animation: vision-pulse 0.6s ease-in-out infinite;
+}
+.vision-dot.disabled {
+  background: #ef4444;
+}
+.vision-dot.error {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+}
+@keyframes vision-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.4); opacity: 0.65; }
 }
 .sep {
   height: 1px;
