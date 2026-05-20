@@ -1,0 +1,23 @@
+{
+  "appId": "cn.qmledmq.fuxi.im",
+  "appName": "玄女",
+  "webDir": "www",
+  "server": {
+    "url": "https://im.qmledmq.cn:8443",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 500,
+      "backgroundColor": "#0e0e12",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#0e0e12"
+    }
+  }
+}

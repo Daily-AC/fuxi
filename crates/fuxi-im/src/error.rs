@@ -42,6 +42,11 @@ pub enum Error {
     #[error("service unavailable: {0}")]
     Unavailable(String),
 
+    /// 请求超时——服务端等下游响应（如桌宠回传 vision frame）超过 deadline。
+    /// 走 408，调用方可重试。玄女眼睛 v1 唯一发起者。
+    #[error("timeout: {0}")]
+    Timeout(String),
+
     /// 未实装——给 β/γ/δ 的 stub handler 用，避免 panic。
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
@@ -62,6 +67,15 @@ pub enum Error {
     /// 兜底——内部错误，对客户端隐藏细节。
     #[error("internal: {0}")]
     Internal(String),
+
+    /// 玄女眼睛 v1 桌宠端上报错误——四类 code 各对应一个 HTTP 状态。
+    /// 与 BadRequest/Internal 等通用变体分开是为了：
+    /// (1) `IntoResponse` 直接把 spec code 写到 ErrorBody.error 字段，
+    ///     CLI 不必从 message 末段切 code；
+    /// (2) HTTP 状态语义对：403 用户/系统拒授权 / 503 无设备 / 500 拍帧失败。
+    /// 公开仅给 vision handler 用，其它 handler 不应碰这条路径。
+    #[error("vision: {0}")]
+    Vision(crate::handlers::vision::FrameErrorKind),
 }
 
 /// 本 crate 的 `Result` 别名。
@@ -76,12 +90,14 @@ impl Error {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Error::Timeout(_) => StatusCode::REQUEST_TIMEOUT,
             // 玄女不在 → 503（让 PWA 区分"路由错"和"暂时不可用，请重试"）；
             // 其余编排错走 500。
             Error::Unavailable(_)
             | Error::Orchestrator(fuxi_orchestrator::OrchestratorError::AgentNotFound(_)) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            Error::Vision(kind) => kind.http_status(),
             Error::Io(_) | Error::Events(_) | Error::Orchestrator(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -105,6 +121,7 @@ impl IntoResponse for Error {
             Error::NotFound(_) => "not_found",
             Error::Conflict(_) => "conflict",
             Error::Unavailable(_) => "unavailable",
+            Error::Timeout(_) => "timeout",
             Error::NotImplemented(_) => "not_implemented",
             Error::Json(_) => "json",
             Error::Events(_) => "events",
@@ -113,6 +130,8 @@ impl IntoResponse for Error {
             }
             Error::Orchestrator(_) => "orchestrator",
             Error::Internal(_) => "internal",
+            // 直接把 spec code 当 ErrorBody.error 字段——CLI 不再 parse message。
+            Error::Vision(kind) => kind.code(),
         };
         let body = ErrorBody {
             error: kind,

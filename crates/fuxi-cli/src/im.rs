@@ -30,6 +30,7 @@ use fuxi_events::{EventBus, EventStore};
 use fuxi_im::auth::HmacSecret;
 use fuxi_im::db as im_db;
 use fuxi_im::devices::DeviceStore;
+use fuxi_im::push::fcm::{FcmCredentials, FcmPusher, HttpFcmSender, NoopFcmSender};
 use fuxi_im::push::notify::HyperPushSender;
 use fuxi_im::state::{AppState, ImAuth, ImPush};
 use fuxi_memory::OracleStore;
@@ -402,10 +403,23 @@ pub async fn run(args: StartArgs) -> Result<()> {
     let hooks_pool = im_pool.clone();
     let hooks_bus = bus.clone();
     let hooks_fuxi = fuxi.clone();
+    // FCM sender：从 ~/.fuxi/fcm_service_account.json 加载 service account。
+    // 文件缺失 / 字段不全时**不 panic**——log warn 退化成 NoopFcmSender，
+    // 让没配 FCM 的部署（如纯 PWA 场景）照常跑，Web Push 那路不受影响。
+    let fcm_sender: Arc<dyn FcmPusher> = match FcmCredentials::load_default() {
+        Ok(creds) => {
+            tracing::info!("FCM service account 已加载——原生 Android 推送通道启用");
+            Arc::new(HttpFcmSender::new(Arc::new(creds)))
+        }
+        Err(e) => {
+            tracing::warn!("FCM service account 未就绪，FCM 推送退化为 no-op: {e}");
+            Arc::new(NoopFcmSender)
+        }
+    };
     let push_hooks_task = tokio::spawn(async move {
         let xuannv = wait_for_xuannv(&hooks_fuxi).await;
         let sender = Arc::new(HyperPushSender::new(vapid_for_hooks));
-        let _h = fuxi_im::push::hooks::spawn(hooks_pool, sender, hooks_bus, xuannv);
+        let _h = fuxi_im::push::hooks::spawn(hooks_pool, sender, fcm_sender, hooks_bus, xuannv);
         // hooks::spawn 返回的 JoinHandle 持续到订阅流结束，由它自己清理；这里
         // detach 不动它即可（task 进程退出统一终结）。
     });

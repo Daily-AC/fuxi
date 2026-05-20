@@ -1,0 +1,19 @@
+{
+  "name": "fuxi-im-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "伏羲 IM 安卓客户端：Capacitor 壳加载 im.qmledmq.cn PWA + 原生 FCM 推送",
+  "scripts": {
+    "sync": "cap sync android",
+    "open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/splash-screen": "^6.0.3",
+    "@capacitor/status-bar": "^6.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}

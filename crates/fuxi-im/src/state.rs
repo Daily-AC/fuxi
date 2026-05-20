@@ -10,6 +10,7 @@
 use crate::auth::HmacSecret;
 use crate::conv_store::ConvStore;
 use crate::devices::DeviceStore;
+use crate::handlers::vision::VisionPairResult;
 use crate::lockout::LoginGuard;
 use crate::nodes_provider::NodesProvider;
 use crate::notifications::NotificationStore;
@@ -21,8 +22,17 @@ use fuxi_orchestrator::Fuxi;
 use fuxi_scheduler::TriggerStore;
 use fuxi_workspace::FileSystemProjectRegistry;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::{Mutex, oneshot};
+
+/// 玄女眼睛 v1 oneshot 配对表别名——`request_id → sender`。
+/// `look` handler 注入 sender，`look/frame` handler 上传时 take 出来 send。
+/// 走 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：handler 跨 await 持锁时
+/// std mutex 不安全（虽然这里不该跨 await，但 tokio mutex 是 axum 共享 state
+/// 的常规选择，clippy 也鼓励）。
+pub type VisionPairs = Arc<Mutex<HashMap<String, oneshot::Sender<VisionPairResult>>>>;
 
 /// 共享给所有 handler 的应用状态。`Clone` 廉价（内部都是 `Arc`）。
 #[derive(Clone)]
@@ -73,6 +83,12 @@ pub struct AppState {
     /// v1-session17 task #9 「更多 → 角色」：roles 目录根（含 `<role>/ROLE.md`）。
     /// production = 项目根 `roles/`；`Option` None 时 handler 返 503。
     pub roles_root: Option<PathBuf>,
+    /// 玄女眼睛 v1：`/api/xuannv/look` ↔ `/api/xuannv/look/frame` 的 oneshot
+    /// 配对表。每次 `look` 调用注入 sender，桌宠 frame 上传时按 request_id 反
+    /// 查 take 出来通知阻塞中的 caller。**默认空 Arc——production 与 smoke
+    /// 路径都共用同一个空 map，无需 wiring**（与 conv_store/oracle 等可选字段
+    /// 不同，vision 是无外部依赖的内存映射）。
+    pub vision_pairs: VisionPairs,
 }
 
 /// β · #56 dist worker onboarding 派给本地 macOS 节点的三件套。
@@ -134,6 +150,7 @@ impl AppState {
             user_profile_store: None,
             triggers: None,
             roles_root: None,
+            vision_pairs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

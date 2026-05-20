@@ -140,6 +140,43 @@ pub async fn silence(
     })))
 }
 
+// ─── /api/push/fcm-register ───────────────────────────────────────────
+
+/// `POST /api/push/fcm-register`——Android app 拿到 FCM 注册 token 后调，
+/// 把 (token, device_name) 入库。后续玄女 idle / task done 时 hooks 会把
+/// 推送 fan-out 给所有登记的 token。
+///
+/// 与 `subscribe`（Web Push）平行：Web Push 走浏览器 endpoint+keys，FCM 走
+/// 原生 SDK token，两条通道互不替代。
+#[derive(Debug, Deserialize)]
+pub struct FcmRegisterRequest {
+    /// FCM SDK 在客户端拿到的注册 token。
+    pub token: String,
+    /// 设备可读名（用户调试用），如 "以琳的 Pixel"。
+    pub device_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FcmRegisterResponse {
+    /// 固定 true——入库成功。形状稳定方便前端断言。
+    pub registered: bool,
+}
+
+pub async fn fcm_register(
+    State(state): State<AppState>,
+    Json(body): Json<FcmRegisterRequest>,
+) -> Result<Json<FcmRegisterResponse>> {
+    let pool =
+        state.im_push.db.as_ref().ok_or_else(|| {
+            Error::Internal("push db pool 未注入（im_push disabled）".to_string())
+        })?;
+    if body.token.is_empty() {
+        return Err(Error::BadRequest("token 不能为空".to_string()));
+    }
+    crate::push::fcm::upsert_token(pool, &body.token, &body.device_name).await?;
+    Ok(Json(FcmRegisterResponse { registered: true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +257,119 @@ mod tests {
             key: kp.public_b64url.clone(),
         };
         assert_eq!(resp.key, kp.public_b64url);
+    }
+
+    /// FcmRegisterResponse 形状稳定——前端按 `registered` 字段断言。
+    #[test]
+    fn fcm_register_response_shape_is_stable() {
+        let json = serde_json::to_value(FcmRegisterResponse { registered: true }).unwrap();
+        assert_eq!(json["registered"], true);
+    }
+
+    /// fcm_register handler：空 token → BadRequest（不入库）。
+    ///
+    /// 走真 router + 真 im.db pool（im_push wiring），不只测纯函数——这样
+    /// 能抓到"handler 没接上 / pool 取法错"之类集成层 bug。
+    #[tokio::test]
+    async fn fcm_register_rejects_empty_token() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use axum::routing::post;
+        use fuxi_events::EventBus;
+        use fuxi_orchestrator::Fuxi;
+        use fuxi_workspace::GitWorktreeWorkspace;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        async fn run_git(cwd: &std::path::Path, args: &[&str]) {
+            let out = tokio::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .await
+                .expect("spawn git");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let ws_dir = tempfile::tempdir().expect("tmp");
+        run_git(ws_dir.path(), &["init", "-q", "-b", "main"]).await;
+        tokio::fs::write(ws_dir.path().join("README.md"), "seed")
+            .await
+            .unwrap();
+        run_git(ws_dir.path(), &["add", "-A"]).await;
+        run_git(
+            ws_dir.path(),
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        )
+        .await;
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            ws_dir.path().to_path_buf(),
+        ));
+        let fuxi = Arc::new(Fuxi::new(bus, ws));
+
+        let db_dir = tempfile::tempdir().expect("db tmp");
+        let pool = init_at(db_dir.path().join("im.db")).await.expect("db");
+        let im_push = crate::state::ImPush {
+            keypair: None,
+            db: Some(pool.clone()),
+        };
+        let state = AppState::new(fuxi).with_im_push(im_push);
+        let app = Router::new()
+            .route("/api/push/fcm-register", post(fcm_register))
+            .with_state(state);
+
+        // 空 token → 400
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/push/fcm-register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"token":"","device_name":"Pixel"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "空 token 应 400");
+        assert!(
+            crate::push::fcm::list_tokens(&pool)
+                .await
+                .unwrap()
+                .is_empty(),
+            "拒绝的请求不应入库"
+        );
+
+        // 合法 token → 200 + 入库
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/push/fcm-register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"token":"tok-1","device_name":"Pixel"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            crate::push::fcm::list_tokens(&pool).await.unwrap(),
+            vec!["tok-1".to_string()]
+        );
     }
 }
