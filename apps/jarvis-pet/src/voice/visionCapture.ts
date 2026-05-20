@@ -91,18 +91,29 @@ export async function captureWebcamFrame(): Promise<Blob> {
 }
 
 export async function captureScreenFrame(): Promise<Blob> {
-  const md = navigator?.mediaDevices as MediaDevices & {
-    getDisplayMedia?: (c?: MediaStreamConstraints) => Promise<MediaStream>
-  } | undefined
-  if (!md?.getDisplayMedia) {
-    throw new NoDeviceError('navigator.mediaDevices.getDisplayMedia 不可用')
-  }
-  let stream: MediaStream
+  // 不走 navigator.mediaDevices.getDisplayMedia——Tauri 2 macOS WKWebView
+  // 实测对它支持坏（release 包里抛 generic 错且不弹系统权限弹窗）。改走
+  // Tauri Rust 侧 IPC 命令 `pet_capture_screen_png` 调 macOS 内置
+  // `screencapture`，TCC 弹窗归属 XuannvPet bundle 走系统正常路径。
+  const { invoke } = await import('@tauri-apps/api/core')
+  let bytes: Uint8Array
   try {
-    // macOS 首次会弹屏幕录制权限弹窗——这是系统强制行为，不要在代码里再包教学弹窗
-    stream = await md.getDisplayMedia({ video: true, audio: false })
+    const result = await invoke<number[] | Uint8Array>('pet_capture_screen_png')
+    bytes = result instanceof Uint8Array ? result : new Uint8Array(result)
   } catch (err) {
-    throw classifyMediaError(err)
+    const msg = String(err)
+    // screencapture 拒绝有几种 stderr 关键字：
+    //   - "could not create image from display" / "TCC" → 权限未授
+    //   - "user cancelled" → 用户在弹窗里点了不允许
+    if (/TCC|create image|user cancelled|denied/i.test(msg)) {
+      throw new PermissionDeniedError(`screencapture 拒：${msg}`)
+    }
+    throw new VisionCaptureError(`screencapture 失败：${msg}`)
   }
-  return streamToFrameBlob(stream)
+  if (!bytes || bytes.length === 0) {
+    throw new VisionCaptureError('screencapture 返回空字节')
+  }
+  // Blob 构造在新版 TS lib.dom 收紧，Uint8Array<ArrayBufferLike> 不 assignable，
+  // 显式取 .buffer（ArrayBufferLike）作 BlobPart 即可。mime 强制 image/png（screencapture -t png）
+  return new Blob([bytes.buffer as ArrayBuffer], { type: 'image/png' })
 }

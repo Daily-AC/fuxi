@@ -583,6 +583,8 @@ async function handleVisionRequest(reqId: string, target: 'webcam' | 'screen'): 
     let errCode = 'capture_failed'
     if (e instanceof PermissionDeniedError) errCode = 'permission_denied'
     else if (e instanceof NoDeviceError) errCode = 'no_device'
+    // 把原 error 写到 pet_log，让 /tmp/jarvis-pet.log 能复盘根因
+    console.error('[vision] capture 失败', target, errCode, String(e))
     try {
       await uploadVisionFrame({
         baseURL: BASE_URL,
