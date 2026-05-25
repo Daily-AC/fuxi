@@ -177,6 +177,7 @@ async fn measure_event_flow_latency() -> Vec<u128> {
             meta: EventMeta::now(),
             kind: EventKind::AgentResponded {
                 text: marker.clone(),
+                artifact_ref: None,
             },
         };
 
@@ -207,7 +208,7 @@ async fn measure_event_flow_latency() -> Vec<u128> {
             }
             match tokio::time::timeout(remain, stream.next()).await {
                 Ok(Some(Ok(ev))) => match ev.kind {
-                    EventKind::AgentResponded { ref text } if text == &marker => {
+                    EventKind::AgentResponded { ref text, .. } if text == &marker => {
                         samples.push(t_publish.elapsed().as_micros());
                         break;
                     }

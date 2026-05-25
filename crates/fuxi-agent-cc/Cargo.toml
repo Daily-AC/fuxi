@@ -30,3 +30,5 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }
 # WS bridge 单测用它当"假 CLI"连回 axum server。
 tokio-tungstenite = { workspace = true }
+# Phase 0 ref-only：artifact dump 单测用 tempdir 替 ~/.fuxi/artifacts。
+tempfile = "3"

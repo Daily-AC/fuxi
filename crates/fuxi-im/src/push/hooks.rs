@@ -311,6 +311,7 @@ mod tests {
             meta,
             kind: EventKind::AgentResponded {
                 text: "好的".into(),
+                artifact_ref: None,
             },
         })
         .expect("publish");
@@ -347,7 +348,10 @@ mod tests {
         meta1.agent = Some(xuannv);
         bus.publish(Event {
             meta: meta1,
-            kind: EventKind::AgentResponded { text: "嗯".into() },
+            kind: EventKind::AgentResponded {
+                text: "嗯".into(),
+                artifact_ref: None,
+            },
         })
         .unwrap();
 
@@ -397,6 +401,7 @@ mod tests {
             meta,
             kind: EventKind::AgentResponded {
                 text: "我做完了".into(),
+                artifact_ref: None,
             },
         })
         .unwrap();

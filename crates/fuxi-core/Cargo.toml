@@ -13,3 +13,7 @@ thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# Phase 0 ref-only：ArtifactRef::maybe_dump 单测用 tempdir 替 $HOME/.fuxi/artifacts。
+tempfile = "3"

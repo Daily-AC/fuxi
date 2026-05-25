@@ -132,7 +132,10 @@ async fn main() -> Result<()> {
             let key_path = cli
                 .sv_hmac_key
                 .clone()
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fuxi").join("im_hmac.key")))
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|h| PathBuf::from(h).join(".fuxi").join("im_hmac.key"))
+                })
                 .context("HOME 未设置 + 没显式 --sv-hmac-key——无法定位 HMAC key")?;
             info!(%url, key_path = %key_path.display(), "wake-server: 启用 SV 拒陌生人");
             let client = fuxi_wake_server::sv::SvClient::from_key_file(url, &key_path)

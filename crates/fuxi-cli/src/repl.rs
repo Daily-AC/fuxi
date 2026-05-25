@@ -1168,7 +1168,7 @@ impl ReplApp {
                     DialogueLine::User(text.clone()),
                 );
             }
-            EventKind::AgentResponded { text } => {
+            EventKind::AgentResponded { text, .. } => {
                 if let Some(id) = who {
                     let name = self.agent_display_name(id);
                     self.push_line(
@@ -6118,12 +6118,14 @@ mod tests {
             Some(xid),
             EventKind::AgentResponded {
                 text: "好的".into(),
+                artifact_ref: None,
             },
         ));
         app.ingest(&mk_ev(
             Some(worker),
             EventKind::AgentResponded {
                 text: "done".into(),
+                artifact_ref: None,
             },
         ));
 

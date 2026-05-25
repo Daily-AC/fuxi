@@ -995,6 +995,7 @@ impl Agent for DistGatewayAgent {
                             task.id,
                             EventKind::AgentResponded {
                                 text: format!("[final] {txt}"),
+                                artifact_ref: None,
                             },
                         )
                         .await;
@@ -1091,7 +1092,10 @@ fn progress_chunk_to_event_kind(
         crate::dist::ProgressKind::ToolCall => format!("[tool] {}", chunk.text),
         crate::dist::ProgressKind::Error => format!("[error] {}", chunk.text),
     };
-    EventKind::AgentResponded { text }
+    EventKind::AgentResponded {
+        text,
+        artifact_ref: None,
+    }
 }
 
 async fn emit_event(
@@ -1118,6 +1122,7 @@ async fn emit_terminal_error(
         task_id,
         EventKind::AgentResponded {
             text: format!("远端网关执行失败：{msg}"),
+            artifact_ref: None,
         },
     )
     .await?;
@@ -1956,7 +1961,7 @@ mod tests {
             AgentId::new(),
             TaskId::new(),
         );
-        let EventKind::AgentResponded { text } = ev else {
+        let EventKind::AgentResponded { text, .. } = ev else {
             panic!("expected AgentResponded");
         };
         assert_eq!(text, "hello world");
@@ -1973,7 +1978,7 @@ mod tests {
         let tid = TaskId::new();
         for (kind, prefix) in cases {
             let ev = progress_chunk_to_event_kind(&mk_chunk(kind, "x"), aid, tid);
-            let EventKind::AgentResponded { text } = ev else {
+            let EventKind::AgentResponded { text, .. } = ev else {
                 panic!("expected AgentResponded");
             };
             assert!(text.starts_with(prefix), "{:?}: got {}", kind, text);

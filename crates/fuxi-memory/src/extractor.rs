@@ -266,7 +266,7 @@ fn build_transcript(events: &[Event]) -> String {
                 out.push_str(text);
                 out.push('\n');
             }
-            EventKind::AgentResponded { text } => {
+            EventKind::AgentResponded { text, .. } => {
                 out.push_str("门客：");
                 out.push_str(text);
                 out.push('\n');

@@ -57,7 +57,7 @@ async fn real_cc_echo_roundtrip() {
                     saw_ready = true;
                     eprintln!("AgentReady: {endpoint}");
                 }
-                EventKind::AgentResponded { text } => {
+                EventKind::AgentResponded { text, .. } => {
                     eprintln!("AgentResponded: {text:?}");
                     let normalized = text.trim().to_lowercase();
                     all_responses.push(text.clone());

@@ -47,7 +47,7 @@ async fn one_turn(cfg: CcLaunchConfig, prompt: &str, title: &str) -> String {
     let outcome = timeout(Duration::from_secs(90), async {
         while let Some(ev) = rx.recv().await {
             match &ev.kind {
-                EventKind::AgentResponded { text } => {
+                EventKind::AgentResponded { text, .. } => {
                     collected.push_str(text);
                     collected.push('\n');
                 }
