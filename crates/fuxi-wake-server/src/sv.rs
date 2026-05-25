@@ -74,8 +74,8 @@ impl SvClient {
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         });
         let body = serde_json::to_vec(&claims)?;
-        let mut mac = HmacSha256::new_from_slice(&self.hmac_secret)
-            .expect("HMAC-SHA256 接受任意长度 key");
+        let mut mac =
+            HmacSha256::new_from_slice(&self.hmac_secret).expect("HMAC-SHA256 接受任意长度 key");
         mac.update(&body);
         let sig = mac.finalize().into_bytes();
         Ok(format!(
@@ -107,7 +107,12 @@ impl SvClient {
         }
         let parsed: VerifyResult = serde_json::from_str(&text)
             .with_context(|| format!("sv verify 返非预期 JSON: {text}"))?;
-        debug!(score = parsed.score, matched = parsed.matched, enrolled = parsed.enrolled, "sv verify");
+        debug!(
+            score = parsed.score,
+            matched = parsed.matched,
+            enrolled = parsed.enrolled,
+            "sv verify"
+        );
         Ok(parsed)
     }
 }

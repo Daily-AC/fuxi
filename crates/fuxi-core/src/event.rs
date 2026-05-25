@@ -97,6 +97,80 @@ pub enum QuotaKind {
     ConcurrentSandboxes,
 }
 
+/// 长产出 ref-only 摘要——门客 emit AgentResponded 时，若 text 超过阈值（默认 500 字）
+/// 则把完整内容 dump 到 `~/.fuxi/artifacts/<task_id>/turn-<ts>.md`，event 只带这个 ref。
+///
+/// 玄女主动读时（fuxi status / fuxi events）CLI 端只 print summary + path；玄女想看
+/// 完整内容自己 `Read path`——参考 Anthropic multi-agent research 的 "lightweight
+/// reference" 设计，避免 "game of telephone" 把中间产出反复 copy 进玄女 context。
+///
+/// `path` 用 PathBuf 跨平台；`byte_size` 给 UI 显示 + 玄女判断是否值得展开；`summary`
+/// 是门客自己写或截取的 ≤200 字摘要（fallback：截 text 前 200 字 + "..."）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRef {
+    pub path: PathBuf,
+    pub summary: String,
+    pub byte_size: u64,
+}
+
+/// Phase 0 ref-only：默认产出 dump 阈值（字符数）。短产出不 dump 直接走老路径。
+pub const ARTIFACT_DUMP_THRESHOLD_CHARS: usize = 500;
+/// summary 截断后的最大字符数——前 N 字 + 提示尾。
+pub const ARTIFACT_SUMMARY_PREVIEW_CHARS: usize = 200;
+
+impl ArtifactRef {
+    /// 若 `text` 超过 `threshold_chars` 字，落档到 `<base>/<task_id>/turn-<ts>-<short>.md`
+    /// 并返回 `Some(ArtifactRef)`；短文本 / 无 task_id / IO 失败均返 `None`——绝不
+    /// 让 dump 故障挡掉 event emit（事件本体可在 events.db 重建，artifact 只是为了
+    /// 玄女 prompt 干净）。`base` 注入是为了单测能用 tempdir 替 `~/.fuxi/artifacts`。
+    pub fn maybe_dump(
+        base: &std::path::Path,
+        task: Option<TaskId>,
+        text: &str,
+        threshold_chars: usize,
+    ) -> Option<Self> {
+        if text.chars().count() < threshold_chars {
+            return None;
+        }
+        let task_id = task?;
+        let dir = base.join(task_id.to_string());
+        std::fs::create_dir_all(&dir).ok()?;
+        // 高分辨率时间戳 + uuid 短码：防同 ms 双发文件名碰撞（cc/codex 都按 turn 1 次，
+        // 但 hostage 测试 / 远端 worker 时序难保证）。后缀 .md 让 Read 友好。
+        let ts = Utc::now().format("%Y%m%dT%H%M%S%.6f").to_string();
+        let short = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let path = dir.join(format!("turn-{ts}-{short}.md"));
+        std::fs::write(&path, text).ok()?;
+        Some(ArtifactRef {
+            path,
+            summary: summarize_for_artifact_ref(text, ARTIFACT_SUMMARY_PREVIEW_CHARS),
+            byte_size: text.len() as u64,
+        })
+    }
+
+    /// 生产路径：base = `$HOME/.fuxi/artifacts`，阈值 [`ARTIFACT_DUMP_THRESHOLD_CHARS`]。
+    /// 无 `$HOME` 时返 `None`（理论不发生，cc/codex 进程必有 HOME）。
+    pub fn maybe_dump_default(task: Option<TaskId>, text: &str) -> Option<Self> {
+        let home = std::env::var_os("HOME")?;
+        let base = PathBuf::from(home).join(".fuxi").join("artifacts");
+        Self::maybe_dump(&base, task, text, ARTIFACT_DUMP_THRESHOLD_CHARS)
+    }
+}
+
+/// 把 text 截成 ref summary：trim 后 ≤ `max_chars` 字直接返回；超过时取头 N 字 +
+/// 提示尾。按 char 不按 byte 切，避免中文字符被截半（Rust String index 是字节边界，
+/// `.chars().take()` 是字符边界安全）。CLI/firehose print 端如果想自己 summarize
+/// 也可调这个 helper 保持文案统一。
+pub fn summarize_for_artifact_ref(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let total = trimmed.chars().count();
+    if total <= max_chars {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(max_chars).collect();
+    format!("{head}…（完整产出已落档，共 {total} 字，调 Read artifact 查看）")
+}
+
 /// 文件级 deliverable 的单文件元信息——`DeliverableProduced.files` 用。
 ///
 /// sha256 给审计校验防篡改 / 重复检测；size_bytes 给配额 / UI 显示。
@@ -228,8 +302,18 @@ pub enum EventKind {
     UserPrompted {
         text: String,
     },
+    /// 门客（或玄女）回了一段文本。
+    ///
+    /// **Phase 0 ref-only**：长产出（默认 ≥ 500 字）由 agent 翻译层（agent-cc/codex
+    /// parser）把完整内容 dump 到 `~/.fuxi/artifacts/<task_id>/result.md`，`text` 字段
+    /// 改填 summary（≤200 字），`artifact_ref` 设 `Some({path, summary, byte_size})`。
+    /// 短产出 `artifact_ref` 留 None，`text` 是完整内容（向后兼容老门客）。
+    /// CLI/firehose print 时优先 artifact_ref（只打 summary + path），让玄女 context
+    /// 不被门客整篇产出污染。详见 `ArtifactRef` 文档。
     AgentResponded {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact_ref: Option<ArtifactRef>,
     },
     ThinkingStarted,
     ThinkingFinished,
@@ -972,6 +1056,7 @@ mod tests {
             meta,
             kind: EventKind::AgentResponded {
                 text: "远端来的".into(),
+                artifact_ref: None,
             },
         };
         let json = serde_json::to_string(&ev).expect("ser");
@@ -1424,5 +1509,146 @@ mod tests {
             }
             other => panic!("expect VisionRequest, got {other:?}"),
         }
+    }
+
+    // ── Phase 0 ref-only：ArtifactRef + AgentResponded.artifact_ref ────────
+    //
+    // 设计意图：长产出（默认 ≥ 500 字）由门客 dump 到磁盘，event 只带 summary +
+    // 路径，避免事件流被整篇报告淹没。玄女想看完整调 Read。
+    // 详见 docs/decisions/2026-05-25-artifact-ref-only.md（待写）。
+
+    #[test]
+    fn artifact_ref_roundtrip() {
+        let ar = ArtifactRef {
+            path: PathBuf::from("/home/e0-7/.fuxi/artifacts/task-xyz/result.md"),
+            summary: "nailong 是 ACM 模板，覆盖度 70%".into(),
+            byte_size: 4096,
+        };
+        let json = serde_json::to_string(&ar).expect("ser");
+        assert!(json.contains("summary"));
+        assert!(json.contains("byte_size"));
+        let back: ArtifactRef = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.path, ar.path);
+        assert_eq!(back.summary, ar.summary);
+        assert_eq!(back.byte_size, ar.byte_size);
+    }
+
+    #[test]
+    fn agent_responded_with_artifact_ref_roundtrip() {
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::AgentResponded {
+                text: "nailong 是 ACM 模板，覆盖度 70%".into(),
+                artifact_ref: Some(ArtifactRef {
+                    path: PathBuf::from("/home/e0-7/.fuxi/artifacts/task-xyz/result.md"),
+                    summary: "nailong 是 ACM 模板，覆盖度 70%".into(),
+                    byte_size: 4096,
+                }),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(json.contains("agent_responded"));
+        assert!(json.contains("artifact_ref"));
+        let back: Event = serde_json::from_str(&json).expect("de");
+        match back.kind {
+            EventKind::AgentResponded { text, artifact_ref } => {
+                assert_eq!(text, "nailong 是 ACM 模板，覆盖度 70%");
+                let r = artifact_ref.expect("Some");
+                assert_eq!(r.byte_size, 4096);
+            }
+            other => panic!("expect AgentResponded, got {other:?}"),
+        }
+    }
+
+    /// 反回归：老 wire JSON 无 artifact_ref 字段（pre-Phase 0 事件）应能反序列化，
+    /// 回出来 artifact_ref = None。serde(default) 是契约。
+    #[test]
+    fn agent_responded_legacy_payload_without_artifact_ref_deserializes() {
+        let raw = serde_json::json!({
+            "meta": {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "at": "2026-04-26T10:00:00Z"
+            },
+            "kind": {
+                "type": "agent_responded",
+                "text": "old wire payload"
+            }
+        });
+        let ev: Event = serde_json::from_value(raw).expect("legacy event");
+        match ev.kind {
+            EventKind::AgentResponded { text, artifact_ref } => {
+                assert!(artifact_ref.is_none(), "老事件 artifact_ref 应回 None");
+                assert_eq!(text, "old wire payload");
+            }
+            other => panic!("expect AgentResponded, got {other:?}"),
+        }
+    }
+
+    // ── ArtifactRef::maybe_dump dump helper 单元 ──────────────────
+
+    #[test]
+    fn artifact_ref_maybe_dump_short_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = TaskId::new();
+        let text = "短".repeat(100); // 100 chars < 500 阈值
+        assert!(ArtifactRef::maybe_dump(dir.path(), Some(task), &text, 500).is_none());
+    }
+
+    #[test]
+    fn artifact_ref_maybe_dump_long_writes_file_returns_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let task = TaskId::new();
+        let text = "调研产出x".repeat(160); // ~800 chars > 500 阈值
+        let r = ArtifactRef::maybe_dump(dir.path(), Some(task), &text, 500).expect("Some");
+        assert!(r.path.starts_with(dir.path().join(task.to_string())));
+        assert!(r.path.exists(), "artifact 文件应落地");
+        assert_eq!(
+            std::fs::read_to_string(&r.path).unwrap(),
+            text,
+            "落地内容 == 原文"
+        );
+        assert_eq!(r.byte_size as usize, text.len());
+        assert!(r.summary.chars().count() < text.chars().count());
+        assert!(r.summary.contains("完整产出已落档"));
+    }
+
+    #[test]
+    fn artifact_ref_maybe_dump_without_task_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "调研产出".repeat(200);
+        assert!(ArtifactRef::maybe_dump(dir.path(), None, &text, 500).is_none());
+    }
+
+    #[test]
+    fn summarize_for_artifact_ref_short_unchanged() {
+        let s = summarize_for_artifact_ref("简短回答", 200);
+        assert_eq!(s, "简短回答");
+    }
+
+    #[test]
+    fn summarize_for_artifact_ref_long_truncates_with_suffix() {
+        let text = "a".repeat(500);
+        let s = summarize_for_artifact_ref(&text, 200);
+        assert!(s.chars().count() < 500);
+        assert!(s.contains("完整产出已落档"));
+        assert!(s.contains("500 字"));
+    }
+
+    /// 反回归：artifact_ref = None 时**不**写进 JSON（保持事件线干净，且
+    /// 跨语言/老 reader 不解析未知字段）。`skip_serializing_if` 契约。
+    #[test]
+    fn agent_responded_none_artifact_ref_skips_serialization() {
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::AgentResponded {
+                text: "短消息".into(),
+                artifact_ref: None,
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(
+            !json.contains("artifact_ref"),
+            "None artifact_ref 应被 skip: {json}"
+        );
     }
 }

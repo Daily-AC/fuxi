@@ -9,7 +9,7 @@
 //!
 //! 翻译规则表见 `reference_cc_stream_json.md` §cc↔A2A 事件映射。
 
-use fuxi_core::event::{DeliverableKind, Event, EventKind, EventMeta};
+use fuxi_core::event::{ArtifactRef, DeliverableKind, Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::TaskState;
 use serde::Deserialize;
@@ -498,10 +498,20 @@ pub fn translate(
                 return out;
             }
             state.responded_this_turn = true;
+            // Phase 0 ref-only：长产出落档 ~/.fuxi/artifacts/<task>/，event 只带
+            // summary + path，避免玄女 `fuxi events --task X` 拉到整篇调研。
+            let artifact_ref = ArtifactRef::maybe_dump_default(task_id, &text);
+            let payload_text = match &artifact_ref {
+                Some(r) => r.summary.clone(),
+                None => text,
+            };
             out.push(mk_event(
                 agent_id,
                 task_id,
-                EventKind::AgentResponded { text },
+                EventKind::AgentResponded {
+                    text: payload_text,
+                    artifact_ref,
+                },
             ));
         }
         CcEvent::AssistantToolUse {
@@ -574,10 +584,20 @@ pub fn translate(
             // 一次会让 TUI 显示两遍。仅在本 turn 没发过 AgentResponded 的
             // 极端场景（cc 只给 result text 没给 assistant stream）才补发。
             if !state.responded_this_turn && !text.is_empty() {
+                // 同 AssistantText 路径走 ref-only——冷场景下 cc 只在 result 里
+                // 给 text，依然可能 ≥ 阈值，要一视同仁 dump。
+                let artifact_ref = ArtifactRef::maybe_dump_default(task_id, &text);
+                let payload_text = match &artifact_ref {
+                    Some(r) => r.summary.clone(),
+                    None => text,
+                };
                 out.push(mk_event(
                     agent_id,
                     task_id,
-                    EventKind::AgentResponded { text },
+                    EventKind::AgentResponded {
+                        text: payload_text,
+                        artifact_ref,
+                    },
                 ));
             }
             // task #8：cc result 一般会带 usage——按本 turn 增量发 UsageReport。
@@ -655,6 +675,79 @@ mod tests {
 
     fn fresh_agent() -> AgentId {
         AgentId::new()
+    }
+
+    // ── Phase 0 ref-only：end-to-end translate 路径 ────────────────
+    // dump helper 单元测试在 fuxi-core 里（ArtifactRef::maybe_dump）；这里只测
+    // translate path 接通——长 text 走 dump、短 text 走原样透传。
+
+    #[test]
+    fn translate_assistant_text_emits_artifact_ref_when_long() {
+        let agent = fresh_agent();
+        let task = TaskId::new();
+        // 通过 HOME 注入临时目录——单线程同步测试，env mutation 在本测试 scope 安全。
+        // 同 mod 其他测试若并发跑会出 race；但 cargo test 默认按文件并发，文件内串行，
+        // 这条测试 cfg 只在 ResultSuccess + AssistantText 走 ~/.fuxi 路径时才相关，
+        // 其他测试不踩 HOME。
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: 单测进程内 env mutation；test 标准做法。
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        let long = "调研产出".repeat(200); // ~800 chars
+        let mut state = TranslateState::new();
+        let events = translate(
+            CcEvent::AssistantText { text: long.clone() },
+            agent,
+            Some(task),
+            &mut state,
+            None,
+        );
+        let resp = events
+            .iter()
+            .find_map(|e| {
+                if let EventKind::AgentResponded { text, artifact_ref } = &e.kind {
+                    Some((text.clone(), artifact_ref.clone()))
+                } else {
+                    None
+                }
+            })
+            .expect("应 emit AgentResponded");
+        let r = resp.1.expect("长产出应带 artifact_ref");
+        assert!(r.path.exists(), "artifact 落档");
+        assert!(
+            resp.0.chars().count() < long.chars().count(),
+            "payload text 应改成 summary"
+        );
+        assert_eq!(resp.0, r.summary, "payload text 应等同 summary 字段");
+    }
+
+    #[test]
+    fn translate_assistant_text_short_keeps_full_text_no_artifact() {
+        let agent = fresh_agent();
+        let task = TaskId::new();
+        let mut state = TranslateState::new();
+        let short = "短回复 OK".to_string();
+        let events = translate(
+            CcEvent::AssistantText {
+                text: short.clone(),
+            },
+            agent,
+            Some(task),
+            &mut state,
+            None,
+        );
+        let (text, artifact_ref) = events
+            .iter()
+            .find_map(|e| {
+                if let EventKind::AgentResponded { text, artifact_ref } = &e.kind {
+                    Some((text.clone(), artifact_ref.clone()))
+                } else {
+                    None
+                }
+            })
+            .expect("AgentResponded");
+        assert!(artifact_ref.is_none(), "短文本不应 dump");
+        assert_eq!(text, short, "短文本应原样透传");
     }
 
     // ── parser 单元 ─────────────────────────────────────────────
@@ -1130,7 +1223,7 @@ mod tests {
             other => panic!("got {other:?}"),
         }
         match &out[1].kind {
-            EventKind::AgentResponded { text } => assert_eq!(text, "hi"),
+            EventKind::AgentResponded { text, .. } => assert_eq!(text, "hi"),
             other => panic!("got {other:?}"),
         }
     }
@@ -1468,7 +1561,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1, "cangjie 只发一条事件");
         match &out[0].kind {
-            EventKind::AgentResponded { text } => {
+            EventKind::AgentResponded { text, .. } => {
                 assert!(text.contains("_fuxi"), "cangjie 输出当作普通文本透传");
             }
             other => panic!("cangjie 不该 emit AgentRequestReview, got {other:?}"),
@@ -1512,7 +1605,7 @@ mod tests {
         // 没 kind = 不是合法 sentinel = 当普通文本走，TUI 仍能看到（用户 debug 友好）
         assert_eq!(out.len(), 1);
         assert!(
-            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == bad),
+            matches!(&out[0].kind, EventKind::AgentResponded { text, .. } if text == bad),
             "缺 kind 应退化 AgentResponded，got {:?}",
             out[0].kind
         );
@@ -1559,7 +1652,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert!(
-            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == other_json),
+            matches!(&out[0].kind, EventKind::AgentResponded { text, .. } if text == other_json),
             "非 _fuxi sentinel 应当透传，got {:?}",
             out[0].kind
         );
@@ -1613,7 +1706,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert!(
-            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == raw),
+            matches!(&out[0].kind, EventKind::AgentResponded { text, .. } if text == raw),
             "无 task_id 时应退化 AgentResponded 透传，got {:?}",
             out[0].kind
         );

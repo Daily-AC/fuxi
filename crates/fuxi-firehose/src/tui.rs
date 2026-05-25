@@ -393,7 +393,12 @@ fn summarize(k: &EventKind) -> String {
                 .unwrap_or_default()
         ),
         UserPrompted { text } => format!("user> {}", one_line(text, 60)),
-        AgentResponded { text } => format!("agent> {}", one_line(text, 60)),
+        AgentResponded { text, artifact_ref } => {
+            // Phase 0 ref-only：带 artifact 的 event 加 `[a]` 标记，提示玄女/操作员
+            // 该 turn 完整产出已落档；TUI 单行不挤完整路径，详情查 `fuxi events`。
+            let marker = if artifact_ref.is_some() { "[a] " } else { "" };
+            format!("agent> {marker}{}", one_line(text, 60))
+        }
         ThinkingStarted => "thinking…".to_string(),
         ThinkingFinished => "thinking done".to_string(),
         ToolCallStarted { tool, .. } => format!("tool={tool}"),
@@ -967,6 +972,7 @@ mod tests {
             meta,
             kind: EventKind::AgentResponded {
                 text: "远端响应".into(),
+                artifact_ref: None,
             },
         };
         let row = EventRow::from_event(&ev);
@@ -982,6 +988,7 @@ mod tests {
             meta: EventMeta::now(),
             kind: EventKind::AgentResponded {
                 text: "本地响应".into(),
+                artifact_ref: None,
             },
         };
         let row_local = EventRow::from_event(&ev_local);
@@ -1009,6 +1016,7 @@ mod tests {
             meta: remote_meta,
             kind: EventKind::AgentResponded {
                 text: "远端来的".into(),
+                artifact_ref: None,
             },
         });
 

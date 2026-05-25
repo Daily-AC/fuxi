@@ -1454,6 +1454,7 @@ mod tests {
             meta: m1,
             kind: EventKind::AgentResponded {
                 text: "中间产物 1".into(),
+                artifact_ref: None,
             },
         })
         .expect("publish AgentResponded");

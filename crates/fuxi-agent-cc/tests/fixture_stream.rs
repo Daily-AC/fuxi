@@ -90,7 +90,7 @@ fn fixture_translates_to_expected_event_sequence() {
         .iter()
         .rev()
         .find_map(|k| match k {
-            EventKind::AgentResponded { text } => Some(text.clone()),
+            EventKind::AgentResponded { text, .. } => Some(text.clone()),
             _ => None,
         })
         .expect("应有一条 AgentResponded");
