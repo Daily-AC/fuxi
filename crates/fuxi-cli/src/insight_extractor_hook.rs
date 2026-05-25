@@ -93,7 +93,7 @@ impl CangjieSpawner for FuxiCangjieSpawner {
                     continue;
                 }
                 match ev.kind {
-                    EventKind::AgentResponded { text } => {
+                    EventKind::AgentResponded { text, .. } => {
                         if !accumulated.is_empty() {
                             accumulated.push('\n');
                         }

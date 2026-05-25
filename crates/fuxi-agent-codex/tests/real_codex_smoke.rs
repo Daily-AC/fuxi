@@ -70,7 +70,7 @@ async fn real_codex_echo_roundtrip() {
                     saw_ready = true;
                     eprintln!("AgentReady: {endpoint}");
                 }
-                EventKind::AgentResponded { text } => {
+                EventKind::AgentResponded { text, .. } => {
                     eprintln!("AgentResponded: {text:?}");
                     responses.push(text.clone());
                     if text.to_lowercase().contains("hi") {

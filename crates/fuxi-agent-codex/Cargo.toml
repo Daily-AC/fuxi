@@ -23,3 +23,5 @@ chrono = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }
+# Phase 0 ref-only：artifact dump 单测用 tempdir 替 ~/.fuxi/artifacts。
+tempfile = "3"

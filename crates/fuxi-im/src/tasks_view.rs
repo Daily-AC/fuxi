@@ -186,7 +186,7 @@ impl TaskAccumulator {
                     self.agent_last_activity.insert(agent, dot_activity);
                 }
             }
-            EventKind::AgentResponded { text } => {
+            EventKind::AgentResponded { text, .. } => {
                 if let Some(agent) = ev.meta.agent {
                     let summary = summarize_text(text);
                     self.agent_last_text.insert(agent, summary.clone());
@@ -763,6 +763,7 @@ mod tests {
             meta,
             kind: EventKind::AgentResponded {
                 text: "已完成进度快照，测试通过".into(),
+                artifact_ref: None,
             },
         });
 

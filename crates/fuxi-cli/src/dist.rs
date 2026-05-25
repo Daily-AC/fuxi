@@ -5387,6 +5387,7 @@ mod tests {
             meta: fuxi_core::EventMeta::now(),
             kind: fuxi_core::EventKind::AgentResponded {
                 text: text.to_string(),
+                artifact_ref: None,
             },
         }
     }
@@ -5579,7 +5580,7 @@ mod tests {
         let drained = bus.take_batch(16).await;
         assert_eq!(drained.len(), 1, "agent_message 单行应只产 1 条 Event");
         match &drained[0].kind {
-            EventKind::AgentResponded { text } => assert_eq!(text, "hi"),
+            EventKind::AgentResponded { text, .. } => assert_eq!(text, "hi"),
             other => panic!("expected AgentResponded, got {other:?}"),
         }
         assert_eq!(drained[0].meta.agent, Some(agent));
@@ -5674,9 +5675,9 @@ mod tests {
             2,
             "fresh state job2 应发 TaskStateChanged + AgentResponded（冷场景）"
         );
-        let has_responded = drained
-            .iter()
-            .any(|e| matches!(&e.kind, EventKind::AgentResponded { text } if text == "job2 reply"));
+        let has_responded = drained.iter().any(
+            |e| matches!(&e.kind, EventKind::AgentResponded { text, .. } if text == "job2 reply"),
+        );
         assert!(
             has_responded,
             "per-job 新 TranslateState 不应继承上 job 的 responded_this_turn 状态"

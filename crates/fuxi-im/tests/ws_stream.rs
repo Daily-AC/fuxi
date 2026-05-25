@@ -139,7 +139,10 @@ fn agent_event(agent: AgentId, text: &str) -> Event {
     meta.agent = Some(agent);
     Event {
         meta,
-        kind: EventKind::AgentResponded { text: text.into() },
+        kind: EventKind::AgentResponded {
+            text: text.into(),
+            artifact_ref: None,
+        },
     }
 }
 
@@ -170,7 +173,10 @@ fn task_event(task: TaskId, label: &str) -> Event {
     meta.task = Some(task);
     Event {
         meta,
-        kind: EventKind::AgentResponded { text: label.into() },
+        kind: EventKind::AgentResponded {
+            text: label.into(),
+            artifact_ref: None,
+        },
     }
 }
 
@@ -216,7 +222,7 @@ async fn ws_conv_streams_xuannv_events_live() {
 
     let got = next_event(&mut r, "conv-live").await;
     match got.kind {
-        EventKind::AgentResponded { text } => assert_eq!(text, "你好以琳"),
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "你好以琳"),
         other => panic!("expect AgentResponded, got {other:?}"),
     }
 }
@@ -270,7 +276,7 @@ async fn ws_conv_filters_out_other_agents() {
 
     let got = next_event(&mut r, "conv-filter").await;
     match got.kind {
-        EventKind::AgentResponded { text } => assert_eq!(text, "玄女发言", "应只收玄女事件"),
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "玄女发言", "应只收玄女事件"),
         other => panic!("expect AgentResponded, got {other:?}"),
     }
 }
@@ -303,11 +309,11 @@ async fn ws_conv_replay_from_cursor_then_tails_live() {
     let first = next_event(&mut r, "replay-1").await;
     let second = next_event(&mut r, "replay-2").await;
     match first.kind {
-        EventKind::AgentResponded { text } => assert_eq!(text, "b"),
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "b"),
         o => panic!("expect b, got {o:?}"),
     }
     match second.kind {
-        EventKind::AgentResponded { text } => assert_eq!(text, "c"),
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "c"),
         o => panic!("expect c, got {o:?}"),
     }
 
@@ -316,7 +322,7 @@ async fn ws_conv_replay_from_cursor_then_tails_live() {
     bus.publish(agent_event(xuannv, "d")).expect("publish d");
     let third = next_event(&mut r, "replay-tail").await;
     match third.kind {
-        EventKind::AgentResponded { text } => assert_eq!(text, "d"),
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "d"),
         o => panic!("expect d, got {o:?}"),
     }
 }
@@ -346,7 +352,7 @@ async fn ws_task_stream_filters_by_task_id() {
 
     let got = next_event(&mut r, "task-filter").await;
     match got.kind {
-        EventKind::AgentResponded { text } => {
+        EventKind::AgentResponded { text, .. } => {
             assert_eq!(text, "A-signal", "应只收 task_a 事件")
         }
         o => panic!("expect AgentResponded, got {o:?}"),
@@ -391,7 +397,7 @@ async fn ws_conv_survives_broadcast_lag() {
             .expect("err");
         if let Message::Text(t) = msg {
             let ev: Event = serde_json::from_str(&t).expect("event");
-            if let EventKind::AgentResponded { text } = ev.kind
+            if let EventKind::AgentResponded { text, .. } = ev.kind
                 && text == "after-lag"
             {
                 break;
@@ -491,7 +497,7 @@ async fn http_task_events_returns_history_with_pagination() {
     let labels: Vec<String> = evs
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::AgentResponded { text } => Some(text.clone()),
+            EventKind::AgentResponded { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -526,7 +532,7 @@ async fn http_task_events_with_cursor_returns_strictly_after() {
     let labels: Vec<String> = evs
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::AgentResponded { text } => Some(text.clone()),
+            EventKind::AgentResponded { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -560,7 +566,7 @@ async fn ws_task_conv_filters_by_task_id() {
 
     let got = next_event(&mut r, "task-conv-filter").await;
     match got.kind {
-        EventKind::AgentResponded { text } => {
+        EventKind::AgentResponded { text, .. } => {
             assert_eq!(text, "A-signal", "应只收 task_a 事件")
         }
         o => panic!("expect AgentResponded, got {o:?}"),
@@ -613,7 +619,7 @@ async fn http_task_events_drops_non_whitelisted_kinds() {
     let evs = read_events_resp(resp).await;
     assert_eq!(evs.len(), 1, "白名单外 2 条应被过滤，只剩 AgentResponded");
     match &evs[0].kind {
-        EventKind::AgentResponded { text } => assert_eq!(text, "say"),
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "say"),
         o => panic!("expect AgentResponded, got {o:?}"),
     }
 }

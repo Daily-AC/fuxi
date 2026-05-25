@@ -30,7 +30,7 @@
 //!    `agent_message` 的文本）；
 //! 2. 中间类型 `CodexEvent` 让单测不用造 JSON 也能验证翻译逻辑。
 
-use fuxi_core::event::{DeliverableKind, Event, EventKind, EventMeta};
+use fuxi_core::event::{ArtifactRef, DeliverableKind, Event, EventKind, EventMeta};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_core::task::TaskState;
 use serde::Deserialize;
@@ -356,10 +356,19 @@ pub fn translate(
             // 但这里也先发一条 AgentResponded——Firehose 读者需要实时看到文本，
             // 而不是等整轮结束。turn.completed 不再重复发，只发状态转移。
             state.last_agent_message = Some(text.clone());
+            // Phase 0 ref-only：长产出落档，event 只带 summary + path。同 cc 路径。
+            let artifact_ref = ArtifactRef::maybe_dump_default(task_id, &text);
+            let payload_text = match &artifact_ref {
+                Some(r) => r.summary.clone(),
+                None => text,
+            };
             out.push(mk_event(
                 agent_id,
                 task_id,
-                EventKind::AgentResponded { text },
+                EventKind::AgentResponded {
+                    text: payload_text,
+                    artifact_ref,
+                },
             ));
         }
         CodexEvent::ItemOther {
@@ -652,10 +661,49 @@ mod tests {
             None,
         );
         match &out[0].kind {
-            EventKind::AgentResponded { text } => assert_eq!(text, "hi"),
+            EventKind::AgentResponded { text, .. } => assert_eq!(text, "hi"),
             other => panic!("got {other:?}"),
         }
         assert_eq!(st.last_agent_message.as_deref(), Some("hi"));
+    }
+
+    /// Phase 0 ref-only：codex 端长 agent_message 也走 dump（同 cc 行为）。
+    /// HOME 用 tempdir 替；同进程 env 注入 — 注意若并行测试踩相同 env 会 race，
+    /// 但 cargo test 默认按文件并发、文件内串行；这个 test 是 codex 唯一一处摸
+    /// HOME 的，避开了 race。
+    #[test]
+    fn translate_long_agent_message_emits_artifact_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: 单测进程内 env mutation；test 标准做法。
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let task = TaskId::new();
+        let mut st = TranslateState::new();
+        let long = "调研产出".repeat(200); // ~800 chars
+        let out = translate(
+            CodexEvent::AgentMessage {
+                item_id: "x".into(),
+                text: long.clone(),
+            },
+            fresh_agent(),
+            Some(task),
+            &mut st,
+            None,
+        );
+        let (text, artifact_ref) = out
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::AgentResponded { text, artifact_ref } => {
+                    Some((text.clone(), artifact_ref.clone()))
+                }
+                _ => None,
+            })
+            .expect("AgentResponded");
+        let r = artifact_ref.expect("长产出应带 artifact_ref");
+        assert!(r.path.exists(), "artifact 应落档");
+        assert!(
+            text.chars().count() < long.chars().count(),
+            "payload 应缩成 summary"
+        );
     }
 
     #[test]
@@ -936,7 +984,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert!(
-            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == other),
+            matches!(&out[0].kind, EventKind::AgentResponded { text, .. } if text == other),
             "非 _fuxi sentinel 应当透传，got {:?}",
             out[0].kind
         );
@@ -959,7 +1007,7 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert!(
-            matches!(&out[0].kind, EventKind::AgentResponded { text } if text == raw),
+            matches!(&out[0].kind, EventKind::AgentResponded { text, .. } if text == raw),
             "无 task_id 时应退化 AgentResponded 透传，got {:?}",
             out[0].kind
         );

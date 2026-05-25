@@ -155,6 +155,7 @@ async fn middle_events_dont_trigger_xuannv_attention() {
             meta: m1,
             kind: EventKind::AgentResponded {
                 text: format!("step-{i}"),
+                artifact_ref: None,
             },
         })
         .expect("publish responded");

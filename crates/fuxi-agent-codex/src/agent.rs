@@ -243,7 +243,10 @@ impl Agent for CodexAgent {
                 let _ = tx
                     .send(Event {
                         meta,
-                        kind: EventKind::AgentResponded { text: msg },
+                        kind: EventKind::AgentResponded {
+                            text: msg,
+                            artifact_ref: None,
+                        },
                     })
                     .await;
                 let mut meta = EventMeta::now();
@@ -467,7 +470,7 @@ mod tests {
 
         // 兜底诊断 AgentResponded：必含 FUXI_CODEX_MODEL 提示 + stderr 那行
         let diag = events.iter().find_map(|e| match &e.kind {
-            fuxi_core::EventKind::AgentResponded { text } => Some(text.clone()),
+            fuxi_core::EventKind::AgentResponded { text, .. } => Some(text.clone()),
             _ => None,
         });
         let diag = diag.expect("应 emit 兜底 AgentResponded");
@@ -522,7 +525,9 @@ mod tests {
 
         // 不应 emit 含 "FUXI_CODEX_MODEL" 的 AgentResponded
         let bogus_diag = events.iter().find_map(|e| match &e.kind {
-            fuxi_core::EventKind::AgentResponded { text } if text.contains("FUXI_CODEX_MODEL") => {
+            fuxi_core::EventKind::AgentResponded { text, .. }
+                if text.contains("FUXI_CODEX_MODEL") =>
+            {
                 Some(text.clone())
             }
             _ => None,
