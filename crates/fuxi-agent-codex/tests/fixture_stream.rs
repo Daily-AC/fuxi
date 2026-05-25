@@ -53,7 +53,7 @@ fn fixture_translates_to_expected_event_sequence() {
     );
 
     let saw_hi = events.iter().any(|e| match e {
-        EventKind::AgentResponded { text } => text.to_lowercase().contains("hi"),
+        EventKind::AgentResponded { text, .. } => text.to_lowercase().contains("hi"),
         _ => false,
     });
     assert!(saw_hi, "no AgentResponded containing 'hi' in {events:#?}");

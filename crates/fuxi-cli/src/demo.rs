@@ -260,7 +260,8 @@ mod tests {
             endpoint: "pid:42".into()
         })));
         assert!(!is_terminal(&ev(EventKind::AgentResponded {
-            text: "hi".into()
+            text: "hi".into(),
+            artifact_ref: None,
         })));
         assert!(!is_terminal(&ev(EventKind::TaskStateChanged {
             from: TaskState::New,
@@ -285,7 +286,8 @@ mod tests {
     #[test]
     fn agent_events_are_not_noise() {
         assert!(!is_noise(&ev(EventKind::AgentResponded {
-            text: "hi".into()
+            text: "hi".into(),
+            artifact_ref: None,
         })));
         assert!(!is_noise(&ev(EventKind::ThinkingStarted)));
         let custom_non_system = EventKind::Custom {

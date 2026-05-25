@@ -73,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     meta: with_agent(agent),
                     kind: EventKind::AgentResponded {
                         text: format!("synthetic response #{i}\nwith a newline"),
+                        artifact_ref: None,
                     },
                 },
             };

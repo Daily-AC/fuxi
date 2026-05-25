@@ -188,12 +188,18 @@ mod tests {
         let mine = ev(
             Some(me),
             None,
-            EventKind::AgentResponded { text: "hi".into() },
+            EventKind::AgentResponded {
+                text: "hi".into(),
+                artifact_ref: None,
+            },
         );
         let theirs = ev(
             Some(other),
             None,
-            EventKind::AgentResponded { text: "hi".into() },
+            EventKind::AgentResponded {
+                text: "hi".into(),
+                artifact_ref: None,
+            },
         );
         assert!(worker_event_visible(&mine, me));
         assert!(!worker_event_visible(&theirs, me));
@@ -353,7 +359,14 @@ mod tests {
         // 没设 meta.agent 的事件（早期模式）—— filter 直接拒（除 UserInterventionSent
         // 这条按 target 走的特殊路径）
         let me = AgentId::new();
-        let no_agent = ev(None, None, EventKind::AgentResponded { text: "x".into() });
+        let no_agent = ev(
+            None,
+            None,
+            EventKind::AgentResponded {
+                text: "x".into(),
+                artifact_ref: None,
+            },
+        );
         assert!(!worker_event_visible(&no_agent, me));
     }
 
@@ -417,6 +430,7 @@ mod tests {
             None,
             EventKind::AgentResponded {
                 text: "我说话".into(),
+                artifact_ref: None,
             },
         ))
         .unwrap();
@@ -435,6 +449,7 @@ mod tests {
             None,
             EventKind::AgentResponded {
                 text: "别人说话".into(),
+                artifact_ref: None,
             },
         ))
         .unwrap();

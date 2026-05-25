@@ -611,7 +611,17 @@ fn event_summary(kind: &fuxi_core::EventKind) -> String {
             .as_deref()
             .map(|s| truncate_preview(s, 120))
             .unwrap_or_else(|| "resumed".to_string()),
-        UserPrompted { text } | AgentResponded { text } => truncate_preview(text, 160),
+        UserPrompted { text } => truncate_preview(text, 160),
+        AgentResponded { text, artifact_ref } => match artifact_ref {
+            // Phase 0 ref-only：text 已是 summary（emit 端收缩过），artifact path
+            // 提示让玄女知道完整产出在哪个文件，要看自己 Read。
+            Some(r) => format!(
+                "{} · artifact={}",
+                truncate_preview(text, 160),
+                r.path.display()
+            ),
+            None => truncate_preview(text, 160),
+        },
         ToolCallStarted { tool, .. } => format!("{tool} started"),
         ToolCallFinished {
             tool,
@@ -1252,6 +1262,7 @@ mod tests {
             meta: EventMeta::now(),
             kind: EventKind::AgentResponded {
                 text: "门客最终答案：README 可改两点".into(),
+                artifact_ref: None,
             },
         };
         let line = format_event_line(&ev, None).expect("应输出");

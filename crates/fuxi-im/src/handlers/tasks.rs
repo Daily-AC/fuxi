@@ -201,12 +201,18 @@ mod filter_tests {
         let mine = ev(
             Some(t),
             None,
-            EventKind::AgentResponded { text: "hi".into() },
+            EventKind::AgentResponded {
+                text: "hi".into(),
+                artifact_ref: None,
+            },
         );
         let other_task = ev(
             Some(TaskId::new()),
             None,
-            EventKind::AgentResponded { text: "hi".into() },
+            EventKind::AgentResponded {
+                text: "hi".into(),
+                artifact_ref: None,
+            },
         );
         assert!(task_thread_visible(&mine, t));
         assert!(!task_thread_visible(&other_task, t));
@@ -368,7 +374,14 @@ mod filter_tests {
     #[test]
     fn drops_when_meta_task_missing() {
         let t = TaskId::new();
-        let no_task = ev(None, None, EventKind::AgentResponded { text: "x".into() });
+        let no_task = ev(
+            None,
+            None,
+            EventKind::AgentResponded {
+                text: "x".into(),
+                artifact_ref: None,
+            },
+        );
         assert!(!task_thread_visible(&no_task, t));
     }
 }
@@ -840,6 +853,7 @@ mod tests {
             t0 + ChronoDuration::seconds(5),
             EventKind::AgentResponded {
                 text: "快照字段已接入".into(),
+                artifact_ref: None,
             },
         ))
         .unwrap();
@@ -888,6 +902,7 @@ mod tests {
             t0 + ChronoDuration::seconds(2),
             EventKind::AgentResponded {
                 text: "好的".into(),
+                artifact_ref: None,
             },
         ))
         .unwrap();
@@ -1066,6 +1081,7 @@ mod tests {
             past + ChronoDuration::seconds(10),
             EventKind::AgentResponded {
                 text: "完成".into(),
+                artifact_ref: None,
             },
         ))
         .unwrap();

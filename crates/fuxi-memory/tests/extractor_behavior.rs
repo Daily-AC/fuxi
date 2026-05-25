@@ -103,6 +103,7 @@ async fn publish_task_transcript(
         meta: mk_meta(),
         kind: EventKind::AgentResponded {
             text: reply.to_string(),
+            artifact_ref: None,
         },
     })
     .expect("publish reply");

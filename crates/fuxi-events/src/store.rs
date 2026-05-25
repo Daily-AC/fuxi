@@ -1197,6 +1197,7 @@ mod tests {
             meta,
             kind: EventKind::AgentResponded {
                 text: "远端响应".into(),
+                artifact_ref: None,
             },
         };
         store.append(&ev).await.expect("append");
@@ -1207,7 +1208,7 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].meta.source_node_id.as_deref(), Some("far"));
         match &got[0].kind {
-            EventKind::AgentResponded { text } => assert_eq!(text, "远端响应"),
+            EventKind::AgentResponded { text, .. } => assert_eq!(text, "远端响应"),
             other => panic!("expect AgentResponded, got {other:?}"),
         }
     }

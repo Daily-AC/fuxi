@@ -1317,7 +1317,7 @@ impl Fuxi {
                 if matches!(&ev.kind, EventKind::AgentRequestReview { .. }) {
                     saw_review_request = true;
                 }
-                if let EventKind::AgentResponded { text } = &ev.kind {
+                if let EventKind::AgentResponded { text, .. } = &ev.kind {
                     last_assistant_text = Some(text.clone());
                 }
                 if matches!(

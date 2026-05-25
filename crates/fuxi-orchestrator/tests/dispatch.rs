@@ -189,6 +189,7 @@ fn happy_script() -> Vec<EventKind> {
     vec![
         EventKind::AgentResponded {
             text: "hello from stub".into(),
+            artifact_ref: None,
         },
         EventKind::TaskStateChanged {
             from: TaskState::InProgress,
@@ -236,7 +237,7 @@ async fn dispatch_republishes_events_and_marks_idle_on_done() {
         let maybe = tokio::time::timeout(std::time::Duration::from_secs(1), sub.next()).await;
         let Ok(Some(Ok(ev))) = maybe else { break };
         match ev.kind {
-            EventKind::AgentResponded { text } if text.contains("hello") => saw_response = true,
+            EventKind::AgentResponded { text, .. } if text.contains("hello") => saw_response = true,
             EventKind::TaskStateChanged {
                 to: TaskState::Done,
                 ..
@@ -443,7 +444,7 @@ async fn events_persist_to_store_for_replay() {
     }
     assert!(
         events.iter().any(
-            |e| matches!(&e.kind, EventKind::AgentResponded { text } if text.contains("hello"))
+            |e| matches!(&e.kind, EventKind::AgentResponded { text, .. } if text.contains("hello"))
         ),
         "replay 应能拿到 AgentResponded"
     );
@@ -514,6 +515,7 @@ async fn pump_returns_to_idle_on_channel_close_without_terminal() {
         "dev",
         vec![EventKind::AgentResponded {
             text: "unfinished".into(),
+            artifact_ref: None,
         }],
     );
     let id = fuxi.insert_agent(stub, None).await;

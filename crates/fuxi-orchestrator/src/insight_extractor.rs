@@ -547,7 +547,7 @@ fn build_trajectory(events: &[Event]) -> String {
                 out.push_str(text);
                 out.push('\n');
             }
-            EventKind::AgentResponded { text } => {
+            EventKind::AgentResponded { text, .. } => {
                 out.push_str("门客：");
                 out.push_str(text);
                 out.push('\n');
@@ -754,6 +754,7 @@ mod tests {
             meta: mk_meta(),
             kind: EventKind::AgentResponded {
                 text: "查到 lockfile 多 worktree 改 Cargo.toml 时合并失败".into(),
+                artifact_ref: None,
             },
         })
         .unwrap();

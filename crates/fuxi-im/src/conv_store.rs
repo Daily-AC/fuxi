@@ -435,7 +435,7 @@ async fn handle_event(
                 .await?;
         }
         // 玄女自己的回应
-        EventKind::AgentResponded { text } if ev.meta.agent == Some(xuannv_id) => {
+        EventKind::AgentResponded { text, .. } if ev.meta.agent == Some(xuannv_id) => {
             store
                 .append_message(
                     conv_id,
@@ -665,7 +665,10 @@ mod tests {
         meta.agent = Some(agent);
         Event {
             meta,
-            kind: EventKind::AgentResponded { text: text.into() },
+            kind: EventKind::AgentResponded {
+                text: text.into(),
+                artifact_ref: None,
+            },
         }
     }
 
