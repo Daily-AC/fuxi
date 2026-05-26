@@ -20,6 +20,7 @@ import { BottomTabBar, type TabSpec } from "./components/BottomTabBar";
 import { MoreSubShell } from "./components/MoreSubShell";
 import { NavigationStack } from "./components/NavigationStack";
 import { Toast } from "./components/Toast";
+import { TopicSidebar } from "./components/TopicSidebar";
 import { CronPage } from "./views/pages/CronPage";
 import { DeliverableDetailPage } from "./views/pages/DeliverableDetailPage";
 import { DeliverablesPage } from "./views/pages/DeliverablesPage";
@@ -163,31 +164,35 @@ const MainShell: Component = () => {
 
   return (
     <div class={styles.shell} data-testid="main-shell">
-      <main class={styles.main} data-testid="tab-content">
-        <Switch>
-          <Match when={activeTab() === 0}>
-            <XuannvPage />
-          </Match>
-          <Match when={activeTab() === 1}>
-            <NavigationStack
-              base={<TasksPage />}
-              top={renderTaskTop()}
-              onPop={navPop}
-            />
-          </Match>
-          <Match when={activeTab() === 2}>
-            <NotificationsPage />
-          </Match>
-          <Match when={activeTab() === 3}>
-            <MoreTabContent
-              sub={moreSub()}
-              renderProjectTop={renderProjectTop}
-              renderDeliverableTop={renderDeliverableTop}
-              onPopL2={navPop}
-            />
-          </Match>
-        </Switch>
-      </main>
+      <div class={styles.bodyRow}>
+        {/* Phase 1 · 桌面 240px 常驻 sidebar；移动端 fixed drawer 由 sidebar 自管 transform */}
+        <TopicSidebar />
+        <main class={styles.main} data-testid="tab-content">
+          <Switch>
+            <Match when={activeTab() === 0}>
+              <XuannvPage />
+            </Match>
+            <Match when={activeTab() === 1}>
+              <NavigationStack
+                base={<TasksPage />}
+                top={renderTaskTop()}
+                onPop={navPop}
+              />
+            </Match>
+            <Match when={activeTab() === 2}>
+              <NotificationsPage />
+            </Match>
+            <Match when={activeTab() === 3}>
+              <MoreTabContent
+                sub={moreSub()}
+                renderProjectTop={renderProjectTop}
+                renderDeliverableTop={renderDeliverableTop}
+                onPopL2={navPop}
+              />
+            </Match>
+          </Switch>
+        </main>
+      </div>
       <BottomTabBar
         tabs={tabs()}
         active={activeTab()}

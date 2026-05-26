@@ -1,0 +1,261 @@
+/* TopicSidebar · 桌面常驻 240px / 移动端左滑抽屉 280px
+ * 视觉规则源头：.impeccable.md + src/styles/global.css
+ * no shadow / no gradient / no glassmorphism / no emoji / no Unicode 装饰
+ */
+
+.sidebar {
+  flex-shrink: 0;
+  width: 240px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* 移动端：抽屉模式 · 默认 translate -100% 隐藏，sidebarOpen=true 时 0 显出 */
+@media (max-width: 767px) {
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 280px;
+    max-width: 80vw;
+    transform: translateX(-100%);
+    transition: transform var(--transition-med);
+    z-index: 60;
+    /* 移动端覆盖 bottom tab bar，避免 56px 留白看起来怪 */
+    height: 100dvh;
+  }
+  .sidebarOpen {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar {
+    transition: none !important;
+  }
+}
+
+/* 移动端 scrim · 抽屉打开时遮罩主区点击关掉。桌面不渲染（组件层 Show 已用 media 等价控） */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 55;
+}
+@media (min-width: 768px) {
+  .scrim {
+    display: none;
+  }
+}
+
+.head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.headTitle {
+  font-size: var(--size-meta);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+
+.addBtn {
+  width: var(--touch);
+  height: var(--touch);
+  min-width: var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-card);
+  font-size: 20px;
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.addBtn:hover:not(:disabled) {
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+}
+.addBtn:disabled {
+  color: var(--text-muted);
+  cursor: wait;
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.muted,
+.empty {
+  margin: var(--space-3) 0;
+  padding: 0 var(--space-2);
+  font-size: var(--size-aux);
+  color: var(--text-muted);
+}
+
+.err {
+  margin: var(--space-3) 0;
+  padding: 0 var(--space-2);
+  font-size: var(--size-aux);
+  color: var(--danger);
+}
+
+/* row · 高 ≥ 44px 满足触控 */
+.row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--radius-card);
+  transition: background var(--transition-fast);
+}
+.row:hover {
+  background: var(--surface-elevated);
+}
+.rowCurrent {
+  background: var(--accent-subtle);
+}
+.rowCurrent:hover {
+  background: var(--accent-subtle);
+}
+.rowDisabled {
+  opacity: 0.5;
+}
+
+.rowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.rowMain:disabled {
+  cursor: wait;
+}
+
+.rowDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.rowCurrent .rowDot {
+  background: var(--accent);
+}
+
+.rowTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rowCurrent .rowTitle {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+
+/* spinner · 切换 loading 唯一允许的 motion（同 global.css .pulse-dot 思路）*/
+.spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none !important;
+  }
+}
+
+/* 三点菜单按钮 · 桌面 hover 出，移动端常驻（触控无 hover） */
+.rowMenuWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-right: 4px;
+}
+
+.rowMenuBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity var(--transition-fast), background var(--transition-fast);
+}
+.row:hover .rowMenuBtn,
+.rowMenuBtn:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  /* 触控设备无 hover，常驻显示 */
+  .rowMenuBtn {
+    opacity: 1;
+  }
+}
+.rowMenuBtn:hover {
+  background: var(--border);
+  color: var(--text-primary);
+}
+
+.rowMenu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 120px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  padding: 4px;
+  z-index: 10;
+}
+
+.rowMenuItem {
+  display: block;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 6px;
+  text-align: left;
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+}
+.rowMenuItem:hover {
+  background: var(--surface);
+  color: var(--text-primary);
+}
