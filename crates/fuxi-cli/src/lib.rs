@@ -54,6 +54,7 @@ pub mod theme;
 pub mod toast;
 pub mod topic_cmd;
 pub mod topic_switch;
+pub mod topic_switcher_impl;
 pub mod up;
 pub mod watch;
 pub mod xuannv_bootstrap;

@@ -30,6 +30,7 @@ pub mod recall;
 pub mod registry;
 pub mod sentinel_addendum;
 pub mod xuannv_context;
+pub mod xuannv_switcher;
 
 pub use bridge::{Intervener, SystemEventBridge};
 pub use dist_enqueuer::{DistEnqueueOptions, DistEnqueuer};
@@ -51,3 +52,4 @@ pub use mailbox::{
 pub use node_load::{NodeLoadProvider, NodeLoadSnapshot, pick_least_loaded};
 pub use recall::{RecallContext, RecallSink};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};
+pub use xuannv_switcher::XuannvSwitcher;

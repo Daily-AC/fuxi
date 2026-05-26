@@ -133,6 +133,10 @@ pub struct Fuxi {
     /// 桌面端 sidebar 都能 `.changed().await` 实时跟随，公理 #3 真实时不轮询。
     /// 由 fuxi-cli `topic_switch::switch_topic_to` 在 kill+spawn 新玄女后更新。
     current_topic_id: watch::Sender<fuxi_core::TopicId>,
+    /// Phase 1 切 topic 反向依赖入口——fuxi-im 的 `/api/topics/:id/switch` 用它。
+    /// trait 在 orchestrator（最小 vocab），impl 在 fuxi-cli `topic_switch` 包
+    /// switch_topic_to 注入。`Option` 未注入 = handler 返 503（同 RecallSink pattern）。
+    xuannv_switcher: Arc<RwLock<Option<Arc<dyn crate::XuannvSwitcher>>>>,
 }
 
 /// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
@@ -175,6 +179,7 @@ impl Fuxi {
             memory_stores: Arc::new(RwLock::new(None)),
             node_load_provider: Arc::new(RwLock::new(None)),
             current_topic_id: topic_tx,
+            xuannv_switcher: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -239,6 +244,19 @@ impl Fuxi {
     /// 幂等：相同 id 重复 set 仍发 changed notification（订阅方按需去重）。
     pub async fn set_current_topic(&self, id: fuxi_core::TopicId) {
         let _ = self.current_topic_id.send_replace(id);
+    }
+
+    /// Phase 1：注入切玄女 topic 的反向依赖 impl（fuxi-cli `topic_switch` 包
+    /// `switch_topic_to`）。fuxi-im handler 通过 [`Self::xuannv_switcher`] 拿
+    /// trait object 调用，避免 fuxi-im 反向依赖 fuxi-cli。
+    pub async fn set_xuannv_switcher(&self, switcher: Arc<dyn crate::XuannvSwitcher>) {
+        *self.xuannv_switcher.write().await = Some(switcher);
+    }
+
+    /// Phase 1：拿当前 xuannv_switcher impl（None = fuxi-cli 启动期还未注入，
+    /// handler 视作 503 Service Unavailable）。
+    pub async fn xuannv_switcher(&self) -> Option<Arc<dyn crate::XuannvSwitcher>> {
+        self.xuannv_switcher.read().await.clone()
     }
 
     /// 注入 P2 召回入库钩子。fuxi-cli 启动时调一次；未调时 dispatch pump silent skip。

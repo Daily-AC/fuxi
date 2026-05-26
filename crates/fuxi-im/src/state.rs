@@ -46,6 +46,9 @@ pub struct AppState {
     /// β · #17 IM 层聊天记录（conversations + messages）持久层。
     /// `Option`：测试 / smoke 默认 None；handler 看到 None 应返 503。
     pub conv_store: Option<ConvStore>,
+    /// Phase 1 · 话题持久层（im.db `topics` 表 CRUD）。`/api/topics` 数据源。
+    /// `Option`：测试默认 None；handler 看到 None 应返 503。
+    pub topic_store: Option<crate::topic_store::TopicStore>,
     /// β · #17 文件上传持久层（uploads 表 + 落盘）。
     /// `Option`：同上，None 时上传/下载 handler 返 503。
     pub upload_store: Option<UploadStore>,
@@ -140,6 +143,7 @@ impl AppState {
             im_auth: ImAuth::ephemeral(),
             im_push: ImPush::disabled(),
             conv_store: None,
+            topic_store: None,
             upload_store: None,
             nodes_provider: None,
             dist_secrets: None,
@@ -169,6 +173,12 @@ impl AppState {
     /// 注入聊天记录持久层（Task #17）。
     pub fn with_conv_store(mut self, store: ConvStore) -> Self {
         self.conv_store = Some(store);
+        self
+    }
+
+    /// Phase 1：注入话题持久层，激活 `/api/topics`。
+    pub fn with_topic_store(mut self, store: crate::topic_store::TopicStore) -> Self {
+        self.topic_store = Some(store);
         self
     }
 
