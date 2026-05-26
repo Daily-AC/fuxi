@@ -5,6 +5,7 @@
 
 use crate::id::{AgentId, TaskId};
 use crate::project::ProjectId;
+use crate::topic::TopicId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +72,13 @@ pub struct Task {
     /// 进对应 sandbox（resolve_project_sandbox_cwd）。
     #[serde(default)]
     pub project_id: Option<ProjectId>,
+    /// Phase 1 topic 路由：本 task 由哪个 topic 发起。`Some(...)` 时玄女切回该
+    /// topic 前 worker 事件不污染当前 prompt（SystemEventBridge filter）；切回
+    /// 后通过 prelude 摘要补出该 topic 进行中任务的状态。`None` = legacy task /
+    /// 不挂任何 topic（视作默认 [`TopicId::general()`]）。
+    /// `#[serde(default)]` 保 v1 events.db 反序列化老 task JSON 不挂。
+    #[serde(default)]
+    pub topic_id: Option<TopicId>,
 }
 
 impl Task {
@@ -87,6 +95,7 @@ impl Task {
             required_tags: Vec::new(),
             pinned_node: None,
             project_id: None,
+            topic_id: None,
         }
     }
 
@@ -105,6 +114,12 @@ impl Task {
     /// v2 跨节点：声明本 task 关联到某 project slug。
     pub fn with_project_id(mut self, project_id: ProjectId) -> Self {
         self.project_id = Some(project_id);
+        self
+    }
+
+    /// Phase 1 topic：声明本 task 由哪个 topic 发起。
+    pub fn with_topic_id(mut self, topic_id: TopicId) -> Self {
+        self.topic_id = Some(topic_id);
         self
     }
 }
@@ -183,5 +198,31 @@ mod tests {
         assert!(t.project_id.is_none());
         assert!(t.required_tags.is_empty());
         assert!(t.pinned_node.is_none());
+    }
+
+    /// Phase 1 Topic：task 必须能携带 topic_id，让 SystemEventBridge filter。
+    #[test]
+    fn task_with_topic_id_round_trip() {
+        use crate::topic::TopicId;
+        let tid = TopicId::new();
+        let t = Task::new("画头像", "用户要的萝莉斯头像").with_topic_id(tid);
+        assert_eq!(t.topic_id, Some(tid));
+
+        let json = serde_json::to_string(&t).unwrap();
+        let t2: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(t2.topic_id, Some(tid));
+    }
+
+    /// 老 Task JSON（缺 topic_id 字段）反序列化得 None，老 events.db 升级兼容。
+    #[test]
+    fn task_deserializes_legacy_without_topic_id() {
+        let modern = Task::new("x", "y");
+        let mut value: serde_json::Value = serde_json::to_value(&modern).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("topic_id");
+        let legacy = serde_json::to_string(&value).unwrap();
+
+        let t: Task = serde_json::from_str(&legacy).expect("legacy task 应反序列化");
+        assert!(t.topic_id.is_none());
     }
 }
