@@ -128,6 +128,11 @@ pub struct Fuxi {
     /// `Option`：未注入 = auto-pin 路径 short-circuit 返 None（fallback 本地路径）。
     /// 同 DistEnqueuer pattern：production impl 由 fuxi-cli 包 `Arc<DistController>` 提供。
     node_load_provider: Arc<RwLock<Option<Arc<dyn crate::NodeLoadProvider>>>>,
+    /// Phase 1 topic 路由：当前玄女绑定的 topic_id。初值 [`TopicId::general()`]
+    /// （Phase 1 之前唯一 topic）。`watch` 让 SystemEventBridge / conv_store sync /
+    /// 桌面端 sidebar 都能 `.changed().await` 实时跟随，公理 #3 真实时不轮询。
+    /// 由 fuxi-cli `topic_switch::switch_topic_to` 在 kill+spawn 新玄女后更新。
+    current_topic_id: watch::Sender<fuxi_core::TopicId>,
 }
 
 /// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
@@ -154,6 +159,9 @@ impl Fuxi {
         // watch::channel 初值 None——和原 `RwLock::new(None)` 等价的"未设置"态。
         // 接收端通过 `borrow()` 读当前值、`changed().await` 等下次 set。
         let (xuannv_tx, _) = watch::channel(None);
+        // Phase 1：current_topic_id 初值 general。switch_topic 前所有玄女对话都
+        // 落在 general topic（兼容老行为）。
+        let (topic_tx, _) = watch::channel(fuxi_core::TopicId::general());
         let me = Self {
             bus: bus.clone(),
             workspace,
@@ -166,6 +174,7 @@ impl Fuxi {
             disk_quota_cache: Arc::new(RwLock::new(HashMap::new())),
             memory_stores: Arc::new(RwLock::new(None)),
             node_load_provider: Arc::new(RwLock::new(None)),
+            current_topic_id: topic_tx,
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -211,6 +220,25 @@ impl Fuxi {
     /// ```
     pub fn xuannv_id_watch(&self) -> watch::Receiver<Option<AgentId>> {
         self.xuannv_id.subscribe()
+    }
+
+    /// Phase 1：读当前玄女绑定的 topic。冷启动 / 未切过为 [`TopicId::general()`]。
+    pub fn current_topic_id(&self) -> fuxi_core::TopicId {
+        *self.current_topic_id.borrow()
+    }
+
+    /// Phase 1：订阅当前 topic 变化——SystemEventBridge / conv_store sync /
+    /// PWA sidebar 都按此 receiver 实时跟随，避免轮询。
+    pub fn current_topic_watch(&self) -> watch::Receiver<fuxi_core::TopicId> {
+        self.current_topic_id.subscribe()
+    }
+
+    /// Phase 1：把当前 topic 切到 `id`。**只更新 watch**，不动 cc 进程——
+    /// 真切 cc + 拉 prelude 由 fuxi-cli 的 `topic_switch::switch_topic_to`
+    /// 做（它先 kill old + spawn new + 注 prelude，最后调本方法 commit）。
+    /// 幂等：相同 id 重复 set 仍发 changed notification（订阅方按需去重）。
+    pub async fn set_current_topic(&self, id: fuxi_core::TopicId) {
+        let _ = self.current_topic_id.send_replace(id);
     }
 
     /// 注入 P2 召回入库钩子。fuxi-cli 启动时调一次；未调时 dispatch pump silent skip。

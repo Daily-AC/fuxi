@@ -52,6 +52,7 @@ pub mod spinner;
 pub mod subcommands;
 pub mod theme;
 pub mod toast;
+pub mod topic_switch;
 pub mod up;
 pub mod watch;
 pub mod xuannv_bootstrap;
