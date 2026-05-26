@@ -409,3 +409,34 @@ export interface RejectDeliverableRequest {
 export interface DeliverablesResponse {
   deliverables: DeliverableEntry[];
 }
+
+// ---------- Phase 1 · Topic 一等公民（docs/handoff/v1-session19.md §2-§4） ----------
+
+/** 跟 backend `crates/fuxi-im/src/handlers/topics.rs::TopicView` 平铺对齐。
+ *  id 是 UUID 字符串（包含 "general" 兜底 topic 也是真 UUID）。 */
+export interface TopicView {
+  id: string;
+  title: string;
+  /** ISO 8601 UTC. */
+  created_at: string;
+  /** ISO 8601 UTC. */
+  last_active_at: string;
+  pinned?: boolean;
+  /** ISO 8601 UTC. 非空 = 已归档。include_archived=1 时才会出现归档项。 */
+  archived_at?: string | null;
+}
+
+export interface TopicsResponse {
+  topics: TopicView[];
+  /** 当前玄女绑定的 topic_id（UUID 字符串）。前端 sidebar 高亮用。 */
+  current_topic_id: string;
+}
+
+export interface CurrentTopicResponse {
+  current_topic_id: string;
+}
+
+/** POST /api/topics body —— title trim 后非空、≤80 字（backend 校验）。 */
+export interface CreateTopicRequest {
+  title: string;
+}

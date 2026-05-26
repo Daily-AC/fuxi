@@ -13,7 +13,9 @@ import type {
   AddProjectRequest,
   AddProjectResponse,
   ConversationHistoryResponse,
+  CreateTopicRequest,
   CronResponse,
+  CurrentTopicResponse,
   DeliverablesResponse,
   EphemeralResponse,
   InterveneRequestV2,
@@ -25,6 +27,8 @@ import type {
   RolesResponse,
   SandboxesResponse,
   TasksOverview,
+  TopicView,
+  TopicsResponse,
   Upload,
 } from "~/types/api";
 
@@ -132,6 +136,17 @@ export interface ApiClient {
   fetchRoles(): Promise<RolesResponse>;
   /** v1-session17 task #9 · 「更多 → 更漏」· GET /api/cron · scheduler trigger 列表。 */
   fetchCron(): Promise<CronResponse>;
+  /** Phase 1 · 列 topic 加当前 topic_id（sidebar 数据源）。 */
+  fetchTopics(includeArchived?: boolean): Promise<TopicsResponse>;
+  /** Phase 1 · 单独读当前 topic_id（PWA 对账兜底）。 */
+  fetchCurrentTopic(): Promise<CurrentTopicResponse>;
+  /** Phase 1 · 建 topic（title trim 后非空、≤80 字；后端 400 拒）。 */
+  createTopic(req: CreateTopicRequest): Promise<TopicView>;
+  /** Phase 1 · 切玄女当前 topic。后端走 shutdown_xuannv_for_handoff + spawn 新 cc，
+   *  实际可能 5-15s——调用方必管 loading 态。返回切完后的 current_topic_id。 */
+  switchTopic(id: string): Promise<CurrentTopicResponse>;
+  /** Phase 1 · 归档 topic（不删，include_archived=1 才能再列出）。 */
+  archiveTopic(id: string): Promise<void>;
 }
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -300,6 +315,31 @@ export function createHttpClient(): ApiClient {
     },
     fetchRoles: () => jsonFetch<RolesResponse>(`/api/roles`),
     fetchCron: () => jsonFetch<CronResponse>(`/api/cron`),
+    fetchTopics: (includeArchived) => {
+      const qs = includeArchived ? "?include_archived=1" : "";
+      return jsonFetch<TopicsResponse>(`/api/topics${qs}`);
+    },
+    fetchCurrentTopic: () => jsonFetch<CurrentTopicResponse>(`/api/topics/current`),
+    createTopic: (req) =>
+      jsonFetch<TopicView>(`/api/topics`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    switchTopic: (id) =>
+      jsonFetch<CurrentTopicResponse>(`/api/topics/${encodeURIComponent(id)}/switch`, {
+        method: "POST",
+      }),
+    archiveTopic: async (id) => {
+      // 204 No Content——jsonFetch 会 await res.json() 撞空 body，单独 fetch。
+      const res = await fetch(`/api/topics/${encodeURIComponent(id)}/archive`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new ApiError(res.status, body || res.statusText);
+      }
+    },
   };
 }
 
