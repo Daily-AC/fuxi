@@ -144,6 +144,20 @@ pub fn build(state: AppState) -> Router {
             post(handlers::vision::look_frame)
                 .layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT_BYTES)),
         )
+        // Phase 1 · 话题 CRUD + 切换（PWA sidebar 数据源）
+        .route(
+            "/api/topics",
+            get(handlers::topics::list_topics).post(handlers::topics::create_topic),
+        )
+        .route("/api/topics/current", get(handlers::topics::current_topic))
+        .route(
+            "/api/topics/{id}/switch",
+            post(handlers::topics::switch_topic),
+        )
+        .route(
+            "/api/topics/{id}/archive",
+            post(handlers::topics::archive_topic),
+        )
         // v1-session17 task #9 「更多」hub 三个新页：策府事实 / 角色卡 / 更漏 trigger
         .route("/api/memory", get(handlers::memory::list))
         .route("/api/roles", get(handlers::roles::list))
