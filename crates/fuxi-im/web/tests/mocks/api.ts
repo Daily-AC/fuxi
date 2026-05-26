@@ -12,7 +12,9 @@ import type {
 } from "~/types/events";
 import type {
   ConversationHistoryResponse,
+  CreateTopicRequest,
   CronResponse,
+  CurrentTopicResponse,
   DeliverablesResponse,
   EphemeralResponse,
   InterveneRequestV2,
@@ -23,6 +25,8 @@ import type {
   SandboxView,
   StoredMessage,
   TasksOverview,
+  TopicView,
+  TopicsResponse,
   Upload,
 } from "~/types/api";
 
@@ -68,6 +72,8 @@ export interface MockState {
   roles?: RolesResponse;
   /** v1-session17 task #9 · /api/cron · 默认空 triggers。 */
   cron?: CronResponse;
+  /** Phase 1 · /api/topics 列表 + current。默认 general 兜底。 */
+  topics?: TopicsResponse;
 }
 
 export interface MockSocket extends Pick<WebSocket, "readyState" | "close"> {
@@ -165,6 +171,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     memory: initial?.memory,
     roles: initial?.roles,
     cron: initial?.cron,
+    topics: initial?.topics,
   };
 
   const nextStatus = (seq: number[] | undefined, fallback: number): number => {
@@ -348,6 +355,55 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
     fetchMemory: async () => state.memory ?? { groups: [], total: 0 },
     fetchRoles: async () => state.roles ?? { roles: [] },
     fetchCron: async () => state.cron ?? { triggers: [] },
+    // Phase 1 · topic mocks · 默认 general 兜底
+    fetchTopics: async (_includeArchived?: boolean): Promise<TopicsResponse> => {
+      if (state.topics) return state.topics;
+      const general: TopicView = {
+        id: "general",
+        title: "general",
+        created_at: new Date(0).toISOString(),
+        last_active_at: new Date().toISOString(),
+        pinned: false,
+      };
+      return { topics: [general], current_topic_id: "general" };
+    },
+    fetchCurrentTopic: async (): Promise<CurrentTopicResponse> => ({
+      current_topic_id: state.topics?.current_topic_id ?? "general",
+    }),
+    createTopic: async (req: CreateTopicRequest): Promise<TopicView> => {
+      const title = req.title.trim();
+      if (title === "") throw new ApiError(400, "title 不能为空");
+      const id = `topic-${(state.topics?.topics.length ?? 1) + 1}`;
+      const now = new Date().toISOString();
+      const t: TopicView = {
+        id,
+        title,
+        created_at: now,
+        last_active_at: now,
+        pinned: false,
+      };
+      const prev = state.topics ?? {
+        topics: [],
+        current_topic_id: "general",
+      };
+      state.topics = { topics: [...prev.topics, t], current_topic_id: prev.current_topic_id };
+      return t;
+    },
+    switchTopic: async (id: string): Promise<CurrentTopicResponse> => {
+      const prev = state.topics;
+      if (prev) {
+        state.topics = { topics: prev.topics, current_topic_id: id };
+      }
+      return { current_topic_id: id };
+    },
+    archiveTopic: async (id: string): Promise<void> => {
+      const prev = state.topics;
+      if (!prev) return;
+      state.topics = {
+        topics: prev.topics.filter((t) => t.id !== id),
+        current_topic_id: prev.current_topic_id,
+      };
+    },
   };
 }
 

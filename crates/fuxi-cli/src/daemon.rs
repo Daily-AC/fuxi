@@ -319,6 +319,11 @@ fn command_log_ctx(cmd: &Command) -> CommandLogCtx {
             agent_id: None,
             task_id: Some(id.clone()),
         },
+        Command::SwitchTopic { topic_id } => CommandLogCtx {
+            kind: "switch_topic",
+            agent_id: None,
+            task_id: Some(topic_id.clone()),
+        },
     }
 }
 
@@ -730,7 +735,44 @@ async fn dispatch_command(
             Ok(false) => Response::err(format!("trigger {id} 不存在")),
             Err(e) => Response::err(e.to_string()),
         },
+
+        Command::SwitchTopic { topic_id } => {
+            match handle_switch_topic(&fuxi, &oracle, &topic_id).await {
+                Ok(()) => Response::ok(serde_json::json!({"switched": true, "topic_id": topic_id})),
+                Err(e) => Response::err(e.to_string()),
+            }
+        }
     }
+}
+
+/// daemon 端 `Command::SwitchTopic` 入口：临时开 im.db pool 调
+/// `topic_switch::switch_topic_to`。pool 短跑用完就丢，跟 fuxi-im start 那份长跑
+/// pool 不冲突（SQLite WAL 支持多 reader/writer，且同一 DB 路径 sqlx 内部 connection
+/// pool 不共享是 OK 的——schema 升级走 migration 幂等）。
+///
+/// `role` hardcode "xuannv"：当前玄女只有一个 role 实例。未来若支持多角色玄女
+/// 副本，再让 CLI 子命令带 `--role` 覆盖。
+async fn handle_switch_topic(
+    fuxi: &Arc<Fuxi>,
+    oracle: &OracleStore,
+    topic_id_str: &str,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use fuxi_im::conv_store::ConvStore;
+    use fuxi_im::topic_store::TopicStore;
+
+    let uuid = Uuid::parse_str(topic_id_str)
+        .with_context(|| format!("topic_id 非 UUID 形态：{topic_id_str}"))?;
+    let topic_id = fuxi_core::TopicId::from(uuid);
+
+    let db_path = fuxi_im::db::default_db_path().context("$HOME 未设——无法定位 ~/.fuxi/im.db")?;
+    let pool = fuxi_im::db::init_at(&db_path)
+        .await
+        .with_context(|| format!("打开 im.db {} 失败", db_path.display()))?;
+    let conv = ConvStore::new(pool.clone());
+    let topics = TopicStore::new(pool);
+
+    crate::topic_switch::switch_topic_to(fuxi, oracle, "xuannv", &conv, &topics, topic_id).await
 }
 
 /// 登记成功后发一条 `TriggerRegistered` 事件——Firehose 能看到候簿变化。

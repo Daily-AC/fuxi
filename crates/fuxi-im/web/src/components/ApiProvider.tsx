@@ -75,6 +75,19 @@ export interface ApiContextValue {
    *  - deliverable → tab 3（更多） + moreSub="deliverables"
    *  原子化设置，避免调用方手写 setActiveTab + setMoreSub + navPush 多步 race。 */
   navTo(route: NonNullable<NavRoute>): void;
+
+  // ---------- Phase 1 · Topic 一等公民（docs/handoff/v1-session19.md §2-§4） ----------
+
+  /** 当前玄女绑定的 topic_id（UUID 字符串）。初始 null = 未拉到，sidebar 兜底
+   *  /api/topics/current 拉一次后填上。switch 完成后由 sidebar 调 `setCurrentTopicId`
+   *  把全局态推到最新——XuannvPage 用这个值订阅 reactive，topic 切换时 re-mount
+   *  Conversation（重拉历史 + 重连 WS 滤新 topic_id）。 */
+  currentTopicId: Accessor<string | null>;
+  setCurrentTopicId(id: string): void;
+
+  /** 移动端左滑抽屉开关。桌面端常驻 sidebar 时这个 flag 无效（CSS @media 控）。 */
+  sidebarOpen: Accessor<boolean>;
+  setSidebarOpen(open: boolean): void;
 }
 
 const ApiContext = createContext<ApiContextValue>();
@@ -104,6 +117,12 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
   const [activeTab, _setActiveTab] = createSignal<TabIndex>(props.initialTab ?? 0);
   const [moreSub, _setMoreSub] = createSignal<MoreSubRoute>(props.initialMoreSub ?? null);
   const [navRoute, setNavRoute] = createSignal<NavRoute>(null);
+  // Phase 1 · 当前 topic_id 全局态。初始 null 由 sidebar 兜底 /api/topics/current
+  // 拉一次后填；switch 完成由调用方主动 setCurrentTopicId（避免 sidebar 跟主对话区
+  // 各 fetch 一次出 race）。
+  const [currentTopicId, setCurrentTopicId] = createSignal<string | null>(null);
+  // 移动端抽屉开关——桌面 CSS @media 把 sidebar 钉死可见，这个 flag 失效。
+  const [sidebarOpen, setSidebarOpen] = createSignal<boolean>(false);
 
   // 哪些 (tab, sub) 组合允许 navPush 二层 detail。
   // 任务 tab 默认开（kind=task / worker）；更多 hub 下仅 projects / deliverables 子页开。
@@ -188,6 +207,10 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
           setNavRoute(route);
         },
         navPop: () => setNavRoute(null),
+        currentTopicId,
+        setCurrentTopicId,
+        sidebarOpen,
+        setSidebarOpen,
         // 跨 tab 跳转——绕过 setActiveTab / setMoreSub 的清栈逻辑，直接钉
         // 内部 _setActiveTab + _setMoreSub + setNavRoute 一次到位避免 race。
         navTo: (route) => {

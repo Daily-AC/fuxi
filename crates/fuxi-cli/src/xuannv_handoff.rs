@@ -156,7 +156,8 @@ async fn run_handoff(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Result<()
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     info!("spawn 新玄女副本（注入 handoff prelude）");
-    let new_id = spawn_with_prelude(fuxi, oracle, role, &body).await?;
+    let prelude = format_handoff_prelude(&body);
+    let new_id = spawn_with_prelude(fuxi, oracle, role, &prelude).await?;
     fuxi.set_xuannv(new_id).await;
 
     // 删除 handoff 文件——下次启动不会误以为又要交接
@@ -201,37 +202,34 @@ async fn wait_idle(fuxi: &Fuxi, agent: AgentId) {
     warn!(agent = %agent, "等玄女 idle 超时——强 kill 老副本（可能丢未完成 turn 的回复）");
 }
 
-/// spawn 新玄女并把 handoff 内容塞入 system prompt 头部。等价于
-/// `xuannv_bootstrap::ensure_xuannv` 但 prepend handoff 段。
-async fn spawn_with_prelude(
+/// spawn 新玄女并把 `prelude_text` 拼到 system prompt 头部。
+///
+/// 共享给 [`crate::topic_switch::switch_topic_to`]：handoff / topic 切换都走 kill +
+/// spawn-with-prelude pattern，区别只在 prelude 内容（handoff = 上一只副本的 handoff
+/// 摘要；topic = 新 topic 的对话回顾）。调用方负责自己 format prelude 文本。
+///
+/// 接班 handoff 是新 cc session（老 cc 已 kill）。同 xuannv_bootstrap：cc 2.1.114+
+/// SDK 模式 strict resume，预先生成 session_id 也会被拒。让 cc 自己生成；prelude
+/// 全部上下文已经 inline，不依赖 cc 端 session 持久化。
+///
+/// `oracle` 暂未使用——保留参数让 caller 不必感知未来若要往 prelude 里塞 oracle
+/// 数据的扩展。
+pub async fn spawn_with_prelude(
     fuxi: &Fuxi,
     oracle: &OracleStore,
     role: &str,
-    handoff_body: &str,
+    prelude_text: &str,
 ) -> Result<AgentId> {
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let xuannv_profile = loaded.profile.clone();
     let _ = oracle;
 
-    // 接班 handoff 是新 cc session（老 cc 已 kill）。同 xuannv_bootstrap：cc 2.1.114+
-    // SDK 模式 strict resume，预先生成 session_id 也会被拒。让 cc 自己生成；handoff
-    // 全部上下文已经在 prelude 里 inline，不依赖 cc 端 session 持久化。
-
-    // handoff prelude 在最顶部，原 append_system_prompt（含 dispatch-routing 教学）
-    // 在后面——cc 接收 system prompt 是按顺序拼接的字符串，前者优先级 = 出现位置。
-    let prelude = format!(
-        "## 上下文交接（必读）\n\n\
-         你是新副本玄女——由上一只副本主动交接来的。下面是她写的 handoff 摘要，\
-         请把它当作「你刚才在做的事」读，不要当陌生信息：\n\n\
-         ---\n{}\n---\n\n\
-         首条用户消息处理完后，你**必须**单独发一句：「✻ 上下文已交接 · 新副本接班\
-         （从 handoff 接续上文）」让用户看到接班完成。然后正常继续对话。\n\n",
-        handoff_body
-    );
+    // prelude 在最顶部，原 append_system_prompt（含 dispatch-routing 教学）在后面
+    // ——cc 接收 system prompt 是按顺序拼接的字符串，前者优先级 = 出现位置。
     let combined = if loaded.append_system_prompt.is_empty() {
-        prelude
+        prelude_text.to_string()
     } else {
-        format!("{}{}", prelude, loaded.append_system_prompt)
+        format!("{}{}", prelude_text, loaded.append_system_prompt)
     };
 
     let cc_cfg = CcLaunchConfig {
@@ -248,4 +246,23 @@ async fn spawn_with_prelude(
         .await
         .context("spawn 新玄女失败")?;
     Ok(id)
+}
+
+/// 把 handoff 文档原文包成"接班 prelude"——加入"你是新副本"导语 + 让玄女首句
+/// 主动告诉用户接班完成。抽出独立 fn 便于单测 prelude 文案不漂移。
+pub(crate) fn format_handoff_prelude(handoff_body: &str) -> String {
+    format!(
+        "## 上下文交接（必读）\n\n\
+         你是新副本玄女——由上一只副本主动交接来的。下面是她写的 handoff 摘要，\
+         请把它当作「你刚才在做的事」读，不要当陌生信息：\n\n\
+         ---\n{}\n---\n\n\
+         首条用户消息处理完后，你**必须**单独发一句：「✻ 上下文已交接 · 新副本接班\
+         （从 handoff 接续上文）」让用户看到接班完成。然后正常继续对话。\n\n",
+        handoff_body
+    )
+}
+
+/// 等当前玄女 turn idle 的兜底 helper——topic_switch 也要等 idle 再 kill。
+pub(crate) async fn wait_xuannv_idle(fuxi: &Fuxi, agent: AgentId) {
+    wait_idle(fuxi, agent).await;
 }

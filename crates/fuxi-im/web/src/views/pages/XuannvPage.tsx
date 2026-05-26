@@ -1,7 +1,10 @@
 import {
+  Show,
+  createEffect,
   createMemo,
   createResource,
   createSignal,
+  on,
   onCleanup,
   onMount,
   type Component,
@@ -50,10 +53,25 @@ const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv";
 
 export const XuannvPage: Component = () => {
-  const { client } = useApi();
+  const { client, currentTopicId, setSidebarOpen } = useApi();
 
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [online, setOnline] = createSignal(false);
+  // Phase 1 · 当前 topic 的 title 仅用于 header 展示。Sidebar 30s 轮 fetchTopics
+  // 是真相源；这里走自己的轻 fetch 拿同一份。topic 切换后 setCurrentTopicId 推
+  // 全局态，下面 createEffect 顺手 refetch 拿新 title（用户新建的 topic 也走这条
+  // 路径补 title）。两份 fetch 双 GET 一次 30s 一次切换，可接受；scope 内不抽
+  // 全局 store。
+  const [topicsResp, { refetch: refetchTopicsForTitle }] = createResource(() =>
+    client.fetchTopics(false),
+  );
+  const currentTitle = createMemo<string>(() => {
+    const id = currentTopicId();
+    const list = topicsResp()?.topics ?? [];
+    if (!id) return "";
+    const t = list.find((x) => x.id === id);
+    return t?.title ?? "";
+  });
 
   // alive workers · 从 running tasks members 去重，不含玄女（role="xuannv"）。
   const [tasksOverview] = createResource(() => client.fetchTasksOverview());
@@ -124,6 +142,23 @@ export const XuannvPage: Component = () => {
     controller?.dispose();
     controller = null;
   });
+
+  // Phase 1 · topic 切换时主对话区刷新 —— 后端走 shutdown_xuannv_for_handoff 起新 cc，
+  // 老 topic 的历史不再属于新会话语境。清 messages + 重拉 /api/conv/messages（后端
+  // conv_store 已按 current_topic_id 过滤）。`defer: true` 避免初次 mount 重复触发 loadHistory。
+  // 同时 refetch topicsResp 让 header 副标题拿到新建 topic 的 title。
+  createEffect(
+    on(
+      () => currentTopicId(),
+      (id) => {
+        if (!id) return;
+        setMessages([]);
+        void loadHistory();
+        void refetchTopicsForTitle();
+      },
+      { defer: true },
+    ),
+  );
 
   const attemptIntervene = async (req: SerializedIntervene, msgId: string): Promise<void> => {
     const send = (): Promise<unknown> =>
@@ -225,11 +260,35 @@ export const XuannvPage: Component = () => {
   return (
     <div class={styles.page} data-testid="page-xuannv">
       <header class={styles.header}>
-        <div class={styles.title}>玄女</div>
-        <div class={styles.statusRow}>
-          <span class={styles.dot} classList={{ [styles.dotOn ?? ""]: online() }} aria-hidden="true" />
-          <span class={styles.status}>{online() ? "在线" : "重连中"}</span>
+        {/* Phase 1 · 移动端汉堡按钮：唤出 TopicSidebar 抽屉。桌面隐藏（CSS @media）。 */}
+        <button
+          type="button"
+          class={styles.menuBtn}
+          onClick={() => setSidebarOpen(true)}
+          aria-label="打开话题列表"
+          data-testid="topic-drawer-open"
+        >
+          <span class={styles.menuIcon} aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+        </button>
+        <div class={styles.titleStack}>
+          <div class={styles.title}>玄女</div>
+          {/* Phase 1 · 当前 topic 副标题：让用户一眼知道在哪个 topic 聊 */}
+          <Show when={currentTitle()}>
+            <div class={styles.topicLabel} data-testid="xuannv-topic-label">
+              ✻ {currentTitle()}
+            </div>
+          </Show>
+          <div class={styles.statusRow}>
+            <span class={styles.dot} classList={{ [styles.dotOn ?? ""]: online() }} aria-hidden="true" />
+            <span class={styles.status}>{online() ? "在线" : "重连中"}</span>
+          </div>
         </div>
+        {/* 右侧占位 · 跟 menuBtn 镜像保持标题居中 */}
+        <span class={styles.menuRightSpacer} aria-hidden="true" />
       </header>
       <Conversation messages={messages} />
       <MentionComposer
