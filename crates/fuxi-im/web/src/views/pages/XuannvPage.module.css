@@ -6,17 +6,24 @@
 }
 
 /* Page header · v3 用 bottom tab bar 后无需为顶部 pager dots 留空间
- * 标题/状态居中，sticky badge 绝对定位右侧（不挤压居中布局）。*/
+ * Phase 1 起改为 grid [汉堡][标题栈][占位]，标题栈仍居中，左右 44px 触控点 */
 .header {
   position: relative;
   flex-shrink: 0;
+  display: grid;
+  grid-template-columns: var(--touch) 1fr var(--touch);
+  align-items: center;
+  padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.titleStack {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-2);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  min-width: 0;
 }
 
 .title {
@@ -24,6 +31,58 @@
   font-weight: var(--weight-semibold);
   color: var(--text-primary);
   line-height: 1.1;
+}
+
+/* Phase 1 · 当前 topic 副标题 —— ✻ 装饰字符是普通星号变体，非 emoji 不豆腐 */
+.topicLabel {
+  font-size: var(--size-meta);
+  color: var(--text-secondary);
+  max-width: 60vw;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 汉堡按钮 · 移动端可见，桌面 @media 隐藏（sidebar 已常驻不需要 toggle） */
+.menuBtn {
+  width: var(--touch);
+  height: var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-card);
+  color: var(--text-secondary);
+}
+.menuBtn:hover {
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+}
+
+.menuIcon {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 18px;
+}
+.menuIcon > span {
+  display: block;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
+.menuRightSpacer {
+  display: inline-block;
+}
+
+@media (min-width: 768px) {
+  .menuBtn,
+  .menuRightSpacer {
+    display: none;
+  }
+  .header {
+    grid-template-columns: 1fr;
+  }
 }
 
 .statusRow {

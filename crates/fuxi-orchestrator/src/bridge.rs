@@ -49,6 +49,7 @@ use fuxi_core::trigger_lookup::TriggerLookup;
 use fuxi_events::EventBus;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -457,17 +458,31 @@ impl SystemEventBridge {
     ///
     /// `trigger_lookup` 由 CLI 启动处注入（通常是 `Arc<TriggerStore>`），
     /// 避免 fuxi-orchestrator 直接依赖 fuxi-scheduler。
+    ///
+    /// Phase 1 #6：从 `fuxi.current_topic_watch()` 拿当前 topic receiver，
+    /// handle_event 用它 filter 跨 topic 事件（meta.topic_id != current → silent 跳过，
+    /// 公理 #2 保持知情权——非 milestone 事件不该污染当前玄女 prompt）。
     pub fn spawn(
         fuxi: Arc<Fuxi>,
         bus: EventBus,
         xuannv_id: AgentId,
         trigger_lookup: Arc<dyn TriggerLookup>,
     ) -> JoinHandle<()> {
+        let topic_watch = Some(fuxi.current_topic_watch());
         let intervener: Arc<dyn Intervener> = fuxi;
-        Self::spawn_with(intervener, bus, xuannv_id, trigger_lookup)
+        Self::spawn_inner(
+            intervener,
+            bus,
+            xuannv_id,
+            trigger_lookup,
+            REVIEW_RETRY_BACKOFF_MS,
+            topic_watch,
+        )
     }
 
-    /// 测试/内部路径——任意 [`Intervener`] 注入。
+    /// 测试/内部路径——任意 [`Intervener`] 注入。默认不带 topic filter（老行为
+    /// 兼容），让 60+ test caller 不必逐一改签名。需要 filter 的测试用
+    /// [`Self::spawn_with_topic`]。
     pub fn spawn_with(
         intervener: Arc<dyn Intervener>,
         bus: EventBus,
@@ -480,6 +495,26 @@ impl SystemEventBridge {
             xuannv_id,
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
+            None,
+        )
+    }
+
+    /// Phase 1 #6 测试路径：带 topic filter 注入。`topic_watch` `Some` 时每条
+    /// event 顶部判断 meta.topic_id vs current_topic。
+    pub fn spawn_with_topic(
+        intervener: Arc<dyn Intervener>,
+        bus: EventBus,
+        xuannv_id: AgentId,
+        trigger_lookup: Arc<dyn TriggerLookup>,
+        topic_watch: watch::Receiver<fuxi_core::TopicId>,
+    ) -> JoinHandle<()> {
+        Self::spawn_inner(
+            intervener,
+            bus,
+            xuannv_id,
+            trigger_lookup,
+            REVIEW_RETRY_BACKOFF_MS,
+            Some(topic_watch),
         )
     }
 
@@ -492,7 +527,7 @@ impl SystemEventBridge {
         trigger_lookup: Arc<dyn TriggerLookup>,
         backoff_ms: &'static [u64],
     ) -> JoinHandle<()> {
-        Self::spawn_inner(intervener, bus, xuannv_id, trigger_lookup, backoff_ms)
+        Self::spawn_inner(intervener, bus, xuannv_id, trigger_lookup, backoff_ms, None)
     }
 
     fn spawn_inner(
@@ -501,6 +536,7 @@ impl SystemEventBridge {
         xuannv_id: AgentId,
         trigger_lookup: Arc<dyn TriggerLookup>,
         backoff_ms: &'static [u64],
+        topic_watch: Option<watch::Receiver<fuxi_core::TopicId>>,
     ) -> JoinHandle<()> {
         let mut sub = bus.subscribe();
         // bus 既要喂 subscribe（已 move 进上面这行），又要在 handle_event 里用作 publish
@@ -512,6 +548,25 @@ impl SystemEventBridge {
                     // 即使底层出错也尽量继续；具体 Lagged 已被 subscribe 过滤。
                     continue;
                 };
+                // Phase 1 #6：topic filter——非当前 topic 的事件**默认 silent**。
+                // 例外（milestone 仍透传，跟决策 7 阈值对齐）：AgentDead / 错误类
+                // 已在各 EventKind 内有专门处理；这里只对"普通对话事件"过滤。
+                if let Some(rx) = topic_watch.as_ref()
+                    && let Some(ev_topic) = ev.meta.topic_id
+                {
+                    let current: fuxi_core::TopicId = *rx.borrow();
+                    if ev_topic != current && !is_cross_topic_milestone(&ev.kind) {
+                        // 跨 topic 普通事件：silent skip，避免污染当前玄女 prompt。
+                        // 玄女想看自己 `fuxi events --topic <id>` 主动查。
+                        debug!(
+                            ev_topic = %ev_topic,
+                            current = %current,
+                            kind_tag = ?std::mem::discriminant(&ev.kind),
+                            "bridge: 跨 topic 普通事件 silent 跳过"
+                        );
+                        continue;
+                    }
+                }
                 handle_event(
                     &*intervener,
                     &*trigger_lookup,
@@ -525,6 +580,23 @@ impl SystemEventBridge {
             debug!("SystemEventBridge: 订阅流结束，退出");
         })
     }
+}
+
+/// Phase 1 决策 7：跨 topic 但仍应该让当前玄女知道的 milestone EventKind。
+/// 其余（AgentResponded / ToolCall* / Thinking* / TaskStateChanged 等普通事件）
+/// 默认不跨 topic 透传——避免 topic A 的对话噪音灌进 topic B 的玄女 prompt。
+///
+/// 决策 7 阈值：`deliverable_produced` / `agent_dead` / `error` / `agent_request_review`。
+/// 这里加 [`EventKind::ReviewRequestTimeout`]（review 超时是 review 的失败兜底，
+/// 同样关键）。其余按需扩。
+fn is_cross_topic_milestone(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::AgentDead { .. }
+            | EventKind::AgentRequestReview { .. }
+            | EventKind::ReviewRequestTimeout { .. }
+            | EventKind::DeliverableProduced { .. }
+    )
 }
 
 /// 事件分派——拆出单函数方便直接单测（不用 spawn 真任务）。
@@ -1927,6 +1999,166 @@ mod tests {
         assert!(
             calls.iter().all(|(_, _, t)| !t.contains("[TASK_DONE]")),
             "Cancelled 不应触发 [TASK_DONE]：{calls:?}"
+        );
+    }
+
+    // ─── Phase 1 #6 · topic filter ────────────────────────────
+
+    /// 跨 topic 的普通 worker event（譬如 AgentResponded）默认 silent——不进入
+    /// 当前玄女 prompt。这是 Phase 1 治"多话题打断"污染的核心断言。
+    #[tokio::test]
+    async fn bridge_filters_cross_topic_non_milestone_events() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let current_topic = TopicId::new();
+        let other_topic = TopicId::new();
+        let (tx, rx) = watch::channel(current_topic);
+        let _h = SystemEventBridge::spawn_with_topic(
+            mock.clone(),
+            bus.clone(),
+            xuannv,
+            empty_lookup(),
+            rx,
+        );
+
+        // 跨 topic 的普通 worker event：other_topic 的 AgentResponded
+        // —— bridge 不直接处理 AgentResponded，所以即使没 filter 它也不会
+        // intervene。但我们要验证的是：跨 topic 时 TaskStateChanged → Done 也
+        // 被过滤掉（这条本来会触发 [TASK_DONE] 注入）。
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        meta.topic_id = Some(other_topic);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::Delivering,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            calls.is_empty(),
+            "跨 topic 普通事件应被 silent 跳过：{calls:?}"
+        );
+
+        // 控制实验：把 current 切到 other_topic，同样事件应通过
+        tx.send_replace(other_topic);
+        let task2 = TaskId::new();
+        let mut meta2 = EventMeta::now();
+        meta2.agent = Some(worker);
+        meta2.task = Some(task2);
+        meta2.topic_id = Some(other_topic);
+        bus.publish(Event {
+            meta: meta2,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::Delivering,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "current=other 后应触发 task_done 注入");
+        assert!(calls[0].2.contains("[TASK_DONE]"));
+    }
+
+    /// 跨 topic 的 milestone（AgentDead / AgentRequestReview / DeliverableProduced /
+    /// ReviewRequestTimeout）依旧透传——决策 7 阈值：玄女总该知道门客死了 / 求审 /
+    /// 交付完成，无论它属哪个 topic。
+    #[tokio::test]
+    async fn bridge_forwards_cross_topic_milestone_events() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let current = TopicId::new();
+        let other = TopicId::new();
+        let (_tx, rx) = watch::channel(current);
+        let _h = SystemEventBridge::spawn_with_topic(
+            mock.clone(),
+            bus.clone(),
+            xuannv,
+            empty_lookup(),
+            rx,
+        );
+
+        // AgentDead 跨 topic 仍透传
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.topic_id = Some(other);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "test crash".into(),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "AgentDead 跨 topic 应透传");
+        assert!(
+            calls[0].2.contains("已下线"),
+            "应是 death prompt：{:?}",
+            calls[0].2
+        );
+    }
+
+    /// 老事件（meta.topic_id=None）视作 general：current 是 general 时透传，
+    /// current 非 general 时也透传（None 不参与 filter，保持向后兼容）。
+    #[tokio::test]
+    async fn bridge_passes_through_legacy_events_without_topic_id() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let custom_topic = TopicId::new();
+        let (_tx, rx) = watch::channel(custom_topic);
+        let _h = SystemEventBridge::spawn_with_topic(
+            mock.clone(),
+            bus.clone(),
+            xuannv,
+            empty_lookup(),
+            rx,
+        );
+
+        // 老事件：meta.topic_id=None（模拟 Phase 1 之前持久化的事件回放）
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        // 故意不设 topic_id
+        bus.publish(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::Delivering,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            !calls.is_empty(),
+            "老事件 meta.topic_id=None 应透传，不参与 filter"
         );
     }
 }

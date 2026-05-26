@@ -14,7 +14,7 @@
 use clap::{Parser, Subcommand};
 use fuxi_cli::{
     banner, bug_cmd, demo, dist, insight_cmd, issue_cmd, memory_cmd, note_cmd, profile_cmd,
-    project_cmd, repl, skill, subcommands, theme, up, watch, xuannv_cmd,
+    project_cmd, repl, skill, subcommands, theme, topic_cmd, up, watch, xuannv_cmd,
 };
 
 #[derive(Debug, Parser)]
@@ -89,6 +89,8 @@ enum Command {
     /// 玄女控制——刷新教学（让她下次 fresh session 加载 dispatch-routing 最新版）。
     #[command(subcommand)]
     Xuannv(XuannvCmd),
+    /// Phase 1 · topic 一等公民：new / list / switch / archive。
+    Topic(topic_cmd::TopicArgs),
     /// 【玄女工具】上报 fuxi 平台 bug / 改进建议——落 PWA 通知 tab。
     Bug(bug_cmd::BugArgs),
     /// 【Claude/玄女工具】issue 工作流——list / show / close / reopen / link-fix。
@@ -345,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Command::Bug(args)) => bug_cmd::run(args).await,
         Some(Command::Issue(args)) => issue_cmd::run(args).await,
+        Some(Command::Topic(args)) => topic_cmd::run(args).await,
     }
 }
 

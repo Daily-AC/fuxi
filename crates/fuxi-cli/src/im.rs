@@ -374,10 +374,14 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 .unwrap_or_else(|_| PathBuf::from("roles"))
         });
 
+    // Phase 1 · topic_store 跟 conv_store 同 im.db pool。
+    let topic_store = fuxi_im::topic_store::TopicStore::new(im_pool.clone());
+
     let app_state_base = AppState::new(fuxi.clone())
         .with_im_auth(im_auth)
         .with_im_push(im_push)
         .with_conv_store(conv_store.clone())
+        .with_topic_store(topic_store.clone())
         .with_upload_store(upload_store)
         .with_nodes_provider(nodes_provider)
         .with_dist_secrets(dist_secrets)
@@ -502,6 +506,20 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 let trigger_lookup: Arc<dyn TriggerLookup> = Arc::new(sched_store.clone());
                 SystemEventBridge::spawn(fuxi.clone(), bus.clone(), id, trigger_lookup);
                 tracing::info!(xuannv = %id, "SystemEventBridge 已装配");
+
+                // Phase 1 · XuannvSwitcher 反向依赖注入：fuxi-im handler 通过它
+                // 切玄女 topic（PWA sidebar `/api/topics/:id/switch`）。
+                fuxi.set_xuannv_switcher(Arc::new(
+                    crate::topic_switcher_impl::CliXuannvSwitcher::new(
+                        fuxi.clone(),
+                        oracle.clone(),
+                        conv_store.clone(),
+                        topic_store.clone(),
+                        xuannv_role.clone(),
+                    ),
+                ))
+                .await;
+                tracing::info!("XuannvSwitcher 已注入（/api/topics/:id/switch 激活）");
 
                 // task #8 玄女上下文水位监控——35%/45% 跨阈值触发 addendum /
                 // handoff offer。订阅 EventBus 上玄女自身的 UsageReport 累加。

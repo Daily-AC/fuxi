@@ -158,6 +158,7 @@ impl Agent for CodexAgent {
         let (tx, rx) = mpsc::channel::<Event>(EVENT_CHANNEL_BUFFER);
         let agent_id = self.card.id;
         let task_id = Some(task.id);
+        let topic_id = task.topic_id;
         let inner_weak = Arc::downgrade(&self.inner);
 
         // stderr collector：异步追读，缓冲到 Vec<String>。reader_loop 退出后
@@ -185,6 +186,7 @@ impl Agent for CodexAgent {
                 tx.clone(),
                 agent_id,
                 task_id,
+                topic_id,
                 pid,
                 emit_count_for_reader,
             )
@@ -240,6 +242,7 @@ impl Agent for CodexAgent {
                 let mut meta = EventMeta::now();
                 meta.agent = Some(agent_id);
                 meta.task = task_id;
+                meta.topic_id = topic_id;
                 let _ = tx
                     .send(Event {
                         meta,
@@ -252,6 +255,7 @@ impl Agent for CodexAgent {
                 let mut meta = EventMeta::now();
                 meta.agent = Some(agent_id);
                 meta.task = task_id;
+                meta.topic_id = topic_id;
                 let cause = exit_code
                     .map(|c| format!("codex exit {c}"))
                     .unwrap_or_else(|| "codex exit unknown".to_string());
@@ -329,6 +333,7 @@ async fn reader_loop(
     tx: mpsc::Sender<Event>,
     agent_id: AgentId,
     task_id: Option<TaskId>,
+    topic_id: Option<fuxi_core::TopicId>,
     pid_hint: Option<u32>,
     emit_count: Arc<AtomicUsize>,
 ) {
@@ -358,7 +363,12 @@ async fn reader_loop(
             parser::CodexEvent::TurnCompleted { .. } | parser::CodexEvent::TurnFailed { .. }
         );
         let events = translate(cx_ev, agent_id, task_id, &mut state, pid_hint);
-        for ev in events {
+        // Phase 1 #6：translate() / mk_event 不感知 topic_id；emit 前统一 patch
+        // ev.meta.topic_id，让 SystemEventBridge filter 区分跨 topic 事件。
+        for mut ev in events {
+            if topic_id.is_some() && ev.meta.topic_id.is_none() {
+                ev.meta.topic_id = topic_id;
+            }
             if tx.send(ev).await.is_err() {
                 tracing::debug!("codex agent event channel closed by subscriber");
                 return;

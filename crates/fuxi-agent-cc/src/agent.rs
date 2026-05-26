@@ -88,6 +88,11 @@ struct Inner {
     active_tx: Option<mpsc::Sender<Event>>,
     /// 当前活跃任务 id——写进事件 meta。
     current_task: Option<TaskId>,
+    /// Phase 1 topic 路由：当前活跃 task 关联的 topic_id（来自 `Task.topic_id`）。
+    /// dispatch 写入，emit 时 → `meta.topic_id`，让 SystemEventBridge filter 决定
+    /// 是否注入当前玄女（跨 topic 的 worker event 不污染当前 prompt）。`None` =
+    /// 视作默认 topic [`fuxi_core::TopicId::general`]（兼容老 dispatch 路径）。
+    current_topic: Option<fuxi_core::TopicId>,
     translate_state: TranslateState,
     /// 死亡信号发送端。
     /// pump_loop 退出（WS channel 关闭）时发一条"ws closed"；shutdown 主动清空。
@@ -209,6 +214,7 @@ impl CcAgent {
             status: AgentStatus::Idle,
             active_tx: None,
             current_task: None,
+            current_topic: None,
             translate_state: TranslateState::with_role(role_for_parser.clone())
                 .with_window_size(crate::config::resolve_default_window_size()),
             death_tx: Some(death_tx),
@@ -273,6 +279,7 @@ impl CcAgent {
             status: AgentStatus::Idle,
             active_tx: None,
             current_task: None,
+            current_topic: None,
             translate_state: TranslateState::with_role(role_for_parser)
                 .with_window_size(crate::config::resolve_default_window_size()),
             death_tx: Some(death_tx),
@@ -368,6 +375,7 @@ impl Agent for CcAgent {
             inner.status = AgentStatus::Busy;
             inner.active_tx = Some(tx);
             inner.current_task = Some(task.id);
+            inner.current_topic = task.topic_id;
             inner.translate_state = TranslateState::with_role(self.card.profile.role.clone())
                 .with_window_size(crate::config::resolve_default_window_size());
             // 发送必须在锁外——channel.send 本身不会 block，但保守点
@@ -410,6 +418,7 @@ impl Agent for CcAgent {
                     let mut meta = EventMeta::now();
                     meta.agent = Some(self.card.id);
                     meta.task = inner.current_task;
+                    meta.topic_id = inner.current_topic;
                     Some(Event {
                         meta,
                         kind: EventKind::AgentInterrupted {
@@ -491,13 +500,17 @@ impl Agent for CcAgent {
             "request_id": request_id,
             "request": {"subtype": "interrupt"},
         });
-        let (current_task, my_generation) = {
+        let (current_task, current_topic, my_generation) = {
             let mut inner = self.inner.lock().await;
             inner.channel.send(msg).map_err(CcError::from)?;
             inner.status = AgentStatus::Stopping;
             inner.last_interrupt_request_id = Some(request_id.clone());
             inner.cancel_generation = inner.cancel_generation.wrapping_add(1);
-            (inner.current_task, inner.cancel_generation)
+            (
+                inner.current_task,
+                inner.current_topic,
+                inner.cancel_generation,
+            )
         };
         tracing::info!(
             agent = %self.card.id,
@@ -517,6 +530,7 @@ impl Agent for CcAgent {
                 &inner_cl,
                 agent_id,
                 current_task,
+                current_topic,
                 DrainCause::WatchdogTimeout {
                     expected_generation: my_generation,
                 },
@@ -543,9 +557,13 @@ impl Agent for CcAgent {
         summary: String,
         artifact_ref: Option<String>,
     ) -> Result<()> {
+        // Phase 1：current_topic 来自 dispatch 时设的值；review nudge 跟它来源 task
+        // 同 topic，让 SystemEventBridge filter 判定正确。
+        let topic_id = self.inner.lock().await.current_topic;
         let event = build_review_event(
             self.card.id,
             task_id,
+            topic_id,
             deliverable_kind,
             summary,
             artifact_ref,
@@ -614,6 +632,7 @@ impl Agent for CcAgent {
 fn build_review_event(
     agent_id: AgentId,
     task_id: TaskId,
+    topic_id: Option<fuxi_core::TopicId>,
     deliverable_kind: DeliverableKind,
     summary: String,
     artifact_ref: Option<String>,
@@ -621,6 +640,7 @@ fn build_review_event(
     let mut meta = EventMeta::now();
     meta.agent = Some(agent_id);
     meta.task = Some(task_id);
+    meta.topic_id = topic_id;
     Event {
         meta,
         kind: EventKind::AgentRequestReview {
@@ -688,11 +708,15 @@ async fn pump_loop(
             if subtype == "success"
                 && let Some(rid) = req_id
             {
-                let task_id = inner.lock().await.current_task;
+                let (task_id, topic_id) = {
+                    let g = inner.lock().await;
+                    (g.current_task, g.current_topic)
+                };
                 drain_pending_to_idle(
                     &inner,
                     agent_id,
                     task_id,
+                    topic_id,
                     DrainCause::InterruptAck { request_id: rid },
                 )
                 .await;
@@ -723,9 +747,10 @@ async fn pump_loop(
         );
 
         // 拿锁产出 events，拿完锁立刻释放，避免 send 时占锁
-        let events_to_send = {
+        let (events_to_send, topic_hint) = {
             let mut guard = inner.lock().await;
             let task_id = guard.current_task;
+            let topic_id = guard.current_topic;
             let mut new_state = std::mem::take(&mut guard.translate_state);
             let events = translate(cc_ev, agent_id, task_id, &mut new_state, pid_hint);
             if is_terminal && new_state.finish() {
@@ -733,6 +758,7 @@ async fn pump_loop(
                 let mut meta = fuxi_core::event::EventMeta::now();
                 meta.agent = Some(agent_id);
                 meta.task = task_id;
+                meta.topic_id = topic_id;
                 let extra = Event {
                     meta,
                     kind: fuxi_core::event::EventKind::ThinkingFinished,
@@ -740,12 +766,24 @@ async fn pump_loop(
                 let mut combined = events;
                 combined.push(extra);
                 guard.translate_state = new_state;
-                combined
+                (combined, topic_id)
             } else {
                 guard.translate_state = new_state;
-                events
+                (events, topic_id)
             }
         };
+
+        // Phase 1 #6：translate() / mk_event 不感知 topic_id（避免改 parser 大面积
+        // signature）；这里统一在 emit 前 patch `meta.topic_id`——只补 None 不覆盖
+        // 已有值。SystemEventBridge 凭此过滤跨 topic 的 worker 事件。
+        let mut events_to_send = events_to_send;
+        if topic_hint.is_some() {
+            for ev in events_to_send.iter_mut() {
+                if ev.meta.topic_id.is_none() {
+                    ev.meta.topic_id = topic_hint;
+                }
+            }
+        }
 
         // 发到 active_tx——clone sender 再释锁
         let tx_opt = {
@@ -775,8 +813,18 @@ async fn pump_loop(
             // M2.1 · 消息黑洞修：turn 结束此刻是 cc 重新 poll WS 的窗口——把 pending
             // 队列的 follow-up 消息按 FIFO drain 自送。Bug A 后该逻辑被提到
             // [`drain_pending_to_idle`] 让 interrupt-ack / watchdog 共用同一路径。
-            let task_id = inner.lock().await.current_task;
-            drain_pending_to_idle(&inner, agent_id, task_id, DrainCause::TurnTerminal).await;
+            let (task_id, topic_id) = {
+                let g = inner.lock().await;
+                (g.current_task, g.current_topic)
+            };
+            drain_pending_to_idle(
+                &inner,
+                agent_id,
+                task_id,
+                topic_id,
+                DrainCause::TurnTerminal,
+            )
+            .await;
         }
     }
     tracing::info!("ws_pump: channel closed, pump exiting");
@@ -811,6 +859,7 @@ async fn drain_pending_to_idle(
     inner: &Arc<Mutex<Inner>>,
     agent_id: AgentId,
     task_id: Option<TaskId>,
+    topic_id: Option<fuxi_core::TopicId>,
     cause: DrainCause,
 ) {
     let (channel_clone, cli_sid, drained, emit_warning) = {
@@ -870,6 +919,7 @@ async fn drain_pending_to_idle(
             let mut meta = EventMeta::now();
             meta.agent = Some(agent_id);
             meta.task = task_id;
+            meta.topic_id = topic_id;
             let ev = Event {
                 meta,
                 kind: EventKind::AgentInterrupted {
@@ -994,12 +1044,17 @@ mod tests {
         let ev = build_review_event(
             agent,
             task,
+            None,
             DeliverableKind::CodeChange,
             "三绿等审".into(),
             Some("sha:abc".into()),
         );
         assert_eq!(ev.meta.agent, Some(agent));
         assert_eq!(ev.meta.task, Some(task));
+        assert!(
+            ev.meta.topic_id.is_none(),
+            "topic_id None 当无显式 topic 时"
+        );
         match ev.kind {
             EventKind::AgentRequestReview {
                 agent: kagent,
@@ -1025,6 +1080,7 @@ mod tests {
         let ev = build_review_event(
             AgentId::new(),
             TaskId::new(),
+            None,
             DeliverableKind::ResearchSummary,
             "看完 auth".into(),
             None,

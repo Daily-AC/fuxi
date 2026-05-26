@@ -10,6 +10,7 @@ pub mod id;
 pub mod project;
 pub mod runtime;
 pub mod task;
+pub mod topic;
 pub mod trigger_lookup;
 pub mod workspace;
 
@@ -22,6 +23,7 @@ pub use id::{AgentId, SessionId, TaskId};
 pub use project::{Project, ProjectId, slug_from_path};
 pub use runtime::{Runtime, RuntimeHandle};
 pub use task::{Task, TaskState};
+pub use topic::{TopicId, TopicMeta};
 pub use trigger_lookup::TriggerLookup;
 pub use workspace::{Workspace, WorkspaceHandle};
 
