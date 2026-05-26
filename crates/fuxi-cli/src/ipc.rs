@@ -138,6 +138,12 @@ pub enum Command {
     CronFire { id: String },
     /// 删 trigger。
     CronRemove { id: String },
+
+    // ── Phase 1 topic ──
+    /// 切玄女当前 topic 到 `topic_id`——daemon 端走 `topic_switch::switch_topic_to`
+    /// 等 idle → kill old cc → 拼 prelude → spawn new。`topic_id` 字符串形态是
+    /// UUID（与 [`fuxi_core::TopicId`] 的 transparent wire 一致）。
+    SwitchTopic { topic_id: String },
 }
 
 /// 客户端可以请求 daemon 推的事件负载——故意受限的白名单。
