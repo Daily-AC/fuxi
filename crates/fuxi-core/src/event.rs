@@ -10,6 +10,7 @@
 use crate::id::{AgentId, SessionId, TaskId};
 use crate::project::ProjectId;
 use crate::task::TaskState;
+use crate::topic::TopicId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -239,6 +240,15 @@ pub struct EventMeta {
     /// `skip_serializing_if = "Option::is_none"` 让本地事件 JSON 不带这个 key。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_node_id: Option<String>,
+    /// Phase 1 topic 路由：本事件属于哪个 topic。`None` 表示老事件（Phase 1 之前
+    /// 持久化）或平台级事件（譬如 PlatformStarted）；SystemEventBridge 在 filter
+    /// 时把 `None` 视作默认 topic [`TopicId::general()`]。
+    ///
+    /// WHY 放 EventMeta 顶层而非各 EventKind 变体：所有事件统一 envelope 路由，
+    /// filter 只看 meta；变体内无需重复加字段，避免扫几十处。
+    /// `serde(default, skip_serializing_if = "Option::is_none")` 兼容老 wire/SQLite。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<TopicId>,
 }
 
 impl EventMeta {
@@ -250,7 +260,15 @@ impl EventMeta {
             agent: None,
             task: None,
             source_node_id: None,
+            topic_id: None,
         }
+    }
+
+    /// 在指定 topic 下产生事件——切 topic / topic-scoped emit 的便捷入口。
+    pub fn now_in_topic(topic: TopicId) -> Self {
+        let mut m = Self::now();
+        m.topic_id = Some(topic);
+        m
     }
 }
 
@@ -1085,6 +1103,64 @@ mod tests {
         });
         let ev: Event = serde_json::from_value(legacy).expect("legacy de");
         assert!(ev.meta.source_node_id.is_none());
+    }
+
+    /// Phase 1 topic：默认 `now()` 不带 topic_id，wire JSON 不输出 key（兼容下游
+    /// 仍按老 wire 形态读的 reader）。
+    #[test]
+    fn event_meta_topic_id_omitted_when_none() {
+        let ev = Event {
+            meta: EventMeta::now(),
+            kind: EventKind::PlatformStarted {
+                version: "0.1".into(),
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(
+            !json.contains("topic_id"),
+            "本地事件不应输出 topic_id key, json={json}"
+        );
+    }
+
+    /// Phase 1 topic：now_in_topic 构造的事件 wire 带 topic_id key + roundtrip 保真。
+    #[test]
+    fn event_meta_topic_id_roundtrip_when_some() {
+        let topic = TopicId::new();
+        let ev = Event {
+            meta: EventMeta::now_in_topic(topic),
+            kind: EventKind::AgentResponded {
+                text: "topic A 的回复".into(),
+                artifact_ref: None,
+            },
+        };
+        let json = serde_json::to_string(&ev).expect("ser");
+        assert!(
+            json.contains("topic_id"),
+            "json 应含 topic_id key, json={json}"
+        );
+        let back: Event = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.meta.topic_id, Some(topic));
+    }
+
+    /// 老 wire / 老 SQLite payload 完全无 topic_id key，反序列化必须 fall back 到
+    /// None——SystemEventBridge filter 把 None 视作 [`TopicId::general()`]。
+    #[test]
+    fn event_meta_deserializes_legacy_payload_without_topic_id() {
+        let legacy = serde_json::json!({
+            "meta": {
+                "id": Uuid::new_v4().to_string(),
+                "at": Utc::now().to_rfc3339(),
+                "session": null,
+                "agent": null,
+                "task": null,
+            },
+            "kind": {
+                "type": "platform_started",
+                "version": "0.0.1",
+            }
+        });
+        let ev: Event = serde_json::from_value(legacy).expect("legacy de");
+        assert!(ev.meta.topic_id.is_none());
     }
 
     /// Decision 21 phase 1：workspace 7 个变体的 serde tag + roundtrip。

@@ -30,6 +30,7 @@ pub mod password;
 pub mod push;
 pub mod state;
 pub mod tasks_view;
+pub mod topic_store;
 pub mod uploads;
 
 pub use error::{Error, Result};

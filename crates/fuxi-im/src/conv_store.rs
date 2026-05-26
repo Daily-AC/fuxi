@@ -34,6 +34,16 @@ use uuid::Uuid;
 /// 玄女主线 conversation 的 scope 字符串——前端用 `?conv=xuannv` 拉它。
 pub const SCOPE_XUANNV: &str = "xuannv";
 
+/// Phase 1 默认 topic UUID（[`fuxi_core::TopicId::general`]）字符串形态——schema
+/// 默认列值 + Message struct serde default 共用。改动需同步：
+/// - `migrations/0008_topics.sql` 的 `DEFAULT` 文字串
+/// - `fuxi-core::topic::TopicId::general()` 常量
+pub const TOPIC_GENERAL_UUID: &str = "00000000-0000-0000-0000-000000000001";
+
+fn default_general_topic_id() -> String {
+    TOPIC_GENERAL_UUID.to_string()
+}
+
 /// 单条消息——读出来给前端的 wire 形态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -53,6 +63,11 @@ pub struct Message {
     /// （前端会 fallback 老路径用 id 当 name）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachment_uploads: Vec<crate::uploads::UploadDigest>,
+    /// Phase 1 topic 路由：本消息属于哪个 topic（UUID 字符串形态，前端按 string
+    /// 比较）。`#[serde(default)]` 让老 wire JSON / 前端老 fixture 缺该字段时
+    /// fallback 到 [`TOPIC_GENERAL_UUID`]，新 PWA 侧 filter 按当前 topic 显示。
+    #[serde(default = "default_general_topic_id")]
+    pub topic_id: String,
 }
 
 /// conversation 行——列表视图用。
@@ -107,8 +122,12 @@ impl ConvStore {
         Ok(id)
     }
 
-    /// 写一条消息进 conv，**事务里同步** bump conversations.message_count + last_active_at。
-    /// 调用方必须先 `ensure_scope` 拿到 conv_id。
+    /// 写一条消息进 conv（默认 topic = general），**事务里同步** bump
+    /// conversations.message_count + last_active_at。调用方必须先 `ensure_scope`
+    /// 拿到 conv_id。
+    ///
+    /// 老 14 处 caller 走这条入口（行为 = 入 general topic，跟数据库列 DEFAULT
+    /// 一致）；Phase 1 topic-aware 路径走 [`Self::append_message_in_topic`]。
     #[allow(clippy::too_many_arguments)]
     pub async fn append_message(
         &self,
@@ -120,6 +139,36 @@ impl ConvStore {
         attachments: Option<&serde_json::Value>,
         source_event_id: Option<&str>,
         ts: DateTime<Utc>,
+    ) -> Result<String> {
+        self.append_message_in_topic(
+            conv_id,
+            role,
+            agent_id,
+            kind,
+            content,
+            attachments,
+            source_event_id,
+            ts,
+            TOPIC_GENERAL_UUID,
+        )
+        .await
+    }
+
+    /// Phase 1：显式指定 topic 写消息。`topic_id` 必须是 UUID 字符串
+    /// （[`fuxi_core::TopicId`] 的 transparent 形态）。新 topic-aware caller
+    /// （switch_topic 后的 user prompt、topic-scoped agent reply）走这条。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_message_in_topic(
+        &self,
+        conv_id: &str,
+        role: &str,
+        agent_id: Option<&str>,
+        kind: &str,
+        content: &serde_json::Value,
+        attachments: Option<&serde_json::Value>,
+        source_event_id: Option<&str>,
+        ts: DateTime<Utc>,
+        topic_id: &str,
     ) -> Result<String> {
         let mut tx = self
             .pool
@@ -137,7 +186,7 @@ impl ConvStore {
 
         sqlx::query(
             "INSERT INTO messages (id, conv_id, role, agent_id, kind, content, attachments, \
-             source_event_id, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             source_event_id, ts, topic_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         )
         .bind(&id)
         .bind(conv_id)
@@ -148,6 +197,7 @@ impl ConvStore {
         .bind(attach_str.as_deref())
         .bind(source_event_id)
         .bind(&ts_str)
+        .bind(topic_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| Error::Internal(format!("messages insert: {e}")))?;
@@ -204,7 +254,7 @@ impl ConvStore {
             };
             sqlx::query(
                 "SELECT id, conv_id, role, agent_id, kind, content, attachments, \
-                 source_event_id, ts FROM messages \
+                 source_event_id, ts, topic_id FROM messages \
                  WHERE conv_id = ?1 AND ts < ?2 \
                  ORDER BY ts DESC, id DESC LIMIT ?3",
             )
@@ -216,7 +266,7 @@ impl ConvStore {
         } else {
             sqlx::query(
                 "SELECT id, conv_id, role, agent_id, kind, content, attachments, \
-                 source_event_id, ts FROM messages \
+                 source_event_id, ts, topic_id FROM messages \
                  WHERE conv_id = ?1 \
                  ORDER BY ts DESC, id DESC LIMIT ?2",
             )
@@ -292,6 +342,9 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
         // hydrate 由调用方（conv handler）后置填充——这里给空集，保持 store 层
         // 跟 upload_store 解耦
         attachment_uploads: Vec::new(),
+        topic_id: row
+            .try_get("topic_id")
+            .map_err(|e| Error::Internal(format!("row topic_id: {e}")))?,
     })
 }
 
