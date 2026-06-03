@@ -38,8 +38,8 @@ export default defineConfig({
         start_url: "/",
         display: "standalone",
         orientation: "portrait",
-        background_color: "#0a0a0a",
-        theme_color: "#0a0a0a",
+        background_color: "#FFF8F0",
+        theme_color: "#FFB877",
         lang: "zh-CN",
         icons: [
           { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
