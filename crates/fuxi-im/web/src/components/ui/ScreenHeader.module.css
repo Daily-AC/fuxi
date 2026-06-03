@@ -1,0 +1,55 @@
+/* ScreenHeader · 三栏（lead / title / trail）grid，标题居中。 */
+.header {
+  display: grid;
+  grid-template-columns: var(--touch) 1fr var(--touch);
+  align-items: center;
+  min-height: var(--header-h);
+  padding: 0 8px;
+  gap: 4px;
+}
+
+.lead {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.trail {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-pill);
+  transition: background 0.18s var(--soft), color 0.18s var(--soft);
+}
+
+.back:hover,
+.back:active {
+  background: var(--accent-subtle);
+  color: var(--accent-deep);
+}
+
+.chevron {
+  display: block;
+}
+
+.title {
+  text-align: center;
+  font-size: var(--size-title);
+  color: var(--text-primary);
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

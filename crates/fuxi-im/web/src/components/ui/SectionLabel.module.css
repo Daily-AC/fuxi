@@ -1,0 +1,9 @@
+/* SectionLabel · 弱化分区标签。 */
+.label {
+  font-size: var(--size-meta);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  padding: 0 2px;
+}
