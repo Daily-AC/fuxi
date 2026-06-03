@@ -1,10 +1,22 @@
+/* LoginView · daimeng 奶油糖果。全屏 u-mesh u-noise 暖背景 + 玄女 wave 招呼，
+ * 单卡片居中（移动端友好），软圆角输入 + 桃色渐变提交药丸。
+ */
+
 .shell {
   min-height: 100dvh;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: var(--space-5);
-  background: var(--bg);
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-5);
+}
+
+/* 玄女吉祥物招呼 · 暖光晕托底 */
+.greeting {
+  display: flex;
+  justify-content: center;
+  filter: drop-shadow(var(--glow-mascot));
 }
 
 .card {
@@ -14,23 +26,23 @@
   flex-direction: column;
   gap: var(--space-4);
   padding: var(--space-6) var(--space-5);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-sheet);
 }
 
 .header {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
+  text-align: center;
 }
 
 .title {
   margin: 0;
+  font-family: var(--font-round);
   font-size: var(--size-title);
   font-weight: var(--weight-semibold);
-  letter-spacing: 0.5px;
+  letter-spacing: 0.02em;
   color: var(--text-primary);
 }
 
@@ -49,24 +61,27 @@
 .label {
   font-size: var(--size-meta);
   color: var(--text-muted);
-  font-weight: var(--weight-medium);
-  letter-spacing: 0.3px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
+/* 软圆角输入 · 内嵌高光 + 暖光聚焦环 */
 .input {
   min-height: var(--touch);
-  padding: 10px var(--space-3);
-  background: var(--bg);
+  padding: 10px var(--space-4);
+  background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
+  box-shadow: inset 0 1px 3px rgba(120, 80, 50, 0.07), var(--inset-hi);
   color: var(--text-primary);
   font-size: var(--size-body);
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .input:focus {
-  border-color: var(--accent-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle), var(--inset-hi);
 }
 
 .input:disabled {
@@ -84,63 +99,70 @@
 .error code {
   font-family: var(--font-mono);
   font-size: 12px;
-  background: var(--surface-elevated);
+  background: var(--accent-subtle);
   padding: 1px 6px;
-  border-radius: 4px;
-  color: var(--text-primary);
+  border-radius: 6px;
+  color: var(--accent-deep);
 }
 
+/* 错误 · 暖桃 danger 软卡 */
 .error {
-  padding: var(--space-3);
-  border: 1px solid var(--danger);
+  padding: var(--space-3) var(--space-4);
+  background: rgba(232, 133, 122, 0.1);
+  border: 1px solid rgba(232, 133, 122, 0.4);
   border-radius: var(--radius-card);
   color: var(--danger);
   font-size: var(--size-aux);
   line-height: 1.5;
 }
 
+/* 提交 · 默认灰药丸，active 态桃色渐变 + spring 按压 */
 .submit {
   min-height: var(--touch);
-  padding: 0 var(--space-4);
+  padding: 0 var(--space-5);
   border-radius: var(--radius-pill);
-  background: var(--surface-elevated);
+  background: var(--surface-soft);
   color: var(--text-muted);
   border: 1px solid var(--border);
   font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
+  box-shadow: var(--inset-hi);
   transition: background var(--transition-fast), color var(--transition-fast),
-    border-color var(--transition-fast);
+    border-color var(--transition-fast), transform 0.16s var(--spring);
   cursor: not-allowed;
 }
 
 .submitActive {
-  background: var(--accent);
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-deep) 100%);
   color: var(--on-accent);
-  border-color: var(--accent);
-  font-weight: var(--weight-semibold);
+  border-color: transparent;
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
   cursor: pointer;
+}
+
+.submitActive:active {
+  transform: scale(0.97);
 }
 
 .divider {
   height: 1px;
   background: var(--border);
-  margin: var(--space-2) 0 0;
+  margin: var(--space-1) 0 0;
 }
 
 .modeSwitch {
   min-height: var(--touch);
   padding: 0 var(--space-2);
-  color: var(--text-secondary);
+  color: var(--accent-deep);
   font-size: var(--size-aux);
+  font-weight: var(--weight-medium);
   text-align: center;
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
-  text-underline-offset: 4px;
   transition: color var(--transition-fast);
 }
 
 .modeSwitch:hover,
 .modeSwitch:focus-visible {
-  color: var(--text-primary);
+  color: var(--accent);
 }
 
 .fallbackHelp {
@@ -148,4 +170,5 @@
   font-size: var(--size-meta);
   color: var(--text-muted);
   line-height: 1.5;
+  text-align: center;
 }

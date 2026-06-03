@@ -1,11 +1,12 @@
 import { Show, createSignal, type Component, onMount } from "solid-js";
 import { ApiError } from "~/lib/api";
+import { Mascot } from "~/components/Mascot/Mascot";
 import { useApi } from "./ApiProvider";
 import styles from "./LoginView.module.css";
 
 // 鉴权 UI · 主路 = 主密码 · 副路 = PIN（"忘了 / 没设过"展开）
-// 视觉规则源头：.impeccable.md / decision-14 §G。
-// 单卡片居中（移动端友好），无 shadow / gradient / glassmorphism。
+// daimeng 奶油糖果重绘：全屏 u-mesh u-noise 暖背景 + 玄女吉祥物 wave 招呼 +
+// 软圆角输入卡 + 桃色渐变提交药丸。所有 login testid / 鉴权流程不变。
 
 function defaultDeviceName(): string {
   if (typeof navigator === "undefined") return "我的设备";
@@ -76,11 +77,18 @@ export const LoginView: Component<LoginViewProps> = (props) => {
   };
 
   return (
-    <main class={styles.shell} data-testid="login-view" data-mode={mode()}>
-      <form class={styles.card} onSubmit={submit} aria-labelledby="login-title">
+    <main
+      class={`u-mesh u-noise ${styles.shell}`}
+      data-testid="login-view"
+      data-mode={mode()}
+    >
+      <div class={styles.greeting} aria-hidden="true">
+        <Mascot state="wave" size={130} />
+      </div>
+      <form class={`u-card ${styles.card}`} onSubmit={submit} aria-labelledby="login-title">
         <header class={styles.header}>
           <h1 id="login-title" class={styles.title}>
-            伏羲
+            你回来啦～
           </h1>
           <p class={styles.subtitle}>
             {mode() === "password" ? "用主密码登入。" : "用 TUI 派发的 PIN 配对。"}
