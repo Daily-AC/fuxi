@@ -21,17 +21,15 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "auto",
-      // sw 仅缓静态资源；事件历史走 IndexedDB，不走 sw cache。
-      // bug #77：用户报修复后界面没生效——SW 缓存了旧 bundle 不更新。
-      // skipWaiting + clientsClaim 让新 SW 立刻接管不等老 client 退出，
-      // autoUpdate 触发自动 reload。代价：新部署后老页面短暂闪一下；用户痛感优先。
-      workbox: {
+      // bug #f391c55b：generateSW 没法注入自定义 push event handler — 后端
+      // web-push fan-out 推到浏览器后无消费方，通知不弹。改 injectManifest
+      // 让 src/sw.ts 接管：precacheAndRoute / cleanupOutdatedCaches /
+      // skipWaiting / clientsClaim 在 sw.ts 内复刻；加 push/notificationclick handler。
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
+      injectManifest: {
         globPatterns: ["**/*.{js,css,html,svg,woff2}"],
-        navigateFallback: "/index.html",
-        navigateFallbackDenylist: [/^\/api\//],
-        skipWaiting: true,
-        clientsClaim: true,
-        cleanupOutdatedCaches: true,
       },
       manifest: {
         name: "伏羲 IM",

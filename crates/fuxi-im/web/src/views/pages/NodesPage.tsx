@@ -129,6 +129,10 @@ const RenderNodes: Component = () => {
         onMessage: () => {
           void refetch();
         },
+        // 切回前台 = 拓扑可能在 background 期间变了，refetch 兜底
+        onVisible: () => {
+          void refetch();
+        },
       },
     );
   });

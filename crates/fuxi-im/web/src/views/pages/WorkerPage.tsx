@@ -110,6 +110,22 @@ export const WorkerPage: Component<WorkerPageProps> = (props) => {
                 console.warn("worker event parse failed", err);
               }
             },
+            // 切回前台 → refetch 私聊页历史补漏，mergeMessages 按 id 去重。
+            onVisible: () => {
+              void (async () => {
+                try {
+                  const r = await client.fetchWorkerEvents(agentId);
+                  const seeded = r.events.reduce<Message[]>(
+                    (acc, ev) => applyWorkerEvent(acc, ev, snap),
+                    [],
+                  );
+                  if (seeded.length > 0)
+                    setMessages((prev) => mergeMessages(prev, seeded));
+                } catch (err) {
+                  console.warn("worker visibility refetch failed", err);
+                }
+              })();
+            },
           },
         );
       },
