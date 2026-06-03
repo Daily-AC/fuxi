@@ -6,6 +6,14 @@
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   padding: var(--space-4) var(--space-5);
+  /* 奶油糖果 · 主屏聊天底纹走极克制的暖光网状渐变（u-mesh 的轻量版，
+   * scroll 时不动 → fixed-ish 暖光，让消息流"浮"在奶油纸面上）。 */
+  background:
+    radial-gradient(120% 70% at 8% -4%, rgba(255, 246, 236, 0.9) 0%, transparent 48%),
+    radial-gradient(110% 60% at 100% 4%, rgba(251, 239, 224, 0.7) 0%, transparent 46%),
+    radial-gradient(130% 80% at 50% 108%, rgba(239, 244, 233, 0.6) 0%, transparent 50%),
+    var(--bg);
+  background-attachment: local, local, local, local;
 }
 
 .stream {
@@ -25,10 +33,33 @@
   padding-bottom: 15dvh;
 }
 
+/* 空态吉祥物 · 居中玄女，下方友好文案。轻浮入场让空屏不冷清。 */
+.emptyMascot {
+  margin-bottom: var(--space-3);
+  animation: empty-mascot-in 420ms var(--spring) both;
+}
+
+@keyframes empty-mascot-in {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.94);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .emptyMascot {
+    animation: none;
+  }
+}
+
 .emptyTitle {
   margin: 0;
-  font-size: var(--size-heading);
-  font-weight: var(--weight-medium);
+  font-size: var(--size-title);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
   letter-spacing: 0.3px;
 }
