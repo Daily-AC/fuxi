@@ -226,7 +226,20 @@ export const TopicSidebar: Component = () => {
             aria-label="新建话题"
             data-testid="topic-add-btn"
           >
-            +
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 18 18"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M9 3.5v11M3.5 9h11"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
           </button>
         </header>
         <div class={styles.list} data-testid="topic-list">
@@ -517,7 +530,11 @@ const TopicRow: Component<TopicRowProps> = (props) => {
           aria-label={`${props.topic.title} 的操作菜单`}
           data-testid={`topic-menu-btn-${props.topic.id}`}
         >
-          ⋯
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="3" cy="8" r="1.4" fill="currentColor" />
+            <circle cx="8" cy="8" r="1.4" fill="currentColor" />
+            <circle cx="13" cy="8" r="1.4" fill="currentColor" />
+          </svg>
         </button>
         <Show when={props.menuOpen}>
           <div
