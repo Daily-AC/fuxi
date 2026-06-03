@@ -376,7 +376,43 @@
   filter: brightness(1.05);
 }
 .modalSubmitBtn:disabled,
-.modalCancelBtn:disabled {
+.modalCancelBtn:disabled,
+.modalDangerBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 归档确认 modal · 危险动作主按钮（danger 色） */
+.modalDangerBtn {
+  min-height: var(--touch);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-pill);
+  font-size: var(--size-aux);
+  background: var(--danger);
+  color: var(--on-accent);
+  border: 1px solid var(--danger);
+  font-weight: var(--weight-semibold);
+  transition: filter var(--transition-fast);
+}
+.modalDangerBtn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+/* 目标话题名 · 大号醒目让用户秒确认是哪个 topic */
+.modalTarget {
+  margin: 0;
+  font-size: var(--size-heading);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+/* 归档当前话题的额外警示 */
+.modalWarn {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  background: var(--accent-subtle);
+  border-radius: var(--radius-card);
 }
