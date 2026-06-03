@@ -52,7 +52,7 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
   it("空 overview · 显示空态", async () => {
     const { getByTestId, queryByTestId, unmount } = setup({ running: [], completed: [] });
     await new Promise((r) => setTimeout(r, 30));
-    expect(getByTestId("tasks-empty").textContent).toContain("暂无任务");
+    expect(getByTestId("tasks-empty").textContent).toContain("还没有任务");
     expect(queryByTestId("tasks-running")).toBeNull();
     unmount();
   });
