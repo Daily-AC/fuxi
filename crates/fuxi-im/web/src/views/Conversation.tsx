@@ -15,6 +15,7 @@ import { XuannvBubble } from "~/components/messages/XuannvBubble";
 import { FileMessage } from "~/components/messages/FileMessage";
 import { ToolCallCard } from "~/components/messages/ToolCallCard";
 import { SystemMessageRow } from "~/components/messages/SystemMessageRow";
+import { Mascot } from "~/components/Mascot/Mascot";
 import styles from "./Conversation.module.css";
 
 // 主屏 chat scroll · padding 16/20，gap 14。空态居中淡字。
@@ -86,6 +87,9 @@ export const Conversation: Component<ConversationProps> = (props) => {
         when={props.messages().length > 0}
         fallback={
           <div class={styles.empty} data-testid="conversation-empty">
+            <div class={styles.emptyMascot} aria-hidden="true">
+              <Mascot state="idle" size={120} />
+            </div>
             <p class={styles.emptyTitle}>玄女在线</p>
             <p class={styles.emptyHint}>跟她说点啥</p>
           </div>
