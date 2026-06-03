@@ -1,13 +1,19 @@
 .row {
-  align-self: stretch;
-  display: flex;
+  /* 思考条：安静的暖色 pill，不抢戏。streaming 时整条染上奶糖橙暖意。 */
+  align-self: flex-start;
+  display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 8px 12px;
-  color: var(--text-muted);
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  box-shadow: var(--inset-hi);
+  color: var(--text-secondary);
   font-size: var(--size-aux);
   font-style: italic;
   min-height: 36px;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .chev {
@@ -19,5 +25,11 @@
 }
 
 .streaming {
-  color: var(--accent);
+  color: var(--accent-deep);
+  background: var(--accent-subtle);
+  border-color: rgba(255, 184, 119, 0.45);
+}
+
+.streaming .chev {
+  color: var(--accent-deep);
 }
