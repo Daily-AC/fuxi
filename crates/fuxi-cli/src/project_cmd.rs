@@ -537,8 +537,11 @@ fn parse_deliverable_kind(s: &str) -> Result<DeliverableKind> {
         "test_result" => Ok(DeliverableKind::TestResult),
         "decision_request" => Ok(DeliverableKind::DecisionRequest),
         "error_block" => Ok(DeliverableKind::ErrorBlock),
+        // issue 7a46963d：通用二进制交付。apk/binary/archive 是便捷别名，
+        // 都归一到 Artifact——具体类型由文件名 + sha256 元信息承载。
+        "artifact" | "apk" | "binary" | "archive" => Ok(DeliverableKind::Artifact),
         other => anyhow::bail!(
-            "未知 deliverable kind: {other}（可选：research_summary / code_change / test_result / decision_request / error_block）"
+            "未知 deliverable kind: {other}（可选：research_summary / code_change / test_result / decision_request / error_block / artifact）"
         ),
     }
 }
@@ -987,6 +990,23 @@ mod tests {
         .await
         .expect_err("未注册 project 应拒");
         assert!(err.to_string().contains("未注册"), "got: {err}");
+    }
+
+    // issue 7a46963d：apk/二进制交付应有合法 kind，不再被迫退 code_change 语义错位。
+    #[test]
+    fn parse_deliverable_kind_accepts_artifact_and_binary_aliases() {
+        assert_eq!(
+            parse_deliverable_kind("artifact").unwrap(),
+            DeliverableKind::Artifact
+        );
+        // 便捷别名都归一到 Artifact（apk/ipa/dmg/zip/model.bin 等二进制交付）。
+        for alias in ["apk", "binary", "archive"] {
+            assert_eq!(
+                parse_deliverable_kind(alias).unwrap(),
+                DeliverableKind::Artifact,
+                "别名 {alias} 应解析为 Artifact"
+            );
+        }
     }
 
     #[tokio::test]

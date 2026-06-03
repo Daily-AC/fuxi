@@ -27,6 +27,11 @@ pub enum DeliverableKind {
     TestResult,
     DecisionRequest,
     ErrorBlock,
+    /// 通用二进制交付物（apk / ipa / dmg / zip / model.bin 等）——issue 7a46963d。
+    /// build artifact 不是 code change，PWA 按此类渲染下载按钮 + sha256 校验，
+    /// 不再被迫退 `CodeChange` 显示成 diff 图标语义错位。具体子类型由
+    /// `DeliverableFileMeta`（文件名 / sha256 / size）承载，枚举本身保持通用。
+    Artifact,
 }
 
 /// Workspace 五层 lifecycle（Decision 21）—— wire JSON 用 snake_case。
@@ -990,6 +995,7 @@ mod tests {
             (DeliverableKind::TestResult, "\"test_result\""),
             (DeliverableKind::DecisionRequest, "\"decision_request\""),
             (DeliverableKind::ErrorBlock, "\"error_block\""),
+            (DeliverableKind::Artifact, "\"artifact\""),
         ] {
             let json = serde_json::to_string(&kind).expect("ser");
             assert_eq!(json, expect);
