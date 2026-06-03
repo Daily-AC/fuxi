@@ -1,12 +1,12 @@
-/* 节点 tab · v3 #58 · spec docs/superpowers/specs/2026-04-27-im-dist-接通-design.md (gap d)
- * 节点卡 #16110E 圆角 12px · worker 行 ≥48px 触控 · 在线 dot 用绿色脉冲
+/* 节点 tab · v3 #58 · daimeng 奶油糖果 · archetype A 列表/收件箱。
+ * 节点卡走 u-card 柔影 + 暖光 iconSlot；在线 dot mint 脉冲 / 离线 muted；
+ * 状态用 StatePill；worker 行 ≥48px 触控；add modal 暖色 u-card sheet + u-glass scrim。
  */
 
 .page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg);
 }
 
 .header {
@@ -20,26 +20,41 @@
 
 .title {
   margin: 0;
-  font-size: var(--size-title);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
 }
 
 .addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   min-height: var(--touch);
-  padding: 0 var(--space-3);
+  padding: 0 14px;
   font-size: var(--size-aux);
-  font-weight: var(--weight-medium);
-  color: var(--accent);
-  background: transparent;
-  border: 1px solid var(--accent);
+  font-weight: var(--weight-semibold);
+  color: var(--accent-deep);
+  background: linear-gradient(
+    150deg,
+    rgba(255, 184, 119, 0.26) 0%,
+    rgba(255, 184, 119, 0.1) 100%
+  );
+  border: 0;
   border-radius: var(--radius-pill);
-  transition: background var(--transition-fast);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
+  cursor: pointer;
+  transition: transform 0.16s var(--spring);
 }
 
-.addBtn:active,
-.addBtn:focus-visible {
-  background: var(--accent-subtle);
+.addBtn:active {
+  transform: scale(0.96);
+}
+
+.addIcon {
+  display: inline-flex;
+}
+
+.addIcon svg {
+  width: 15px;
+  height: 15px;
+  display: block;
 }
 
 .body {
@@ -47,71 +62,97 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: 0 var(--space-4) var(--space-4);
+  padding: var(--space-1) var(--space-4) var(--space-5);
 }
 
 .root {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-3);
 }
 
 .muted {
   color: var(--text-muted);
   font-size: var(--size-aux);
-  margin: 0;
+  margin: var(--space-3) 0 0;
 }
 
 .errMsg {
   color: var(--danger);
   font-size: var(--size-aux);
-  margin: 0;
-}
-
-.empty {
-  padding: var(--space-7) var(--space-4);
-  text-align: center;
-  color: var(--text-muted);
-}
-
-.emptyTitle {
-  margin: 0 0 var(--space-2);
-  font-size: var(--size-heading);
-  font-weight: var(--weight-medium);
-  color: var(--text-secondary);
-}
-
-.emptyHint {
-  margin: 0;
-  font-size: var(--size-aux);
-  color: var(--text-muted);
+  margin: var(--space-3) 0 0;
 }
 
 /* ===== 节点卡 ===== */
 
 .nodeCard {
   padding: var(--space-3) var(--space-4);
-  background: #16110E;
-  border: 1px solid var(--border);
-  border-radius: 12px;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .nodeCardOffline {
-  opacity: 0.5;
+  opacity: 0.6;
 }
 
 .nodeHead {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
+}
+
+/* 节点 iconSlot ~38px（在线 mint / 离线 muted） */
+.iconSlot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  color: #3f8f6a;
+  background: linear-gradient(
+    150deg,
+    rgba(143, 217, 182, 0.3) 0%,
+    rgba(143, 217, 182, 0.12) 100%
+  );
+  box-shadow: var(--inset-hi);
+}
+
+.iconSlot :global(svg) {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.iconSlot[data-tone="muted"] {
+  color: var(--text-muted);
+  background: linear-gradient(
+    150deg,
+    rgba(195, 180, 162, 0.22) 0%,
+    rgba(195, 180, 162, 0.1) 100%
+  );
+}
+
+.nodeMid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.nodeTitleLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .nodeDot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--text-muted);
   flex-shrink: 0;
@@ -123,7 +164,8 @@
 }
 
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 0.55;
     transform: scale(0.85);
   }
@@ -134,12 +176,22 @@
 }
 
 .nodeName {
-  flex: 1;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--size-heading);
   font-weight: var(--weight-semibold);
   color: var(--text-primary);
-  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nodeSub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
 }
 
 .nodeMeta {
@@ -149,23 +201,29 @@
   font-feature-settings: "tnum";
 }
 
+.nodeTrail {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
 .tagRow {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
 }
 
 .tag {
   display: inline-flex;
   align-items: center;
-  height: 22px;
+  height: 20px;
   padding: 0 8px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-secondary);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 11px;
+  background: var(--accent-subtle);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--inset-hi);
 }
 
 /* ===== workers 列表 ===== */
@@ -185,14 +243,13 @@
   border-bottom: 0;
 }
 
-/* P2-A · idle 门客无 current_task = "已完成等清理" 视觉折叠：
- * 底色变浅 + 小一号 + workerRole/workerStatusText 进入 muted 色，让用户一眼区分
- * "活的待命门客" vs "刚跑完等 GC 的僵尸 idle"。后端 IdleGc 600s 会自动 emit AgentDead；
- * 那之前用户在 PWA 不该误以为 cangjie/extractor 这种一锤子角色还活着等派活。 */
+/* P2-A · idle 门客无 current_task = "已完成等清理" 视觉折叠：行压扁 + 灰显 + 小标签。
+ * 后端 IdleGc 600s 会自动 emit AgentDead；那之前 PWA 不该让用户误以为
+ * cangjie/extractor 这种一锤子角色还活着等派活。 */
 .workerRowSettled .workerBtn {
-  min-height: 36px;
-  padding: 4px var(--space-2);
-  opacity: 0.6;
+  min-height: 38px;
+  padding: 5px var(--space-2);
+  opacity: 0.62;
 }
 
 .workerRowSettled .workerRole,
@@ -220,12 +277,13 @@
   color: inherit;
   font: inherit;
   cursor: pointer;
-  transition: background var(--transition-fast);
+  border-radius: 10px;
+  transition: background 0.16s var(--soft);
 }
 
 .workerBtn:hover:not(:disabled),
 .workerBtn:focus-visible {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--accent-subtle);
 }
 
 .workerBtn:disabled {
@@ -233,8 +291,8 @@
 }
 
 .workerDot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -263,7 +321,7 @@
 
 .workerEmpty {
   margin: 0;
-  padding: var(--space-2) 0;
+  padding: var(--space-1) 0 0;
   font-size: var(--size-meta);
   color: var(--text-muted);
 }
@@ -273,7 +331,6 @@
 .modalScrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -283,20 +340,33 @@
 }
 
 @keyframes fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .modalCard {
   width: 100%;
   max-width: 420px;
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-card);
   padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  animation: sheet-rise 220ms var(--spring);
+}
+
+@keyframes sheet-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .modalHead {
@@ -308,24 +378,28 @@
 .modalTitle {
   margin: 0;
   font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
 }
 
 .modalClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 36px;
   height: 36px;
-  font-size: 22px;
   color: var(--text-muted);
-  border-radius: 18px;
+  border-radius: 50%;
   background: transparent;
   border: 0;
+  cursor: pointer;
+  transition:
+    background 0.16s var(--soft),
+    color 0.16s var(--soft);
 }
 
 .modalClose:hover,
 .modalClose:focus-visible {
-  background: var(--surface-elevated);
-  color: var(--text-primary);
+  background: var(--accent-subtle);
+  color: var(--accent-deep);
 }
 
 .modalHint {
@@ -338,9 +412,9 @@
 .modalCode {
   margin: 0;
   padding: var(--space-3);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: var(--accent-subtle);
+  border-radius: 12px;
+  box-shadow: var(--inset-hi);
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
@@ -357,6 +431,8 @@
   background: var(--accent);
   border: 0;
   border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-soft1);
+  cursor: pointer;
 }
 
 .modalCopy:active {
