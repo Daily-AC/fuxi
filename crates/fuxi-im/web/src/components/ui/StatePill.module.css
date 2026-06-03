@@ -1,0 +1,38 @@
+/* StatePill · 软染状态药丸。底色按 tone 取自色板（低 alpha + 深字保留质感）。 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: var(--size-meta);
+  font-weight: var(--weight-semibold);
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: var(--inset-hi);
+}
+
+.pill[data-tone="running"] {
+  background: rgba(255, 184, 119, 0.18);
+  color: var(--accent-deep);
+}
+.pill[data-tone="done"] {
+  background: rgba(143, 217, 182, 0.22);
+  color: #3f8f6a;
+}
+.pill[data-tone="queued"] {
+  background: rgba(201, 182, 232, 0.22);
+  color: #7c63a8;
+}
+.pill[data-tone="warn"] {
+  background: rgba(232, 162, 58, 0.18);
+  color: var(--warning);
+}
+.pill[data-tone="danger"] {
+  background: rgba(232, 133, 122, 0.18);
+  color: var(--danger);
+}
+.pill[data-tone="neutral"] {
+  background: rgba(195, 180, 162, 0.18);
+  color: var(--text-secondary);
+}

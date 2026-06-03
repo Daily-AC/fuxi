@@ -1,0 +1,21 @@
+/* Card · 在 global u-card（柔影 + 内高光）之上做色调微染。 */
+.card {
+  padding: 16px;
+}
+
+/* tone 微染：暖白底之上叠极淡彩，保留奶油质感不抢眼 */
+.card[data-tone="peach"] {
+  background:
+    linear-gradient(180deg, rgba(255, 184, 119, 0.1) 0%, rgba(255, 184, 119, 0.03) 100%),
+    var(--surface);
+}
+.card[data-tone="lavender"] {
+  background:
+    linear-gradient(180deg, rgba(201, 182, 232, 0.12) 0%, rgba(201, 182, 232, 0.04) 100%),
+    var(--surface);
+}
+.card[data-tone="mint"] {
+  background:
+    linear-gradient(180deg, rgba(143, 217, 182, 0.12) 0%, rgba(143, 217, 182, 0.04) 100%),
+    var(--surface);
+}
