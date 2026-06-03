@@ -15,6 +15,7 @@ import {
   type MoreSubRoute,
   type TabIndex,
 } from "./components/ApiProvider";
+import { MascotProvider } from "./components/Mascot/MascotController";
 import { LoginView } from "./components/LoginView";
 import { BottomTabBar, type TabSpec } from "./components/BottomTabBar";
 import { MoreSubShell } from "./components/MoreSubShell";
@@ -58,8 +59,10 @@ export const App: Component = (): JSX.Element => {
 
   return (
     <ApiProvider>
-      <AuthGate />
-      <Toast />
+      <MascotProvider>
+        <AuthGate />
+        <Toast />
+      </MascotProvider>
     </ApiProvider>
   );
 };
