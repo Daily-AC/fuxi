@@ -15,6 +15,10 @@ import { pushToast } from "~/lib/toast";
 import type { TopicView } from "~/types/api";
 import styles from "./TopicSidebar.module.css";
 
+// fuxi-core::TopicId::general() 的常量 UUID——和后端 schema 对齐。
+// 用户体验：归档 general 没意义（系统兜底），UI 直接 disable 归档按钮。
+const GENERAL_TOPIC_ID = "00000000-0000-0000-0000-000000000001";
+
 // Phase 1 · 桌面 left sidebar / 移动端左滑抽屉
 //
 // 设计源：docs/handoff/v1-session19.md §2-§4
@@ -49,12 +53,15 @@ export const TopicSidebar: Component = () => {
     setCurrentTopicId,
     sidebarOpen,
     setSidebarOpen,
+    setIsSwitchingTopic,
   } = useApi();
 
   const [data, { refetch }] = createResource(() => client.fetchTopics(false));
   const [switching, setSwitching] = createSignal<string | null>(null);
   const [creating, setCreating] = createSignal(false);
   const [menuOpenFor, setMenuOpenFor] = createSignal<string | null>(null);
+  // bug D · IM 风格新建话题 modal 取代 window.prompt
+  const [createOpen, setCreateOpen] = createSignal(false);
 
   // 初始填全局 currentTopicId——首次 fetchTopics 返 current_topic_id 时回写 context。
   // 若用户在另一 client 切了 topic，30s 后下一次 poll 也会同步过来。
@@ -83,6 +90,7 @@ export const TopicSidebar: Component = () => {
       return;
     }
     setSwitching(id);
+    setIsSwitchingTopic(true);
     try {
       const resp = await client.switchTopic(id);
       setCurrentTopicId(resp.current_topic_id);
@@ -100,14 +108,14 @@ export const TopicSidebar: Component = () => {
       pushToast(msg, "error");
     } finally {
       setSwitching(null);
+      setIsSwitchingTopic(false);
     }
   };
 
-  const handleCreate = async (): Promise<void> => {
-    if (creating()) return;
-    const raw = window.prompt("新话题标题（≤80 字）", "");
-    if (raw === null) return; // 用户取消
-    const title = raw.trim();
+  /** 接 modal 提交：trim/长度校验 → POST createTopic → refetch → 自动 switch 进新话题。
+   *  bug B：整个流程期间 setIsSwitchingTopic(true)，XuannvPage 全程显 overlay。 */
+  const submitCreate = async (rawTitle: string): Promise<void> => {
+    const title = rawTitle.trim();
     if (title === "") {
       pushToast("标题不能为空", "warn");
       return;
@@ -116,11 +124,15 @@ export const TopicSidebar: Component = () => {
       pushToast("标题上限 80 字", "warn");
       return;
     }
+    if (creating()) return;
     setCreating(true);
+    setIsSwitchingTopic(true);
     try {
       const t = await client.createTopic({ title });
+      setCreateOpen(false);
       await refetch();
-      // 自动 switch 到新建的 topic——用户建 = 想进
+      // 自动 switch 到新建的 topic——用户建 = 想进。handleSwitch 内部也会 set/clear
+      // isSwitchingTopic，外层这一对覆盖整个 create→switch 全程不闪烁。
       await handleSwitch(t.id);
     } catch (err) {
       const msg =
@@ -129,19 +141,29 @@ export const TopicSidebar: Component = () => {
       pushToast(msg, "error");
     } finally {
       setCreating(false);
+      setIsSwitchingTopic(false);
     }
   };
 
   const handleArchive = async (id: string, title: string): Promise<void> => {
     setMenuOpenFor(null);
-    if (id === currentTopicId()) {
-      pushToast("当前话题不可归档，请先切到其他话题", "warn");
+    // general 是系统兜底，禁止归档（archive 后没东西可切，且每次 ensure_scope 都会
+    // 重新落 general 行）。前端硬拦 + 后端 SQL UPDATE 即便走也只是 archived_at 一个时间戳，
+    // ensure_scope 路径仍认 general，影响不大；这里仅是 UX。
+    if (id === GENERAL_TOPIC_ID) {
+      pushToast("默认 general 话题为系统兜底，不可归档", "warn");
       return;
     }
     if (!window.confirm(`归档话题「${title}」？归档不删，可在数据库手动恢复。`)) {
       return;
     }
+    // bug C · 允许归档"当前话题"：先把玄女切回 general，再归档目标。
+    // 旧逻辑直接拒（"先切到其他话题"），用户新建测试话题后想立刻归档完全做不到。
+    const wasCurrent = id === currentTopicId();
     try {
+      if (wasCurrent) {
+        await handleSwitch(GENERAL_TOPIC_ID);
+      }
       await client.archiveTopic(id);
       await refetch();
     } catch (err) {
@@ -186,7 +208,7 @@ export const TopicSidebar: Component = () => {
           <button
             type="button"
             class={styles.addBtn}
-            onClick={() => void handleCreate()}
+            onClick={() => setCreateOpen(true)}
             disabled={creating()}
             aria-label="新建话题"
             data-testid="topic-add-btn"
@@ -232,7 +254,112 @@ export const TopicSidebar: Component = () => {
           </Show>
         </div>
       </aside>
+      {/* bug D · IM 风格新建 modal —— 取代 window.prompt 的浏览器原生弹窗 */}
+      <Show when={createOpen()}>
+        <CreateTopicModal
+          submitting={creating()}
+          onCancel={() => setCreateOpen(false)}
+          onSubmit={(title) => void submitCreate(title)}
+        />
+      </Show>
     </>
+  );
+};
+
+interface CreateTopicModalProps {
+  submitting: boolean;
+  onCancel(): void;
+  onSubmit(title: string): void;
+}
+
+const CreateTopicModal: Component<CreateTopicModalProps> = (props) => {
+  const [title, setTitle] = createSignal("");
+  let inputEl: HTMLInputElement | undefined;
+  // 长度上限同后端 / submitCreate 校验。char count 用 Array.from 数 grapheme，
+  // 让 emoji/汉字一字一格而非 utf-16 unit。
+  const len = createMemo(() => [...title()].length);
+  const overflow = createMemo(() => len() > 80);
+
+  onMount(() => {
+    // 自动聚焦输入框——modal 打开第一时间能打字。
+    queueMicrotask(() => inputEl?.focus());
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") props.onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
+  const submit = (): void => {
+    if (props.submitting) return;
+    if (overflow()) return;
+    if (title().trim() === "") return;
+    props.onSubmit(title());
+  };
+
+  return (
+    <div
+      class={styles.modalScrim}
+      data-testid="topic-create-modal-scrim"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !props.submitting) props.onCancel();
+      }}
+    >
+      <div
+        class={styles.modalCard}
+        role="dialog"
+        aria-label="新建话题"
+        data-testid="topic-create-modal"
+      >
+        <header class={styles.modalHead}>
+          <h2 class={styles.modalTitle}>新建话题</h2>
+        </header>
+        <p class={styles.modalHint}>给这次对话起个名字（≤80 字）</p>
+        <input
+          ref={inputEl}
+          type="text"
+          class={styles.modalInput}
+          classList={{ [styles.modalInputErr ?? ""]: overflow() }}
+          placeholder="例：英语 app 调研、周末画画…"
+          value={title()}
+          onInput={(e) => setTitle(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          disabled={props.submitting}
+          data-testid="topic-create-input"
+          aria-invalid={overflow()}
+        />
+        <div class={styles.modalFooter}>
+          <span class={styles.modalCount} aria-live="polite">
+            {len()}/80
+          </span>
+          <div class={styles.modalBtnRow}>
+            <button
+              type="button"
+              class={styles.modalCancelBtn}
+              onClick={() => props.onCancel()}
+              disabled={props.submitting}
+              data-testid="topic-create-cancel"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              class={styles.modalSubmitBtn}
+              onClick={submit}
+              disabled={props.submitting || title().trim() === "" || overflow()}
+              data-testid="topic-create-submit"
+            >
+              {props.submitting ? "建中…" : "创建"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 };
 
