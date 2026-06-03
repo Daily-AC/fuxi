@@ -1136,7 +1136,23 @@ impl Fuxi {
         // - dist 路径不发 TaskCreated/TaskDispatched 事件到本进程 EventBus——
         //   dist worker 自己 emit 后通过 dist /dist/event publish 流回，本进程
         //   bus 自然能看到（共享 bus，#54 装配）
-        let needs_dist = task.pinned_node.is_some() || !task.required_tags.is_empty();
+        // issue f4e0ff39：`--to <id>` 指向本地已存在的 agent 时，caller（用户/玄女）
+        // 是**显式点名**这个 agent 干活——直派本地，不进 dist queue。否则 home 既是
+        // controller 又是唯一 worker 且**无 pull loop**（im_dist 虚节点只注册不消费）
+        // 时，required_tags 让 task 进 dist queue 无人 pull，9 分钟卡死后 idle_ttl
+        // 把 agent GC 掉、task 永久悬空。pinned_node 仍**永远**走 dist——那是玄女
+        // 显式跨节点路由的唯一信号，不能被本地 agent 的存在抹掉。
+        let agent_is_local = self.shelf.get_agent(agent_id).await.is_some();
+        let needs_dist =
+            task.pinned_node.is_some() || (!task.required_tags.is_empty() && !agent_is_local);
+        if !needs_dist && !task.required_tags.is_empty() {
+            info!(
+                task_id = %task.id,
+                agent = %agent_id,
+                required_tags = ?task.required_tags,
+                "dispatch routing: --to 指向本地 agent，override required_tags 直派本地"
+            );
+        }
         if needs_dist {
             let enqueuer_opt = self.dist_enqueuer.read().await.clone();
             if let Some(enqueuer) = enqueuer_opt {
@@ -2714,6 +2730,169 @@ mod pump_orphan_recovery_tests {
         assert_eq!(
             cancelled_count, 0,
             "saw_terminal=true 时不应再补 TaskCancelled（避免重复终态）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_routing_tests {
+    //! issue f4e0ff39：`--to <本地 agent>` + `--required-tags` 不该卡 dist queue。
+    //! home 既是 controller 又是唯一 worker、且**无 pull loop**，task 进 dist queue
+    //! 永远无人 pull。修复：agent 在本地 shelf 存在时，required_tags 不触发 dist；
+    //! 但 pinned_node 永远走 dist（玄女显式跨节点路由必须保留）。
+
+    use super::*;
+    use async_trait::async_trait;
+    use fuxi_core::Result as CoreResult;
+    use fuxi_core::agent::{AgentCard, AgentProfile, AgentStatus};
+    use fuxi_events::EventBus;
+    use fuxi_workspace::GitWorktreeWorkspace;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Mutex;
+    use tokio::sync::mpsc;
+
+    struct StubAgent {
+        card: AgentCard,
+        rx_holder: Mutex<Option<mpsc::Receiver<Event>>>,
+    }
+    impl StubAgent {
+        fn new(role: &str) -> (Arc<Self>, mpsc::Sender<Event>) {
+            let (tx, rx) = mpsc::channel(64);
+            let agent = Arc::new(Self {
+                card: AgentCard {
+                    id: AgentId::new(),
+                    profile: AgentProfile {
+                        name: format!("stub-{role}"),
+                        role: role.to_string(),
+                        cli: "stub".to_string(),
+                        system_prompt: String::new(),
+                        tags: vec![],
+                        extra: Default::default(),
+                    },
+                    endpoint: "stub://".into(),
+                    status: AgentStatus::Idle,
+                },
+                rx_holder: Mutex::new(Some(rx)),
+            });
+            (agent, tx)
+        }
+    }
+    #[async_trait]
+    impl Agent for StubAgent {
+        fn card(&self) -> &AgentCard {
+            &self.card
+        }
+        async fn dispatch(&self, _task: Task) -> CoreResult<mpsc::Receiver<Event>> {
+            Ok(self.rx_holder.lock().await.take().expect("rx 已取走"))
+        }
+        async fn send_message(&self, _t: TaskId, _text: &str) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _t: TaskId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    /// 记录 enqueue 调用次数的 mock——验证 dist 路径是否被触发。
+    struct CountingEnqueuer {
+        count: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl crate::DistEnqueuer for CountingEnqueuer {
+        async fn enqueue(&self, _task: &Task, _opts: crate::DistEnqueueOptions) -> Result<String> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok("job-stub".to_string())
+        }
+    }
+
+    async fn make_fuxi() -> Arc<Fuxi> {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let bus = EventBus::with_memory_store().await.unwrap();
+        std::mem::forget(dir);
+        Arc::new(Fuxi::new(bus, ws))
+    }
+
+    /// 核心修复：`--to <本地 agent>` + `--required-tags home` 走本地直派，不 enqueue。
+    #[tokio::test]
+    async fn required_tags_with_local_agent_dispatches_locally_not_dist() {
+        let fuxi = make_fuxi().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        fuxi.set_dist_enqueuer(Arc::new(CountingEnqueuer {
+            count: count.clone(),
+        }))
+        .await;
+
+        let (agent, _tx) = StubAgent::new("luban");
+        let agent_id = fuxi.insert_agent(agent.clone(), None).await;
+
+        let task =
+            Task::new("home-maint", "重启 sovits").with_required_tags(vec!["home".to_string()]);
+        fuxi.dispatch(agent_id, task).await.expect("dispatch");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "本地 agent + required_tags 应直派本地，不进 dist queue"
+        );
+        assert_eq!(
+            fuxi.status_of(agent_id).await,
+            Some(ShelfStatus::Busy),
+            "本地直派后 agent 应 Busy（被本地 pump 接管）"
+        );
+    }
+
+    /// pinned_node 永远走 dist——保护玄女显式跨节点路由不被本修复破坏。
+    #[tokio::test]
+    async fn pinned_node_with_local_agent_still_goes_dist() {
+        let fuxi = make_fuxi().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        fuxi.set_dist_enqueuer(Arc::new(CountingEnqueuer {
+            count: count.clone(),
+        }))
+        .await;
+
+        let (agent, _tx) = StubAgent::new("luban");
+        let agent_id = fuxi.insert_agent(agent.clone(), None).await;
+
+        let task = Task::new("on-mac", "跑 mac 专属活").with_pinned_node("mac-studio".to_string());
+        fuxi.dispatch(agent_id, task).await.expect("dispatch");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "pinned_node 显式跨节点应走 dist enqueue，无论 agent 是否本地"
+        );
+    }
+
+    /// required_tags + agent 不在本地 shelf → 仍走 dist（跨节点 role 路由保留）。
+    #[tokio::test]
+    async fn required_tags_with_nonlocal_agent_goes_dist() {
+        let fuxi = make_fuxi().await;
+        let count = Arc::new(AtomicUsize::new(0));
+        fuxi.set_dist_enqueuer(Arc::new(CountingEnqueuer {
+            count: count.clone(),
+        }))
+        .await;
+
+        // 不 insert_agent——agent_id 不在本地 shelf
+        let ghost = AgentId::new();
+        let task = Task::new("remote", "远端活").with_required_tags(vec!["erp".to_string()]);
+        fuxi.dispatch(ghost, task).await.expect("dispatch");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "agent 不在本地 + required_tags → 走 dist enqueue"
         );
     }
 }

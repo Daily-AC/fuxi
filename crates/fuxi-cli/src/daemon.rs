@@ -1180,6 +1180,15 @@ async fn emit_terminal_error(
     .await
 }
 
+/// cangjie / extractor 是平台**内部角色**——只由经验抽取管线（InsightExtractorTask /
+/// FactExtractor）经 `dispatch_to_any_in_task` 在进程内唤起，喂的是 trajectory 抽取
+/// prompt。它们的 ROLE.md 契约是"非 trajectory 输入直接返 `[]`"，所以被用户/玄女经
+/// `fuxi spawn` 错派通用调研任务时会**静默空跑**，玄女误以为搞定（issue fb09ee62）。
+/// 在 spawn 入口 fail loud，引导改派交付型门客。
+fn is_internal_only_role(role: &str) -> bool {
+    matches!(role.trim(), "cangjie" | "extractor")
+}
+
 /// 根据 role 读 Skill → 构造 AgentProfile + 对应 LaunchConfig → 丢给 Fuxi.spawn_worker
 /// 或 spawn_worker_in_worktree（有召回 worktree 时）。
 ///
@@ -1195,6 +1204,13 @@ async fn spawn_by_role(
     project_override: Option<String>,
     ephemeral_task_override: Option<String>,
 ) -> Result<AgentId> {
+    // issue fb09ee62：内部角色不接受直接派活——否则错派通用任务时静默返 [] 让玄女
+    // 误判完成。内部抽取管线不走这条路径（用 dispatch_to_any_in_task），guard 安全。
+    if is_internal_only_role(role) {
+        anyhow::bail!(
+            "'{role}' 是平台内部角色（经验抽取管线专用），不接受直接 spawn 派活；通用调研/写代码请派 luban / pusong 等交付型门客"
+        );
+    }
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let mut profile = loaded.profile;
     if let Some(n) = name_override {
@@ -1578,6 +1594,18 @@ mod tests {
     use super::*;
     use crate::ipc::Command;
     use fuxi_memory::NewFact;
+
+    // issue fb09ee62：cangjie/extractor 是内部经验抽取角色，被错派通用任务会静默
+    // 返 [] 让玄女误以为搞定。spawn 入口应拒这两个 role，引导派 luban/pusong。
+    #[test]
+    fn internal_only_roles_rejected_at_spawn_entry() {
+        assert!(is_internal_only_role("cangjie"));
+        assert!(is_internal_only_role("extractor"));
+        assert!(is_internal_only_role("  cangjie  "), "trim 后仍命中");
+        assert!(!is_internal_only_role("luban"));
+        assert!(!is_internal_only_role("pusong"));
+        assert!(!is_internal_only_role("xuannv"));
+    }
 
     /// 不起真 Fuxi——用空壳子验 wire 行为（ping/invalid cmd）。
     async fn mock_daemon_parts() -> (Arc<Fuxi>, EventBus, TriggerStore, Arc<Keeper>, OracleStore) {

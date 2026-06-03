@@ -70,15 +70,16 @@ pub const SENTINEL_ADDENDUM_TEXT: &str = r#"
 message 中**单独一行**输出 sentinel JSON 通知玄女审阅：
 
 ```
-{"_fuxi":"request_review","kind":"<5 类之一>","summary":"<一两句中文>","artifact_ref":"<可选>"}
+{"_fuxi":"request_review","kind":"<6 类之一>","summary":"<一两句中文>","artifact_ref":"<可选>"}
 ```
 
-**5 类 kind**：
+**6 类 kind**：
 - `research_summary` — 完成调研主题，写出小结让玄女据此决策
 - `code_change` — 写完一段三绿（fmt + clippy + test）的代码等审 commit
 - `test_result` — 跑完一轮测试有"通过 / 失败 / 数字"
 - `decision_request` — 自己分析过 trade-off，把 ≥2 个选项 + 推荐摆给她
 - `error_block` — 试过 ≥2 个假设都不对、连续 ≥3 步走不通同一个根因；继续试就是浪费 token
+- `artifact` — 产出了**二进制交付物**（apk / ipa / dmg / zip / model.bin 等）；用户拿去安装/下载，不是代码 diff
 
 **不输出 sentinel = 玄女不知道你做了什么 = 任务被认为没收尾**。
 
@@ -96,7 +97,8 @@ message 中**单独一行**输出 sentinel JSON 通知玄女审阅：
 在发 sentinel **之前**先在 Bash 里把文件落进 PWA 收件箱：
 
 ```bash
-fuxi deliverable produce --project <slug> --task <task-uuid> --kind <5 类之一> file1 [file2 ...]
+fuxi deliverable produce --project <slug> --task <task-uuid> --kind <6 类之一> file1 [file2 ...]
+# 二进制交付（apk/ipa/dmg/zip/...）用 --kind artifact（或别名 apk/binary/archive）
 ```
 
 `<task-uuid>` 形态 `task-<uuid>`——若派活 prompt 里有标注用它（同 task 的多份
@@ -363,8 +365,8 @@ mod tests {
     }
 
     #[test]
-    fn addendum_text_contains_sentinel_format_and_5_kinds() {
-        // 防漂移：核心字段名 + 5 类 kind 都在文案里
+    fn addendum_text_contains_sentinel_format_and_6_kinds() {
+        // 防漂移：核心字段名 + 6 类 kind 都在文案里
         let txt = SENTINEL_ADDENDUM_TEXT;
         assert!(txt.contains("_fuxi"));
         assert!(txt.contains("request_review"));
@@ -373,6 +375,7 @@ mod tests {
         assert!(txt.contains("test_result"));
         assert!(txt.contains("decision_request"));
         assert!(txt.contains("error_block"));
+        assert!(txt.contains("artifact")); // issue 7a46963d
     }
 
     #[test]
