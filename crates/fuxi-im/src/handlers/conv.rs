@@ -82,6 +82,11 @@ pub struct MessagesQuery {
     /// 翻历史 cursor —— 上一页 oldest message id。`None` = 最新一页。
     #[serde(default)]
     pub before: Option<String>,
+    /// Phase 1 · 玄女主对话切 topic 时按 UUID 过滤；缺省走 server-side
+    /// `state.fuxi.current_topic_id()`（PWA 不必主动传，老 client 默认行为对齐）。
+    /// 任务子线（`conv=task:<id>`）传不传都无所谓——任务 thread 跨 topic 不分。
+    #[serde(default)]
+    pub topic_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,9 +107,21 @@ pub async fn messages(
     let scope = q.conv.as_deref().unwrap_or(SCOPE_XUANNV);
     let conv_id = store.ensure_scope(scope, None).await?;
     let limit = q.limit.unwrap_or(50);
-    let (mut messages, has_more, oldest) = store
-        .page_messages(&conv_id, limit, q.before.as_deref())
-        .await?;
+    // Phase 1 · topic 过滤仅对玄女主线生效——任务子线（conv=task:<id>）跨 topic 不分。
+    // 玄女主线缺省走当前 topic，避免老 PWA 不传 topic_id 仍拉全 conv 漏旧 topic 历史。
+    let (mut messages, has_more, oldest) = if scope == SCOPE_XUANNV {
+        let topic = match q.topic_id.as_deref() {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => state.fuxi.current_topic_id().0.to_string(),
+        };
+        store
+            .page_messages_in_topic(&conv_id, &topic, limit, q.before.as_deref())
+            .await?
+    } else {
+        store
+            .page_messages(&conv_id, limit, q.before.as_deref())
+            .await?
+    };
     // v1-session19 #2 · hydrate 附件元数据 — 让前端历史回放显真名而非 uuid。
     // upload_store 缺时（少数 smoke 路径）跳过：前端 fallback uploadsFromIds(id 当 name)
     // 不致命，只是显示退化。

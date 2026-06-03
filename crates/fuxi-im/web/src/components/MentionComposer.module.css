@@ -30,7 +30,10 @@
   min-height: var(--touch);
   /* P1.5：textarea 多行——auto-grow JS 设 inline height；CSS 兜个 max 防 5 行
    * 以上撑爆视口，超出后内部 scroll。原来 120px 单行场景对 textarea 偏紧，
-   * 拉到 ~5 行 (~120px → 160px)。 */
+   * 拉到 ~5 行 (~120px → 160px)。
+   * bug #f391c55b 后用户实测 · 移动端 viewport 短 + 虚拟键盘吃掉 ~50% 时，160px
+   * 的 editor 让 conversation 几乎不可见，多行打字过程中看不到上文。下面 @media
+   * 在窄屏把 cap 拉到 96px (~3.5 行) 缓解。 */
   max-height: 160px;
   padding: 10px var(--space-4);
   background: var(--surface);
@@ -54,6 +57,16 @@
 
 .editor:focus {
   border-color: var(--accent-dim);
+}
+
+/* 移动端：拉低 max-height + auto-grow JS 设的 inline height 由 composer.tsx 同步收口。
+ * 加 `!important` 是因为 contentEditable JS 也会在 style 上写 inline height —— CSS
+ * 这边定的 max-height 不会被 JS inline 覆盖，但 JS 写的 inline height 也会被
+ * max-height 钳住。 */
+@media (max-width: 767px) {
+  .editor {
+    max-height: 96px;
+  }
 }
 
 .editor:empty::before {

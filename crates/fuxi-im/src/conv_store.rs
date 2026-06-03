@@ -22,7 +22,7 @@
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use fuxi_core::{AgentId, Event, EventKind};
+use fuxi_core::{AgentId, Event, EventKind, TopicId};
 use fuxi_events::EventBus;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -226,11 +226,38 @@ impl ConvStore {
     ///
     /// 返回顺序按 ts ASC（前端从最早到最近渲染）。`has_more` 表示当前页之外
     /// **更早**的还有；oldest 是本页最早消息 id（前端下次 `before=oldest`）。
+    ///
+    /// 默认不过滤 topic（老 caller 行为）；topic-aware caller 走
+    /// [`Self::page_messages_in_topic`]。
     pub async fn page_messages(
         &self,
         conv_id: &str,
         limit: usize,
         before: Option<&str>,
+    ) -> Result<(Vec<Message>, bool, Option<String>)> {
+        self.page_messages_inner(conv_id, limit, before, None).await
+    }
+
+    /// Phase 1 · 按 topic 过滤拉历史。PWA 玄女主对话切 topic 时调本接口，
+    /// 让历史只显当前 topic 的消息（修 bug "新建话题不空"——老路径全 conv_id 拉，
+    /// 跨 topic 看到旧 topic 内容漏出来）。`topic_id` 必须是 UUID 字符串。
+    pub async fn page_messages_in_topic(
+        &self,
+        conv_id: &str,
+        topic_id: &str,
+        limit: usize,
+        before: Option<&str>,
+    ) -> Result<(Vec<Message>, bool, Option<String>)> {
+        self.page_messages_inner(conv_id, limit, before, Some(topic_id))
+            .await
+    }
+
+    async fn page_messages_inner(
+        &self,
+        conv_id: &str,
+        limit: usize,
+        before: Option<&str>,
+        topic_id: Option<&str>,
     ) -> Result<(Vec<Message>, bool, Option<String>)> {
         let limit = limit.clamp(1, 200);
         // 查 limit+1 条来判 has_more
@@ -252,28 +279,43 @@ impl ConvStore {
                 // anchor 不存在/不属于此 conv → 空页 + has_more=false
                 return Ok((Vec::new(), false, None));
             };
-            sqlx::query(
+            // topic_id 过滤可选——None 走老路径（不加 AND topic_id=?）。
+            let sql = if topic_id.is_some() {
+                "SELECT id, conv_id, role, agent_id, kind, content, attachments, \
+                 source_event_id, ts, topic_id FROM messages \
+                 WHERE conv_id = ?1 AND ts < ?2 AND topic_id = ?4 \
+                 ORDER BY ts DESC, id DESC LIMIT ?3"
+            } else {
                 "SELECT id, conv_id, role, agent_id, kind, content, attachments, \
                  source_event_id, ts, topic_id FROM messages \
                  WHERE conv_id = ?1 AND ts < ?2 \
-                 ORDER BY ts DESC, id DESC LIMIT ?3",
-            )
-            .bind(conv_id)
-            .bind(&anchor_ts)
-            .bind(fetch_n)
-            .fetch_all(&self.pool)
-            .await
+                 ORDER BY ts DESC, id DESC LIMIT ?3"
+            };
+            let mut q = sqlx::query(sql)
+                .bind(conv_id)
+                .bind(&anchor_ts)
+                .bind(fetch_n);
+            if let Some(t) = topic_id {
+                q = q.bind(t);
+            }
+            q.fetch_all(&self.pool).await
         } else {
-            sqlx::query(
+            let sql = if topic_id.is_some() {
+                "SELECT id, conv_id, role, agent_id, kind, content, attachments, \
+                 source_event_id, ts, topic_id FROM messages \
+                 WHERE conv_id = ?1 AND topic_id = ?3 \
+                 ORDER BY ts DESC, id DESC LIMIT ?2"
+            } else {
                 "SELECT id, conv_id, role, agent_id, kind, content, attachments, \
                  source_event_id, ts, topic_id FROM messages \
                  WHERE conv_id = ?1 \
-                 ORDER BY ts DESC, id DESC LIMIT ?2",
-            )
-            .bind(conv_id)
-            .bind(fetch_n)
-            .fetch_all(&self.pool)
-            .await
+                 ORDER BY ts DESC, id DESC LIMIT ?2"
+            };
+            let mut q = sqlx::query(sql).bind(conv_id).bind(fetch_n);
+            if let Some(t) = topic_id {
+                q = q.bind(t);
+            }
+            q.fetch_all(&self.pool).await
         }
         .map_err(|e| Error::Internal(format!("page_messages query: {e}")))?;
 
@@ -369,6 +411,7 @@ pub async fn spawn_xuannv_sync(
     store: Arc<ConvStore>,
     bus: EventBus,
     xuannv_id_watch: watch::Receiver<Option<AgentId>>,
+    current_topic_watch: watch::Receiver<TopicId>,
 ) -> tokio::task::JoinHandle<()> {
     // 同步期：先 ensure conv + 先 subscribe
     let conv_id = match store.ensure_scope(SCOPE_XUANNV, None).await {
@@ -382,6 +425,7 @@ pub async fn spawn_xuannv_sync(
     debug!(
         conv = %conv_id,
         xuannv = ?*xuannv_id_watch.borrow(),
+        topic = %current_topic_watch.borrow().0,
         "conv_store xuannv sync 准备就绪"
     );
 
@@ -401,7 +445,10 @@ pub async fn spawn_xuannv_sync(
             let Some(current_xn) = *xuannv_id_watch.borrow() else {
                 continue;
             };
-            if let Err(e) = handle_event(&store, &conv_id, current_xn, &ev).await {
+            // bug "新建话题不空"：必读当前 topic_id 落库，否则所有消息都进 general，
+            // 切 topic 看到旧 topic 历史漏出来。watch 跟随 set_current_topic 实时变。
+            let topic = *current_topic_watch.borrow();
+            if let Err(e) = handle_event(&store, &conv_id, current_xn, topic, &ev).await {
                 warn!(error = %e, kind = ?ev.kind, "conv_store sync 写库失败");
             }
         }
@@ -410,20 +457,23 @@ pub async fn spawn_xuannv_sync(
 }
 
 /// 把单条 Event 翻成 messages 行（如果该事件该入对话视图）。
+/// `topic_id` 来自调用方 watch borrow，每条事件实时取——topic 切了立刻按新值落库。
 async fn handle_event(
     store: &ConvStore,
     conv_id: &str,
     xuannv_id: AgentId,
+    topic_id: TopicId,
     ev: &Event,
 ) -> Result<()> {
     let source_id = ev.meta.id.to_string();
+    let topic_str = topic_id.0.to_string();
     match &ev.kind {
         // 用户对玄女说话的两种入口都翻 user role：
         // - UserPrompted（玄女当前 turn 的 prompt）
         // - UserInterventionSent target=xuannv（用户主动 intervene 玄女）
         EventKind::UserPrompted { text } if ev.meta.agent == Some(xuannv_id) => {
             store
-                .append_message(
+                .append_message_in_topic(
                     conv_id,
                     "user",
                     None,
@@ -432,6 +482,7 @@ async fn handle_event(
                     None,
                     Some(&source_id),
                     ev.meta.at,
+                    &topic_str,
                 )
                 .await?;
         }
@@ -475,7 +526,7 @@ async fn handle_event(
                 None => ("user", serde_json::json!({ "text": text })),
             };
             store
-                .append_message(
+                .append_message_in_topic(
                     conv_id,
                     role,
                     None,
@@ -484,13 +535,14 @@ async fn handle_event(
                     attach_json.as_ref(),
                     Some(&source_id),
                     ev.meta.at,
+                    &topic_str,
                 )
                 .await?;
         }
         // 玄女自己的回应
         EventKind::AgentResponded { text, .. } if ev.meta.agent == Some(xuannv_id) => {
             store
-                .append_message(
+                .append_message_in_topic(
                     conv_id,
                     "xuannv",
                     Some(&xuannv_id.to_string()),
@@ -499,6 +551,7 @@ async fn handle_event(
                     None,
                     Some(&source_id),
                     ev.meta.at,
+                    &topic_str,
                 )
                 .await?;
         }
@@ -506,7 +559,7 @@ async fn handle_event(
         EventKind::TaskCreated { title, description } if ev.meta.agent == Some(xuannv_id) => {
             let task_id = ev.meta.task.map(|t| t.to_string()).unwrap_or_default();
             store
-                .append_message(
+                .append_message_in_topic(
                     conv_id,
                     "xuannv",
                     Some(&xuannv_id.to_string()),
@@ -519,6 +572,7 @@ async fn handle_event(
                     None,
                     Some(&source_id),
                     ev.meta.at,
+                    &topic_str,
                 )
                 .await?;
         }
@@ -527,7 +581,7 @@ async fn handle_event(
             from_user_to, text, ..
         } if ev.meta.agent == Some(xuannv_id) => {
             store
-                .append_message(
+                .append_message_in_topic(
                     conv_id,
                     "system",
                     None,
@@ -539,6 +593,7 @@ async fn handle_event(
                     None,
                     Some(&source_id),
                     ev.meta.at,
+                    &topic_str,
                 )
                 .await?;
         }
@@ -750,7 +805,8 @@ mod tests {
         let task = TaskId::new();
 
         let (_tx, rx) = watch::channel(Some(xuannv));
-        let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx).await;
+        let (_topic_tx, topic_rx) = watch::channel(TopicId::general());
+        let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx, topic_rx).await;
 
         // user intervene 玄女
         bus.publish(user_intervention_event(xuannv, "你好", false))
@@ -805,7 +861,8 @@ mod tests {
         let new_xn = AgentId::new();
 
         let (tx, rx) = watch::channel(Some(old_xn));
-        let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx).await;
+        let (_topic_tx, topic_rx) = watch::channel(TopicId::general());
+        let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx, topic_rx).await;
 
         // 旧副本说一句
         bus.publish(agent_responded_event(old_xn, "旧副本：我下班了"))
@@ -848,6 +905,89 @@ mod tests {
             }
         }
         assert!(new_landed, "handoff 后新副本发言必须按新 id 过滤通过并落库");
+
+        h.abort();
+    }
+
+    /// 反回归：切 topic 后玄女新发言必须按"新 topic_id"落库；
+    /// `page_messages_in_topic` 按 topic 过滤的结果不混旧 topic 消息。
+    /// 修复 bug "新建话题不空"——之前 handle_event 永远写 general。
+    #[tokio::test]
+    async fn sync_tags_message_with_current_topic() {
+        use fuxi_events::EventBus;
+        let (_dir, store) = open_store().await;
+        let store = Arc::new(store);
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let xuannv = AgentId::new();
+
+        let (_id_tx, id_rx) = watch::channel(Some(xuannv));
+        let (topic_tx, topic_rx) = watch::channel(TopicId::general());
+        let h = spawn_xuannv_sync(store.clone(), bus.clone(), id_rx, topic_rx).await;
+
+        // 在 general topic 下玄女说一句
+        bus.publish(agent_responded_event(xuannv, "general 期")).unwrap();
+
+        let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let (msgs, _, _) = store.page_messages(&conv, 50, None).await.unwrap();
+            if msgs.iter().any(|m| m.content["text"].as_str() == Some("general 期")) {
+                break;
+            }
+        }
+
+        // 切到新 topic
+        let new_topic = TopicId::from(Uuid::new_v4());
+        topic_tx
+            .send(new_topic)
+            .expect("topic watch send 不应失败");
+
+        // 切完后玄女在新 topic 下发言
+        bus.publish(agent_responded_event(xuannv, "new topic 期")).unwrap();
+
+        // 等新发言落库
+        let mut new_landed_in_new_topic = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let (msgs, _, _) = store
+                .page_messages_in_topic(&conv, &new_topic.0.to_string(), 50, None)
+                .await
+                .unwrap();
+            if msgs
+                .iter()
+                .any(|m| m.content["text"].as_str() == Some("new topic 期"))
+            {
+                new_landed_in_new_topic = true;
+                // 关键反回归：filter 必须把"general 期"挡在外面
+                assert!(
+                    msgs.iter().all(|m| m.content["text"].as_str() != Some("general 期")),
+                    "new topic 历史不能看到 general 期消息"
+                );
+                break;
+            }
+        }
+        assert!(
+            new_landed_in_new_topic,
+            "新发言必须按 topic 过滤后能看到（且不混旧 topic 消息）"
+        );
+
+        // 反向：general topic filter 仍能看到旧消息，但看不到新 topic 那条
+        let (general_msgs, _, _) = store
+            .page_messages_in_topic(&conv, &TopicId::general().0.to_string(), 50, None)
+            .await
+            .unwrap();
+        assert!(
+            general_msgs
+                .iter()
+                .any(|m| m.content["text"].as_str() == Some("general 期")),
+            "general 过滤仍能找到旧消息"
+        );
+        assert!(
+            general_msgs
+                .iter()
+                .all(|m| m.content["text"].as_str() != Some("new topic 期")),
+            "general 过滤不能漏出新 topic 的消息"
+        );
 
         h.abort();
     }
