@@ -62,6 +62,12 @@ export const TopicSidebar: Component = () => {
   const [menuOpenFor, setMenuOpenFor] = createSignal<string | null>(null);
   // bug D · IM 风格新建话题 modal 取代 window.prompt
   const [createOpen, setCreateOpen] = createSignal(false);
+  // 归档确认弹窗的目标——非空 = 弹窗打开。同源理由：替换 window.confirm。
+  const [archiveTarget, setArchiveTarget] = createSignal<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [archiving, setArchiving] = createSignal(false);
 
   // 初始填全局 currentTopicId——首次 fetchTopics 返 current_topic_id 时回写 context。
   // 若用户在另一 client 切了 topic，30s 后下一次 poll 也会同步过来。
@@ -145,32 +151,39 @@ export const TopicSidebar: Component = () => {
     }
   };
 
-  const handleArchive = async (id: string, title: string): Promise<void> => {
+  /** ⋯ 菜单点"归档" → 仅开 modal；真执行在 confirmArchive 里。
+   *  general 在前端层硬拦，不进 modal 直接 toast 拒绝。 */
+  const handleArchive = (id: string, title: string): void => {
     setMenuOpenFor(null);
-    // general 是系统兜底，禁止归档（archive 后没东西可切，且每次 ensure_scope 都会
-    // 重新落 general 行）。前端硬拦 + 后端 SQL UPDATE 即便走也只是 archived_at 一个时间戳，
-    // ensure_scope 路径仍认 general，影响不大；这里仅是 UX。
     if (id === GENERAL_TOPIC_ID) {
       pushToast("默认 general 话题为系统兜底，不可归档", "warn");
       return;
     }
-    if (!window.confirm(`归档话题「${title}」？归档不删，可在数据库手动恢复。`)) {
-      return;
-    }
+    setArchiveTarget({ id, title });
+  };
+
+  /** Modal 确认按钮回调：执行归档（含"当前话题先切回 general"路径）。 */
+  const confirmArchive = async (): Promise<void> => {
+    const target = archiveTarget();
+    if (!target || archiving()) return;
+    setArchiving(true);
     // bug C · 允许归档"当前话题"：先把玄女切回 general，再归档目标。
     // 旧逻辑直接拒（"先切到其他话题"），用户新建测试话题后想立刻归档完全做不到。
-    const wasCurrent = id === currentTopicId();
+    const wasCurrent = target.id === currentTopicId();
     try {
       if (wasCurrent) {
         await handleSwitch(GENERAL_TOPIC_ID);
       }
-      await client.archiveTopic(id);
+      await client.archiveTopic(target.id);
       await refetch();
+      setArchiveTarget(null);
     } catch (err) {
       const msg =
         err instanceof ApiError ? `归档失败 (${err.status})` :
         err instanceof Error ? err.message : "归档失败";
       pushToast(msg, "error");
+    } finally {
+      setArchiving(false);
     }
   };
 
@@ -261,6 +274,20 @@ export const TopicSidebar: Component = () => {
           onCancel={() => setCreateOpen(false)}
           onSubmit={(title) => void submitCreate(title)}
         />
+      </Show>
+      {/* 归档确认 modal —— 取代 window.confirm，跟新建 modal 同风格 */}
+      <Show when={archiveTarget()}>
+        {(target) => (
+          <ArchiveTopicModal
+            title={target().title}
+            isCurrent={target().id === currentTopicId()}
+            submitting={archiving()}
+            onCancel={() => {
+              if (!archiving()) setArchiveTarget(null);
+            }}
+            onConfirm={() => void confirmArchive()}
+          />
+        )}
       </Show>
     </>
   );
@@ -355,6 +382,78 @@ const CreateTopicModal: Component<CreateTopicModalProps> = (props) => {
               data-testid="topic-create-submit"
             >
               {props.submitting ? "建中…" : "创建"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface ArchiveTopicModalProps {
+  title: string;
+  /** 是否归档当前正在用的 topic——会附加"先切回 general"提示 */
+  isCurrent: boolean;
+  submitting: boolean;
+  onCancel(): void;
+  onConfirm(): void;
+}
+
+const ArchiveTopicModal: Component<ArchiveTopicModalProps> = (props) => {
+  onMount(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape" && !props.submitting) props.onCancel();
+      if (e.key === "Enter" && !props.submitting) props.onConfirm();
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+  return (
+    <div
+      class={styles.modalScrim}
+      data-testid="topic-archive-modal-scrim"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !props.submitting) props.onCancel();
+      }}
+    >
+      <div
+        class={styles.modalCard}
+        role="dialog"
+        aria-label="归档话题"
+        data-testid="topic-archive-modal"
+      >
+        <header class={styles.modalHead}>
+          <h2 class={styles.modalTitle}>归档话题</h2>
+        </header>
+        <p class={styles.modalHint}>
+          归档不删——消息保留，sidebar 默认不显，可在数据库手动恢复。
+        </p>
+        <p class={styles.modalTarget} data-testid="topic-archive-target">
+          「{props.title}」
+        </p>
+        <Show when={props.isCurrent}>
+          <p class={styles.modalWarn}>这是当前话题，归档前会先切回 general。</p>
+        </Show>
+        <div class={styles.modalFooter}>
+          <span aria-hidden="true" />
+          <div class={styles.modalBtnRow}>
+            <button
+              type="button"
+              class={styles.modalCancelBtn}
+              onClick={() => props.onCancel()}
+              disabled={props.submitting}
+              data-testid="topic-archive-cancel"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              class={styles.modalDangerBtn}
+              onClick={() => props.onConfirm()}
+              disabled={props.submitting}
+              data-testid="topic-archive-confirm"
+            >
+              {props.submitting ? "归档中…" : "归档"}
             </button>
           </div>
         </div>
