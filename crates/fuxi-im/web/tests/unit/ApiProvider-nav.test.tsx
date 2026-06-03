@@ -32,8 +32,8 @@ const Probe: Component<{
   );
 };
 
-describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)", () => {
-  it("默认 activeTab=0（玄女）+ moreSub=null", () => {
+describe("ApiProvider · nav state (daimeng · 4 tab 家/聊天/任务/更多)", () => {
+  it("默认 activeTab=0（家）+ moreSub=null", () => {
     setApiOverride(createMockApi());
     let captured: { tab: TabIndex; sub: MoreSubRoute; nav: NavRoute } | null = null;
     const { unmount } = render(() => (
@@ -66,7 +66,7 @@ describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)"
     const Wired: Component = () => {
       const { setActiveTab, navPush, navPop, activeTab, navRoute } = useApi();
       onMount(() => {
-        setActiveTab(1); // 任务 tab
+        setActiveTab(2); // 任务 tab
         navPush({ kind: "task", task_id: "t-uuid", title: "查 ERP" });
       });
       const navId = (): string => {
@@ -75,7 +75,8 @@ describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)"
         if (r.kind === "task") return r.task_id;
         if (r.kind === "worker") return r.agent_id;
         if (r.kind === "project") return r.project_id;
-        return r.task_id;
+        if (r.kind === "deliverable") return r.task_id;
+        return r.kind;
       };
       return (
         <div>
@@ -92,11 +93,11 @@ describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)"
         <Wired />
       </ApiProvider>
     ));
-    expect(getByTestId("tab-now").textContent).toBe("1");
+    expect(getByTestId("tab-now").textContent).toBe("2");
     expect(getByTestId("nav-now").textContent).toBe("t-uuid");
     getByTestId("pop").click();
     expect(getByTestId("nav-now").textContent).toBe("null");
-    expect(getByTestId("tab-now").textContent).toBe("1"); // pop 不动 tab
+    expect(getByTestId("tab-now").textContent).toBe("2"); // pop 不动 tab
     unmount();
   });
 
@@ -105,7 +106,7 @@ describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)"
     const Wired: Component = () => {
       const { setActiveTab, navPush, navRoute } = useApi();
       onMount(() => {
-        setActiveTab(0); // 玄女 tab
+        setActiveTab(0); // 家 tab：task 路由位置不匹配（仅 tab 2 收 task）→ noop
         navPush({ kind: "task", task_id: "should-not-push" });
       });
       const id = (): string => {
@@ -114,7 +115,8 @@ describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)"
         if (r.kind === "task") return r.task_id;
         if (r.kind === "worker") return r.agent_id;
         if (r.kind === "project") return r.project_id;
-        return r.task_id;
+        if (r.kind === "deliverable") return r.task_id;
+        return r.kind;
       };
       return <span data-testid="nav-now">{id()}</span>;
     };
@@ -186,6 +188,30 @@ describe("ApiProvider · nav state (v1-session17 task #9 · 4 tab + 更多 hub)"
     expect(getByTestId("tab-now").textContent).toBe("3");
     expect(getByTestId("sub-now").textContent).toBe("projects");
     expect(getByTestId("nav-now").textContent).toBe("erp");
+    unmount();
+  });
+
+  it("openNotifications · 切家 tab(0) + push notifications 路由", () => {
+    setApiOverride(createMockApi());
+    const Wired: Component = () => {
+      const { openNotifications, activeTab, navRoute } = useApi();
+      onMount(() => {
+        openNotifications();
+      });
+      return (
+        <div>
+          <span data-testid="tab-now">{String(activeTab())}</span>
+          <span data-testid="nav-kind">{navRoute()?.kind ?? "null"}</span>
+        </div>
+      );
+    };
+    const { getByTestId, unmount } = render(() => (
+      <ApiProvider initialAuth="in">
+        <Wired />
+      </ApiProvider>
+    ));
+    expect(getByTestId("tab-now").textContent).toBe("0");
+    expect(getByTestId("nav-kind").textContent).toBe("notifications");
     unmount();
   });
 

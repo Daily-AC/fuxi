@@ -163,7 +163,7 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
     fireEvent.click(getByTestId("node-worker-a-luban").querySelector("button")!);
     await new Promise((r) => setTimeout(r, 10));
     expect(pushedTask).toBe("t-erp");
-    expect(switchedTab).toBe(1);
+    expect(switchedTab).toBe(2);
     unmount();
   });
 

@@ -24,6 +24,14 @@ function setup(opts?: {
   return { api, ...tools };
 }
 
+// daimeng 重构后默认 tab=家(Home)；聊天(玄女会话)挪到 tab 1。
+// 所有走 chat editor / conversation 的测试须先切到「聊天」tab。
+function switchToChat(): void {
+  const el = document.querySelector('[data-testid="tab-xuannv"]');
+  if (!el) throw new Error('tab-xuannv not found');
+  fireEvent.click(el as HTMLElement);
+}
+
 function ev(kind: ServerEvent["kind"]): ServerEvent {
   return {
     meta: {
@@ -41,6 +49,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("登入后输入发送 → optimistic user bubble + intervene 被调用", async () => {
     const { api, getByTestId, queryAllByTestId, unmount } = setup({ interveneSeq: [200] });
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "派活：修 ERP" } });
     fireEvent.click(getByTestId("mention-send"));
     await new Promise((r) => setTimeout(r, 30));
@@ -57,6 +67,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     const { api, getByTestId, queryByTestId, unmount } = setup({ interveneSeq: [503, 200] });
     vi.useRealTimers();
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     vi.useFakeTimers();
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
     fireEvent.click(getByTestId("mention-send"));
@@ -74,6 +86,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     const { getByTestId, unmount } = setup({ interveneSeq: [503, 503] });
     vi.useRealTimers();
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     vi.useFakeTimers();
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "hi" } });
     fireEvent.click(getByTestId("mention-send"));
@@ -88,6 +102,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("WS agent_responded（cc haiku 实际格式）→ 玄女 bubble 整段渲染", async () => {
     const { api, queryAllByTestId, unmount } = setup();
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     api.pushConv(ev({ type: "agent_responded", text: "你好。什么需要帮忙？" }));
     await new Promise((r) => setTimeout(r, 30));
     const xn = queryAllByTestId("msg-xuannv");
@@ -99,6 +115,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("WS thinking_started → pulse 立即出现；agent_responded → pulse 消失", async () => {
     const { api, queryByTestId, queryAllByTestId, unmount } = setup();
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     api.pushConv(ev({ type: "thinking_started" }));
     await new Promise((r) => setTimeout(r, 30));
     expect(queryByTestId("msg-streaming")).toBeTruthy();
@@ -114,6 +132,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("WS agent_text_delta 连续 → 累积同一 streaming bubble", async () => {
     const { api, queryByTestId, queryAllByTestId, unmount } = setup();
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     api.pushConv(ev({ type: "agent_text_delta", delta: "好" }));
     api.pushConv(ev({ type: "agent_text_delta", delta: "的" }));
     api.pushConv(ev({ type: "agent_text_delta", delta: "，我看一下" }));
@@ -131,6 +151,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
   it("user_intervention_sent echo · 不重复渲染 user bubble", async () => {
     const { api, queryAllByTestId, unmount } = setup({ interveneSeq: [200] });
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     fireEvent.input(getByQueryTestId("mention-editor"), { target: { value: "hi" } });
     fireEvent.click(getByQueryTestId("mention-send"));
     await new Promise((r) => setTimeout(r, 30));
@@ -187,6 +209,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     };
     const { queryAllByTestId, unmount } = setup({ history });
     await new Promise((r) => setTimeout(r, 50));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 30));
     const users = queryAllByTestId("msg-user");
     const xn = queryAllByTestId("msg-xuannv");
     expect(users).toHaveLength(3);
@@ -221,6 +245,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     };
     const { queryAllByTestId, unmount } = setup({ history });
     await new Promise((r) => setTimeout(r, 50));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 30));
     const users = queryAllByTestId("msg-user");
     const xn = queryAllByTestId("msg-xuannv");
     expect(users).toHaveLength(1);
@@ -249,6 +275,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
       },
     });
     await new Promise((r) => setTimeout(r, 30));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 5));
     fireEvent.input(getByTestId("mention-editor"), { target: { value: "用 @ma" } });
     fireEvent.click(getByTestId("mention-item-node-mac-local"));
     fireEvent.input(getByTestId("mention-editor"), { target: { value: " 跑 cargo test" } });
@@ -279,6 +307,8 @@ describe("MainShell · intervene + WS 集成（嵌套 wire format）", () => {
     };
     const { api, queryAllByTestId, unmount } = setup({ history });
     await new Promise((r) => setTimeout(r, 50));
+    switchToChat();
+    await new Promise((r) => setTimeout(r, 30));
     expect(queryAllByTestId("msg-xuannv")).toHaveLength(1);
     // WS 推同 id 的 agent_responded · reducer 走 startBubble，会创新一条（id 不同）
     // 验证：用同 id 不去重（reducer 与 history merge 走两条不同 path，
