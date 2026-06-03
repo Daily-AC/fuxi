@@ -1,24 +1,27 @@
-/* bottom tab bar · v3 spec §A
- * 56px 高 · 3 项 [玄女][任务][节点] · 触控 ≥ 48px · active 橙色
- * 不用 emoji / Unicode block 装饰 / shadow / gradient
+/* bottom tab bar · daimeng 奶油糖果重构
+ * 4 项 [家][聊天][任务][更多] · 毛玻璃（u-glass）+ 顶部发丝边 · 圆角高级感
+ * active 走 --accent-deep · 触控 ≥ 48px · 不用 emoji
  */
 
 .bar {
   flex-shrink: 0;
   display: flex;
-  height: calc(56px + env(safe-area-inset-bottom, 0));
+  height: calc(58px + env(safe-area-inset-bottom, 0));
   padding-bottom: env(safe-area-inset-bottom, 0);
-  background: var(--bg);
+  /* u-glass 提供 frosted 背景；这里只补顶部发丝边 + 圆角 */
   border-top: 1px solid var(--border);
+  border-top-left-radius: var(--radius-card, 16px);
+  border-top-right-radius: var(--radius-card, 16px);
 }
 
 .tab {
+  position: relative;
   flex: 1;
   display: inline-flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
   min-height: 48px;
   padding: 6px 0;
   background: transparent;
@@ -29,25 +32,23 @@
 }
 
 .tab:active {
-  background: var(--surface);
+  transform: scale(0.96);
 }
 
 .tab[aria-selected="true"] {
-  color: var(--accent);
+  color: var(--accent-deep);
   font-weight: var(--weight-semibold);
 }
 
-.dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  transition: background var(--transition-fast), transform var(--transition-fast);
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform var(--transition-fast);
 }
 
-.tab[aria-selected="true"] .dot {
-  background: var(--accent);
-  transform: scale(1.15);
+.tab[aria-selected="true"] .icon {
+  transform: translateY(-1px) scale(1.06);
 }
 
 .label {
@@ -57,14 +58,11 @@
 }
 
 /* tab 红点 badge —— 右上角小标，未读数 / 「99+」溢出 */
-.tab {
-  position: relative;
-}
 .badge {
   position: absolute;
-  top: 4px;
+  top: 6px;
   right: 50%;
-  margin-right: -22px;
+  margin-right: -20px;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
