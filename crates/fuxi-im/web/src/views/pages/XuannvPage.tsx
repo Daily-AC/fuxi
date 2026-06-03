@@ -134,6 +134,11 @@ export const XuannvPage: Component = () => {
             console.warn("conv event parse failed", err);
           }
         },
+        // 切回前台时补历史——WS 在 background 被冻结期间错过的消息靠 fetchHistory
+        // 兜底；mergeMessages 按 id 去重，重复无副作用。
+        onVisible: () => {
+          void loadHistory();
+        },
       },
     );
   });
