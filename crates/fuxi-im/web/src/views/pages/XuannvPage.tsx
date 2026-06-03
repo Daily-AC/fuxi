@@ -129,6 +129,12 @@ export const XuannvPage: Component = () => {
 
   const handleEvent = (ev: ServerEvent): void => {
     setMessages((prev) => applyEvent(prev, ev));
+    // Task 32 · 任务完成 → 玄女开心。task_completed 是单一可靠信号（后端
+    // EventKind::TaskCompleted），不轮询、不靠 list diff。每条 task_completed
+    // 派一次 happy（瞬时态 1.8s 自归位），多任务连完会重置计时不抖。
+    if (ev.kind.type === "task_completed") {
+      dispatchMascot({ type: "task-done" });
+    }
   };
 
   const loadHistory = async (): Promise<void> => {
