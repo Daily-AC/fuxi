@@ -363,13 +363,14 @@ export interface EphemeralResponse {
 
 // ---------- Decision 22 phase 1 · 交付收件箱视图 ----------
 
-/** Decision 13 五类 deliverable_kind。 */
+/** Decision 13 deliverable_kind（issue 7a46963d 起加 artifact 二进制类，共六类）。 */
 export type DeliverableKind =
   | "research_summary"
   | "code_change"
   | "test_result"
   | "decision_request"
-  | "error_block";
+  | "error_block"
+  | "artifact";
 
 /** 单文件元信息——sha256 给前端校验/秒传可能用，size 给 UI 显示。 */
 export interface DeliverableFileMeta {

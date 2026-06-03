@@ -1887,9 +1887,32 @@ async fn dispatch_dist_path_emits_task_created_to_bus() {
     assert!(found, "dist 路径必须发 TaskCreated 让 /api/tasks 能聚合到");
 }
 
-/// 决策树分支 2：task.required_tags 非空 → 走 dist enqueue。
+/// 决策树分支 2：task.required_tags 非空 **且 `--to` agent 不在本地 shelf** → 走 dist
+/// enqueue（跨节点 role 路由）。issue f4e0ff39 后语义收窄：本地点名的 agent 不再走 dist。
 #[tokio::test]
-async fn dispatch_routes_to_dist_when_required_tags_nonempty() {
+async fn dispatch_routes_to_dist_when_required_tags_nonempty_and_agent_not_local() {
+    let bus = EventBus::with_memory_store().await.unwrap();
+    let (_dir, ws) = make_workspace().await;
+    let fuxi = Fuxi::new(bus.clone(), ws);
+
+    let (enq, calls) = RecordingEnqueuer::new();
+    fuxi.set_dist_enqueuer(enq).await;
+
+    // 不 insert_agent——目标 agent 不在本地 shelf，required_tags 作为跨节点路由 hint。
+    let ghost = AgentId::new();
+    let task = Task::new("t1", "需要 erp 节点能力")
+        .with_required_tags(vec!["erp".to_string(), "local".to_string()]);
+    fuxi.dispatch(ghost, task.clone()).await.unwrap();
+
+    let recorded = calls.lock().await;
+    assert_eq!(recorded.len(), 1, "非本地 agent + tags 非空应走 dist");
+    assert_eq!(recorded[0].0.required_tags, vec!["erp", "local"]);
+}
+
+/// issue f4e0ff39：`--to <本地 agent>` + required_tags → **直派本地**，不进 dist queue
+/// （否则 home 既是 controller 又是唯一 worker 但无 pull loop 时 task 卡死）。
+#[tokio::test]
+async fn dispatch_required_tags_with_local_agent_overrides_to_local() {
     let bus = EventBus::with_memory_store().await.unwrap();
     let (_dir, ws) = make_workspace().await;
     let fuxi = Fuxi::new(bus.clone(), ws);
@@ -1900,15 +1923,13 @@ async fn dispatch_routes_to_dist_when_required_tags_nonempty() {
     let stub = StubAgent::new("dev", happy_script());
     let id = fuxi.insert_agent(stub.clone(), None).await;
 
-    let task = Task::new("t1", "需要 erp 节点能力")
-        .with_required_tags(vec!["erp".to_string(), "local".to_string()]);
+    let task = Task::new("t1", "home 维护活").with_required_tags(vec!["home".to_string()]);
     fuxi.dispatch(id, task.clone()).await.unwrap();
 
     let recorded = calls.lock().await;
-    assert_eq!(recorded.len(), 1, "tags 非空也应走 dist");
-    assert_eq!(recorded[0].0.required_tags, vec!["erp", "local"]);
+    assert_eq!(recorded.len(), 0, "本地 agent + tags 应直派本地，不走 dist");
     drop(recorded);
-    assert_eq!(stub.dispatches(), 0);
+    assert_eq!(stub.dispatches(), 1, "应走本地 stub agent.dispatch");
 }
 
 /// 决策树分支 3：pinned_node + required_tags 都空 → 本地 spawn 路径。

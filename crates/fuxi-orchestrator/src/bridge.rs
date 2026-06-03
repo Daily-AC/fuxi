@@ -377,6 +377,7 @@ fn deliverable_kind_tag(k: DeliverableKind) -> &'static str {
         DeliverableKind::TestResult => "test_result",
         DeliverableKind::DecisionRequest => "decision_request",
         DeliverableKind::ErrorBlock => "error_block",
+        DeliverableKind::Artifact => "artifact",
     }
 }
 
