@@ -1,72 +1,12 @@
-/* 交付详情 Layer 2 · Decision 22 phase 3 */
+/* 交付详情 Layer 2 · Decision 22 phase 3 · daimeng 奶油糖果 · archetype B 详情。
+ * ScreenHeader 返回 + 居中标题；summary u-card（状态 StatePill）；SectionLabel
+ * 「交付内容」+ entry u-card（kind / 时间 / 文件行 + 内联预览 + icon 下载）；
+ * SectionLabel「处理」+ 输入 + 页底 peach 渐变主操作（接收）。去暗色。 */
 
 .page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg);
-}
-
-.header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-3) var(--space-3);
-  border-bottom: 1px solid var(--border);
-}
-
-.backBtn {
-  appearance: none;
-  background: transparent;
-  border: 0;
-  color: var(--accent);
-  font-size: var(--size-body);
-  padding: var(--space-2) var(--space-3);
-  margin: 0;
-  cursor: pointer;
-  min-height: 44px;
-  min-width: 44px;
-  text-align: left;
-}
-
-.backBtn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 6px;
-}
-
-.title {
-  margin: 0;
-  font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-  flex: 1;
-  text-align: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-}
-
-.titleProj {
-  color: var(--accent);
-}
-
-.titleSep {
-  color: var(--text-muted);
-}
-
-.titleTask {
-  color: var(--text-secondary);
-  font-weight: var(--weight-medium);
-  font-size: var(--size-aux);
-}
-
-.headerSpacer {
-  width: 44px;
-  flex-shrink: 0;
 }
 
 .body {
@@ -74,7 +14,7 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: var(--space-3) var(--space-4) var(--space-5);
+  padding: var(--space-2) var(--space-4) var(--space-5);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -86,8 +26,10 @@
   font-size: var(--size-aux);
 }
 
+/* ===== 空态 ===== */
+
 .empty {
-  padding: var(--space-7) var(--space-4);
+  padding: var(--space-6) var(--space-4);
   text-align: center;
   color: var(--text-muted);
 }
@@ -96,6 +38,7 @@
   margin: 0 0 var(--space-2);
   font-size: var(--size-heading);
   color: var(--text-secondary);
+  font-weight: var(--weight-semibold);
 }
 
 .emptyHint {
@@ -103,22 +46,17 @@
   font-size: var(--size-aux);
 }
 
-.statusCard {
+/* ===== summary 卡（当前状态） ===== */
+
+.summary {
+  padding: var(--space-3) var(--space-4);
+}
+
+.statusRow {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  background: #16110E;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.statusCard_accepted {
-  border-color: var(--accent);
-}
-
-.statusCard_rejected {
-  border-color: var(--danger);
 }
 
 .statusLabel {
@@ -126,19 +64,18 @@
   font-size: var(--size-aux);
 }
 
-.statusValue {
-  color: var(--text-primary);
-  font-weight: var(--weight-semibold);
-}
+/* ===== 分组 ===== */
 
-.entry {
+.section {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+/* ===== entry 卡 ===== */
+
+.entry {
   padding: var(--space-3) var(--space-4);
-  background: #16110E;
-  border: 1px solid var(--border);
-  border-radius: 12px;
 }
 
 .entryHead {
@@ -146,16 +83,18 @@
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-3);
+  margin-bottom: var(--space-2);
 }
 
 .entryKind {
-  color: var(--accent);
+  color: var(--accent-deep);
   font-weight: var(--weight-semibold);
 }
 
 .entryTime {
   color: var(--text-muted);
   font-size: var(--size-aux);
+  font-feature-settings: "tnum";
 }
 
 .fileList {
@@ -167,30 +106,15 @@
   gap: var(--space-1);
 }
 
-/* bug #77 用户："你看红框这么空那个红框和正文不要左右布局要不然正文都很挤
- * 不好阅读" → 老 phase 1 用 `display: grid 1fr auto auto` 三列，把 fileHeader
- * 挤左侧 1fr、preview 卡进右侧 grid cell 双区域，预览正文非常窄。改 block：
- * header（filename + size + sha + ⬇ icon）一整行在上，preview 区下面占满宽。 */
+/* header（filename + size + sha + ⬇ icon）一整行在上，preview 区下面占满宽。 */
 .fileRow {
   display: block;
   padding: var(--space-2);
-  border-radius: 6px;
-}
-
-.fileLink {
-  color: var(--text-primary);
-  text-decoration: none;
-  font-weight: var(--weight-medium);
-}
-
-.fileLink:hover,
-.fileLink:focus-visible {
-  text-decoration: underline;
-  outline: none;
+  border-radius: var(--radius-chip);
 }
 
 .fileSize {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--size-aux);
 }
 
@@ -199,92 +123,6 @@
   font-size: var(--size-aux);
 }
 
-.actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  background: #16110E;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-}
-
-.actionsTitle {
-  margin: 0;
-  font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-secondary);
-}
-
-.actionField {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.actionLabel {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-}
-
-.actionInput {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: var(--space-2) var(--space-3);
-  color: var(--text-primary);
-  font-size: var(--size-body);
-}
-
-.actionInput:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.actionRow {
-  display: flex;
-  gap: var(--space-2);
-  justify-content: flex-end;
-}
-
-.btnReject {
-  appearance: none;
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--danger);
-  border-radius: 8px;
-  padding: var(--space-2) var(--space-4);
-  cursor: pointer;
-  font-size: var(--size-body);
-  min-height: 44px;
-}
-
-.btnAccept {
-  appearance: none;
-  background: var(--accent);
-  border: 0;
-  color: white;
-  border-radius: 8px;
-  padding: var(--space-2) var(--space-4);
-  cursor: pointer;
-  font-weight: var(--weight-medium);
-  font-size: var(--size-body);
-  min-height: 44px;
-}
-
-.btnAccept:disabled,
-.btnReject:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.errMsg {
-  color: var(--danger);
-  font-size: var(--size-aux);
-  margin: 0;
-}
-
-/* bug #76 inline preview · 卡片整体打开后内联预览 + 显式下载按钮 */
 .fileHeader {
   display: flex;
   flex-wrap: wrap;
@@ -292,58 +130,70 @@
   gap: var(--space-2);
 }
 
-/* bug #77 fileName 占据主行，sha + 下载 icon 跟在后面 */
-.fileHeader .fileName {
+.fileName {
   flex: 1 1 auto;
   min-width: 0;
   word-break: break-all;
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
 }
 
-/* bug #77 用户："下载占这么大空间不妥，布局重新做。下载按钮放在一个角落
- * 就行，可以用icon表示" → icon-only 32×32 圆形角落按钮，预览主区域占满。 */
+/* icon-only 32×32 圆角角落下载按钮，预览主区域占满宽。 */
 .fileDownloadBtn {
   margin-left: auto;
   appearance: none;
-  background: var(--surface-elevated, var(--surface));
-  border: 1px solid var(--border);
-  border-radius: 50%;
+  background: var(--accent-subtle);
+  border: 0;
+  border-radius: var(--radius-pill);
   width: 32px;
   height: 32px;
   padding: 0;
-  font-size: 14px;
-  line-height: 1;
-  color: var(--accent);
+  color: var(--accent-deep);
   text-decoration: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   cursor: pointer;
+  box-shadow: var(--inset-hi);
+  transition: transform 0.16s var(--spring);
+}
+
+.fileDownloadBtn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .fileDownloadBtn:hover,
 .fileDownloadBtn:focus-visible {
-  background: var(--accent-subtle, rgba(255, 138, 76, 0.1));
+  transform: translateY(-1px);
   outline: none;
 }
+
+.fileDownloadBtn:active {
+  transform: scale(0.94);
+}
+
+/* ===== 内联预览 ===== */
 
 .imgPreview {
   display: block;
   max-width: 100%;
   max-height: 480px;
   margin-top: 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   border: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--surface-soft);
   object-fit: contain;
 }
 
 .mdPreview {
   margin-top: 10px;
   padding: var(--space-3);
-  background: var(--bg);
+  background: var(--surface-soft);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   max-height: 600px;
   overflow-y: auto;
 }
@@ -351,9 +201,9 @@
 .textPreview {
   margin: 10px 0 0;
   padding: var(--space-3);
-  background: var(--bg);
+  background: var(--surface-soft);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   font-family: var(--font-mono);
   font-size: 12.5px;
   line-height: 1.5;
@@ -370,7 +220,94 @@
   padding: 8px 10px;
   font-size: var(--size-aux);
   color: var(--text-muted);
-  background: var(--bg);
-  border-radius: 6px;
+  background: var(--surface-soft);
+  border-radius: var(--radius-chip);
   border: 1px dashed var(--border);
+}
+
+/* ===== 处理（accept / reject）===== */
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.actionField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.actionLabel {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+}
+
+.actionInput {
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--size-body);
+}
+
+.actionInput:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.actionRow {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.btnReject {
+  appearance: none;
+  background: var(--accent-subtle);
+  border: 0;
+  color: var(--danger);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-4);
+  cursor: pointer;
+  font-size: var(--size-body);
+  font-weight: var(--weight-medium);
+  min-height: var(--touch);
+  box-shadow: var(--inset-hi);
+}
+
+/* 页底主操作：peach 渐变 + 柔影 + spring。 */
+.btnAccept {
+  appearance: none;
+  background: linear-gradient(150deg, var(--accent) 0%, var(--accent-deep) 100%);
+  border: 0;
+  color: var(--on-accent, #fff);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-5, var(--space-4));
+  cursor: pointer;
+  font-weight: var(--weight-semibold);
+  font-size: var(--size-body);
+  min-height: var(--touch);
+  box-shadow: var(--shadow-soft1);
+  transition: transform 0.16s var(--spring);
+}
+
+.btnAccept:active {
+  transform: scale(0.97);
+}
+
+.btnAccept:disabled,
+.btnReject:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.errMsg {
+  color: var(--danger);
+  font-size: var(--size-aux);
+  margin: 0;
 }
