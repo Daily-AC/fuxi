@@ -48,16 +48,16 @@ describe("shortTaskId", () => {
 
 describe("colorForTaskRole", () => {
   it("玄女 → xuannv 紫", () => {
-    expect(colorForTaskRole("xuannv")).toBe("#C4A8E8");
-    expect(colorForTaskRole("玄女")).toBe("#C4A8E8");
+    expect(colorForTaskRole("xuannv")).toBe("#C9B6E8");
+    expect(colorForTaskRole("玄女")).toBe("#C9B6E8");
   });
-  it("鲁班 → luban 金", () => {
-    expect(colorForTaskRole("luban")).toBe("#E5A547");
+  it("鲁班 → luban 蜜桃", () => {
+    expect(colorForTaskRole("luban")).toBe("#E8915A");
   });
   it("蒲松 → pusong 绿", () => {
-    expect(colorForTaskRole("pusong")).toBe("#A0C277");
+    expect(colorForTaskRole("pusong")).toBe("#6FB893");
   });
   it("未知 → 默认次要色", () => {
-    expect(colorForTaskRole("unknown")).toBe("#B8B0A0");
+    expect(colorForTaskRole("unknown")).toBe("#9A8C7A");
   });
 });
