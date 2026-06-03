@@ -14,7 +14,7 @@ describe("RolesPage", () => {
         <RolesPage />
       </ApiProvider>
     ));
-    await findByText(/未发现 role/);
+    await findByText(/还没有角色/);
     unmount();
   });
 
