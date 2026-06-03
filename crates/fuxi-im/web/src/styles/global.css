@@ -196,6 +196,8 @@ pre code {
   padding: 0;
 }
 
+.u-title { font-family: var(--font-round); font-weight: 700; letter-spacing: .01em; }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
