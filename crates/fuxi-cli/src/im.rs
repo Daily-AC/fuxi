@@ -492,6 +492,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
                     Arc::new(conv_store.clone()),
                     bus.clone(),
                     fuxi.xuannv_id_watch(),
+                    fuxi.current_topic_watch(),
                 )
                 .await;
 

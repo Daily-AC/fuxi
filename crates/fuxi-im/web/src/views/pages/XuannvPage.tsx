@@ -53,7 +53,7 @@ const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv";
 
 export const XuannvPage: Component = () => {
-  const { client, currentTopicId, setSidebarOpen } = useApi();
+  const { client, currentTopicId, setSidebarOpen, isSwitchingTopic } = useApi();
 
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [online, setOnline] = createSignal(false);
@@ -296,6 +296,20 @@ export const XuannvPage: Component = () => {
         <span class={styles.menuRightSpacer} aria-hidden="true" />
       </header>
       <Conversation messages={messages} />
+      {/* bug B · 切 topic 5-15s 全程显 overlay，让用户知道在切（不是卡住） */}
+      <Show when={isSwitchingTopic()}>
+        <div
+          class={styles.switchOverlay}
+          data-testid="topic-switching-overlay"
+          aria-live="polite"
+        >
+          <div class={styles.switchCard}>
+            <span class={styles.switchSpinner} aria-hidden="true" />
+            <span class={styles.switchLabel}>切换话题中…</span>
+            <span class={styles.switchHint}>玄女正在重新接班</span>
+          </div>
+        </div>
+      </Show>
       <MentionComposer
         candidates={candidates()}
         placeholder="对玄女说... (@ 角色或节点)"
