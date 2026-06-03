@@ -1,63 +1,52 @@
-/* SettingsPage · 「更多 → 设置」· stub 起步 */
+/* SettingsPage · 「更多 → 设置」· daimeng 奶油糖果 · archetype D 设置/表单。
+ * SectionLabel 分组 + ToggleRow / ListRow 行卡。页底 u-mesh 暖光网格。
+ */
 
 .page {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  min-height: 100%;
+  padding: var(--space-4) var(--space-4) var(--space-5);
 }
 
-.row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: var(--space-3);
-  background: var(--surface);
-  border-radius: var(--radius-card);
+/* SectionLabel 之间留更大间距（首个除外，靠 :first-child 收紧） */
+.page :global([data-testid="section-label"]) {
+  margin-top: var(--space-3);
+}
+.page :global([data-testid="section-label"]):first-child {
+  margin-top: 0;
 }
 
-.rowHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.label {
-  font-size: var(--size-body);
-  color: var(--text-primary);
-}
-
+/* 值行右槽文字 */
 .value {
   font-size: var(--size-aux);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
+/* 开启推送按钮 · 暖橙描边药丸，按压 spring */
 .btn {
-  margin-top: var(--space-2);
+  align-self: flex-start;
   min-height: var(--touch);
-  padding: 0 var(--space-3);
+  padding: 0 var(--space-4);
   font-size: var(--size-aux);
-  font-weight: var(--weight-medium);
-  color: var(--accent);
-  background: transparent;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-pill);
-}
-
-.btn:active,
-.btn:focus-visible {
+  font-weight: var(--weight-semibold);
+  color: var(--accent-deep);
   background: var(--accent-subtle);
-  outline: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
+  transition: transform 0.16s var(--spring), background var(--transition-fast);
 }
 
-.btn:disabled {
-  color: var(--text-muted);
-  border-color: var(--surface-elevated);
-  cursor: default;
+.btn:active {
+  transform: scale(0.97);
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
-.hint {
-  font-size: var(--size-meta);
-  color: var(--text-muted);
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
