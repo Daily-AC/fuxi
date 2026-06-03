@@ -1,46 +1,112 @@
-/* CronPage · 「更多 → 更漏」· trigger 列表 */
+/* 更漏页 · daimeng 奶油糖果 · archetype A 列表/收件箱。
+ * 每 trigger 一 u-card 行卡 + 暖光闹钟 iconSlot；连失败 StatePill danger；
+ * 空态 EmptyState；页底 u-mesh 暖光网格。
+ */
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  min-height: 100%;
+  padding: var(--space-3) var(--space-4) var(--space-5);
 }
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  margin: var(--space-3) 0 0;
+}
+
+/* ===== trigger 行卡 ===== */
 
 .card {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3);
-  background: var(--surface);
-  border-radius: var(--radius-card);
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: 12px var(--space-4);
 }
 
 .cardDisabled {
-  opacity: 0.55;
+  opacity: 0.58;
 }
 
-.head {
+/* 闹钟 iconSlot ~36px（默认暖橙 / 失败 桃红） */
+.iconSlot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  color: var(--accent-deep);
+  background: linear-gradient(
+    150deg,
+    rgba(255, 184, 119, 0.26) 0%,
+    rgba(255, 184, 119, 0.1) 100%
+  );
+  box-shadow: var(--inset-hi);
+}
+
+.iconSlot :global(svg) {
+  width: 19px;
+  height: 19px;
+  display: block;
+}
+
+.iconSlot[data-tone="pink"] {
+  color: #d4607d;
+  background: linear-gradient(
+    150deg,
+    rgba(255, 158, 181, 0.3) 0%,
+    rgba(255, 158, 181, 0.12) 100%
+  );
+}
+
+.mid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.titleLine {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2);
+  gap: 8px;
+  min-width: 0;
+}
+
+.intent {
+  min-width: 0;
+  font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .kind {
+  flex: 0 0 auto;
   font-size: var(--size-meta);
-  color: var(--accent);
+  font-weight: var(--weight-semibold);
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-subtle);
+  color: var(--accent-deep);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
-.intent {
-  font-size: var(--size-body);
-  color: var(--text-primary);
-}
-
 .summary {
-  font-family: var(--font-mono, "SFMono-Regular", monospace);
+  font-family: var(--font-mono);
   font-size: var(--size-aux);
   color: var(--text-secondary);
   word-break: break-all;
@@ -54,13 +120,8 @@
   color: var(--text-muted);
 }
 
-.fail {
-  color: #c87a6b;
-}
-
-.empty {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-  padding: var(--space-4) 0;
-  text-align: center;
+.trail {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
 }
