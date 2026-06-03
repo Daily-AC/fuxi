@@ -5,9 +5,12 @@ import {
   createResource,
   createSignal,
   type Component,
+  type JSX,
 } from "solid-js";
 import { ApiError } from "~/lib/api";
 import { useApi } from "~/components/ApiProvider";
+import { EmptyState } from "~/components/ui/EmptyState";
+import { StatePill, type StatePillTone } from "~/components/ui/StatePill";
 import type {
   DeliverableEntry,
   DeliverableFileMeta,
@@ -16,7 +19,7 @@ import type {
 } from "~/types/api";
 import styles from "./DeliverablesPage.module.css";
 
-// 交付 tab · Decision 22 phase 1
+// 交付 tab · Decision 22 phase 1 · daimeng 奶油糖果重绘（archetype A · 列表/收件箱）。
 //
 // PWA 视角的"门客交活给我"收件箱。
 // 数据源：GET /api/deliverables → DeliverablesResponse{ deliverables: [...] }
@@ -25,6 +28,13 @@ import styles from "./DeliverablesPage.module.css";
 // v1：纯展示 + 下载。Accept / Reject 两个动作 phase 2 加（需要 POST 端点）。
 // 按 produced_at 倒序（后端已排），按 (project, task) 聚合显示——同一 task 的
 // 多次 produce 集中展示。
+//
+// RESKIN：保留全部行为 + data-testid（page-deliverables / deliverables-empty /
+// deliverables-loading / deliverable-card-<task>-<kind> / deliverable-open-<task> /
+// deliverable-file-<task>-<name> / deliverable-accept-<task> /
+// deliverable-reject-<task> / deliverable-status-<task>）+ 空态文案
+// 「门客把活做完会在这里出现」。视觉换共享原语：每交付一 u-card 行卡（暖光 iconSlot 盒子 +
+// kind 标题 + 项目/task/时间 副标题 + StatePill 状态）；文件嵌套行；空态 EmptyState。页底 u-mesh。
 
 const KIND_LABEL: Record<DeliverableKind, string> = {
   research_summary: "调研",
@@ -42,14 +52,36 @@ const STATUS_LABEL: Record<DeliverableStatus, string> = {
   expired: "已过期",
 };
 
+// 状态 → StatePill tone（pending 薰衣草排队感 / accepted 薄荷 / rejected 红 / expired 中性）。
+function statusTone(s: DeliverableStatus): StatePillTone {
+  switch (s) {
+    case "accepted":
+      return "done";
+    case "rejected":
+      return "danger";
+    case "expired":
+      return "neutral";
+    default:
+      return "queued";
+  }
+}
+
+// 盒子 / 文件 SVG（交付 iconSlot，禁 emoji）。
+const BoxIcon = (): JSX.Element => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path d="M12 3 4 7v10l8 4 8-4V7l-8-4Z" stroke-linejoin="round" />
+    <path d="M4 7l8 4 8-4M12 11v10" stroke-linejoin="round" />
+  </svg>
+);
+
 export const DeliverablesPage: Component = () => {
   const { client } = useApi();
   const [data, { refetch }] = createResource(() => client.fetchDeliverables());
 
   return (
-    <div class={styles.page} data-testid="page-deliverables">
+    <div class={`u-mesh u-noise ${styles.page}`} data-testid="page-deliverables">
       <header class={styles.header}>
-        <h1 class={styles.title}>交付</h1>
+        <h1 class={`u-title ${styles.title}`}>交付</h1>
       </header>
       <div class={styles.body}>
         <Show
@@ -72,9 +104,12 @@ export const DeliverablesPage: Component = () => {
           <Show
             when={data()!.deliverables.length > 0}
             fallback={
-              <div class={styles.empty} data-testid="deliverables-empty">
-                <p class={styles.emptyTitle}>暂无交付</p>
-                <p class={styles.emptyHint}>门客把活做完会在这里出现</p>
+              <div data-testid="deliverables-empty">
+                <EmptyState
+                  title="暂无交付"
+                  hint="门客把活做完会在这里出现"
+                  mascotState="sleep"
+                />
               </div>
             }
           >
@@ -146,7 +181,7 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
 
   return (
     <li
-      class={styles.card}
+      class={`u-card ${styles.card}`}
       data-testid={`deliverable-card-${props.entry.task}-${props.entry.kind}`}
       data-status={props.entry.status}
     >
@@ -157,26 +192,48 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
         data-testid={`deliverable-open-${props.entry.task}`}
         aria-label="查看交付详情"
       >
-        <div class={styles.cardHead}>
-          <span class={styles.cardKind}>
-            {KIND_LABEL[props.entry.kind] ?? props.entry.kind}
+        <span class={styles.iconSlot} aria-hidden="true">
+          <BoxIcon />
+        </span>
+        <span class={styles.cardMid}>
+          <span class={styles.cardTitleLine}>
+            <span class={styles.cardKind}>
+              {KIND_LABEL[props.entry.kind] ?? props.entry.kind}
+            </span>
           </span>
-          <span class={styles.cardMeta}>
+          <span class={styles.cardSub}>
             <span class={styles.metaProj}>{props.entry.project}</span>
             <span class={styles.metaSep} aria-hidden="true">·</span>
             <span class={`${styles.metaTask} mono`}>task-{taskShort()}</span>
             <span class={styles.metaSep} aria-hidden="true">·</span>
             <time class={styles.metaTime}>{produced()}</time>
-            <span class={styles.cardChevron} aria-hidden="true">›</span>
           </span>
-        </div>
+        </span>
+        <span class={styles.trail}>
+          <Show when={props.entry.status !== "pending"}>
+            <StatePill
+              label={STATUS_LABEL[props.entry.status]}
+              tone={statusTone(props.entry.status)}
+            />
+          </Show>
+          <span class={styles.chevron} aria-hidden="true">
+            <svg width="8" height="14" viewBox="0 0 8 14" fill="none">
+              <path
+                d="M1.5 1 6.5 7l-5 6"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+        </span>
       </button>
       <ul class={styles.files}>
         <For each={props.entry.files}>
           {(f) => (
             <FileRow
               file={f}
-              project={props.entry.project}
               task={props.entry.task}
               onOpen={openDetail}
             />
@@ -188,12 +245,13 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
           when={props.entry.status === "pending"}
           fallback={
             <span
-              class={`${styles.statusBadge} ${
-                styles[`status_${props.entry.status}`] ?? ""
-              }`}
+              class={styles.statusBadge}
               data-testid={`deliverable-status-${props.entry.task}`}
             >
-              {STATUS_LABEL[props.entry.status]}
+              <StatePill
+                label={STATUS_LABEL[props.entry.status]}
+                tone={statusTone(props.entry.status)}
+              />
             </span>
           }
         >
@@ -230,7 +288,6 @@ const EntryCard: Component<{ entry: DeliverableEntry; onChanged: () => void }> =
 // 触发"）。点行进 detail page 看预览 + 显式下载。
 const FileRow: Component<{
   file: DeliverableFileMeta;
-  project: string;
   task: string;
   onOpen(): void;
 }> = (props) => {
@@ -241,7 +298,7 @@ const FileRow: Component<{
       <button
         type="button"
         class={styles.fileLink}
-        onClick={props.onOpen}
+        onClick={() => props.onOpen()}
         data-testid={`deliverable-file-${props.task}-${props.file.name}`}
         aria-label={`查看 ${props.file.name} 预览`}
       >
