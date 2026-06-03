@@ -1,6 +1,7 @@
-/* TaskThreadPage · v3 #N4' / #39
- * 任务 thread = 群聊心智 · 微信群风格 · 时间序 mix 全成员
- * spec docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §"任务 tab · Layer 2"
+/* TaskThreadPage · daimeng 奶油糖果 · archetype B 详情/线程。
+ * 顶栏 ScreenHeader 风格（back ‹ + 居中标题 + ⋯ 菜单）；任务 banner 走 peach Card +
+ * StatePill；thread 背景 u-mesh 暖光网格；门客 popover 走 u-glass 遮罩 + u-card 面板。
+ * 群聊心智 · 微信群风格 · 时间序 mix 全成员。
  */
 
 .page {
@@ -10,34 +11,45 @@
   background: var(--bg);
 }
 
+/* 顶栏 · ScreenHeader 三栏 grid（lead/title/trail） · 暖白浮起、柔影分隔 */
 .topbar {
   flex-shrink: 0;
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: var(--space-2);
-  padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-3) var(--space-3);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-3) var(--space-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft1);
+  position: relative;
+  z-index: 2;
 }
 
 .back {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   min-height: var(--touch);
   padding: 0 var(--space-3);
   font-size: var(--size-aux);
-  color: var(--accent);
-  border-radius: 8px;
+  font-weight: var(--weight-medium);
+  color: var(--accent-deep);
+  border-radius: var(--radius-pill);
+  transition: background 0.18s var(--soft);
 }
 
 .back:active {
   background: var(--accent-subtle);
 }
 
+.backIcon {
+  display: block;
+}
+
 .title {
   text-align: center;
-  font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
+  font-size: var(--size-title);
+  margin: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -49,21 +61,21 @@
   justify-content: center;
   min-width: var(--touch);
   min-height: var(--touch);
-  font-size: 18px;
   color: var(--text-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
+  transition: background 0.18s var(--soft), color 0.18s var(--soft);
 }
 
 .more:active {
   background: var(--accent-subtle);
+  color: var(--accent-deep);
 }
 
-/* ⋯ 弹层 — fixed 全屏遮罩 + 右上角抽屉 */
+/* ⋯ 弹层 — 全屏暖玻璃遮罩 + 右上角暖卡抽屉 */
 .menuOverlay {
   position: fixed;
   inset: 0;
   z-index: 30;
-  background: rgba(0, 0, 0, 0.4);
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -73,10 +85,8 @@
 .menuPanel {
   margin: max(var(--space-4), env(safe-area-inset-top)) var(--space-3) 0 auto;
   width: min(360px, calc(100vw - var(--space-4) * 2));
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-soft2), var(--inset-hi);
   padding: var(--space-3);
   display: flex;
   flex-direction: column;
@@ -87,9 +97,9 @@
 
 .menuTitle {
   font-size: var(--size-aux);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   margin: 0 0 4px 0;
-  font-weight: var(--weight-medium);
+  font-weight: var(--weight-semibold);
 }
 
 .menuList {
@@ -102,9 +112,10 @@
 }
 
 .menuMember {
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: var(--bg);
+  padding: 10px 12px;
+  border-radius: var(--radius-chip);
+  background: var(--surface-soft);
+  box-shadow: var(--shadow-soft1);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -124,7 +135,7 @@
 
 .menuMemberStatus {
   font-size: var(--size-aux);
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .menuMemberSub {
@@ -142,62 +153,51 @@
 }
 
 .menuMemberNodeOffline {
-  color: #C76A6A;
-  opacity: 0.85;
+  color: var(--danger);
+  opacity: 0.9;
 }
 
 .menuClose {
   margin-top: 4px;
   align-self: flex-end;
   min-height: var(--touch);
-  padding: 0 var(--space-3);
-  border-radius: 8px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-pill);
   font-size: var(--size-aux);
-  color: var(--accent);
+  font-weight: var(--weight-medium);
+  color: var(--accent-deep);
 }
 
 .menuClose:active {
   background: var(--accent-subtle);
 }
 
-/* 任务 banner · 顶栏下方紧贴 */
-.banner {
+/* 任务 banner · 顶栏下方 peach Card */
+.bannerWrap {
   flex-shrink: 0;
-  padding: 10px var(--space-4);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.banner {
+  padding: var(--space-3) var(--space-3x);
+}
+
+.bannerInner {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .bannerLine {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   font-size: var(--size-aux);
   color: var(--text-secondary);
 }
 
-.statusDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.statusDotRunning {
-  background: var(--accent);
-}
-
-.statusDotDone {
-  background: var(--success);
-}
-
-.statusName {
-  color: var(--text-primary);
-  font-weight: var(--weight-medium);
+.bannerMeta {
+  font-feature-settings: "tnum";
 }
 
 .bannerSep {
@@ -213,13 +213,13 @@
   text-overflow: ellipsis;
 }
 
-/* v3 #64 · @node 离线时 dim red（spec gap d）。在线 @node 走 .bannerMembers 默认 muted gray。 */
+/* @node 离线时 dim red（spec gap d）。在线 @node 走 .bannerMembers 默认 muted。 */
 .bannerNodeOffline {
-  color: #C76A6A;
-  opacity: 0.7;
+  color: var(--danger);
+  opacity: 0.8;
 }
 
-/* thread */
+/* thread · u-mesh 暖光网格背景 */
 .thread {
   flex: 1;
   display: flex;
