@@ -18,7 +18,7 @@
   /* 奶油糖果：纯白气泡浮在暖底上 —— 柔暖投影 + 高光内边让它有质感不塑料。 */
   background: var(--user-bubble);
   color: var(--user-bubble-text);
-  border-radius: var(--radius-bubble);
+  border-radius: var(--radius-card);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-card), var(--inset-hi);
   font-size: var(--size-body);

@@ -23,7 +23,6 @@
   --accent: #FFB877;
   --accent-deep: #E8915A;
   --accent-subtle: #FFF0DC;
-  --accent-dim: #FFF0DC; /* compat alias — old CSS refs this var */
   --on-accent: #FFFFFF;
 
   /* palette */
@@ -65,7 +64,6 @@
 
   /* radii */
   --radius-card: 20px;
-  --radius-bubble: 20px;
   --radius-sheet: 28px;
   --radius-pill: 999px;
   --radius-chip: 14px;
