@@ -38,7 +38,7 @@
 }
 
 .input:focus {
-  border-color: var(--accent-dim);
+  border-color: var(--accent-subtle);
 }
 
 .attachBtn {

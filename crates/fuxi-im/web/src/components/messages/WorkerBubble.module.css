@@ -33,7 +33,7 @@
   color: var(--text-primary);
   border: 1px solid var(--border);
   border-left: 3px solid var(--luban);
-  border-radius: var(--radius-bubble);
+  border-radius: var(--radius-card);
   border-top-left-radius: 6px;
   box-shadow: var(--shadow-card), var(--inset-hi);
   font-size: var(--size-body);

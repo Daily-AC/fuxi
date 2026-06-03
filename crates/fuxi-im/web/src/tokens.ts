@@ -16,8 +16,6 @@ export const tokens = {
   accent: "#FFB877",
   accentDeep: "#E8915A",
   accentSubtle: "#FFF0DC",
-  // 兼容旧字段 accentDim（旧暗底 → 奶油版映射到 accentSubtle 的值）
-  accentDim: "#FFF0DC",
   onAccent: "#FFFFFF",
 
   mint: "#8FD9B6",
@@ -43,7 +41,6 @@ export const tokens = {
   weight: { normal: 400, medium: 500, semibold: 700 },
   radius: {
     card: 20,
-    bubble: 20,  // 兼容旧字段（旧值 14 → 新奶油风 20）
     sheet: 28,
     pill: 999,
     chip: 14,

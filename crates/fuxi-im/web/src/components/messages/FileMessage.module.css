@@ -12,7 +12,7 @@
 .bubble {
   max-width: 78%;
   padding: var(--space-3);
-  border-radius: var(--radius-bubble);
+  border-radius: var(--radius-card);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-card), var(--inset-hi);
   display: flex;
