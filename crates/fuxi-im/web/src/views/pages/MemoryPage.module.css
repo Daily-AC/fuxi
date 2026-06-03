@@ -1,17 +1,49 @@
-/* MemoryPage · 「更多 → 记忆」· 策府事实分组列表 */
+/* 记忆页 · daimeng 奶油糖果 · 分层视图（身份卡 / 事实策府 / 河图洛书）。
+ * 每层 SectionLabel + 描述；身份卡 lavender Card，事实软 Card 按 subject 分组，
+ * 河图洛书 mint Card。空态 EmptyState；页底 u-mesh 暖光网格。
+ */
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  min-height: 100%;
+  padding: var(--space-3) var(--space-4) var(--space-5);
 }
 
-.summary {
-  margin: 0;
+.muted {
+  color: var(--text-muted);
   font-size: var(--size-aux);
+  margin: var(--space-3) 0 0;
+}
+
+.layers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* ===== 单层 ===== */
+
+.layer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.layerHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.layerSub {
+  flex: 0 0 auto;
+  font-size: var(--size-meta);
   color: var(--text-muted);
 }
+
+/* ===== 事实分组 ===== */
 
 .group {
   display: flex;
@@ -23,14 +55,15 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  padding: 0 2px;
   font-size: var(--size-meta);
   color: var(--text-muted);
 }
 
 .subject {
-  font-size: var(--size-heading);
-  font-weight: var(--weight-medium);
-  color: var(--accent);
+  font-size: var(--size-aux);
+  font-weight: var(--weight-semibold);
+  color: var(--accent-deep);
   letter-spacing: 0.02em;
 }
 
@@ -38,76 +71,45 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* ===== 单条事实软卡 ===== */
+
 .fact {
+  padding: 12px var(--space-4);
+}
+
+.factInner {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--space-3);
-  background: var(--surface);
-  border-radius: var(--radius-card);
+  gap: 3px;
 }
 
 .predicate {
-  font-size: var(--size-aux);
+  font-size: var(--size-meta);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
+  letter-spacing: 0.02em;
 }
 
 .object {
   font-size: var(--size-body);
   color: var(--text-primary);
+  line-height: 1.5;
   word-break: break-word;
 }
 
 .meta {
   display: flex;
   gap: var(--space-2);
+  margin-top: 1px;
   font-size: var(--size-meta);
   color: var(--text-muted);
 }
 
 .confHigh {
-  color: #87b574;
+  color: var(--pusong);
+  font-weight: var(--weight-medium);
 }
+
 .confLow {
-  color: var(--text-muted);
-}
-
-.empty {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-  padding: var(--space-4) 0;
-  text-align: center;
-}
-
-/* v1-session19 · 三层视图（身份卡 / 事实策府 / 河图洛书） */
-
-.layer {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding-top: var(--space-2);
-}
-
-.layer + .layer {
-  border-top: 1px solid var(--border);
-  padding-top: var(--space-3);
-  margin-top: var(--space-2);
-}
-
-.layerHead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: var(--space-2);
-}
-
-.layerName {
-  font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-}
-
-.layerSub {
-  font-size: var(--size-meta);
   color: var(--text-muted);
 }
