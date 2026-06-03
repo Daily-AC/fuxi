@@ -67,6 +67,13 @@ test.beforeEach(async ({ page }) => {
       }
       if (url === "/api/push/vapid-pub") return json({ public_key: "stub" });
       if (url === "/api/push/subscribe") return json({ ok: true });
+      // Phase 1 · XuannvPage 拉 topics（header 副标题）+ projects（@ 候选追加段）。
+      // 玄女 tab 不再是默认页 → 切过去才 mount 这些 fetch。mock 必须兜底，否则
+      // 落到 realFetch（preview 无后端返 index.html）→ .json() throw → composer 子树坏，
+      // @ autocomplete popup 不弹。
+      if (url.startsWith("/api/topics")) return json({ topics: [] });
+      if (url.startsWith("/api/projects")) return json({ projects: [] });
+      if (url.startsWith("/api/notifications")) return json({ unread_count: 0 });
       if (url.startsWith("/api/conv/messages")) {
         const inj = (window as unknown as { __FUXI_HISTORY__?: unknown[] }).__FUXI_HISTORY__;
         return json({ messages: inj ?? [], next_before: null });
@@ -158,16 +165,21 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("登入后 main shell · BottomTabBar 4 tab + 玄女默认 + Composer 空态 (v1-session17 task #9)", async ({ page }) => {
+test("登入后 main shell · BottomTabBar 4 tab + 家默认 + 切玄女后 Composer 空态 (daimeng 重构 4-tab)", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible({ timeout: 5_000 });
-  // tab bar 渲 4 项：玄女 / 任务 / 通知 / 更多
+  // tab bar 渲 4 项：家 / 聊天(玄女) / 任务 / 更多（无通知一级 tab）
   await expect(page.getByTestId("tab-bar")).toBeVisible();
+  await expect(page.getByTestId("tab-home")).toBeVisible();
   await expect(page.getByTestId("tab-xuannv")).toBeVisible();
   await expect(page.getByTestId("tab-tasks")).toBeVisible();
-  await expect(page.getByTestId("tab-notifications")).toBeVisible();
   await expect(page.getByTestId("tab-more")).toBeVisible();
-  // 玄女 默认 active
+  await expect(page.getByTestId("tab-notifications")).toHaveCount(0);
+  // 家 默认 active
+  await expect(page.getByTestId("tab-home")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("page-home")).toBeVisible();
+  // 切到聊天 tab → 玄女会话空态 + composer
+  await page.getByTestId("tab-xuannv").click();
   await expect(page.getByTestId("tab-xuannv")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await expect(page.getByTestId("conversation-empty")).toContainText("玄女在线");
@@ -198,6 +210,8 @@ test("BottomTabBar · 点 tab-tasks 切任务页 (v1-session17 任务 tab 仍在
 test("composer 输入后发送按钮变 active", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   const send = page.getByTestId("mention-send");
   await expect(send).toBeDisabled();
   await page.getByTestId("mention-editor").fill("hi");
@@ -207,6 +221,8 @@ test("composer 输入后发送按钮变 active", async ({ page }) => {
 test("发送消息 → user bubble + intervene 调用 + WS 流式收到玄女回复", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   // 等 ws open
   await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
 
@@ -270,6 +286,8 @@ test("发送消息 → user bubble + intervene 调用 + WS 流式收到玄女回
 test("玄女回 markdown 长文 → bubble 渲染 strong + code + link", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
 
   await page.evaluate(() => {
@@ -313,6 +331,8 @@ test("玄女回 markdown 长文 → bubble 渲染 strong + code + link", async (
 test("XSS · 玄女回 <script> 不执行（被 sanitize）", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await page.waitForFunction(() => window.__FUXI_WS__.last !== null);
 
   let attacked = false;
@@ -361,6 +381,8 @@ test("历史预加载 · mock 5 条 stored message → 看到 5 条进入", asyn
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await expect(page.getByTestId("msg-user").first()).toContainText("之前的提问 A");
   await expect(page.locator('[data-testid="msg-user"]')).toHaveCount(3);
   await expect(page.locator('[data-testid="msg-xuannv"]')).toHaveCount(2);
@@ -418,8 +440,9 @@ test("Pager · 切任务页 · 看到 mock 数据 + 切回玄女", async ({ page
   await page.getByTestId("tab-tasks").click();
   await expect(page.getByTestId("page-tasks")).toBeVisible();
   await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("修 ERP 客户列表");
-  await expect(page.getByTestId("member-a-luban")).toContainText("鲁班");
-  await expect(page.getByTestId("member-a-luban")).toContainText("cargo test --lib");
+  // RESKIN：门客活动折叠进卡片副标题（lead 门客 · 活动），不再单独 member-<id> 元素
+  await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("鲁班");
+  await expect(page.getByTestId("task-card-task-uuid-12345678")).toContainText("cargo test --lib");
   // v3 #44：已完成段直接平铺，无 sticky tail
   await expect(page.getByTestId("task-card-c1")).toContainText("升级 deps");
   // 切回玄女
@@ -524,6 +547,8 @@ test("Pager · 多次切换 · 节点→任务→玄女 都正常", async ({ pag
 test("#46 · 玄女 tab + 选 PNG → attach chip → 发 → intervene 带 attachments", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await expect(page.getByTestId("composer-attach-btn")).toBeVisible();
 
   // 选文件
@@ -584,7 +609,8 @@ test("#N5' · 玄女 tab @ chip · 输 @ 弹 autocomplete + 选 → chip + 发 i
   });
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
-  // 默认在玄女 tab
+  // 切到聊天 tab（家是默认）
+  await page.getByTestId("tab-xuannv").click();
   await expect(page.getByTestId("page-xuannv")).toBeVisible();
 
   // 输 @ 触发 autocomplete
@@ -618,6 +644,8 @@ test("#N5' · 玄女 tab @ chip · 输 @ 弹 autocomplete + 选 → chip + 发 i
 test("#N5' · 玄女 tab 无 chip · intervene 不带 target（backend 走玄女默认）", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("main-shell")).toBeVisible();
+  await page.getByTestId("tab-xuannv").click();
+  await expect(page.getByTestId("page-xuannv")).toBeVisible();
   await page.getByTestId("mention-editor").fill("你好玄女");
   await page.getByTestId("mention-send").click();
   await expect.poll(() =>
@@ -780,6 +808,7 @@ test("#44 · completed 段直接平铺（无 sticky tail）+ 显 members + tool 
   // v3 #44：sticky tail 已删；卡片直接见底
   await expect(page.getByTestId("tasks-completed-tail")).toHaveCount(0);
   await expect(page.getByTestId("task-card-c-dense")).toBeVisible();
-  await expect(page.getByTestId("member-a-c-luban")).toContainText("鲁班");
-  await expect(page.getByTestId("member-a-c-luban")).toContainText("cargo update");
+  // RESKIN：门客活动折叠进卡片副标题（lead 门客 · 工具），不再单独 member-<id> 元素
+  await expect(page.getByTestId("task-card-c-dense")).toContainText("鲁班");
+  await expect(page.getByTestId("task-card-c-dense")).toContainText("cargo update");
 });
