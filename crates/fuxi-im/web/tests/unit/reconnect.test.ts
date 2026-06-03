@@ -152,6 +152,69 @@ describe("startReconnectingSocket", () => {
     ctrl.dispose();
   });
 
+  it("visibilitychange→visible 时强制重连 + 触发 onVisible（bug #f391c55b）", () => {
+    const sockets: FakeWS[] = [];
+    const onVisible = vi.fn();
+    // 用 ref 容器避免 TS 把 let 收窄成 null
+    const listenerRef: { fn: (() => void) | null } = { fn: null };
+    let hidden = false;
+    const ctrl = startReconnectingSocket(
+      () => {
+        const s = new FakeWS();
+        sockets.push(s);
+        return s as unknown as WebSocket;
+      },
+      { onVisible },
+      {
+        initialDelayMs: 100,
+        jitter: 0,
+        visibility: {
+          isHidden: () => hidden,
+          subscribe: (l) => {
+            listenerRef.fn = l;
+            return () => {
+              listenerRef.fn = null;
+            };
+          },
+        },
+      },
+    );
+    sockets[0]?.open();
+    expect(ctrl.attempts()).toBe(1);
+    // 切到后台
+    hidden = true;
+    listenerRef.fn?.();
+    // hidden=true 不触发 reopen
+    expect(ctrl.attempts()).toBe(1);
+    expect(onVisible).not.toHaveBeenCalled();
+    // 切回前台 → 立即重连 + 触发 onVisible 让 caller refetch
+    hidden = false;
+    listenerRef.fn?.();
+    expect(onVisible).toHaveBeenCalledTimes(1);
+    expect(ctrl.attempts()).toBe(2);
+    // 旧 socket 被关
+    expect(sockets[0]?.closed).toBe(true);
+    ctrl.dispose();
+    expect(listenerRef.fn).toBeNull();
+  });
+
+  it("visibility 跳过：传 visibility=null 时不订阅，避免污染无 document 环境", () => {
+    const sockets: FakeWS[] = [];
+    const ctrl = startReconnectingSocket(
+      () => {
+        const s = new FakeWS();
+        sockets.push(s);
+        return s as unknown as WebSocket;
+      },
+      {},
+      { initialDelayMs: 50, jitter: 0, visibility: null },
+    );
+    sockets[0]?.open();
+    ctrl.dispose();
+    // dispose 不应 throw 即使没有 unsubscribe
+    expect(sockets[0]?.closed).toBe(true);
+  });
+
   it("onMessage 透传消息事件", () => {
     const sockets: FakeWS[] = [];
     const onMessage = vi.fn();

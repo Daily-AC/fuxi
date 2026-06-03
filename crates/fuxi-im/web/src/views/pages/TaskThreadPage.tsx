@@ -147,6 +147,25 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
                   console.warn("task thread event parse failed", err);
                 }
               },
+              // 切回前台 → refetch 历史补漏；mergeMessages 按 id 去重。
+              // ctx() 在闭包外快照避免 solid/reactivity lint（fold 不需要 reactive）。
+              onVisible: () => {
+                if (!historyLoaded) return;
+                const snap = ctx();
+                void (async () => {
+                  try {
+                    const r = await client.fetchTaskEvents(taskId);
+                    const seeded = r.events.reduce<Message[]>(
+                      (acc, ev) => applyTaskThreadEvent(acc, ev, snap),
+                      [],
+                    );
+                    if (seeded.length > 0)
+                      setMessages((prev) => mergeMessages(prev, seeded));
+                  } catch (err) {
+                    console.warn("task thread visibility refetch failed", err);
+                  }
+                })();
+              },
             },
           );
         }
