@@ -2,6 +2,7 @@
 import { render } from "solid-js/web";
 
 import "./styles/global.css";
+import "./styles/texture.css";
 import { App } from "./App";
 import { startVersionPoll } from "./lib/version-poll";
 import { pushToast } from "./lib/toast";
