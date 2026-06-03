@@ -36,6 +36,9 @@ import { ThinkingRow } from "~/components/messages/ThinkingRow";
 import { StatusMarkerRow } from "~/components/messages/StatusMarkerRow";
 import { SystemMessageRow } from "~/components/messages/SystemMessageRow";
 import { formatDuration } from "~/lib/format-task";
+import { Card } from "~/components/ui/Card";
+import { StatePill, type StatePillTone } from "~/components/ui/StatePill";
+import { EmptyState } from "~/components/ui/EmptyState";
 import styles from "./WorkerPage.module.css";
 
 // 私聊页 modal · #N3 · spec docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §C
@@ -213,7 +216,23 @@ export const WorkerPage: Component<WorkerPageProps> = (props) => {
           data-testid="worker-back"
           aria-label="返回玄女"
         >
-          ‹ 玄女
+          <svg
+            class={styles.backIcon}
+            width="9"
+            height="15"
+            viewBox="0 0 9 15"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M7.5 1.5 1.5 7.5l6 6"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          玄女
         </button>
         <div class={styles.titleWrap}>
           <span class={styles.role}>{props.role_display ?? "门客"}</span>
@@ -228,20 +247,30 @@ export const WorkerPage: Component<WorkerPageProps> = (props) => {
           data-testid="worker-more"
           disabled
         >
-          ⋯
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="4" cy="10" r="1.6" fill="currentColor" />
+            <circle cx="10" cy="10" r="1.6" fill="currentColor" />
+            <circle cx="16" cy="10" r="1.6" fill="currentColor" />
+          </svg>
         </button>
       </header>
 
       <Show when={taskCtx()}>
         {(t) => (
-          <div class={styles.banner} data-testid="worker-task-banner">
-            <span class={styles.bannerLabel}>任务</span>
-            <span class={styles.bannerTitle} title={t().title}>
-              {t().title}
-            </span>
-            <span class={styles.bannerMeta}>
-              {formatDuration(t().duration_ms)} · {bannerStatusLabel(t().status)}
-            </span>
+          <div class={styles.bannerWrap}>
+            <Card tone="peach" class={styles.banner}>
+              <div data-testid="worker-task-banner" class={styles.bannerInner}>
+                <span class={styles.bannerLabel}>任务</span>
+                <span class={styles.bannerTitle} title={t().title}>
+                  {t().title}
+                </span>
+                <span class={styles.bannerMeta}>{formatDuration(t().duration_ms)}</span>
+                <StatePill
+                  label={bannerStatusLabel(t().status)}
+                  tone={bannerStatusTone(t().status)}
+                />
+              </div>
+            </Card>
           </div>
         )}
       </Show>
@@ -297,15 +326,16 @@ const Thread: Component<ThreadProps> = (props) => {
   );
 
   return (
-    <section ref={scrollEl} class={styles.thread} data-testid="worker-thread">
+    <section ref={scrollEl} class={`u-mesh ${styles.thread}`} data-testid="worker-thread">
       <Show
         when={props.messages().length > 0}
         fallback={
           <div class={styles.empty} data-testid="worker-empty">
-            <p class={styles.emptyTitle}>{props.role_display ?? "门客"}在线</p>
-            <p class={styles.emptyHint}>
-              {props.online() ? "跟他/她说点啥" : "重连中…"}
-            </p>
+            <EmptyState
+              mascotState={props.online() ? "idle" : "sleep"}
+              title={`${props.role_display ?? "门客"}在线`}
+              hint={props.online() ? "跟他/她说点啥" : "重连中…"}
+            />
           </div>
         }
       >
@@ -377,6 +407,13 @@ function bannerStatusLabel(status: string): string {
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
   return status;
+}
+
+function bannerStatusTone(status: string): StatePillTone {
+  if (status === "running") return "running";
+  if (status === "completed") return "done";
+  if (status === "failed") return "danger";
+  return "neutral";
 }
 
 function shortAgent(id: string): string {
