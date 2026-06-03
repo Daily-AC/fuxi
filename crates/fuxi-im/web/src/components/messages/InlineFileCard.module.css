@@ -19,7 +19,7 @@
 
 .name {
   font-weight: var(--weight-semibold);
-  color: var(--accent);
+  color: var(--luban);
   letter-spacing: 0.2px;
 }
 
@@ -50,11 +50,14 @@
 .card {
   width: 100%;
   padding: 12px 14px;
-  background: #2A241E;
+  /* 门客 inline 文件卡：奶白底 + 门客角色色左缘，跟 WorkerBubble 同色温。 */
+  background: var(--surface-soft);
   color: var(--text-primary);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-bubble);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--luban);
+  border-radius: var(--radius-card);
   border-top-left-radius: 6px;
+  box-shadow: var(--shadow-card), var(--inset-hi);
   font-size: var(--size-body);
   line-height: 1.45;
   /* WorkerBubble 同款溢出防御 —— md 长 token 不撑爆 row 边界 */

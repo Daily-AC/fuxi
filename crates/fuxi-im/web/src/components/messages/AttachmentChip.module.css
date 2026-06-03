@@ -4,15 +4,17 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--surface);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
   color: inherit;
   text-decoration: none;
   overflow: hidden;
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .chip:hover,
 .chip:focus-visible {
-  border-color: var(--border-strong);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card), var(--inset-hi);
 }
 
 .fileBlock {

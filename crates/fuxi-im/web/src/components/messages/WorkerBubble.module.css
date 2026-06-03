@@ -15,7 +15,7 @@
 .name {
   font-size: var(--size-aux);
   font-weight: var(--weight-semibold);
-  color: var(--accent);
+  color: var(--luban);
   letter-spacing: 0.2px;
 }
 
@@ -27,10 +27,15 @@
 
 .bubble {
   padding: 12px 14px;
-  background: #2A241E;
+  /* 门客气泡：中性奶白底 + 一道门客角色色（luban 桃橙）左缘细条，
+   * 跟玄女（薰衣草）/ 用户（纯白）三方一眼区分。柔暖投影 premium。 */
+  background: var(--surface-soft);
   color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--luban);
   border-radius: var(--radius-bubble);
-  border-top-left-radius: 4px;
+  border-top-left-radius: 6px;
+  box-shadow: var(--shadow-card), var(--inset-hi);
   font-size: var(--size-body);
   line-height: 1.45;
   white-space: pre-wrap;
