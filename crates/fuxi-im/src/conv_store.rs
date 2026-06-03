@@ -925,25 +925,28 @@ mod tests {
         let h = spawn_xuannv_sync(store.clone(), bus.clone(), id_rx, topic_rx).await;
 
         // 在 general topic 下玄女说一句
-        bus.publish(agent_responded_event(xuannv, "general 期")).unwrap();
+        bus.publish(agent_responded_event(xuannv, "general 期"))
+            .unwrap();
 
         let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let (msgs, _, _) = store.page_messages(&conv, 50, None).await.unwrap();
-            if msgs.iter().any(|m| m.content["text"].as_str() == Some("general 期")) {
+            if msgs
+                .iter()
+                .any(|m| m.content["text"].as_str() == Some("general 期"))
+            {
                 break;
             }
         }
 
         // 切到新 topic
         let new_topic = TopicId::from(Uuid::new_v4());
-        topic_tx
-            .send(new_topic)
-            .expect("topic watch send 不应失败");
+        topic_tx.send(new_topic).expect("topic watch send 不应失败");
 
         // 切完后玄女在新 topic 下发言
-        bus.publish(agent_responded_event(xuannv, "new topic 期")).unwrap();
+        bus.publish(agent_responded_event(xuannv, "new topic 期"))
+            .unwrap();
 
         // 等新发言落库
         let mut new_landed_in_new_topic = false;
@@ -960,7 +963,8 @@ mod tests {
                 new_landed_in_new_topic = true;
                 // 关键反回归：filter 必须把"general 期"挡在外面
                 assert!(
-                    msgs.iter().all(|m| m.content["text"].as_str() != Some("general 期")),
+                    msgs.iter()
+                        .all(|m| m.content["text"].as_str() != Some("general 期")),
                     "new topic 历史不能看到 general 期消息"
                 );
                 break;

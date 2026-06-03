@@ -15,6 +15,14 @@
   `"home"`）。比 tags 更强，绕过 tag 匹配直接钉到该节点。**真实 node id 跑
   `fuxi nodes --json` 查**——别硬编 `mac-local` 这种 alias，不存在则 enqueue 卡死。
 
+## 内部角色不可派活（issue fb09ee62）
+
+`cangjie`（仓颉）/ `extractor` 是平台**内部经验抽取角色**，由抽取管线自动唤起，
+喂的是 trajectory 抽取 prompt。它们对通用任务（调研 / 写代码 / 列候选）按契约
+**直接返 `[]` 空跑**——你会误以为搞定。**绝不 `fuxi spawn --role cangjie/extractor`**。
+现在 spawn 入口会直接拒（报错引导改派），但你心里也要清楚：通用调研派 `luban` /
+`pusong` 等交付型门客，不要碰内部角色。
+
 ## 派活规则（5 条决策树）
 
 按下面顺序判定，**路由职责永远在 `dispatch` 上，不在 `spawn` 上**：
@@ -59,9 +67,16 @@ fuxi dispatch --to "$ID" --pinned-node zyldemacbook-pro-local --title 'ls home' 
 
 ## 编排层会怎么处理
 
-`Fuxi::dispatch` 看到 `task.pinned_node.is_some() || !task.required_tags.is_empty()`
-就走 dist enqueue（远端 worker pull 跑），否则走本地 spawn。dist worker 跑完
-事件流回共享 EventBus，你照常订阅审阅。
+`Fuxi::dispatch` 路由决策（issue f4e0ff39 修订）：
+
+- `pinned_node` 非空 → **永远**走 dist enqueue（远端 worker pull 跑）。这是显式跨节点的唯一信号。
+- `required_tags` 非空 **但 `--to` 指向的 agent 在本机 shelf 里** → **直派本地**（你显式点名了本地 agent，tag 视为已满足）。
+- `required_tags` 非空 **且 `--to` agent 不在本机** → 走 dist enqueue（跨节点 role 路由）。
+- 都为空 → 本地 spawn。
+
+dist worker 跑完事件流回共享 EventBus，你照常订阅审阅。
+
+> 修订前的坑：home 既是 controller 又是唯一 worker 但**无 pull loop**，`--to <本地 luban> --required-tags home` 会把 task 塞 dist queue 无人 pull、卡死后 agent 被 GC。现在本地 agent + required_tags 直派本机，不再悬空。
 
 ## Project 维度（Decision 21 phase 1）
 

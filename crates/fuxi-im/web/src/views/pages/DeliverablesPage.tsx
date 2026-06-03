@@ -32,6 +32,7 @@ const KIND_LABEL: Record<DeliverableKind, string> = {
   test_result: "测试结果",
   decision_request: "决策请示",
   error_block: "错误阻塞",
+  artifact: "二进制交付",
 };
 
 const STATUS_LABEL: Record<DeliverableStatus, string> = {

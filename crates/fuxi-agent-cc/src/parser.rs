@@ -37,6 +37,23 @@ pub struct RequestReviewSentinel {
     pub artifact_ref: Option<String>,
 }
 
+/// 识别 cc wind-down race（issue 9ffd7e13 / ee1551f2）产生的「复读 prompt-wrapper」
+/// 幻觉文本。cc 进程在 task done 后偶发额外多跑一轮 turn，模型 hallucinate 出**自己
+/// 输入的 prompt 注入模板**——以 `Human:` role 标记起头、夹带 `UserPromptSubmit hook`
+/// / `<system-reminder>` 注入 marker。合法 assistant 输出**绝不**会以 `Human:` role 标
+/// 记起头再带这些 cc 内部 marker。命中 = 幻觉，parser 层直接丢弃，避免回流 events.db
+/// 污染玄女上下文 + PWA 把它当用户消息回显（连同泄露服务器绝对路径）。
+///
+/// 双条件（`Human:` 前缀 **且** 含注入 marker）避免误杀合法回话（如「Human Resources
+/// 模块……」这种恰好以 Human 起头但不带 marker 的正常文本）。
+pub fn looks_like_regurgitated_prompt(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("Human:") {
+        return false;
+    }
+    trimmed.contains("UserPromptSubmit hook") || trimmed.contains("<system-reminder>")
+}
+
 /// 尝试把一段 `AssistantText` 解析为 sentinel；只有**整段单行裸 JSON object** +
 /// `_fuxi == "request_review"` + `kind` 是合法枚举值 + `summary` 非空 才算命中。
 /// 不命中（含解析失败）返 None，调用方退化为 `AgentResponded`。
@@ -233,6 +250,14 @@ impl TranslateState {
     /// AgentRequestReview。
     fn sentinel_enabled(&self) -> bool {
         !matches!(self.role.as_deref(), Some("cangjie") | Some("extractor"))
+    }
+
+    /// 该 role 的回话是否参与 artifact 截断落档（issue 3baac205）。
+    /// 玄女是顶层对话主体，回话直接面向用户——截断成「调 Read artifact 查看」
+    /// 是给门客的术语用户看不懂，且截断 = 用户拿不到完整信息。她豁免，直显全文。
+    /// 门客（luban/codex/...）回话是给玄女审阅的中间产物，仍走 ref-only 保 prompt 干净。
+    fn dumps_artifacts(&self) -> bool {
+        !matches!(self.role.as_deref(), Some("xuannv"))
     }
 
     /// 标记当前事件流已收尾（result 到达）——如果还挂在 thinking 里，
@@ -497,10 +522,24 @@ pub fn translate(
                 ));
                 return out;
             }
+            // issue 9ffd7e13 / ee1551f2：wind-down race 复读 prompt-wrapper 幻觉直接丢弃。
+            // 不置 responded_this_turn——这不算 LLM 真回复，且终态冷路径不该被它顶掉。
+            if looks_like_regurgitated_prompt(&text) {
+                tracing::warn!(
+                    %agent_id,
+                    "丢弃复读 prompt-wrapper 的 AssistantText 幻觉（cc wind-down race）"
+                );
+                return out;
+            }
             state.responded_this_turn = true;
             // Phase 0 ref-only：长产出落档 ~/.fuxi/artifacts/<task>/，event 只带
             // summary + path，避免玄女 `fuxi events --task X` 拉到整篇调研。
-            let artifact_ref = ArtifactRef::maybe_dump_default(task_id, &text);
+            // issue 3baac205：玄女回话豁免——直显全文（dumps_artifacts() 见 role 判定）。
+            let artifact_ref = if state.dumps_artifacts() {
+                ArtifactRef::maybe_dump_default(task_id, &text)
+            } else {
+                None
+            };
             let payload_text = match &artifact_ref {
                 Some(r) => r.summary.clone(),
                 None => text,
@@ -583,10 +622,18 @@ pub fn translate(
             // AgentResponded 了；result 里的 `text` 是同内容的终态副本，再发
             // 一次会让 TUI 显示两遍。仅在本 turn 没发过 AgentResponded 的
             // 极端场景（cc 只给 result text 没给 assistant stream）才补发。
-            if !state.responded_this_turn && !text.is_empty() {
+            if !state.responded_this_turn
+                && !text.is_empty()
+                && !looks_like_regurgitated_prompt(&text)
+            {
                 // 同 AssistantText 路径走 ref-only——冷场景下 cc 只在 result 里
                 // 给 text，依然可能 ≥ 阈值，要一视同仁 dump。
-                let artifact_ref = ArtifactRef::maybe_dump_default(task_id, &text);
+                // issue 3baac205：玄女豁免；issue 9ffd7e13：复读幻觉上面已被排除。
+                let artifact_ref = if state.dumps_artifacts() {
+                    ArtifactRef::maybe_dump_default(task_id, &text)
+                } else {
+                    None
+                };
                 let payload_text = match &artifact_ref {
                     Some(r) => r.summary.clone(),
                     None => text,
@@ -748,6 +795,100 @@ mod tests {
             .expect("AgentResponded");
         assert!(artifact_ref.is_none(), "短文本不应 dump");
         assert_eq!(text, short, "短文本应原样透传");
+    }
+
+    // issue 3baac205：玄女作为对话主体，回话直接面向用户。她的长回话**不应**
+    // 被 artifact 截断成「调 Read artifact 查看」——那是给门客 agent 的术语，
+    // 用户看不懂，且截断 = 用户拿不到完整信息。role=="xuannv" 豁免 dump。
+    #[test]
+    fn translate_xuannv_long_text_keeps_full_text_no_artifact() {
+        let agent = fresh_agent();
+        let task = TaskId::new();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: 单测进程内 env mutation；test 标准做法。
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        let long = "玄女对用户的长篇回话".repeat(200); // 远超阈值
+        let mut state = TranslateState::with_role("xuannv");
+        let events = translate(
+            CcEvent::AssistantText { text: long.clone() },
+            agent,
+            Some(task),
+            &mut state,
+            None,
+        );
+        let (text, artifact_ref) = events
+            .iter()
+            .find_map(|e| {
+                if let EventKind::AgentResponded { text, artifact_ref } = &e.kind {
+                    Some((text.clone(), artifact_ref.clone()))
+                } else {
+                    None
+                }
+            })
+            .expect("应 emit AgentResponded");
+        assert!(artifact_ref.is_none(), "玄女回话不该 dump artifact");
+        assert_eq!(text, long, "玄女回话应原样全文透传");
+    }
+
+    // issue 9ffd7e13 + ee1551f2：cc wind-down race 模型额外多跑一轮 turn，
+    // hallucinate 复读出自己输入的 prompt-wrapper 模板（"Human: <system-reminder>
+    // UserPromptSubmit hook additional context..."），被翻成 AgentResponded
+    // 回流 events.db → 污染玄女上下文 + PWA 把它当用户消息回显。assistant 输出
+    // 绝不该以 "Human:" role 标记起头并夹带注入 marker——parser 层直接丢弃。
+    #[test]
+    fn translate_drops_regurgitated_prompt_wrapper() {
+        let agent = fresh_agent();
+        let task = TaskId::new();
+        let phantom = "Human: <system-reminder>UserPromptSubmit hook additional context: 当前时间: 2026/05/17 20:51:23</system-reminder>\n我玩了，可好玩了。我现在已经在家了\n[附件: /home/e0-7/.fuxi/im_uploads/8d/8df7.jpg]".to_string();
+        let mut state = TranslateState::with_role("xuannv");
+        let events = translate(
+            CcEvent::AssistantText { text: phantom },
+            agent,
+            Some(task),
+            &mut state,
+            None,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.kind, EventKind::AgentResponded { .. })),
+            "复读 prompt-wrapper 的幻觉文本不该 emit AgentResponded"
+        );
+        // 丢弃后 responded_this_turn 不应被置位——否则 ResultSuccess 冷路径补发又漏判。
+        assert!(
+            !state.responded_this_turn,
+            "幻觉丢弃后不该标记 responded_this_turn"
+        );
+    }
+
+    #[test]
+    fn translate_normal_text_starting_with_human_word_not_dropped() {
+        // 边界：合法回话恰好以 "Human" 开头但不带注入 marker，不该误杀。
+        let agent = fresh_agent();
+        let task = TaskId::new();
+        let normal = "Human Resources 这个模块我建议这样改……".to_string();
+        let mut state = TranslateState::with_role("xuannv");
+        let events = translate(
+            CcEvent::AssistantText {
+                text: normal.clone(),
+            },
+            agent,
+            Some(task),
+            &mut state,
+            None,
+        );
+        let text = events
+            .iter()
+            .find_map(|e| {
+                if let EventKind::AgentResponded { text, .. } = &e.kind {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("正常回话应 emit AgentResponded");
+        assert_eq!(text, normal);
     }
 
     // ── parser 单元 ─────────────────────────────────────────────

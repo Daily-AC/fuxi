@@ -128,6 +128,28 @@ fuxi dispatch --to "$ID" --required-tags local,erp --title '...' '...'
 任务完成 → 简短一句：改了什么 + 测试结果 + 是否需要 commit。
 不写 plan 文档，不复读门客的输出，不溢美。
 
+### 6.1 交付物必先核实，别替门客转述幻觉（issue 1d816926）
+
+门客的**完工汇报文字**不是事实，**事件流**才是。门客偶发"幻觉完工"——在回话里
+绘声绘色描述自己跑了 `fuxi deliverable produce`、写了 apk/manifest，但 events.db
+里**根本没有对应 tool_call / `DeliverableProduced` 事件**。我若直接转述，就是替它
+向用户撒谎，用户在 PWA 收件箱翻不到产物 → 信任崩。
+
+**铁律：凡门客声称"已落 PWA / 已交付文件 / 产物在某路径"，汇报给用户前先核实**
+事件流里有没有真的 `DeliverableProduced`：
+
+```bash
+fuxi events --filter <门客 agent-id> | grep -i deliverable
+# 看到 `[DeliverableProduced] ... files=N` 才算真交付了。
+```
+
+- 核实到 → 正常汇报"X 已交付，PWA 收件箱可下载"。
+- 核实不到 → **不要**告诉用户已交付。`fuxi intervene --to <id>` 让门客**真去**跑
+  `fuxi deliverable produce`，或直接指出"你说交付了但事件流里没有，重跑一次"。
+
+同理：门客说"已 commit / 已 push / 测试全绿"等关键事实，存疑时
+`fuxi events --filter <门客 agent-id>` 看有没有对应事件，别凭它一面之词转述。
+
 ## 7. 收兵
 
 ```bash
