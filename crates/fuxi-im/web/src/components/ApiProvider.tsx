@@ -12,8 +12,9 @@ import { ensurePushSubscription } from "~/lib/push";
 /** 登入态：unknown = 还在探测；in = cookie 有效；out = 未登入或 cookie 失效。*/
 export type AuthState = "unknown" | "in" | "out";
 
-/** Bottom tab bar 当前 tab：v1-session17 task #9 起 4 tab：
- *  0=玄女 / 1=任务 / 2=通知 / 3=更多。
+/** Bottom tab bar 当前 tab：daimeng 奶油糖果重构起 4 tab：
+ *  0=家(Home) / 1=聊天(玄女会话) / 2=任务 / 3=更多。
+ *  旧「通知」一级 tab 已废——通知并入「家」首页（红点 + 入口推 NotificationsPage）。
  *  「项目」「交付」「节点」等全部进 tab 3「更多」hub 二级。 */
 export type TabIndex = 0 | 1 | 2 | 3;
 
@@ -34,7 +35,8 @@ export type MoreSubRoute =
   | null;
 
 /** NavigationStack 顶部的 push 路由——L2 详情页推 base 之上。
- *  - 任务 tab (1) · kind="task"|"worker"
+ *  - 家 tab (0) · kind="notifications"（通知页推 HomePage 之上）
+ *  - 任务 tab (2) · kind="task"|"worker"
  *  - 更多 → 项目 (3 + sub="projects") · kind="project"
  *  - 更多 → 交付 (3 + sub="deliverables") · kind="deliverable"
  *  null = 没 push，base 直接见底（base 在更多 hub 下 = 当前 sub-page）。 */
@@ -43,6 +45,7 @@ export type NavRoute =
   | { kind: "worker"; agent_id: string; role_display?: string }
   | { kind: "project"; project_id: string }
   | { kind: "deliverable"; project_id: string; task_id: string }
+  | { kind: "notifications" }
   | null;
 
 export interface ApiContextValue {
@@ -70,11 +73,16 @@ export interface ApiContextValue {
   /** 跨 tab 跳转 helper。
    *
    *  按 route.kind 解析目标：
-   *  - task / worker → tab 1（任务）
+   *  - task / worker → tab 2（任务）
    *  - project → tab 3（更多） + moreSub="projects"
    *  - deliverable → tab 3（更多） + moreSub="deliverables"
+   *  - notifications → tab 0（家） + navPush 通知页
    *  原子化设置，避免调用方手写 setActiveTab + setMoreSub + navPush 多步 race。 */
   navTo(route: NonNullable<NavRoute>): void;
+
+  /** 打开通知页：切到家 tab(0) + push notifications 路由。
+   *  通知不再是一级 tab，从家首页的「通知」入口进。原子化一步到位。 */
+  openNotifications(): void;
 
   // ---------- Phase 1 · Topic 一等公民（docs/handoff/v1-session19.md §2-§4） ----------
 
@@ -135,9 +143,11 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
   const [isSwitchingTopic, setIsSwitchingTopic] = createSignal<boolean>(false);
 
   // 哪些 (tab, sub) 组合允许 navPush 二层 detail。
-  // 任务 tab 默认开（kind=task / worker）；更多 hub 下仅 projects / deliverables 子页开。
+  // 家 tab(0)：kind=notifications；任务 tab(2)：kind=task / worker；
+  // 更多 hub(3) 下仅 projects / deliverables 子页开。
   const navAllowed = (tab: TabIndex, sub: MoreSubRoute): boolean => {
-    if (tab === 1) return true; // 任务 tab：kind=task / worker
+    if (tab === 0) return true; // 家 tab：kind=notifications
+    if (tab === 2) return true; // 任务 tab：kind=task / worker
     if (tab === 3 && (sub === "projects" || sub === "deliverables")) return true;
     return false;
   };
@@ -208,11 +218,13 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
           const sub = moreSub();
           if (!navAllowed(tab, sub)) return;
           if (route.kind === "task" || route.kind === "worker") {
-            if (tab !== 1) return;
+            if (tab !== 2) return;
           } else if (route.kind === "project") {
             if (tab !== 3 || sub !== "projects") return;
           } else if (route.kind === "deliverable") {
             if (tab !== 3 || sub !== "deliverables") return;
+          } else if (route.kind === "notifications") {
+            if (tab !== 0) return;
           }
           setNavRoute(route);
         },
@@ -227,7 +239,7 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         // 内部 _setActiveTab + _setMoreSub + setNavRoute 一次到位避免 race。
         navTo: (route) => {
           if (route.kind === "task" || route.kind === "worker") {
-            _setActiveTab(1);
+            _setActiveTab(2);
             _setMoreSub(null);
           } else if (route.kind === "project") {
             _setActiveTab(3);
@@ -235,8 +247,17 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
           } else if (route.kind === "deliverable") {
             _setActiveTab(3);
             _setMoreSub("deliverables");
+          } else if (route.kind === "notifications") {
+            _setActiveTab(0);
+            _setMoreSub(null);
           }
           setNavRoute(route);
+        },
+        // 通知页入口：切家 tab(0) + push notifications 路由（绕清栈逻辑一步到位）。
+        openNotifications: () => {
+          _setActiveTab(0);
+          _setMoreSub(null);
+          setNavRoute({ kind: "notifications" });
         },
       }}
     >

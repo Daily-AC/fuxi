@@ -219,11 +219,11 @@ const NodeCard: Component<{ node: NodeView }> = (props) => {
 };
 
 const WorkerRow: Component<{ worker: NodeWorker }> = (props) => {
-  const { setActiveTab, navPush } = useApi();
+  const { navTo } = useApi();
   const onTap = (): void => {
     if (!props.worker.current_task_id) return;
-    setActiveTab(1);
-    navPush({
+    // navTo 原子切到任务 tab(2) + push task 路由，避免 setActiveTab 清栈与 navPush 两步 race。
+    navTo({
       kind: "task",
       task_id: props.worker.current_task_id,
       title: props.worker.current_task_title ?? undefined,
