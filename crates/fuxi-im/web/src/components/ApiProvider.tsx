@@ -88,6 +88,13 @@ export interface ApiContextValue {
   /** 移动端左滑抽屉开关。桌面端常驻 sidebar 时这个 flag 无效（CSS @media 控）。 */
   sidebarOpen: Accessor<boolean>;
   setSidebarOpen(open: boolean): void;
+
+  /** Phase 1 · 玄女 topic 切换中（后端 shutdown_xuannv_for_handoff + spawn 新 cc
+   *  耗时 5-15s）。TopicSidebar 进入切换流程时 setIsSwitchingTopic(true)，结束
+   *  setIsSwitchingTopic(false)。XuannvPage 监听显示 overlay 让用户知道在切。
+   *  含"新建后自动切"的两段流程：建好后立刻切，期间持续 true。*/
+  isSwitchingTopic: Accessor<boolean>;
+  setIsSwitchingTopic(v: boolean): void;
 }
 
 const ApiContext = createContext<ApiContextValue>();
@@ -123,6 +130,9 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
   const [currentTopicId, setCurrentTopicId] = createSignal<string | null>(null);
   // 移动端抽屉开关——桌面 CSS @media 把 sidebar 钉死可见，这个 flag 失效。
   const [sidebarOpen, setSidebarOpen] = createSignal<boolean>(false);
+  // Phase 1 · 切 topic 进行中标志（包含"新建+自动切"全流程）。
+  // XuannvPage 显示 overlay，用户在 5-15s 等待期间有视觉反馈。
+  const [isSwitchingTopic, setIsSwitchingTopic] = createSignal<boolean>(false);
 
   // 哪些 (tab, sub) 组合允许 navPush 二层 detail。
   // 任务 tab 默认开（kind=task / worker）；更多 hub 下仅 projects / deliverables 子页开。
@@ -211,6 +221,8 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         setCurrentTopicId,
         sidebarOpen,
         setSidebarOpen,
+        isSwitchingTopic,
+        setIsSwitchingTopic,
         // 跨 tab 跳转——绕过 setActiveTab / setMoreSub 的清栈逻辑，直接钉
         // 内部 _setActiveTab + _setMoreSub + setNavRoute 一次到位避免 race。
         navTo: (route) => {

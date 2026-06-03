@@ -6,6 +6,7 @@ import {
   createEffect,
   createSignal,
   on,
+  onCleanup,
   onMount,
 } from "solid-js";
 import type { Message } from "~/messages";
@@ -40,6 +41,16 @@ export const Conversation: Component<ConversationProps> = (props) => {
   onMount(() => {
     if (!scrollEl) return;
     scrollEl.addEventListener("scroll", () => setStickToBottom(isAtBottom()));
+    // 移动端多行 composer 长大时 scrollEl 高度被 flex 挤短，最末几条消息会被
+    // 推到 viewport 之下"看不见"。ResizeObserver 监听 scrollEl 尺寸变化，
+    // 在 stickToBottom 状态下自动重锚到底——keystroke 级别响应。
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (!stickToBottom() || !scrollEl) return;
+      scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: "instant" });
+    });
+    ro.observe(scrollEl);
+    onCleanup(() => ro.disconnect());
   });
 
   createEffect(

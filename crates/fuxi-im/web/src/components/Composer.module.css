@@ -29,6 +29,14 @@
   font-size: var(--size-body);
 }
 
+/* 移动端：viewport 矮 + 虚拟键盘吃高度时，120px 也太多——压到 88px (~3 行)，
+ * 多行超出靠内部 scroll。bug "多行 input 遮挡消息（仅移动端）"修复同源。 */
+@media (max-width: 767px) {
+  .input {
+    max-height: 88px;
+  }
+}
+
 .input:focus {
   border-color: var(--accent-dim);
 }

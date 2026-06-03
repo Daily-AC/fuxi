@@ -1,4 +1,5 @@
 .page {
+  position: relative; /* switchOverlay 用 absolute 定位锚到本容器（bug B） */
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -108,3 +109,62 @@
 }
 
 /* v2 sticky badge "✓ 抄送 N 门客" CSS 已删（v3 #40 删 badge，任务 tab 自身已是这个角色）。 */
+
+/* ===== bug B · 切 topic loading overlay =====
+ * 覆盖 conversation 区（不盖 header / composer），用户全程看到"切换中"信号。
+ * absolute 定在 .page 内，避开 composer / header；半透明遮罩 + spinner 卡片。 */
+.switchOverlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 30;
+  pointer-events: auto;
+}
+
+.switchCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  min-width: 200px;
+}
+
+.switchSpinner {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: xn-switch-spin 0.8s linear infinite;
+}
+@keyframes xn-switch-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .switchSpinner {
+    animation: none !important;
+  }
+}
+
+.switchLabel {
+  font-size: var(--size-body);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.switchHint {
+  font-size: var(--size-meta);
+  color: var(--text-muted);
+}
