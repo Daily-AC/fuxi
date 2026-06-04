@@ -12,7 +12,7 @@ const TASK_UUID = "5e5e98b4-1cdf-44d5-8bb3-d489c7905392";
 function setup(deliverables?: DeliverablesResponse) {
   setApiOverride(createMockApi({ deliverables }));
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="deliverables">
+    <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="deliverables">
       <DeliverableDetailPage project_id="erp" task_id={TASK_UUID} />
     </ApiProvider>
   ));

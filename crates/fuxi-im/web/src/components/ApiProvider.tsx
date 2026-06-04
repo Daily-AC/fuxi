@@ -16,7 +16,8 @@ export type AuthState = "unknown" | "in" | "out";
  *  0=家(Home) / 1=聊天(玄女会话) / 2=任务 / 3=更多。
  *  旧「通知」一级 tab 已废——通知并入「家」首页（红点 + 入口推 NotificationsPage）。
  *  「项目」「交付」「节点」等全部进 tab 3「更多」hub 二级。 */
-export type TabIndex = 0 | 1 | 2 | 3;
+// tab 序：0=聊天(xuannv) 1=通知(notifications) 2=家(home) 3=任务(tasks) 4=更多(more)。
+export type TabIndex = 0 | 1 | 2 | 3 | 4;
 
 /** 「更多」hub 内的二级 sub-page。null = hub 首页（tile grid）。
  *  - nodes / projects / workers / deliverables：原一级 tab 沉到 hub 内
@@ -73,14 +74,14 @@ export interface ApiContextValue {
   /** 跨 tab 跳转 helper。
    *
    *  按 route.kind 解析目标：
-   *  - task / worker → tab 2（任务）
-   *  - project → tab 3（更多） + moreSub="projects"
-   *  - deliverable → tab 3（更多） + moreSub="deliverables"
-   *  - notifications → tab 0（家） + navPush 通知页
+   *  - task / worker → tab 3（任务）
+   *  - project → tab 4（更多） + moreSub="projects"
+   *  - deliverable → tab 4（更多） + moreSub="deliverables"
+   *  - notifications → tab 1（通知，一级 tab）
    *  原子化设置，避免调用方手写 setActiveTab + setMoreSub + navPush 多步 race。 */
   navTo(route: NonNullable<NavRoute>): void;
 
-  /** 打开通知页：切到家 tab(0) + push notifications 路由。
+  /** 打开通知页：切到通知 tab(1)。
    *  通知不再是一级 tab，从家首页的「通知」入口进。原子化一步到位。 */
   openNotifications(): void;
 
@@ -143,12 +144,11 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
   const [isSwitchingTopic, setIsSwitchingTopic] = createSignal<boolean>(false);
 
   // 哪些 (tab, sub) 组合允许 navPush 二层 detail。
-  // 家 tab(0)：kind=notifications；任务 tab(2)：kind=task / worker；
-  // 更多 hub(3) 下仅 projects / deliverables 子页开。
+  // 任务 tab(3)：kind=task / worker；更多 hub(4) 下仅 projects / deliverables 子页开。
+  // 通知(1) 现为一级 tab（NotificationsPage 直接做 base，不走 navPush）。
   const navAllowed = (tab: TabIndex, sub: MoreSubRoute): boolean => {
-    if (tab === 0) return true; // 家 tab：kind=notifications
-    if (tab === 2) return true; // 任务 tab：kind=task / worker
-    if (tab === 3 && (sub === "projects" || sub === "deliverables")) return true;
+    if (tab === 3) return true; // 任务 tab：kind=task / worker
+    if (tab === 4 && (sub === "projects" || sub === "deliverables")) return true;
     return false;
   };
 
@@ -159,14 +159,14 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
       // 离开「更多」tab 时也清 sub，回到 hub 首页比"记住上次 sub-page"更符合
       // 移动端用户预期（再次点 tab 是回首页，二次切回手势只是 tab 切换，不该
       // 跳到上次深处）。
-      if (i !== 3) _setMoreSub(null);
+      if (i !== 4) _setMoreSub(null);
     }
     _setActiveTab(i);
   };
 
   const setMoreSub = (s: MoreSubRoute): void => {
     // 仅在「更多」tab 下生效；其他 tab 下静默 noop（防误操作）。
-    if (activeTab() !== 3) return;
+    if (activeTab() !== 4) return;
     if (s !== moreSub()) setNavRoute(null);
     _setMoreSub(s);
   };
@@ -218,13 +218,14 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
           const sub = moreSub();
           if (!navAllowed(tab, sub)) return;
           if (route.kind === "task" || route.kind === "worker") {
-            if (tab !== 2) return;
+            if (tab !== 3) return; // 任务 tab
           } else if (route.kind === "project") {
-            if (tab !== 3 || sub !== "projects") return;
+            if (tab !== 4 || sub !== "projects") return; // 更多 → 项目
           } else if (route.kind === "deliverable") {
-            if (tab !== 3 || sub !== "deliverables") return;
+            if (tab !== 4 || sub !== "deliverables") return; // 更多 → 交付
           } else if (route.kind === "notifications") {
-            if (tab !== 0) return;
+            // 通知现为一级 tab，不再走 navPush（保留分支兼容旧调用，落 noop）
+            return;
           }
           setNavRoute(route);
         },
@@ -239,25 +240,29 @@ export const ApiProvider: ParentComponent<ApiProviderProps> = (props) => {
         // 内部 _setActiveTab + _setMoreSub + setNavRoute 一次到位避免 race。
         navTo: (route) => {
           if (route.kind === "task" || route.kind === "worker") {
-            _setActiveTab(2);
+            _setActiveTab(3);
             _setMoreSub(null);
+            setNavRoute(route);
           } else if (route.kind === "project") {
-            _setActiveTab(3);
+            _setActiveTab(4);
             _setMoreSub("projects");
+            setNavRoute(route);
           } else if (route.kind === "deliverable") {
-            _setActiveTab(3);
+            _setActiveTab(4);
             _setMoreSub("deliverables");
+            setNavRoute(route);
           } else if (route.kind === "notifications") {
-            _setActiveTab(0);
+            // 通知现为一级 tab(1)，直接切过去即可，不再 push 二层 top。
+            _setActiveTab(1);
             _setMoreSub(null);
+            setNavRoute(null);
           }
-          setNavRoute(route);
         },
-        // 通知页入口：切家 tab(0) + push notifications 路由（绕清栈逻辑一步到位）。
+        // 通知页入口：切通知 tab(1)。通知已升一级 tab，不再走 navRoute push。
         openNotifications: () => {
-          _setActiveTab(0);
+          _setActiveTab(1);
           _setMoreSub(null);
-          setNavRoute({ kind: "notifications" });
+          setNavRoute(null);
         },
       }}
     >

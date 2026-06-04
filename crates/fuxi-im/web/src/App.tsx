@@ -87,8 +87,9 @@ const AuthGate: Component = () => {
 };
 
 const BASE_TABS: ReadonlyArray<TabSpec> = [
-  { key: "home", label: "家" },
   { key: "xuannv", label: "聊天" },
+  { key: "notifications", label: "通知" },
+  { key: "home", label: "家" },
   { key: "tasks", label: "任务" },
   { key: "more", label: "更多" },
 ];
@@ -109,8 +110,14 @@ const MainShell: Component = () => {
     }, 15000);
     onCleanup(() => clearInterval(t));
   });
-  // 底栏不再挂通知 badge（通知并入家）；tabs 直接用 BASE_TABS。
-  const tabs = createMemo<TabSpec[]>(() => BASE_TABS.map((t) => ({ ...t })));
+  // 通知 tab(1) 挂 unread 红点 badge；其余 tab 透传 BASE_TABS。
+  const tabs = createMemo<TabSpec[]>(() =>
+    BASE_TABS.map((t) =>
+      t.key === "notifications"
+        ? { ...t, badge: notif()?.unread_count ?? 0 }
+        : { ...t },
+    ),
+  );
 
   // 任务 tab L2 · v3 真 TaskThreadPage（#39 已落）；worker kind 为 v2 残留兜底 stub。
   const renderTaskTop = (): JSX.Element | undefined => {
@@ -173,28 +180,23 @@ const MainShell: Component = () => {
         <main class={styles.main} data-testid="tab-content">
           <Switch>
             <Match when={activeTab() === 0}>
-              {/* 家(Home)：HomePage 为 base；navRoute=notifications 时推 NotificationsPage */}
-              <NavigationStack
-                base={<HomePage unreadCount={notif()?.unread_count ?? 0} />}
-                top={
-                  navRoute()?.kind === "notifications" ? (
-                    <NotificationsPage />
-                  ) : undefined
-                }
-                onPop={navPop}
-              />
-            </Match>
-            <Match when={activeTab() === 1}>
               <XuannvPage />
             </Match>
+            <Match when={activeTab() === 1}>
+              {/* 通知(Notifications)：升为一级 tab，直接做 base，无二层 push */}
+              <NotificationsPage />
+            </Match>
             <Match when={activeTab() === 2}>
+              <HomePage unreadCount={notif()?.unread_count ?? 0} />
+            </Match>
+            <Match when={activeTab() === 3}>
               <NavigationStack
                 base={<TasksPage />}
                 top={renderTaskTop()}
                 onPop={navPop}
               />
             </Match>
-            <Match when={activeTab() === 3}>
+            <Match when={activeTab() === 4}>
               <MoreTabContent
                 sub={moreSub()}
                 renderProjectTop={renderProjectTop}
@@ -210,8 +212,8 @@ const MainShell: Component = () => {
         active={activeTab()}
         onChange={(i: TabIndex) => {
           setActiveTab(i);
-          // 切回家 tab 时刷一次 unread_count（家首页红点/入口跟着更新）。
-          if (i === 0) {
+          // 切到通知 tab(1) 或家(2) 时刷一次 unread_count（badge / 家红点跟着更新）。
+          if (i === 1 || i === 2) {
             setTimeout(() => {
               void refetchNotif();
             }, 200);

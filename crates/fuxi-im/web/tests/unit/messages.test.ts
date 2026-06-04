@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   applyEvent,
+  fromStoredMessage,
   makeUserMessage,
   markUserMessage,
+  mergeMessages,
   type Message,
 } from "~/messages";
 import type { ServerEvent } from "~/types/events";
@@ -48,6 +50,65 @@ describe("messages.applyEvent · ServerEvent 嵌套", () => {
     expect(s).toHaveLength(1);
     expect((s[0] as { text: string }).text).toBe("好的，我看一下");
     expect((s[0] as { streaming: boolean }).streaming).toBe(false);
+  });
+
+  // Bug（2026-06-04 用户实测「消息重复显示两次，切 tab 复原」）：live 流渲染的
+  // 玄女气泡 id 必须跟 conv_store 历史落库的 id 对齐——否则 loadHistory（onVisible
+  // 不卸载时触发）merge 进同一条消息的历史副本时，mergeMessages 按 id 去重失败 →
+  // 冒两条；切 tab 整页重挂载只剩历史 → 收敛回一条。
+  // conv_store 给 message 发的是随机 uuid，但 source_event_id = AgentResponded 的
+  // event id（handle_event:468）。所以两边都以 event id 作 id 才能对齐去重。
+  it("Bug · live 玄女气泡 id = agent_responded event id（与历史 source_event_id 对齐）", () => {
+    let s: Message[] = [];
+    s = applyEvent(s, ev({ type: "thinking_started" }, { id: "evt-think" }));
+    s = applyEvent(
+      s,
+      ev({ type: "agent_responded", text: "好的，已派给鲁班" }, { id: "evt-resp" }),
+    );
+    expect(s).toHaveLength(1);
+    // 关键：完结 streaming bubble 必须采纳 agent_responded 的 event id，不能留
+    // thinking_started 的 id（否则跟历史对不上）。
+    expect(s[0]!.id).toBe("evt-resp");
+  });
+
+  it("Bug · fromStoredMessage 用 source_event_id 当 id（与 live 对齐）", () => {
+    const stored = fromStoredMessage({
+      id: "store-random-uuid",
+      conv_id: "c",
+      role: "xuannv",
+      agent_id: null,
+      kind: "text",
+      content: { text: "好的，已派给鲁班" },
+      attachments: undefined,
+      source_event_id: "evt-resp",
+      ts: "2026-06-04T12:00:00Z",
+      topic_id: "t",
+    } as unknown as Parameters<typeof fromStoredMessage>[0]);
+    expect(stored).not.toBeNull();
+    expect(stored!.id).toBe("evt-resp");
+  });
+
+  it("Bug · live 气泡 + 历史副本 mergeMessages 去重不重复（端到端）", () => {
+    let live: Message[] = [];
+    live = applyEvent(live, ev({ type: "thinking_started" }, { id: "evt-think" }));
+    live = applyEvent(
+      live,
+      ev({ type: "agent_responded", text: "好的，已派给鲁班" }, { id: "evt-resp" }),
+    );
+    const stored = fromStoredMessage({
+      id: "store-random-uuid",
+      conv_id: "c",
+      role: "xuannv",
+      agent_id: null,
+      kind: "text",
+      content: { text: "好的，已派给鲁班" },
+      attachments: undefined,
+      source_event_id: "evt-resp",
+      ts: "2026-06-04T12:00:00Z",
+      topic_id: "t",
+    } as unknown as Parameters<typeof fromStoredMessage>[0]);
+    const merged = mergeMessages(live, [stored!]);
+    expect(merged).toHaveLength(1);
   });
 
   it("thinking_started 然后 thinking_finished 没回复 · 空 bubble 被丢弃", () => {
