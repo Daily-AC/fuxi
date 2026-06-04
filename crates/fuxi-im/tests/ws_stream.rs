@@ -257,6 +257,79 @@ async fn ws_conv_streams_xuannv_voice_line() {
     }
 }
 
+/// P0 回归（2026-06-04 用户实测「玄女回复要切 tab 才刷出来」）：玄女 id 在
+/// 会话中漂移（idle GC 重生 / handoff / fresh cc session——home 日志实测单进程
+/// 15 分钟内换了 3 个 id），长连的 `/api/conv` WS 必须实时跟随到新 id 的事件。
+/// 旧实现把 accept 时的 xuannv_id 烤进 filter 闭包：玄女换 id 后她的 AgentResponded
+/// 被静默滤掉，live 流不再来；用户切 tab 重挂载重拉**id 无关**的历史才看得到。
+/// 见 memory `feedback_dynamic_agent_id_via_watch`。
+#[tokio::test]
+async fn ws_conv_follows_xuannv_id_drift_live() {
+    // 自建 server 以保留 Arc<Fuxi> 句柄（spawn_im 把 fuxi 吞进 AppState 不返出）。
+    let bus = EventBus::with_memory_store().await.expect("bus");
+    let (_dir, ws_handle) = make_workspace().await;
+    let fuxi = Arc::new(Fuxi::new(bus.clone(), ws_handle));
+
+    let old_xuannv = AgentId::new();
+    fuxi.set_xuannv(old_xuannv).await;
+
+    let secret = HmacSecret::from_string("drift-key".into());
+    let secret_arc = Arc::new(secret);
+    let im_auth = ImAuth {
+        secret: secret_arc.clone(),
+        pairs: Arc::new(PendingPairs::new()),
+        devices: None::<DeviceStore>,
+        password_path: None,
+        login_guard: Arc::new(fuxi_im::lockout::LoginGuard::new()),
+    };
+    let state = AppState::new(fuxi.clone()).with_im_auth(im_auth);
+    let app = router(state);
+
+    let claims = fresh_claims("drift-device".into(), "drift".into());
+    let token = sign_token(&secret_arc, &claims).expect("sign");
+    let cookie = format!("{COOKIE_NAME}={token}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let _srv = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    let base = format!("http://{addr}");
+
+    let url = Url::parse(&(base.replace("http://", "ws://") + "/api/conv")).expect("parse");
+    let (ws, _) = ws_connect_with_cookie(url.as_str(), &cookie).await;
+    let (_w, mut r) = ws.split();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // sanity：旧 id 实时可达。
+    bus.publish(agent_event(old_xuannv, "旧玄女在"))
+        .expect("publish old");
+    let got = next_event(&mut r, "drift-old").await;
+    match got.kind {
+        EventKind::AgentResponded { text, .. } => assert_eq!(text, "旧玄女在"),
+        o => panic!("expect AgentResponded, got {o:?}"),
+    }
+
+    // 玄女在会话中重生 → id 漂到新值（同进程，WS 不重 accept，filter 须实时跟随）。
+    let new_xuannv = AgentId::new();
+    fuxi.set_xuannv(new_xuannv).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 新 id 的回复必须实时推达——旧实现这里收不到（被 snapshot 的旧 id 滤掉）。
+    bus.publish(agent_event(new_xuannv, "新玄女回话"))
+        .expect("publish new");
+    let got = next_event(&mut r, "drift-new").await;
+    match got.kind {
+        EventKind::AgentResponded { text, .. } => {
+            assert_eq!(
+                text, "新玄女回话",
+                "玄女换 id 后新回复必须实时推达，不能要切 tab"
+            )
+        }
+        o => panic!("expect AgentResponded, got {o:?}"),
+    }
+}
+
 #[tokio::test]
 async fn ws_conv_filters_out_other_agents() {
     let (base, bus, xuannv, cookie, _dir, _srv) = spawn_im().await;
