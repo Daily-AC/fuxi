@@ -33,7 +33,17 @@ cleanupOutdatedCaches();
 precacheAndRoute(self.__WB_MANIFEST);
 
 // SPA fallback：/foo/bar 这类前端路由刷新 → /index.html，并跳过 /api/。
+// **网络优先**（原来 cache-first 把旧 index.html 钉死 → 引用旧 hash bundle →
+// 用户得 ctrl+shift+r 强刷）：每次导航先拿网络最新 index.html（→ 最新 hash 资源
+// → 最新 bundle），失败（离线）才回退缓存。配合 sw-update.ts 的自动 reload，
+// 前端 rsync 部署无需手动强刷。
 const navHandler = async (): Promise<Response> => {
+  try {
+    const fresh = await fetch("/index.html", { cache: "no-store" });
+    if (fresh && fresh.ok) return fresh;
+  } catch {
+    // 离线 → 落缓存
+  }
   const cache = await caches.match("/index.html");
   if (cache) return cache;
   return fetch("/index.html");
