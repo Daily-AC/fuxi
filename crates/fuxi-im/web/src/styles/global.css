@@ -1,45 +1,57 @@
-/* fuxi-im v2 PWA · 视觉规则源头：.impeccable.md / task #16 spec
- * 硬规则：no shadow / no gradient / no glassmorphism / no emoji / no Unicode block 装饰
- * 等宽仅限 code/agent-id/tool 输出
+/* fuxi-im 呆萌风 · 视觉规则源头：spec 2026-06-04 §2 质感系统
+ * 硬规则：必须有 柔影 / 网状渐变 / 暖光高光 / 克制毛玻璃 / 噪点纸纹（反塑料反 AI）
+ * 禁 emoji（图标走 SVG）。等宽仅限 code/agent-id/tool 输出。
  */
 
 :root {
-  /* surfaces · 暖灰棕（Claude Code 风） */
-  --bg: #1F1E1B;
-  --surface: #2A2925;
-  --surface-elevated: #33312D;
-  --border: #3A3835;
-  --border-strong: #48453F;
+  /* surfaces · 奶油暖白 */
+  --bg: #FFF8F0;
+  --surface: #FFFFFF;
+  --surface-soft: #FFFDFA;
+  --surface-elevated: #FFFFFF;
 
-  /* text · 奶白米白 */
-  --text-primary: #F5F1E8;
-  --text-secondary: #B8B0A0;
-  --text-muted: #807868;
+  /* borders */
+  --border: #F0E2D2;
+  --border-strong: #E6D5C0;
 
-  /* accent · Anthropic 橙 */
-  --accent: #D97757;
-  --accent-subtle: #3F2E26;
-  --accent-dim: #3F2E26; /* 兼容旧引用 */
-  --on-accent: #1A0F08; /* accent 底上的文字色，深棕保证 ≥ 4.5:1 对比 */
+  /* text */
+  --text-primary: #5A4A3A;
+  --text-secondary: #9A8C7A;
+  --text-muted: #C3B4A2;
 
-  /* role 角色色（暖系） */
-  --xuannv: #C4A8E8;
-  --luban: #E5A547;
-  --pusong: #A0C277;
+  /* accent · 奶糖橙 */
+  --accent: #FFB877;
+  --accent-deep: #E8915A;
+  --accent-subtle: #FFF0DC;
+  --on-accent: #FFFFFF;
 
-  /* user bubble · 棕调 */
-  --user-bubble: #3D332A;
-  --user-bubble-text: #F5F1E8;
+  /* palette */
+  --mint: #8FD9B6;
+  --mint-soft: #A8E6CF;
+  --lavender: #C9B6E8;
+  --pink: #FF9EB5;
+
+  /* role 角色色 */
+  --xuannv: #C9B6E8;
+  --luban: #E8915A;
+  --pusong: #6FB893;
+
+  /* user bubble · 纯白 */
+  --user-bubble: #FFFFFF;
+  --user-bubble-text: #5A4A3A;
 
   /* state */
-  --success: #88B47B;
-  --warning: #E5B047;
-  --danger: #D97777;
+  --success: #6FB893;
+  --warning: #E8A23A;
+  --danger: #E8857A;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC",
+  /* fonts */
+  --font-sans: "Yuanti SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC",
     system-ui, sans-serif;
+  --font-round: "Yuanti SC", "PingFang SC", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 
+  /* type scale */
   --size-meta: 11px;
   --size-aux: 13px;
   --size-body: 15px;
@@ -50,14 +62,18 @@
   --weight-medium: 500;
   --weight-semibold: 600;
 
-  --radius-card: 12px;
-  --radius-bubble: 14px;
-  --radius-pill: 22px;
+  /* radii */
+  --radius-card: 20px;
+  --radius-sheet: 28px;
+  --radius-pill: 999px;
+  --radius-chip: 14px;
 
+  /* layout */
   --touch: 44px;
   --header-h: 52px;
   --composer-h: 64px;
 
+  /* spacing */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -69,7 +85,7 @@
   --transition-fast: 120ms ease;
   --transition-med: 200ms ease;
 
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 * {
@@ -177,6 +193,8 @@ pre code {
   background: transparent;
   padding: 0;
 }
+
+.u-title { font-family: var(--font-round); font-weight: 700; letter-spacing: .01em; }
 
 @media (prefers-reduced-motion: reduce) {
   *,

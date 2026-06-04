@@ -1,64 +1,126 @@
-/* RolesPage · 「更多 → 角色」· role 卡列表 */
+/* 角色页 · daimeng 奶油糖果 · 能力卡。
+ * 每角色一 Card：角色色头像点 + 名 + tier StatePill + 描述 + 能力暖圆药丸。
+ * 空态 EmptyState；页底 u-mesh 暖光网格。
+ */
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  min-height: 100%;
+  padding: var(--space-3) var(--space-4) var(--space-5);
 }
 
-.card {
+.muted {
+  color: var(--text-muted);
+  font-size: var(--size-aux);
+  margin: var(--space-3) 0 0;
+}
+
+.list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  background: var(--surface);
-  border-radius: var(--radius-card);
+  gap: var(--space-3);
+}
+
+/* ===== 能力卡 ===== */
+
+.card {
+  padding: var(--space-4);
+}
+
+.inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
 .head {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* 角色色头像点 ~40px（按 tone 软染） */
+.avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  font-size: var(--size-heading);
+  font-weight: var(--weight-semibold);
+  color: var(--accent-deep);
+  background: linear-gradient(
+    150deg,
+    rgba(255, 184, 119, 0.26) 0%,
+    rgba(255, 184, 119, 0.1) 100%
+  );
+  box-shadow: var(--inset-hi);
+}
+
+.avatar[data-tone="lavender"] {
+  color: #8a6fc0;
+  background: linear-gradient(
+    150deg,
+    rgba(201, 182, 232, 0.32) 0%,
+    rgba(201, 182, 232, 0.12) 100%
+  );
+}
+.avatar[data-tone="peach"] {
+  color: var(--accent-deep);
+  background: linear-gradient(
+    150deg,
+    rgba(255, 184, 119, 0.28) 0%,
+    rgba(255, 184, 119, 0.1) 100%
+  );
+}
+.avatar[data-tone="mint"] {
+  color: #3f9c72;
+  background: linear-gradient(
+    150deg,
+    rgba(143, 217, 182, 0.3) 0%,
+    rgba(143, 217, 182, 0.12) 100%
+  );
+}
+
+.nameWrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
 .name {
   font-size: var(--size-heading);
-  font-weight: var(--weight-medium);
+  font-weight: var(--weight-semibold);
   color: var(--text-primary);
 }
 
-.tier {
-  font-size: var(--size-meta);
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
 .desc {
+  margin: 0;
   font-size: var(--size-aux);
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
-.foot {
+/* ===== 能力药丸 ===== */
+
+.chips {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  font-size: var(--size-meta);
-  color: var(--text-muted);
 }
 
 .chip {
-  padding: 2px var(--space-2);
-  border: 1px solid var(--surface-elevated);
+  padding: 3px 10px;
   border-radius: var(--radius-pill);
-}
-
-.empty {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-  padding: var(--space-4) 0;
-  text-align: center;
+  font-size: var(--size-meta);
+  font-weight: var(--weight-medium);
+  color: var(--accent-deep);
+  background: var(--accent-subtle);
+  box-shadow: var(--inset-hi);
 }

@@ -15,6 +15,7 @@ import {
   type MoreSubRoute,
   type TabIndex,
 } from "./components/ApiProvider";
+import { MascotProvider } from "./components/Mascot/MascotController";
 import { LoginView } from "./components/LoginView";
 import { BottomTabBar, type TabSpec } from "./components/BottomTabBar";
 import { MoreSubShell } from "./components/MoreSubShell";
@@ -24,6 +25,7 @@ import { TopicSidebar } from "./components/TopicSidebar";
 import { CronPage } from "./views/pages/CronPage";
 import { DeliverableDetailPage } from "./views/pages/DeliverableDetailPage";
 import { DeliverablesPage } from "./views/pages/DeliverablesPage";
+import { HomePage } from "./views/pages/HomePage";
 import { MemoryPage } from "./views/pages/MemoryPage";
 import { MorePage } from "./views/pages/MorePage";
 import { NodesPage } from "./views/pages/NodesPage";
@@ -37,12 +39,13 @@ import { TasksPage } from "./views/pages/TasksPage";
 import { TaskThreadPage } from "./views/pages/TaskThreadPage";
 import styles from "./App.module.css";
 
-// 顶层 shell · v1-session17 task #9 4 tab + 「更多」hub
+// 顶层 shell · daimeng 奶油糖果重构 4 tab + 「更多」hub
 //   未登入 → LoginView
 //   登入 → MainShell{ activeTab content + BottomTabBar }
 //
-// tab 模型（docs/handoff/v1-session16.md §2.2 方案 A）：
-//   0 玄女 / 1 任务 / 2 通知 / 3 更多
+// tab 模型：
+//   0 家(Home) / 1 聊天(玄女会话) / 2 任务 / 3 更多
+//   通知不再是一级 tab——并入「家」首页（红点 + 入口推 NotificationsPage）。
 //
 // tab 3 「更多」分两层：
 //   - moreSub=null → MorePage（tile grid hub）
@@ -58,8 +61,10 @@ export const App: Component = (): JSX.Element => {
 
   return (
     <ApiProvider>
-      <AuthGate />
-      <Toast />
+      <MascotProvider>
+        <AuthGate />
+        <Toast />
+      </MascotProvider>
     </ApiProvider>
   );
 };
@@ -82,17 +87,19 @@ const AuthGate: Component = () => {
 };
 
 const BASE_TABS: ReadonlyArray<TabSpec> = [
-  { key: "xuannv", label: "玄女" },
+  { key: "home", label: "家" },
+  { key: "xuannv", label: "聊天" },
   { key: "tasks", label: "任务" },
-  { key: "notifications", label: "通知" },
   { key: "more", label: "更多" },
 ];
 
 const MainShell: Component = () => {
   const { client, activeTab, setActiveTab, moreSub, navRoute, navPop } = useApi();
 
-  // v1-session16 通知红点 · 后台轮询 GET /api/notifications 拿 unread_count。
+  // 通知红点 · 后台轮询 GET /api/notifications 拿 unread_count。
   // 简单起步不接 WS——15s 间隔够用（bug / handoff offer 是分钟级事件，不抢秒级）。
+  // daimeng 重构后通知不再是一级 tab——unread 透传给 HomePage（红点入口在家首页），
+  // 底栏不再挂 badge。
   const [notif, { refetch: refetchNotif }] = createResource(() =>
     client.fetchNotifications({ limit: 1 }),
   );
@@ -102,12 +109,8 @@ const MainShell: Component = () => {
     }, 15000);
     onCleanup(() => clearInterval(t));
   });
-  const tabs = createMemo<TabSpec[]>(() => {
-    const unread = notif()?.unread_count ?? 0;
-    return BASE_TABS.map((t) =>
-      t.key === "notifications" ? { ...t, badge: unread } : t,
-    );
-  });
+  // 底栏不再挂通知 badge（通知并入家）；tabs 直接用 BASE_TABS。
+  const tabs = createMemo<TabSpec[]>(() => BASE_TABS.map((t) => ({ ...t })));
 
   // 任务 tab L2 · v3 真 TaskThreadPage（#39 已落）；worker kind 为 v2 残留兜底 stub。
   const renderTaskTop = (): JSX.Element | undefined => {
@@ -170,17 +173,26 @@ const MainShell: Component = () => {
         <main class={styles.main} data-testid="tab-content">
           <Switch>
             <Match when={activeTab() === 0}>
-              <XuannvPage />
+              {/* 家(Home)：HomePage 为 base；navRoute=notifications 时推 NotificationsPage */}
+              <NavigationStack
+                base={<HomePage unreadCount={notif()?.unread_count ?? 0} />}
+                top={
+                  navRoute()?.kind === "notifications" ? (
+                    <NotificationsPage />
+                  ) : undefined
+                }
+                onPop={navPop}
+              />
             </Match>
             <Match when={activeTab() === 1}>
+              <XuannvPage />
+            </Match>
+            <Match when={activeTab() === 2}>
               <NavigationStack
                 base={<TasksPage />}
                 top={renderTaskTop()}
                 onPop={navPop}
               />
-            </Match>
-            <Match when={activeTab() === 2}>
-              <NotificationsPage />
             </Match>
             <Match when={activeTab() === 3}>
               <MoreTabContent
@@ -198,9 +210,8 @@ const MainShell: Component = () => {
         active={activeTab()}
         onChange={(i: TabIndex) => {
           setActiveTab(i);
-          // 进入「通知」tab 时立即刷一次 unread_count（NotificationsPage 自己
-          // 会调 readAllNotifications 清零，badge 跟着消失）。
-          if (i === 2) {
+          // 切回家 tab 时刷一次 unread_count（家首页红点/入口跟着更新）。
+          if (i === 0) {
             setTimeout(() => {
               void refetchNotif();
             }, 200);

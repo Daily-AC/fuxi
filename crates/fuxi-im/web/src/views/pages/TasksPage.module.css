@@ -1,24 +1,21 @@
-/* 任务树页 · C 方案两级行卡片 (#N2 / #29)
- * 设计 spec: docs/superpowers/specs/2026-04-26-im-task-tree-redesign-design.md §"页 3·任务树"
+/* 任务列表页 · daimeng 奶油糖果 · archetype A 列表/收件箱。
+ * 行卡走 u-card 柔影 + 暖光 iconSlot；状态用 StatePill；分区 SectionLabel。
  */
 
 .page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg);
 }
 
 .header {
   flex-shrink: 0;
-  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4)
+    var(--space-2);
 }
 
 .title {
   margin: 0;
-  font-size: var(--size-title);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
 }
 
 .body {
@@ -26,13 +23,7 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: 0 var(--space-4) var(--space-4);
-}
-
-.muted {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-5);
 }
 
 .errMsg {
@@ -41,193 +32,178 @@
   margin: 0;
 }
 
+.skeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+
 .root {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
 
 .section {
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-3);
 }
 
-.sectionLabel {
-  margin: 0;
-  font-size: var(--size-meta);
-  font-weight: var(--weight-medium);
-  color: var(--text-muted);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  padding-left: var(--space-2);
-}
-
-.emptyAll {
-  padding: var(--space-7) var(--space-3);
-  text-align: center;
-  color: var(--text-muted);
-}
-
-.emptyTitle {
-  margin: 0 0 var(--space-2);
-  font-size: var(--size-heading);
-  font-weight: var(--weight-medium);
-  color: var(--text-secondary);
-}
-
-.emptyHint {
-  margin: 0;
-  font-size: var(--size-aux);
-  color: var(--text-muted);
-}
-
-/* ===== 任务卡 ===== */
+/* ===== 任务行卡 ===== */
 
 .card {
-  background: #16110E; /* 比 surface 更深一档 · 任务卡专用，spec 钉的 */
-  border: 1px solid var(--border);
-  border-radius: 10px; /* spec §"任务卡 · 圆角 10px" */
-  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 
 .cardDim {
-  opacity: 0.65;
+  opacity: 0.62;
 }
 
-/* card header · tap 折叠/展开 · 整行可点 */
-.cardHead {
+/* 行卡主体 button · u-card 表面 + ≥44px 触控 + 按下回弹 */
+.row {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  text-align: left;
-  min-height: var(--touch);
-  cursor: pointer;
-  background: transparent;
-  border: 0;
-  color: inherit;
-  font: inherit;
   width: 100%;
+  min-height: var(--touch);
+  padding: 12px var(--space-4);
+  text-align: left;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 0.16s var(--spring),
+    box-shadow 0.18s var(--soft);
 }
 
-.cardHead:hover,
-.cardHead:focus-visible {
-  background: rgba(255, 255, 255, 0.02);
+.row:active {
+  transform: scale(0.985);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
 }
 
-.cardId {
+/* 角色染色圆角图标槽 ~36px（默认暖橙 = 鲁班 peach） */
+.iconSlot {
+  flex: 0 0 auto;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  color: var(--accent-deep);
+  background: linear-gradient(
+    150deg,
+    rgba(255, 184, 119, 0.26) 0%,
+    rgba(255, 184, 119, 0.1) 100%
+  );
+  box-shadow: var(--inset-hi);
+}
+
+.iconSlot :global(svg) {
+  width: 19px;
+  height: 19px;
+  display: block;
+}
+
+.iconSlot[data-tone="mint"] {
+  color: #3f8f6a;
+  background: linear-gradient(
+    150deg,
+    rgba(143, 217, 182, 0.3) 0%,
+    rgba(143, 217, 182, 0.12) 100%
+  );
+}
+
+.iconSlot[data-tone="lavender"] {
+  color: #7c63a8;
+  background: linear-gradient(
+    150deg,
+    rgba(201, 182, 232, 0.32) 0%,
+    rgba(201, 182, 232, 0.12) 100%
+  );
+}
+
+.mid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.titleLine {
+  display: flex;
   align-items: baseline;
   gap: 6px;
   min-width: 0;
-  flex: 1;
 }
 
-.cardId .agent-id,
-.cardId :global(.agent-id) {
+.cardId {
+  flex: 0 0 auto;
   color: var(--text-muted);
   font-size: var(--size-meta);
 }
 
 .cardTitle {
-  font-size: var(--size-heading);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.cardMeta {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.memberCount {
-  font-size: var(--size-aux);
-  color: var(--text-muted);
-}
-
-.metaSep {
-  color: var(--text-muted);
-  font-size: var(--size-aux);
-}
-
-.duration {
-  font-size: var(--size-aux);
-  color: var(--text-muted);
-  font-feature-settings: "tnum";
-}
-
-/* ===== members 列表 ===== */
-
-.members {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border-top: 1px solid var(--border);
-}
-
-/* v3：member 行 inspection-only（div，不可 tap）。
- *  active 高亮 + chev 已删（per-worker 私聊概念去除）。 */
-.memberRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: 10px var(--space-4);
-  border-bottom: 1px solid var(--border);
-  min-height: 44px;
-}
-
-.memberRow:last-child {
-  border-bottom: 0;
-}
-
-.memberMain {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.memberRole {
   font-size: var(--size-body);
   font-weight: var(--weight-semibold);
   color: var(--text-primary);
-  line-height: 1.2;
-}
-
-.memberSub {
-  font-size: var(--size-meta);
-  color: var(--text-muted);
-  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* v3 #59 · @node 标识：muted 等宽小字，靠右不省略（spec §"优先级高于 tool_call 截断"）。 */
-.memberNode {
+.sub {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--size-aux);
+}
+
+.subText {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.subDim,
+.metaTail {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
   flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.metaTail {
+  margin-left: auto;
+}
+
+.memberCount,
+.metaSep,
+.duration {
   font-size: var(--size-meta);
   color: var(--text-muted);
-  letter-spacing: 0;
-  margin-left: 6px;
 }
 
-/* v3 #64 · @node 离线时 dim red 区分 stale 节点（spec gap d）。
- * #C76A6A 暗红 + opacity 0.7（不亮过 muted 但能区分） */
-.memberNodeOffline {
-  color: #C76A6A;
-  opacity: 0.7;
+.duration {
+  font-feature-settings: "tnum";
 }
 
-/* v3 #44：已完成段 sticky tail 折叠已删（用户实测嫌没必要），直接平铺。
- * dim 卡片视觉用 .cardDim opacity 0.65。 */
+.trail {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}

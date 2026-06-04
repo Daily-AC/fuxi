@@ -23,6 +23,8 @@ import type { Upload } from "~/types/api";
 import type { ServerEvent } from "~/types/events";
 import { useApi } from "~/components/ApiProvider";
 import { MentionComposer } from "~/components/MentionComposer";
+import { Mascot } from "~/components/Mascot/Mascot";
+import { useMascot } from "~/components/Mascot/MascotController";
 import { Conversation } from "~/views/Conversation";
 import {
   candidatesFromMembers,
@@ -54,9 +56,32 @@ const CONV_ID = "xuannv";
 
 export const XuannvPage: Component = () => {
   const { client, currentTopicId, setSidebarOpen, isSwitchingTopic } = useApi();
+  const { mascotState, dispatch: dispatchMascot } = useMascot();
 
   const [messages, setMessages] = createSignal<Message[]>([]);
   const [online, setOnline] = createSignal(false);
+
+  // 流式信号 = 当前消息流里有任一玄女/思考气泡处于 streaming 状态。
+  // applyEvent reducer 已经在 thinking_started / agent_text_delta 时把对应 bubble
+  // 标 streaming:true，在 agent_responded / thinking_done 时翻 false——所以这里
+  // 派生一个布尔即可拿到可靠的"玄女正在回话"边界，无需另接 WS 事件类型。
+  const streaming = createMemo<boolean>(() =>
+    messages().some(
+      (m) => (m.kind === "xuannv" || m.kind === "thinking") && m.streaming,
+    ),
+  );
+
+  // 流式起止驱动头像吉祥物：开始 → talk（说话帧），结束 → idle（回归眨眼）。
+  // on(...defer) 避免初次 mount（无流式）误发 stream-end。
+  createEffect(
+    on(
+      () => streaming(),
+      (isStreaming) => {
+        dispatchMascot({ type: isStreaming ? "stream-start" : "stream-end" });
+      },
+      { defer: true },
+    ),
+  );
   // Phase 1 · 当前 topic 的 title 仅用于 header 展示。Sidebar 30s 轮 fetchTopics
   // 是真相源；这里走自己的轻 fetch 拿同一份。topic 切换后 setCurrentTopicId 推
   // 全局态，下面 createEffect 顺手 refetch 拿新 title（用户新建的 topic 也走这条
@@ -104,6 +129,12 @@ export const XuannvPage: Component = () => {
 
   const handleEvent = (ev: ServerEvent): void => {
     setMessages((prev) => applyEvent(prev, ev));
+    // Task 32 · 任务完成 → 玄女开心。task_completed 是单一可靠信号（后端
+    // EventKind::TaskCompleted），不轮询、不靠 list diff。每条 task_completed
+    // 派一次 happy（瞬时态 1.8s 自归位），多任务连完会重置计时不抖。
+    if (ev.kind.type === "task_completed") {
+      dispatchMascot({ type: "task-done" });
+    }
   };
 
   const loadHistory = async (): Promise<void> => {
@@ -280,7 +311,17 @@ export const XuannvPage: Component = () => {
           </span>
         </button>
         <div class={styles.titleStack}>
-          <div class={styles.title}>玄女</div>
+          <div class={styles.titleRow}>
+            <span
+              class={styles.avatar}
+              classList={{ [styles.avatarTalk ?? ""]: streaming() }}
+              data-testid="xuannv-avatar"
+              aria-hidden="true"
+            >
+              <Mascot state={mascotState().kind} size={36} />
+            </span>
+            <div class={styles.title}>玄女</div>
+          </div>
           {/* Phase 1 · 当前 topic 副标题：让用户一眼知道在哪个 topic 聊 */}
           <Show when={currentTitle()}>
             <div class={styles.topicLabel} data-testid="xuannv-topic-label">

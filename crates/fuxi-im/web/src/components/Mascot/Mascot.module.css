@@ -1,0 +1,94 @@
+/* 桌宠玄女渲染器。帧切换在 TSX，动效在这里。
+   质感目标：活的，不是静态图片缩放。 */
+
+.mascot {
+  position: relative;
+  display: inline-block;
+  user-select: none;
+  -webkit-user-select: none;
+  /* 挤压拉伸的轴在底部中心，像站着的人 */
+  transform-origin: bottom center;
+  will-change: transform;
+  touch-action: none;
+}
+
+.img {
+  display: block;
+  width: 100%;
+  height: auto;
+  pointer-events: none;
+  /* 暖色柔光投影，让她从背景里"浮"起来 */
+  filter: drop-shadow(0 10px 30px rgba(255, 170, 110, 0.30))
+    drop-shadow(0 2px 6px rgba(120, 80, 50, 0.12));
+  transform-origin: bottom center;
+}
+
+.draggable {
+  cursor: grab;
+}
+.draggable:active {
+  cursor: grabbing;
+}
+
+/* 呼吸：极轻的上下浮 + 缩放，3.4s 来回。戳的 wobble 优先（同时挂时不呼吸）。 */
+.breathe:not(.wobble) .img {
+  animation: breathe 3.4s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-2%) scale(1.012, 0.992);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 戳：挤压-回弹的果冻感。0.55s 走完，animationend 后类被移除。 */
+.wobble .img {
+  animation: wobble 0.55s var(--spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both;
+}
+
+@keyframes wobble {
+  0% {
+    transform: scale(1, 1);
+  }
+  18% {
+    transform: scale(1.12, 0.86);
+  }
+  40% {
+    transform: scale(0.92, 1.1) rotate(-2deg);
+  }
+  62% {
+    transform: scale(1.05, 0.96) rotate(1.5deg);
+  }
+  80% {
+    transform: scale(0.98, 1.02) rotate(-0.5deg);
+  }
+  100% {
+    transform: scale(1, 1) rotate(0);
+  }
+}
+
+/* 可选悬浮飘动，给静止页面一点生命 */
+@keyframes float {
+  0% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .breathe .img,
+  .wobble .img {
+    animation: none;
+  }
+}

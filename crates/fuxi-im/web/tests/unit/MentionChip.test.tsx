@@ -43,14 +43,14 @@ describe("MentionChip (v3 #N2' / #37)", () => {
     expect(x.getAttribute("aria-label")).toContain("鲁班");
   });
 
-  it("使用 colorForRole · 鲁班琥珀色（CSS var）", () => {
+  it("使用 colorForRole · 鲁班蜜桃色（CSS var）", () => {
     const { getByTestId } = render(() => (
       <MentionChip agent_id="a-luban" role="luban" role_display="鲁班" />
     ));
     const chip = getByTestId("mention-chip-a-luban") as HTMLElement;
     // inline style 包含 chip-color css var
     expect(chip.getAttribute("style")).toContain("--chip-color");
-    expect(chip.getAttribute("style")?.toLowerCase()).toContain("e5a547");
+    expect(chip.getAttribute("style")?.toLowerCase()).toContain("e8915a");
   });
 
   it("v3 #60 · kind='node' · testid 走 mention-chip-node-<id> + 蓝色 #7AA0E5", () => {

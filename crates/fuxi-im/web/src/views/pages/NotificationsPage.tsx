@@ -7,12 +7,15 @@ import {
   onCleanup,
   onMount,
   type Component,
+  type JSX,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
+import { EmptyState } from "~/components/ui/EmptyState";
+import { StatePill, type StatePillTone } from "~/components/ui/StatePill";
 import type { FixRef, IssueEvent, IssueStatus, NotificationView } from "~/types/api";
 import styles from "./NotificationsPage.module.css";
 
-// 通知 tab · v1-session19 · GitHub-issue 化
+// 通知 tab · v1-session19 · GitHub-issue 化 · daimeng 奶油糖果重绘（archetype A）
 //
 // 拆 2 子 tab：
 //   - 「Issues」（kind == "bug"）：玄女上报 + Claude link-fix → awaiting_test → user/玄女测试关闭
@@ -23,11 +26,43 @@ import styles from "./NotificationsPage.module.css";
 //     行为同老的「通知」tab——单条 close 即可
 //
 // 进 tab 自动 mark_all_read。后台 15s 轮询。
+//
+// RESKIN：保留全部行为 + data-testid（page-notifications / subtab-* / issue-filter-* /
+// issue-<id>(+close/reopen) / notification-<id>(+close) / issues-empty / other-empty）。
+// 视觉换共享原语：行卡 u-card 柔影 + iconSlot 图标 + StatePill 状态药丸 +
+// EmptyState 空态。页底 u-mesh 暖光网格，去暗色主题。
 
 const POLL_MS = 15000;
 
 type SubTab = "issues" | "other";
 type IssueFilter = "active" | "open" | "awaiting_test" | "closed" | "all";
+
+// ── inline SVG 图标（禁 emoji）。色由 iconSlot 按 tone 染 ──
+
+const BugIcon = (): JSX.Element => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path
+      d="M9 8a3 3 0 0 1 6 0M8 8h8v4a4 4 0 0 1-8 0V8Z"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path
+      d="M5 9h3M16 9h3M5 14h3M16 14h3M6 18l2-1M18 18l-2-1M6 5l2 1M18 5l-2 1M12 16v4"
+      stroke-linecap="round"
+    />
+  </svg>
+);
+
+const BellIcon = (): JSX.Element => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path
+      d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <path d="M10 19a2 2 0 0 0 4 0" stroke-linecap="round" />
+  </svg>
+);
 
 export const NotificationsPage: Component = () => {
   const { client } = useApi();
@@ -96,9 +131,9 @@ export const NotificationsPage: Component = () => {
   );
 
   return (
-    <div class={styles.page} data-testid="page-notifications">
+    <div class={`u-mesh u-noise ${styles.page}`} data-testid="page-notifications">
       <header class={styles.header}>
-        <h1 class={styles.title}>通知</h1>
+        <h1 class={`u-title ${styles.title}`}>通知</h1>
         <div class={styles.subTabs} role="tablist">
           <button
             type="button"
@@ -172,11 +207,12 @@ export const NotificationsPage: Component = () => {
             <Show
               when={issues().length > 0}
               fallback={
-                <div class={styles.empty} data-testid="issues-empty">
-                  <p class={styles.emptyTitle}>没有 issue</p>
-                  <p class={styles.emptyHint}>
-                    玄女撞到 fuxi 平台 bug 时会上报；Claude 修完会自动转「待测试」
-                  </p>
+                <div data-testid="issues-empty">
+                  <EmptyState
+                    title="没有 issue～"
+                    hint="玄女撞到 fuxi 平台 bug 时会上报；Claude 修完会自动转「待测试」"
+                    mascotState="sleep"
+                  />
                 </div>
               }
             >
@@ -204,11 +240,12 @@ export const NotificationsPage: Component = () => {
             <Show
               when={otherList().length > 0}
               fallback={
-                <div class={styles.empty} data-testid="other-empty">
-                  <p class={styles.emptyTitle}>暂无其他通知</p>
-                  <p class={styles.emptyHint}>
-                    门客等审阅 / 玄女 handoff offer / 系统提示 时这里会有红点
-                  </p>
+                <div data-testid="other-empty">
+                  <EmptyState
+                    title="暂无其他通知～"
+                    hint="门客等审阅 / 玄女 handoff offer / 系统提示 时这里会有红点"
+                    mascotState="sleep"
+                  />
                 </div>
               }
             >
@@ -231,7 +268,19 @@ export const NotificationsPage: Component = () => {
   );
 };
 
-// ─── Issue 卡片（GitHub-issue 风格：状态 badge + 展开时间线 + 操作）────
+// severity → iconSlot tone（error 桃红 / warn 默认暖橙 / info 薰衣草）
+function toneForSeverity(sev: string | undefined): string {
+  switch (sev) {
+    case "error":
+      return "pink";
+    case "warn":
+      return "plain";
+    default:
+      return "lavender";
+  }
+}
+
+// ─── Issue 卡片（GitHub-issue 风格：iconSlot + StatePill + 展开时间线 + 操作）────
 
 const IssueCard: Component<{
   n: NotificationView;
@@ -241,24 +290,14 @@ const IssueCard: Component<{
 }> = (props) => {
   const [expanded, setExpanded] = createSignal(false);
   const status = (): IssueStatus => (props.n.status as IssueStatus) ?? "open";
-  const sevClass = (): string => {
-    switch (props.n.severity) {
-      case "error":
-        return styles.sevError ?? "";
-      case "warn":
-        return styles.sevWarn ?? "";
-      default:
-        return styles.sevInfo ?? "";
-    }
-  };
-  const statusBadge = (): { label: string; className: string } => {
+  const statusPill = (): { label: string; tone: StatePillTone } => {
     switch (status()) {
       case "awaiting_test":
-        return { label: "待测试", className: styles.statusAwaiting ?? "" };
+        return { label: "待测试", tone: "done" };
       case "closed":
-        return { label: "已关闭", className: styles.statusClosed ?? "" };
+        return { label: "已关闭", tone: "neutral" };
       default:
-        return { label: "待修", className: styles.statusOpen ?? "" };
+        return { label: "待修", tone: "warn" };
     }
   };
   const fixRefs = (): FixRef[] => props.n.fix_refs ?? [];
@@ -266,122 +305,131 @@ const IssueCard: Component<{
 
   return (
     <li
-      class={styles.card}
-      classList={{
-        [styles.cardClosed ?? ""]: status() === "closed",
-        [styles.cardAwaiting ?? ""]: status() === "awaiting_test",
-      }}
+      class={styles.cardWrap}
+      classList={{ [styles.cardClosed ?? ""]: status() === "closed" }}
       data-testid={`issue-${props.n.id}`}
       data-status={status()}
       data-severity={props.n.severity}
     >
       <div
-        class={styles.cardRow}
-        onClick={() => setExpanded(!expanded())}
-        role="button"
-        tabIndex={0}
+        class={`u-card ${styles.card}`}
+        classList={{ [styles.cardAwaiting ?? ""]: status() === "awaiting_test" }}
       >
-        <span class={`${styles.sevDot} ${sevClass()}`} aria-hidden="true" />
-        <span class={`${styles.statusBadge} ${statusBadge().className}`}>
-          {statusBadge().label}
-        </span>
-        <span class={styles.cardTitle}>{props.n.title}</span>
-        <Show when={fixRefs().length > 0}>
-          <span class={styles.fixCount} aria-label="fix 数">
-            ✓{fixRefs().length}
+        <div
+          class={styles.cardRow}
+          onClick={() => setExpanded(!expanded())}
+          role="button"
+          tabIndex={0}
+        >
+          <span
+            class={styles.iconSlot}
+            data-tone={toneForSeverity(props.n.severity)}
+            aria-hidden="true"
+          >
+            <BugIcon />
           </span>
-        </Show>
-      </div>
-
-      <div class={styles.meta}>
-        <time>{formatTs(props.n.created_at)}</time>
-        <Show when={props.n.task_id}>
-          {(tid) => <span class={styles.metaSep}>· task {shortUuid(tid())}</span>}
-        </Show>
-      </div>
-
-      <Show when={expanded()}>
-        <Show when={props.n.body && props.n.body.trim().length > 0}>
-          <div class={styles.detailBody}>{props.n.body}</div>
-        </Show>
-
-        <Show when={fixRefs().length > 0}>
-          <div class={styles.section}>
-            <div class={styles.sectionTitle}>fix commits ({fixRefs().length})</div>
-            <ul class={styles.fixList}>
-              <For each={fixRefs()}>
-                {(f) => (
-                  <li class={styles.fixItem}>
-                    <code class={styles.commitSha}>{f.commit_sha}</code>
-                    <Show when={f.branch}>
-                      {(b) => <span class={styles.branchTag}>{b()}</span>}
-                    </Show>
-                    <Show when={f.summary}>
-                      {(s) => <span class={styles.fixSummary}>{s()}</span>}
-                    </Show>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </div>
-        </Show>
-
-        <Show when={events().length > 0}>
-          <div class={styles.section}>
-            <div class={styles.sectionTitle}>events ({events().length})</div>
-            <ul class={styles.eventList}>
-              <For each={events()}>
-                {(e) => (
-                  <li class={styles.eventItem}>
-                    <time class={styles.eventTime}>{formatTs(e.at)}</time>
-                    <span class={styles.eventActor}>{e.actor}</span>
-                    <span class={styles.eventAction}>{actionLabel(e.action)}</span>
-                    <Show when={e.from && e.to && e.action !== "created"}>
-                      <span class={styles.eventTransition}>
-                        {e.from} → {e.to}
-                      </span>
-                    </Show>
-                    <Show when={e.note}>
-                      {(note) => <span class={styles.eventNote}>// {note()}</span>}
-                    </Show>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </div>
-        </Show>
-
-        <div class={styles.actions}>
-          <Show when={status() !== "closed"}>
-            <button
-              type="button"
-              class={styles.actionPrimary}
-              disabled={props.busy}
-              onClick={(e) => {
-                e.stopPropagation();
-                props.onClose();
-              }}
-              data-testid={`issue-${props.n.id}-close`}
-            >
-              {status() === "awaiting_test" ? "测过了 → 关闭" : "我关掉"}
-            </button>
-          </Show>
-          <Show when={status() === "closed"}>
-            <button
-              type="button"
-              class={styles.actionSecondary}
-              disabled={props.busy}
-              onClick={(e) => {
-                e.stopPropagation();
-                props.onReopen();
-              }}
-              data-testid={`issue-${props.n.id}-reopen`}
-            >
-              重新打开
-            </button>
-          </Show>
+          <span class={styles.mid}>
+            <span class={styles.cardTitle}>{props.n.title}</span>
+            <span class={styles.meta}>
+              <time>{formatTs(props.n.created_at)}</time>
+              <Show when={props.n.task_id}>
+                {(tid) => <span class={styles.metaSep}>· task {shortUuid(tid())}</span>}
+              </Show>
+              <Show when={fixRefs().length > 0}>
+                <span class={styles.fixCount} aria-label="fix 数">
+                  · fix {fixRefs().length}
+                </span>
+              </Show>
+            </span>
+          </span>
+          <span class={styles.trail}>
+            <StatePill label={statusPill().label} tone={statusPill().tone} />
+          </span>
         </div>
-      </Show>
+
+        <Show when={expanded()}>
+          <Show when={props.n.body && props.n.body.trim().length > 0}>
+            <div class={styles.detailBody}>{props.n.body}</div>
+          </Show>
+
+          <Show when={fixRefs().length > 0}>
+            <div class={styles.section}>
+              <div class={styles.sectionTitle}>fix commits ({fixRefs().length})</div>
+              <ul class={styles.fixList}>
+                <For each={fixRefs()}>
+                  {(f) => (
+                    <li class={styles.fixItem}>
+                      <code class={styles.commitSha}>{f.commit_sha}</code>
+                      <Show when={f.branch}>
+                        {(b) => <span class={styles.branchTag}>{b()}</span>}
+                      </Show>
+                      <Show when={f.summary}>
+                        {(s) => <span class={styles.fixSummary}>{s()}</span>}
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
+
+          <Show when={events().length > 0}>
+            <div class={styles.section}>
+              <div class={styles.sectionTitle}>events ({events().length})</div>
+              <ul class={styles.eventList}>
+                <For each={events()}>
+                  {(e) => (
+                    <li class={styles.eventItem}>
+                      <time class={styles.eventTime}>{formatTs(e.at)}</time>
+                      <span class={styles.eventActor}>{e.actor}</span>
+                      <span class={styles.eventAction}>{actionLabel(e.action)}</span>
+                      <Show when={e.from && e.to && e.action !== "created"}>
+                        <span class={styles.eventTransition}>
+                          {e.from} → {e.to}
+                        </span>
+                      </Show>
+                      <Show when={e.note}>
+                        {(note) => <span class={styles.eventNote}>// {note()}</span>}
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
+
+          <div class={styles.actions}>
+            <Show when={status() !== "closed"}>
+              <button
+                type="button"
+                class={styles.actionPrimary}
+                disabled={props.busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onClose();
+                }}
+                data-testid={`issue-${props.n.id}-close`}
+              >
+                {status() === "awaiting_test" ? "测过了 → 关闭" : "我关掉"}
+              </button>
+            </Show>
+            <Show when={status() === "closed"}>
+              <button
+                type="button"
+                class={styles.actionSecondary}
+                disabled={props.busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onReopen();
+                }}
+                data-testid={`issue-${props.n.id}-reopen`}
+              >
+                重新打开
+              </button>
+            </Show>
+          </div>
+        </Show>
+      </div>
     </li>
   );
 };
@@ -393,16 +441,6 @@ const SimpleNotificationCard: Component<{
   busy: boolean;
   onClose: () => void;
 }> = (props) => {
-  const sevClass = (): string => {
-    switch (props.n.severity) {
-      case "error":
-        return styles.sevError ?? "";
-      case "warn":
-        return styles.sevWarn ?? "";
-      default:
-        return styles.sevInfo ?? "";
-    }
-  };
   const kindLabel = (): string => {
     switch (props.n.kind) {
       case "review_request":
@@ -418,39 +456,64 @@ const SimpleNotificationCard: Component<{
   const isClosed = (): boolean => Boolean(props.n.closed_at);
   return (
     <li
-      class={styles.card}
+      class={styles.cardWrap}
       classList={{ [styles.cardClosed ?? ""]: isClosed() }}
       data-testid={`notification-${props.n.id}`}
       data-kind={props.n.kind}
     >
-      <div class={styles.cardRow}>
-        <span class={`${styles.sevDot} ${sevClass()}`} aria-hidden="true" />
-        <span class={styles.kind}>{kindLabel()}</span>
-        <span class={styles.cardTitle}>{props.n.title}</span>
-        <Show when={!isClosed()}>
-          <button
-            type="button"
-            class={styles.closeBtn}
-            onClick={props.onClose}
-            disabled={props.busy}
-            data-testid={`notification-${props.n.id}-close`}
-            aria-label={`关闭 ${props.n.title}`}
+      <div class={`u-card ${styles.card}`}>
+        <div class={styles.cardRow}>
+          <span
+            class={styles.iconSlot}
+            data-tone={toneForSeverity(props.n.severity)}
+            aria-hidden="true"
           >
-            ×
-          </button>
-        </Show>
-      </div>
-      <Show when={props.n.body && props.n.body.trim().length > 0}>
-        <p class={styles.simpleBody}>{props.n.body}</p>
-      </Show>
-      <div class={styles.meta}>
-        <time>{formatTs(props.n.created_at)}</time>
-        <Show when={props.n.task_id}>
-          {(tid) => <span class={styles.metaSep}>· task {shortUuid(tid())}</span>}
-        </Show>
-        <Show when={isClosed()}>
-          <span class={styles.metaSep}>· 已关闭</span>
-        </Show>
+            <BellIcon />
+          </span>
+          <span class={styles.mid}>
+            <span class={styles.titleLine}>
+              <span class={styles.kind}>{kindLabel()}</span>
+              <span class={styles.cardTitle}>{props.n.title}</span>
+            </span>
+            <Show when={props.n.body && props.n.body.trim().length > 0}>
+              <p class={styles.simpleBody}>{props.n.body}</p>
+            </Show>
+            <span class={styles.meta}>
+              <time>{formatTs(props.n.created_at)}</time>
+              <Show when={props.n.task_id}>
+                {(tid) => <span class={styles.metaSep}>· task {shortUuid(tid())}</span>}
+              </Show>
+              <Show when={isClosed()}>
+                <span class={styles.metaSep}>· 已关闭</span>
+              </Show>
+            </span>
+          </span>
+          <Show when={!isClosed()}>
+            <button
+              type="button"
+              class={styles.closeBtn}
+              onClick={() => props.onClose()}
+              disabled={props.busy}
+              data-testid={`notification-${props.n.id}-close`}
+              aria-label={`关闭 ${props.n.title}`}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M3 3l8 8M11 3l-8 8"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </button>
+          </Show>
+        </div>
       </div>
     </li>
   );

@@ -1,0 +1,49 @@
+/* Tile · u-card 宫格瓦片。顶图标槽 + label + desc，竖排。 */
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch);
+  padding: var(--space-4);
+  text-align: left;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: transform 0.16s var(--spring), box-shadow 0.18s var(--soft);
+}
+.tile:active {
+  transform: scale(0.98);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
+}
+
+/* 渐变染色圆角图标槽 ~40px（瓦片比列表行略大） */
+.iconSlot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  color: var(--accent-deep);
+  background:
+    linear-gradient(150deg, rgba(255, 184, 119, 0.28) 0%, rgba(255, 184, 119, 0.1) 100%);
+  box-shadow: var(--inset-hi);
+}
+.iconSlot :global(svg) {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.label {
+  font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.desc {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  line-height: 1.4;
+}

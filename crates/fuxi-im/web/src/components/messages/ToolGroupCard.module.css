@@ -15,21 +15,25 @@
   align-items: center;
   gap: var(--space-2);
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px dashed rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
+  /* 折叠态：一道淡暖虚线 pill，安静地表示「这里折着一组工具调用」。 */
+  background: var(--surface-soft);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--inset-hi);
   cursor: pointer;
   font-size: var(--size-aux);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-family: inherit;
   width: 100%;
   text-align: left;
   min-height: 36px;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .head:hover {
   color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.18);
+  background: var(--accent-subtle);
+  border-color: var(--accent);
 }
 
 .head:focus-visible {
@@ -57,7 +61,7 @@
 .who {
   flex-shrink: 0;
   font-weight: var(--weight-semibold);
-  color: var(--accent);
+  color: var(--luban);
   letter-spacing: 0.2px;
 }
 

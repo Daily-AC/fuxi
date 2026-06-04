@@ -4,9 +4,12 @@ import {
   createResource,
   createSignal,
   type Component,
+  type JSX,
 } from "solid-js";
 import { ApiError } from "~/lib/api";
 import { useApi } from "~/components/ApiProvider";
+import { EmptyState } from "~/components/ui/EmptyState";
+import { StatePill } from "~/components/ui/StatePill";
 import type {
   AddProjectRequest,
   ProjectView,
@@ -14,7 +17,7 @@ import type {
 } from "~/types/api";
 import styles from "./ProjectsPage.module.css";
 
-// 项目 tab · Decision 21 phase 1
+// 项目 tab · Decision 21 phase 1 · daimeng 奶油糖果重绘（archetype A · 列表/收件箱）。
 //
 // PWA 视角的"工作区"门面——展示已注册 project 的 canonical 路径 + 默认分支。
 // v1 只读：注册 / 删除走 CLI（fuxi project add / rm）；后续若加 GUI 注册流
@@ -22,6 +25,30 @@ import styles from "./ProjectsPage.module.css";
 //
 // 数据源：GET /api/projects → ProjectsResponse{ projects: [...] }
 // 503 路径：registry 未注入（部署侧 $HOME 没设）；前端显示空态 + 提示。
+//
+// RESKIN：保留全部行为 + data-testid（page-projects / projects-add-btn /
+// projects-add-modal / projects-add-* / project-card-<id> / project-open-<id> /
+// project-delete-<id> / project-delete-confirm-<id> / project-delete-cancel-<id> /
+// sandboxes-<id> / sandboxes-empty-<id> / sandbox-<wsId> / projects-empty /
+// projects-loading）。视觉换共享原语：每项目一 u-card 行卡（暖光 iconSlot 文件夹图标 +
+// 名字 / 路径 + 默认分支 StatePill）；sandbox 嵌套行；空态 EmptyState；
+// add modal 暖色 u-card sheet + u-glass scrim。页底 u-mesh。
+
+// 文件夹 SVG（项目 iconSlot，禁 emoji）。
+const FolderIcon = (): JSX.Element => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path
+      d="M3 7a2 2 0 0 1 2-2h4l2 2.5h6a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"
+      stroke-linejoin="round"
+    />
+  </svg>
+);
+
+const PlusIcon = (): JSX.Element => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M12 5v14M5 12h14" stroke-linecap="round" />
+  </svg>
+);
 
 export const ProjectsPage: Component = () => {
   const { client } = useApi();
@@ -29,9 +56,9 @@ export const ProjectsPage: Component = () => {
   const [addOpen, setAddOpen] = createSignal(false);
 
   return (
-    <div class={styles.page} data-testid="page-projects">
+    <div class={`u-mesh u-noise ${styles.page}`} data-testid="page-projects">
       <header class={styles.header}>
-        <h1 class={styles.title}>项目</h1>
+        <h1 class={`u-title ${styles.title}`}>项目</h1>
         <button
           type="button"
           class={styles.addBtn}
@@ -39,7 +66,10 @@ export const ProjectsPage: Component = () => {
           data-testid="projects-add-btn"
           aria-label="注册项目"
         >
-          + 注册
+          <span class={styles.addIcon} aria-hidden="true">
+            <PlusIcon />
+          </span>
+          注册
         </button>
       </header>
       <div class={styles.body}>
@@ -63,12 +93,12 @@ export const ProjectsPage: Component = () => {
           <Show
             when={data()!.projects.length > 0}
             fallback={
-              <div class={styles.empty} data-testid="projects-empty">
-                <p class={styles.emptyTitle}>暂无项目</p>
-                <p class={styles.emptyHint}>
-                  点 + 注册，或在 home 上跑{" "}
-                  <span class="mono">fuxi project add ~/your-repo</span>
-                </p>
+              <div data-testid="projects-empty">
+                <EmptyState
+                  title="暂无项目"
+                  hint="点上方「+ 注册」，或在 home 上跑 fuxi project add ~/your-repo"
+                  mascotState="sleep"
+                />
               </div>
             }
           >
@@ -129,10 +159,7 @@ const ProjectCard: Component<{ project: ProjectView; onChanged: () => void }> = 
   };
 
   return (
-    <li
-      class={styles.card}
-      data-testid={`project-card-${props.project.id}`}
-    >
+    <li class={`u-card ${styles.card}`} data-testid={`project-card-${props.project.id}`}>
       <button
         type="button"
         class={styles.cardHeadBtn}
@@ -140,19 +167,29 @@ const ProjectCard: Component<{ project: ProjectView; onChanged: () => void }> = 
         data-testid={`project-open-${props.project.id}`}
         aria-label={`查看 ${props.project.id} 详情`}
       >
-        <div class={styles.cardHead}>
-          <span class={styles.cardId}>{props.project.id}</span>
-          <span class={styles.cardBranch}>
-            <span class={styles.branchLabel}>默认分支</span>
-            <span class={`${styles.branchValue} mono`}>
-              {props.project.default_branch}
-            </span>
+        <span class={styles.iconSlot} aria-hidden="true">
+          <FolderIcon />
+        </span>
+        <span class={styles.cardMid}>
+          <span class={styles.cardTitleLine}>
+            <span class={styles.cardId}>{props.project.id}</span>
+            <StatePill label={props.project.default_branch} tone="queued" />
           </span>
-          <span class={styles.cardChevron} aria-hidden="true">›</span>
-        </div>
-        <div class={`${styles.cardPath} mono`} title={props.project.canonical_path}>
-          {props.project.canonical_path}
-        </div>
+          <span class={`${styles.cardPath} mono`} title={props.project.canonical_path}>
+            {props.project.canonical_path}
+          </span>
+        </span>
+        <span class={styles.chevron} aria-hidden="true">
+          <svg width="8" height="14" viewBox="0 0 8 14" fill="none">
+            <path
+              d="M1.5 1 6.5 7l-5 6"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </span>
       </button>
       <SandboxList projectId={props.project.id} />
       <div class={styles.cardMeta}>
@@ -292,20 +329,20 @@ const AddProjectModal: Component<{
 
   return (
     <div
-      class={styles.modalScrim}
+      class={`u-glass ${styles.modalScrim}`}
       data-testid="projects-add-modal"
       onClick={(e) => {
         if (e.target === e.currentTarget) props.onClose();
       }}
     >
       <form
-        class={styles.modalCard}
+        class={`u-card ${styles.modalCard}`}
         role="dialog"
         aria-label="注册项目"
         onSubmit={(e) => void onSubmit(e)}
       >
         <header class={styles.modalHead}>
-          <h2 class={styles.modalTitle}>注册项目</h2>
+          <h2 class={`u-title ${styles.modalTitle}`}>注册项目</h2>
           <button
             type="button"
             class={styles.modalClose}
@@ -313,7 +350,14 @@ const AddProjectModal: Component<{
             aria-label="关闭"
             data-testid="projects-add-close"
           >
-            ×
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path
+                d="M4 4l8 8M12 4l-8 8"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+              />
+            </svg>
           </button>
         </header>
         <div class={styles.modalBody}>

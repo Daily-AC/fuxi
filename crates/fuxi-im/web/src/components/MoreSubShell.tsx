@@ -36,7 +36,23 @@ export const MoreSubShell: Component<MoreSubShellProps> = (props) => {
           data-testid="more-sub-back"
           aria-label="返回更多"
         >
-          ‹ 更多
+          <svg
+            class={styles.chevron}
+            width="9"
+            height="15"
+            viewBox="0 0 11 18"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M9 1.5 2 9l7 7.5"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          更多
         </button>
         {!props.hideTitle && <h1 class={styles.title}>{props.title}</h1>}
       </header>

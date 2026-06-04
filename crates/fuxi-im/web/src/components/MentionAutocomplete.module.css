@@ -8,13 +8,15 @@
   bottom: 100%;
   left: 0;
   right: 0;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   max-height: 200px;
   overflow-y: auto;
+  /* 奶油糖果 · 候选弹层走暖白卡片 + 柔影浮起，圆角加大更糖果 */
   background: var(--surface);
-  border: 1px solid var(--border-strong);
-  border-radius: 10px;
-  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-card), var(--inset-hi);
+  padding: 6px;
   z-index: 20;
 }
 
@@ -34,13 +36,14 @@
   padding: 6px 10px;
   background: transparent;
   border: 0;
-  border-radius: 8px;
+  border-radius: 12px;
   cursor: pointer;
   text-align: left;
+  transition: background var(--transition-fast);
 }
 
 .item:hover {
-  background: var(--surface-elevated);
+  background: var(--accent-subtle);
 }
 
 .itemActive {

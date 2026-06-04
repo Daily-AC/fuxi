@@ -12,7 +12,9 @@
 .bubble {
   max-width: 78%;
   padding: var(--space-3);
-  border-radius: var(--radius-bubble);
+  border-radius: var(--radius-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card), var(--inset-hi);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -21,13 +23,13 @@
 .userBubble {
   background: var(--user-bubble);
   color: var(--user-bubble-text);
-  border-top-right-radius: 4px;
+  border-bottom-right-radius: 6px;
 }
 
 .agentBubble {
-  background: var(--surface);
+  background: var(--surface-soft);
   color: var(--text-primary);
-  border-top-left-radius: 4px;
+  border-top-left-radius: 6px;
 }
 
 .caption {

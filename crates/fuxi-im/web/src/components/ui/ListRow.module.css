@@ -1,0 +1,93 @@
+/* ListRow · u-card 行，左图标槽 + 中列 + 右槽。≥44px 触控。 */
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: var(--touch);
+  padding: 12px var(--space-4);
+  text-align: left;
+  color: var(--text-primary);
+}
+
+/* button 形态：去 native chrome，保留 u-card 表面 */
+.tap {
+  cursor: pointer;
+  transition: transform 0.16s var(--spring), box-shadow 0.18s var(--soft);
+}
+.tap:active {
+  transform: scale(0.985);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
+}
+
+/* 渐变染色圆角图标槽 ~34px */
+.iconSlot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  color: var(--accent-deep);
+  background:
+    linear-gradient(150deg, rgba(255, 184, 119, 0.26) 0%, rgba(255, 184, 119, 0.1) 100%);
+  box-shadow: var(--inset-hi);
+}
+.iconSlot :global(svg) {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.iconSlot[data-tone="mint"] {
+  color: #3f8f6a;
+  background:
+    linear-gradient(150deg, rgba(143, 217, 182, 0.3) 0%, rgba(143, 217, 182, 0.12) 100%);
+}
+.iconSlot[data-tone="lavender"] {
+  color: #7c63a8;
+  background:
+    linear-gradient(150deg, rgba(201, 182, 232, 0.32) 0%, rgba(201, 182, 232, 0.12) 100%);
+}
+.iconSlot[data-tone="pink"] {
+  color: #d4607d;
+  background:
+    linear-gradient(150deg, rgba(255, 158, 181, 0.3) 0%, rgba(255, 158, 181, 0.12) 100%);
+}
+
+.mid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.title {
+  font-size: var(--size-body);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subtitle {
+  font-size: var(--size-aux);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trail {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.chevron {
+  display: block;
+}
