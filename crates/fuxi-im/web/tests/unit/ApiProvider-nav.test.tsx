@@ -32,7 +32,7 @@ const Probe: Component<{
   );
 };
 
-describe("ApiProvider · nav state (daimeng · 5 tab 聊天/通知/家/任务/更多)", () => {
+describe("ApiProvider · nav state (daimeng · 5 tab 聊天/任务/家/通知/更多)", () => {
   it("默认 activeTab=0（聊天）+ moreSub=null", () => {
     setApiOverride(createMockApi());
     let captured: { tab: TabIndex; sub: MoreSubRoute; nav: NavRoute } | null = null;
@@ -66,7 +66,7 @@ describe("ApiProvider · nav state (daimeng · 5 tab 聊天/通知/家/任务/�
     const Wired: Component = () => {
       const { setActiveTab, navPush, navPop, activeTab, navRoute } = useApi();
       onMount(() => {
-        setActiveTab(3); // 任务 tab
+        setActiveTab(1); // 任务 tab
         navPush({ kind: "task", task_id: "t-uuid", title: "查 ERP" });
       });
       const navId = (): string => {
@@ -93,11 +93,11 @@ describe("ApiProvider · nav state (daimeng · 5 tab 聊天/通知/家/任务/�
         <Wired />
       </ApiProvider>
     ));
-    expect(getByTestId("tab-now").textContent).toBe("3");
+    expect(getByTestId("tab-now").textContent).toBe("1");
     expect(getByTestId("nav-now").textContent).toBe("t-uuid");
     getByTestId("pop").click();
     expect(getByTestId("nav-now").textContent).toBe("null");
-    expect(getByTestId("tab-now").textContent).toBe("3"); // pop 不动 tab
+    expect(getByTestId("tab-now").textContent).toBe("1"); // pop 不动 tab
     unmount();
   });
 
@@ -191,7 +191,7 @@ describe("ApiProvider · nav state (daimeng · 5 tab 聊天/通知/家/任务/�
     unmount();
   });
 
-  it("openNotifications · 切通知 tab(1)，不再 push 二层路由", () => {
+  it("openNotifications · 切通知 tab(3)，不再 push 二层路由", () => {
     setApiOverride(createMockApi());
     const Wired: Component = () => {
       const { openNotifications, activeTab, navRoute } = useApi();
@@ -210,7 +210,7 @@ describe("ApiProvider · nav state (daimeng · 5 tab 聊天/通知/家/任务/�
         <Wired />
       </ApiProvider>
     ));
-    expect(getByTestId("tab-now").textContent).toBe("1");
+    expect(getByTestId("tab-now").textContent).toBe("3");
     expect(getByTestId("nav-kind").textContent).toBe("null");
     unmount();
   });

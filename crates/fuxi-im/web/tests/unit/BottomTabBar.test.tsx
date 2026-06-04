@@ -27,12 +27,15 @@ describe("BottomTabBar (daimeng · 4 tab 家/聊天/任务/更多)", () => {
     expect(m.getAttribute("aria-selected")).toBe("false");
   });
 
-  it("每个 tab 渲染 inline SVG 图标（无 emoji）", () => {
+  it("tab 图标无 emoji：家=小玄女头像 img，其余 inline SVG", () => {
     const onChange = vi.fn();
     const { getByTestId } = render(() => (
       <BottomTabBar tabs={TABS} active={0} onChange={onChange} />
     ));
-    expect(getByTestId("tab-home-icon").tagName.toLowerCase()).toBe("svg");
+    // 家 tab 改用小玄女头像（webp avatar），更显眼且绑产品主体；仍非 emoji。
+    const home = getByTestId("tab-home-icon");
+    expect(home.tagName.toLowerCase()).toBe("img");
+    expect(home.getAttribute("src")).toContain("/mascot/xuannv-");
     expect(getByTestId("tab-xuannv-icon").tagName.toLowerCase()).toBe("svg");
     expect(getByTestId("tab-tasks-icon").tagName.toLowerCase()).toBe("svg");
     expect(getByTestId("tab-more-icon").tagName.toLowerCase()).toBe("svg");
