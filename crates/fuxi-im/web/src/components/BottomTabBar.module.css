@@ -76,21 +76,30 @@
   letter-spacing: 0;
 }
 
-/* 家 tab 的小玄女头像 · 圆形裁脸（object-position 取上半身/头）。
- * 未选：略降透明度 + 中性描边；选中：满色 + accent 描边圈 + 轻放大（沿用 .icon scale）。 */
+/* 家 tab 的玄女头像 · 放大 + 抬出底栏（浮在上沿的「主按钮」式中心 tab）。
+ * 负 margin-top 让她探出栏外、白圆底 + 柔影做悬浮感；负 margin 抵掉多出的高度，
+ * 让「家」label 跟其它 tab label 仍对齐底边。始终满色（品牌主体），选中加 accent 圈。 */
 .homeMascot {
-  width: 24px;
-  height: 24px;
+  width: 46px;
+  height: 46px;
+  margin-top: -28px;
+  margin-bottom: -2px;
   border-radius: 50%;
   object-fit: cover;
   object-position: top center;
-  background: var(--surface-soft, rgba(0, 0, 0, 0.04));
-  box-shadow: 0 0 0 1.5px var(--border);
-  opacity: 0.7;
-  transition: opacity var(--transition-fast), box-shadow var(--transition-fast);
+  background: #fff;
+  padding: 2px;
+  box-shadow:
+    0 4px 12px rgba(80, 50, 20, 0.2),
+    0 0 0 3px #fff;
+  position: relative;
+  z-index: 1;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .tab[aria-selected="true"] .homeMascot {
-  opacity: 1;
-  box-shadow: 0 0 0 1.5px var(--accent-deep);
+  box-shadow:
+    0 5px 16px rgba(213, 138, 74, 0.34),
+    0 0 0 3px var(--accent-deep);
+  transform: scale(1.05);
 }
