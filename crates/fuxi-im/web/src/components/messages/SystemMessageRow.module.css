@@ -73,10 +73,11 @@
   display: block;
   width: 100%;
   box-sizing: border-box;
-  background: var(--surface);
-  border: 1px dashed var(--border);
+  background: var(--surface-soft);
+  border: 1px dashed var(--border-strong);
   border-left: 3px solid var(--text-muted);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
   padding: 10px 12px;
   margin: 0;
 }

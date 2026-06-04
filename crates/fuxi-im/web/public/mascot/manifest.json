@@ -1,0 +1,42 @@
+{
+  "idle": {
+    "src": "/mascot/xuannv-idle.webp",
+    "w": 543,
+    "h": 768
+  },
+  "blink": {
+    "src": "/mascot/xuannv-blink.webp",
+    "w": 541,
+    "h": 768
+  },
+  "happy": {
+    "src": "/mascot/xuannv-happy.webp",
+    "w": 544,
+    "h": 768
+  },
+  "think": {
+    "src": "/mascot/xuannv-think.webp",
+    "w": 478,
+    "h": 768
+  },
+  "talk": {
+    "src": "/mascot/xuannv-talk.webp",
+    "w": 541,
+    "h": 768
+  },
+  "wave": {
+    "src": "/mascot/xuannv-wave.webp",
+    "w": 492,
+    "h": 768
+  },
+  "sleep": {
+    "src": "/mascot/xuannv-sleep.webp",
+    "w": 508,
+    "h": 768
+  },
+  "surprise": {
+    "src": "/mascot/xuannv-surprise.webp",
+    "w": 495,
+    "h": 768
+  }
+}

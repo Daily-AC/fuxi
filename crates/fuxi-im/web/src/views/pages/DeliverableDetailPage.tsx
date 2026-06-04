@@ -8,7 +8,11 @@ import {
 } from "solid-js";
 import { ApiError } from "~/lib/api";
 import { useApi } from "~/components/ApiProvider";
+import { Card } from "~/components/ui/Card";
 import { Markdown } from "~/components/Markdown";
+import { ScreenHeader } from "~/components/ui/ScreenHeader";
+import { SectionLabel } from "~/components/ui/SectionLabel";
+import { StatePill, type StatePillTone } from "~/components/ui/StatePill";
 import type {
   DeliverableEntry,
   DeliverableFileMeta,
@@ -23,11 +27,18 @@ const MD_EXTS = ["md", "markdown"];
 const IMG_EXTS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"];
 const PREVIEW_BYTE_LIMIT = 512 * 1024; // 512 KB 文本上限——避免拉超大 log 卡浏览器
 
-// 交付详情 Layer 2 · Decision 22 phase 3
+// 交付详情 Layer 2 · Decision 22 phase 3 · daimeng 奶油糖果重绘（archetype B · 详情）。
 //
 // 数据源：GET /api/deliverables → 前端 filter (project, task) 拿同 task 多 entries。
-// 文件：每条 entry 多个 file，统一展示成大列表 + sha256 全文 + 下载链接。
-// 操作：accept (可选 accepted_to) / reject (可选 reason)。
+// 文件：每条 entry 多个 file，统一展示成 Card 列表 + sha256 全文 + 下载链接。
+// 操作：accept (可选 accepted_to) / reject (可选 reason)。页底 peach 渐变主操作（接收）。
+//
+// RESKIN：保留全部 data-testid（page-deliverable-detail / deliverable-detail-back /
+// deliverable-detail-loading / deliverable-detail-empty / deliverable-detail-status-* /
+// deliverable-detail-entry-* / deliverable-detail-download-<task>-<name> /
+// deliverable-detail-preview-* / deliverable-detail-no-preview-* / deliverable-accept-target /
+// deliverable-reject-reason / deliverable-detail-accept / deliverable-detail-reject）+ 行为。
+// 视觉换共享原语，去暗色。
 
 const KIND_LABEL: Record<DeliverableKind, string> = {
   research_summary: "调研",
@@ -44,6 +55,20 @@ const STATUS_LABEL: Record<DeliverableStatus, string> = {
   rejected: "已拒绝",
   expired: "已过期",
 };
+
+// 状态 → StatePill tone（pending 薰衣草排队感 / accepted 薄荷 / rejected 红 / expired 中性）。
+function statusTone(s: DeliverableStatus): StatePillTone {
+  switch (s) {
+    case "accepted":
+      return "done";
+    case "rejected":
+      return "danger";
+    case "expired":
+      return "neutral";
+    default:
+      return "queued";
+  }
+}
 
 export interface DeliverableDetailPageProps {
   project_id: string;
@@ -71,16 +96,17 @@ export const DeliverableDetailPage: Component<DeliverableDetailPageProps> = (
   // P1.4 体验：accept_to 默认值——按 project 分别 sticky（用户多项目时
   // 每个项目可能有不同的"收件目录"习惯）。`localStorage` 是浏览器局部，重装
   // PWA 失忆——但简单可靠不依赖后端，第一阶段够用。
-  const acceptedToStorageKey = (): string =>
-    `fuxi:acceptedTo:${props.project_id}`;
-  const initialAcceptedTo = ((): string => {
+  // 只在 event handler 内调用（accept 时读 / 写）——满足 solid/reactivity
+  // tracked-scope 约束，且 props.project_id 在 push 后不会变。
+  const storageKey = (): string => `fuxi:acceptedTo:${props.project_id}`;
+  const readSticky = (): string => {
     try {
-      return localStorage.getItem(acceptedToStorageKey()) ?? "";
+      return localStorage.getItem(storageKey()) ?? "";
     } catch {
       return "";
     }
-  })();
-  const [acceptedTo, setAcceptedTo] = createSignal(initialAcceptedTo);
+  };
+  const [acceptedTo, setAcceptedTo] = createSignal(readSticky());
   const [reason, setReason] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
@@ -98,7 +124,7 @@ export const DeliverableDetailPage: Component<DeliverableDetailPageProps> = (
       // 只有真填了路径 + 后端没拒（成功落到 catch 之外）才记忆
       if (target) {
         try {
-          localStorage.setItem(acceptedToStorageKey(), target);
+          localStorage.setItem(storageKey(), target);
         } catch {
           // localStorage 可能被禁——静默不挂主流程
         }
@@ -131,26 +157,11 @@ export const DeliverableDetailPage: Component<DeliverableDetailPageProps> = (
 
   const taskShort = (): string =>
     props.task_id.length > 12 ? props.task_id.slice(0, 12) : props.task_id;
+  const title = (): string => `${props.project_id} · task-${taskShort()}`;
 
   return (
-    <div class={styles.page} data-testid="page-deliverable-detail">
-      <header class={styles.header}>
-        <button
-          type="button"
-          class={styles.backBtn}
-          onClick={() => navPop()}
-          data-testid="deliverable-detail-back"
-          aria-label="返回交付收件箱"
-        >
-          ‹ 交付
-        </button>
-        <h1 class={styles.title}>
-          <span class={styles.titleProj}>{props.project_id}</span>
-          <span class={styles.titleSep} aria-hidden="true">·</span>
-          <span class={`${styles.titleTask} mono`}>task-{taskShort()}</span>
-        </h1>
-        <span class={styles.headerSpacer} aria-hidden="true" />
-      </header>
+    <div class={`u-mesh u-noise ${styles.page}`} data-testid="page-deliverable-detail">
+      <ScreenHeader title={title()} onBack={() => navPop()} />
 
       <div class={styles.body}>
         <Show
@@ -173,77 +184,89 @@ export const DeliverableDetailPage: Component<DeliverableDetailPageProps> = (
             }
           >
             <Show when={status()}>
-              <section
-                class={`${styles.statusCard} ${styles[`statusCard_${status()}`] ?? ""}`}
-                data-testid={`deliverable-detail-status-${status()}`}
+              <Card
+                class={styles.summary}
+                tone="peach"
+                /* data-testid 落在内层 row 上 */
               >
-                <span class={styles.statusLabel}>当前状态</span>
-                <span class={styles.statusValue}>
-                  {STATUS_LABEL[status()!]}
-                </span>
-              </section>
+                <div
+                  class={styles.statusRow}
+                  data-testid={`deliverable-detail-status-${status()}`}
+                >
+                  <span class={styles.statusLabel}>当前状态</span>
+                  <StatePill
+                    label={STATUS_LABEL[status()!]}
+                    tone={statusTone(status()!)}
+                  />
+                </div>
+              </Card>
             </Show>
 
-            <For each={myEntries()}>
-              {(entry) => <EntrySection entry={entry} />}
-            </For>
+            <section class={styles.section}>
+              <SectionLabel>交付内容</SectionLabel>
+              <For each={myEntries()}>
+                {(entry) => <EntrySection entry={entry} />}
+              </For>
+            </section>
 
             <Show when={status() === "pending"}>
-              <section class={styles.actions}>
-                <h2 class={styles.actionsTitle}>处理</h2>
-                <div class={styles.actionField}>
-                  <label class={styles.actionLabel} for="accepted-to">
-                    接收到（可选 · 绝对路径）
-                  </label>
-                  <input
-                    id="accepted-to"
-                    type="text"
-                    class={`${styles.actionInput} mono`}
-                    placeholder="/Users/e0_7/写作"
-                    value={acceptedTo()}
-                    onInput={(e) => setAcceptedTo(e.currentTarget.value)}
-                    data-testid="deliverable-accept-target"
-                  />
-                </div>
-                <div class={styles.actionField}>
-                  <label class={styles.actionLabel} for="reject-reason">
-                    拒绝理由（可选）
-                  </label>
-                  <input
-                    id="reject-reason"
-                    type="text"
-                    class={styles.actionInput}
-                    placeholder="不符合期望 / 改动太大…"
-                    value={reason()}
-                    onInput={(e) => setReason(e.currentTarget.value)}
-                    data-testid="deliverable-reject-reason"
-                  />
-                </div>
-                <div class={styles.actionRow}>
-                  <button
-                    type="button"
-                    class={styles.btnReject}
-                    disabled={busy()}
-                    onClick={() => void onReject()}
-                    data-testid="deliverable-detail-reject"
-                  >
-                    拒绝
-                  </button>
-                  <button
-                    type="button"
-                    class={styles.btnAccept}
-                    disabled={busy()}
-                    onClick={() => void onAccept()}
-                    data-testid="deliverable-detail-accept"
-                  >
-                    {busy() ? "…" : "接收"}
-                  </button>
-                </div>
-                <Show when={err()}>
-                  <p class={styles.errMsg} role="alert">
-                    {err()}
-                  </p>
-                </Show>
+              <section class={styles.section}>
+                <SectionLabel>处理</SectionLabel>
+                <Card class={styles.actions}>
+                  <div class={styles.actionField}>
+                    <label class={styles.actionLabel} for="accepted-to">
+                      接收到（可选 · 绝对路径）
+                    </label>
+                    <input
+                      id="accepted-to"
+                      type="text"
+                      class={`${styles.actionInput} mono`}
+                      placeholder="/Users/e0_7/写作"
+                      value={acceptedTo()}
+                      onInput={(e) => setAcceptedTo(e.currentTarget.value)}
+                      data-testid="deliverable-accept-target"
+                    />
+                  </div>
+                  <div class={styles.actionField}>
+                    <label class={styles.actionLabel} for="reject-reason">
+                      拒绝理由（可选）
+                    </label>
+                    <input
+                      id="reject-reason"
+                      type="text"
+                      class={styles.actionInput}
+                      placeholder="不符合期望 / 改动太大…"
+                      value={reason()}
+                      onInput={(e) => setReason(e.currentTarget.value)}
+                      data-testid="deliverable-reject-reason"
+                    />
+                  </div>
+                  <Show when={err()}>
+                    <p class={styles.errMsg} role="alert">
+                      {err()}
+                    </p>
+                  </Show>
+                  <div class={styles.actionRow}>
+                    <button
+                      type="button"
+                      class={styles.btnReject}
+                      disabled={busy()}
+                      onClick={() => void onReject()}
+                      data-testid="deliverable-detail-reject"
+                    >
+                      拒绝
+                    </button>
+                    <button
+                      type="button"
+                      class={styles.btnAccept}
+                      disabled={busy()}
+                      onClick={() => void onAccept()}
+                      data-testid="deliverable-detail-accept"
+                    >
+                      {busy() ? "…" : "接收"}
+                    </button>
+                  </div>
+                </Card>
               </section>
             </Show>
           </Show>
@@ -266,38 +289,37 @@ const EntrySection: Component<{ entry: DeliverableEntry }> = (props) => {
     });
   };
   return (
-    <section
-      class={styles.entry}
-      data-testid={`deliverable-detail-entry-${props.entry.kind}`}
-    >
-      <header class={styles.entryHead}>
-        <span class={styles.entryKind}>
-          {KIND_LABEL[props.entry.kind] ?? props.entry.kind}
-        </span>
-        <time class={styles.entryTime}>{produced()}</time>
-      </header>
-      <ul class={styles.fileList}>
-        <For each={props.entry.files}>
-          {(f) => (
-            <FileRow
-              file={f}
-              project={props.entry.project}
-              task={props.entry.task}
-              downloadUrl={client.deliverableFileUrl(
-                props.entry.project,
-                props.entry.task,
-                f.name,
-              )}
-              previewUrl={client.deliverableFilePreviewUrl(
-                props.entry.project,
-                props.entry.task,
-                f.name,
-              )}
-            />
-          )}
-        </For>
-      </ul>
-    </section>
+    <Card class={styles.entry}>
+      <div data-testid={`deliverable-detail-entry-${props.entry.kind}`}>
+        <header class={styles.entryHead}>
+          <span class={styles.entryKind}>
+            {KIND_LABEL[props.entry.kind] ?? props.entry.kind}
+          </span>
+          <time class={styles.entryTime}>{produced()}</time>
+        </header>
+        <ul class={styles.fileList}>
+          <For each={props.entry.files}>
+            {(f) => (
+              <FileRow
+                file={f}
+                project={props.entry.project}
+                task={props.entry.task}
+                downloadUrl={client.deliverableFileUrl(
+                  props.entry.project,
+                  props.entry.task,
+                  f.name,
+                )}
+                previewUrl={client.deliverableFilePreviewUrl(
+                  props.entry.project,
+                  props.entry.task,
+                  f.name,
+                )}
+              />
+            )}
+          </For>
+        </ul>
+      </div>
+    </Card>
   );
 };
 
@@ -338,7 +360,15 @@ const FileRow: Component<{
           aria-label={`下载 ${props.file.name}`}
           title="下载"
         >
-          ⬇
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M8 2v8m0 0L4.5 6.5M8 10l3.5-3.5M3 13h10"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
         </a>
       </header>
       <Show when={previewable()}>
@@ -365,7 +395,8 @@ const FileRow: Component<{
 };
 
 /** bug #76 内联预览：md → Markdown 渲染；其它文本 → <pre>；图片 → <img>。
- *  text 类走 fetch 拉文本，加载中 / 失败都不阻塞父组件其它部分的下载按钮。 */
+ *  text 类走 fetch 拉文本，加载中 / 失败都不阻塞父组件其它部分的下载按钮。
+ *  注意：solid 组件单次运行，分支必须在 JSX 内（<Show />），不能 early return。 */
 const FilePreview: Component<{
   name: string;
   url: string;
@@ -373,47 +404,53 @@ const FilePreview: Component<{
   isImg: boolean;
   testid: string;
 }> = (props) => {
-  if (props.isImg) {
-    return (
-      <img
-        class={styles.imgPreview}
-        src={props.url}
-        alt={props.name}
-        data-testid={props.testid}
-        loading="lazy"
-      />
-    );
-  }
   // text/md：fetch 拉文本（credentials 必带——cookie 鉴权）。
   // jsdom test env 下 relative URL 会炸 → URL 标准化（test/production 双安全）。
-  const [text] = createResource(async () => {
-    const base =
-      typeof location !== "undefined" && location.origin && location.origin !== "null"
-        ? location.origin
-        : "http://localhost";
-    const abs = new URL(props.url, base).toString();
-    const resp = await fetch(abs, { credentials: "include" });
-    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-    return resp.text();
-  });
+  // 仅当非图片时才发请求（图片直接 <img src>，无需 fetch）。
+  const [text] = createResource(
+    () => (props.isImg ? null : props.url),
+    async (url: string) => {
+      const base =
+        typeof location !== "undefined" && location.origin && location.origin !== "null"
+          ? location.origin
+          : "http://localhost";
+      const abs = new URL(url, base).toString();
+      const resp = await fetch(abs, { credentials: "include" });
+      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+      return resp.text();
+    },
+  );
   return (
     <Show
-      when={text()}
+      when={!props.isImg}
       fallback={
-        <p class={styles.previewLoading} data-testid={`${props.testid}-loading`}>
-          {text.error ? `预览失败：${String(text.error)}` : "加载中…"}
-        </p>
+        <img
+          class={styles.imgPreview}
+          src={props.url}
+          alt={props.name}
+          data-testid={props.testid}
+          loading="lazy"
+        />
       }
     >
       <Show
-        when={props.isMd}
+        when={text()}
         fallback={
-          <pre class={styles.textPreview} data-testid={props.testid}>
-            {text()}
-          </pre>
+          <p class={styles.previewLoading} data-testid={`${props.testid}-loading`}>
+            {text.error ? `预览失败：${String(text.error)}` : "加载中…"}
+          </p>
         }
       >
-        <Markdown class={styles.mdPreview} source={text() ?? ""} />
+        <Show
+          when={props.isMd}
+          fallback={
+            <pre class={styles.textPreview} data-testid={props.testid}>
+              {text()}
+            </pre>
+          }
+        >
+          <Markdown class={styles.mdPreview} source={text() ?? ""} />
+        </Show>
       </Show>
     </Show>
   );

@@ -45,6 +45,8 @@ import {
   type SerializedIntervene,
 } from "~/lib/mentions";
 import { formatDuration } from "~/lib/format-task";
+import { Card } from "~/components/ui/Card";
+import { StatePill, type StatePillTone } from "~/components/ui/StatePill";
 import styles from "./TaskThreadPage.module.css";
 
 // 任务 thread Layer 2 · v3 #N4' / #39
@@ -307,9 +309,27 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
           data-testid="task-thread-back"
           aria-label="返回任务列表"
         >
-          ‹ 列表
+          <svg
+            class={styles.backIcon}
+            width="9"
+            height="15"
+            viewBox="0 0 9 15"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M7.5 1.5 1.5 7.5l6 6"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          列表
         </button>
-        <span class={styles.title}>{task()?.title ?? props.fallback_title ?? "任务"}</span>
+        <span class={`u-title ${styles.title}`}>
+          {task()?.title ?? props.fallback_title ?? "任务"}
+        </span>
         <button
           type="button"
           class={styles.more}
@@ -317,7 +337,11 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
           data-testid="task-thread-more"
           onClick={() => setMenuOpen(true)}
         >
-          ⋯
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="4" cy="10" r="1.6" fill="currentColor" />
+            <circle cx="10" cy="10" r="1.6" fill="currentColor" />
+            <circle cx="16" cy="10" r="1.6" fill="currentColor" />
+          </svg>
         </button>
       </header>
 
@@ -374,13 +398,13 @@ const MembersMenu: Component<{
 
   return (
     <div
-      class={styles.menuOverlay}
+      class={`u-glass ${styles.menuOverlay}`}
       data-testid="task-thread-menu"
       onClick={(e) => {
         if (e.target === e.currentTarget) props.onClose();
       }}
     >
-      <div class={styles.menuPanel} role="dialog" aria-label="门客详情">
+      <div class={`u-card ${styles.menuPanel}`} role="dialog" aria-label="门客详情">
         <p class={styles.menuTitle}>门客（{props.task.members.length}）</p>
         <Show
           when={props.task.members.length > 0}
@@ -431,10 +455,11 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
     return props.task.status;
   };
 
-  const statusDotClass = (): string => {
-    if (props.task.status === "running") return styles.statusDotRunning ?? "";
-    if (props.task.status === "completed") return styles.statusDotDone ?? "";
-    return "";
+  const statusTone = (): StatePillTone => {
+    if (props.task.status === "running") return "running";
+    if (props.task.status === "completed") return "done";
+    if (props.task.status === "failed") return "danger";
+    return "neutral";
   };
 
   // 第二行成员列表 = role · last_tool_call.tool（截 12 字符）· @node 标识
@@ -448,17 +473,19 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
     return memberStatusComposite(props.task.status, m.status);
   };
   return (
-    <div class={styles.banner} data-testid="task-banner">
-      <div class={styles.bannerLine}>
-        <span class={`${styles.statusDot} ${statusDotClass()}`} aria-hidden="true" />
-        <span class={styles.statusName}>{statusLabel()}</span>
-        <span class={styles.bannerSep} aria-hidden="true">·</span>
-        <span>{formatDuration(props.task.duration_ms)}</span>
-        <span class={styles.bannerSep} aria-hidden="true">·</span>
-        <span>{props.task.members.length} 门客</span>
-      </div>
-      <Show when={props.task.members.length > 0}>
-        <div class={styles.bannerMembers} data-testid="task-banner-members">
+    <div class={styles.bannerWrap}>
+      <Card tone="peach" class={styles.banner}>
+        <div data-testid="task-banner" class={styles.bannerInner}>
+          <div class={styles.bannerLine}>
+            <StatePill label={statusLabel()} tone={statusTone()} />
+            <span class={styles.bannerMeta}>
+              {formatDuration(props.task.duration_ms)}
+              <span class={styles.bannerSep} aria-hidden="true"> · </span>
+              {props.task.members.length} 门客
+            </span>
+          </div>
+          <Show when={props.task.members.length > 0}>
+            <div class={styles.bannerMembers} data-testid="task-banner-members">
           <For each={props.task.members}>
             {(m, i) => {
               const tail = truncate(memberTail(m), 12);
@@ -495,9 +522,11 @@ const Banner: Component<{ task: TaskGroupCard; onlineNodeIds: Set<string> | null
                 </>
               );
             }}
-          </For>
+              </For>
+            </div>
+          </Show>
         </div>
-      </Show>
+      </Card>
     </div>
   );
 };
@@ -554,7 +583,7 @@ const Thread: Component<ThreadProps> = (props) => {
   );
 
   return (
-    <section ref={scrollEl} class={styles.thread} data-testid="task-thread">
+    <section ref={scrollEl} class={`u-mesh ${styles.thread}`} data-testid="task-thread">
       <Show
         when={props.messages().length > 0}
         fallback={

@@ -4,30 +4,42 @@ import {
   createMemo,
   createResource,
   type Component,
+  type JSX,
 } from "solid-js";
 import { useApi } from "~/components/ApiProvider";
-import {
-  formatDuration,
-  shortTaskId,
-} from "~/lib/format-task";
-import type { TaskGroupCard, TasksOverview } from "~/types/api";
+import { EmptyState } from "~/components/ui/EmptyState";
+import { SectionLabel } from "~/components/ui/SectionLabel";
+import { Skeleton } from "~/components/ui/Skeleton";
+import { StatePill, type StatePillTone } from "~/components/ui/StatePill";
+import { formatDuration, shortTaskId } from "~/lib/format-task";
+import type { TaskGroupCard, TaskMember, TasksOverview } from "~/types/api";
 import styles from "./TasksPage.module.css";
 
-// 任务 tab Layer 1 · 任务列表（v3 #N3' / #38）
+// 任务 tab Layer 1 · 任务列表 · daimeng 奶油糖果重构（archetype A · 列表/收件箱）。
 // 设计 spec: docs/superpowers/specs/2026-04-26-im-tab-bar-task-thread-design.md §"任务 tab · Layer 1"
 //
-// v3 vs v2 改动：
-//   - 任务卡 header tap → push Layer 2 任务 thread（不再"折叠展开 members"）
-//   - members 行变 inspection-only（div，不可 tap）
-//   - 删 active 高亮（per-worker 私聊概念去除）
-//   - 删 "›" 推入箭头（tap 整卡进 thread，不需要 affordance）
-//   - 进行中段 last_active_at 降序、已完成 sticky tail 不变
+// RESKIN：保留全部行为 + data-testid（page-tasks / task-card-<id> /
+// task-card-head-<id> / tasks-running / tasks-completed / tasks-empty）。
+// 视觉换成共享原语：行卡 (ListRow look) + StatePill 状态 + SectionLabel 分区 +
+// EmptyState 空态。页底 u-mesh 暖光网格。
+
+// 任务清单图标（inline SVG，禁 emoji）。色由 iconSlot 按 tone 染。
+const ChecklistIcon = (): JSX.Element => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+    <path d="M10 6h9M10 12h9M10 18h9" stroke-linecap="round" />
+    <path
+      d="m4 5.5 1.4 1.4L8 4M4 11.5l1.4 1.4L8 10M4 17.5l1.4 1.4L8 16"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </svg>
+);
 
 export const TasksPage: Component = () => {
   return (
-    <div class={styles.page} data-testid="page-tasks">
+    <div class={`u-mesh u-noise ${styles.page}`} data-testid="page-tasks">
       <header class={styles.header}>
-        <h1 class={styles.title}>任务树</h1>
+        <h1 class={`u-title ${styles.title}`}>任务</h1>
       </header>
       <div class={styles.body}>
         <RenderTasks />
@@ -40,7 +52,6 @@ const RenderTasks: Component = () => {
   const { client } = useApi();
   const [data] = createResource(() => client.fetchTasksOverview());
   // v4：卡片不再渲染门客预览，nodes 在线/离线状态搬到详情页 ⋯ 菜单。
-  // TasksPage 这里去掉 fetchNodes 调用，省一个网络往返。
 
   return (
     <Show
@@ -48,7 +59,13 @@ const RenderTasks: Component = () => {
       fallback={
         <Show
           when={data.error}
-          fallback={<p class={styles.muted} data-testid="tasks-loading">加载中…</p>}
+          fallback={
+            <div class={styles.skeletons} data-testid="tasks-loading">
+              <Skeleton height="60px" />
+              <Skeleton height="60px" />
+              <Skeleton height="60px" />
+            </div>
+          }
         >
           <p class={styles.errMsg} role="alert">
             加载失败：{String(data.error)}
@@ -68,7 +85,7 @@ const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
     list.sort((a, b) => parseTs(b.last_active_at) - parseTs(a.last_active_at));
     return list;
   });
-  // v3 #44 实测反馈：已完成段不再 sticky tail 折叠，直接平铺；按 last_active_at 降序（无 completed_at 字段时的最佳代理）
+  // 已完成段直接平铺，按 last_active_at 降序（无 completed_at 字段时的最佳代理）
   const completed = createMemo(() => {
     const list = [...props.overview.completed];
     list.sort((a, b) => parseTs(b.last_active_at) - parseTs(a.last_active_at));
@@ -81,23 +98,30 @@ const TaskTree: Component<{ overview: TasksOverview }> = (props) => {
   return (
     <div class={styles.root}>
       <Show when={empty()}>
-        <div class={styles.emptyAll} data-testid="tasks-empty">
-          <p class={styles.emptyTitle}>暂无任务</p>
-          <p class={styles.emptyHint}>跟玄女说点啥，她会自动开 root task</p>
+        <div data-testid="tasks-empty">
+          <EmptyState
+            title="还没有任务～"
+            hint="跟玄女说点啥，她会自动开 root task"
+            mascotState="sleep"
+          />
         </div>
       </Show>
 
       <Show when={running().length > 0}>
         <section class={styles.section} data-testid="tasks-running">
-          <h3 class={styles.sectionLabel}>进行中</h3>
-          <For each={running()}>{(t) => <TaskCard task={t} />}</For>
+          <SectionLabel>进行中</SectionLabel>
+          <div class={styles.list}>
+            <For each={running()}>{(t) => <TaskCard task={t} />}</For>
+          </div>
         </section>
       </Show>
 
       <Show when={completed().length > 0}>
         <section class={styles.section} data-testid="tasks-completed">
-          <h3 class={styles.sectionLabel}>已完成</h3>
-          <For each={completed()}>{(t) => <TaskCard task={t} dim />}</For>
+          <SectionLabel>已完成</SectionLabel>
+          <div class={styles.list}>
+            <For each={completed()}>{(t) => <TaskCard task={t} dim />}</For>
+          </div>
         </section>
       </Show>
     </div>
@@ -109,12 +133,52 @@ function parseTs(iso: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
+// status → StatePill tone（running 桃 / completed 薄荷 / 其余 queued 薰衣草）。
+function pillFor(status: string): { label: string; tone: StatePillTone } {
+  switch (status) {
+    case "running":
+      return { label: "进行中", tone: "running" };
+    case "completed":
+      return { label: "已完成", tone: "done" };
+    default:
+      return { label: "排队中", tone: "queued" };
+  }
+}
+
+// 卡片 iconSlot 色调：按首个门客角色染（鲁班 peach / 蒲松 mint / 玄女 lavender）。
+function toneForRole(role: string | undefined): string {
+  switch (role) {
+    case "luban":
+    case "鲁班":
+      return "plain"; // peach 默认 iconSlot 即暖橙
+    case "pusong":
+    case "蒲松":
+      return "mint";
+    case "xuannv":
+    case "玄女":
+      return "lavender";
+    default:
+      return "plain";
+  }
+}
+
+// 副标题：门客活动摘要。有门客 → "鲁班 · grep server/api.go"；无 → 时长 only。
+function memberSummary(members: TaskMember[]): string {
+  const lead = members[0];
+  if (!lead) return "";
+  const display = lead.role_display || lead.role;
+  const tool =
+    typeof lead.last_tool_call === "string"
+      ? lead.last_tool_call
+      : (lead.last_tool_call?.tool ?? lead.activity ?? "");
+  return tool ? `${display} · ${tool}` : display;
+}
+
 const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
   const { navPush } = useApi();
   const memberCount = (): number => props.task.members.length;
 
-  // 卡片整体一个 button — 移除底部门客预览块（用户实测反馈：误点击 +
-  // role 兜底 unknown 体验差）。门客详情移到详情页右上 ⋯ 菜单（TaskThreadPage）。
+  // 整卡 tap → push Layer 2 任务 thread（门客详情移到详情页右上 ⋯ 菜单）。
   const onCardTap = (): void => {
     navPush({
       kind: "task",
@@ -122,6 +186,10 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
       title: props.task.title,
     });
   };
+
+  const pill = (): { label: string; tone: StatePillTone } =>
+    pillFor(props.task.status);
+  const subtitle = (): string => memberSummary(props.task.members);
 
   return (
     <article
@@ -132,21 +200,59 @@ const TaskCard: Component<{ task: TaskGroupCard; dim?: boolean }> = (props) => {
     >
       <button
         type="button"
-        class={styles.cardHead}
+        class={`u-card ${styles.row}`}
         onClick={onCardTap}
         data-testid={`task-card-head-${props.task.id}`}
         aria-label={`进入任务 ${props.task.title}`}
       >
-        <span class={styles.cardId}>
-          <span class="agent-id">{shortTaskId(props.task.id)}</span>
-          <span class={styles.cardTitle}>{props.task.title}</span>
+        <span
+          class={styles.iconSlot}
+          data-tone={toneForRole(props.task.members[0]?.role)}
+          aria-hidden="true"
+        >
+          <ChecklistIcon />
         </span>
-        <span class={styles.cardMeta}>
-          <Show when={memberCount() > 0}>
-            <span class={styles.memberCount}>{memberCount()} 门客</span>
-            <span class={styles.metaSep} aria-hidden="true">·</span>
-          </Show>
-          <time class={styles.duration}>{formatDuration(props.task.duration_ms)}</time>
+        <span class={styles.mid}>
+          <span class={styles.titleLine}>
+            <span class={`agent-id ${styles.cardId}`}>
+              {shortTaskId(props.task.id)}
+            </span>
+            <span class={styles.cardTitle}>{props.task.title}</span>
+          </span>
+          <span class={styles.sub}>
+            <Show
+              when={subtitle()}
+              fallback={
+                <span class={styles.subDim}>
+                  <Show when={memberCount() > 0}>
+                    <span class={styles.memberCount}>{memberCount()} 门客</span>
+                    <span class={styles.metaSep} aria-hidden="true">
+                      ·
+                    </span>
+                  </Show>
+                  <time class={styles.duration}>
+                    {formatDuration(props.task.duration_ms)}
+                  </time>
+                </span>
+              }
+            >
+              <span class={styles.subText}>{subtitle()}</span>
+              <span class={styles.metaTail}>
+                <Show when={memberCount() > 0}>
+                  <span class={styles.memberCount}>{memberCount()} 门客</span>
+                  <span class={styles.metaSep} aria-hidden="true">
+                    ·
+                  </span>
+                </Show>
+                <time class={styles.duration}>
+                  {formatDuration(props.task.duration_ms)}
+                </time>
+              </span>
+            </Show>
+          </span>
+        </span>
+        <span class={styles.trail}>
+          <StatePill label={pill().label} tone={pill().tone} />
         </span>
       </button>
     </article>

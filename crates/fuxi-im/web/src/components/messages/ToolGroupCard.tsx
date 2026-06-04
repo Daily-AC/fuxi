@@ -12,7 +12,7 @@ function fmtTime(ts: number): string {
 
 // 用户实测反馈（2026-05-05）：玄女一个 turn 跑 5 个 tool_call 渲染成 5 个独立卡，
 // 占满屏幕，文本回复夹在中间难找。改成默认折叠成一行 header
-// `[🔧 5 个工具调用 ▸]`，点击展开看完整 ToolCallCard list。
+// `[<wrench-svg> 5 个工具调用 ▸]`，点击展开看完整 ToolCallCard list。
 //
 // 视觉：左对齐 worker 侧（继承 row 样式），折叠态像一行 marker；展开后 cascade
 // 显示原 ToolCallCard 各自的折叠/展开内部状态保留。
@@ -51,7 +51,19 @@ export const ToolGroupCard: Component<{
           </Show>
           <time class={styles.time}>{fmtTime(props.items[0]!.ts)}</time>
           <span class={styles.icon} aria-hidden="true">
-            🔧
+            {/* wrench / tool SVG */}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+            </svg>
           </span>
           <span class={styles.summary}>{summary()}</span>
           <span

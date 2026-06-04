@@ -1,4 +1,4 @@
-/* MoreSubShell · 「更多」二级 sub-page 公共 wrapper */
+/* MoreSubShell · 「更多」二级 sub-page 公共 wrapper（奶油糖果重绘） */
 
 .shell {
   display: flex;
@@ -11,28 +11,41 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
-  border-bottom: 1px solid var(--surface);
+  gap: var(--space-1);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-3) var(--space-3);
+  /* 暖玻璃顶栏 + 柔细分隔，呼应 ScreenHeader 质感 */
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.6), 0 6px 14px rgba(120, 80, 50, 0.04);
 }
 
 .back {
-  min-width: var(--touch);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-height: var(--touch);
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-3) 0 var(--space-2);
   font-size: var(--size-body);
   font-weight: var(--weight-medium);
-  color: var(--accent);
+  color: var(--text-secondary);
   background: transparent;
   border: none;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   text-align: left;
+  transition: background 0.18s var(--soft), color 0.18s var(--soft);
 }
 
+.back:hover,
 .back:active,
 .back:focus-visible {
-  color: var(--text-primary);
+  background: var(--accent-subtle);
+  color: var(--accent-deep);
   outline: none;
+}
+
+.chevron {
+  display: block;
+  flex-shrink: 0;
 }
 
 .title {

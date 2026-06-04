@@ -27,10 +27,14 @@
 
 .bubble {
   padding: 12px 14px;
-  background: var(--surface);
+  /* 玄女气泡：极淡薰衣草调（lavender 往白里调）让她跟门客/用户一眼区分。
+   * 柔暖投影 + 高光内边，premium 不平。左上角收紧 = 尾巴贴向她那侧。 */
+  background: linear-gradient(180deg, #F6F1FB 0%, #FBF8FE 100%);
   color: var(--text-primary);
-  border-radius: var(--radius-bubble);
-  border-top-left-radius: 4px;
+  border-radius: var(--radius-card);
+  border: 1px solid rgba(201, 182, 232, 0.3);
+  border-top-left-radius: 6px;
+  box-shadow: var(--shadow-card), var(--inset-hi);
   font-size: var(--size-body);
   line-height: 1.45;
   white-space: pre-wrap;

@@ -14,9 +14,11 @@
   position: relative;
   margin: 0;
   align-self: stretch;
+  /* 工具卡：u-card 质感 —— 柔暖投影 + 高光内边，rounded card。 */
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
   overflow: hidden;
 }
 
@@ -32,7 +34,7 @@
 }
 
 .head:hover {
-  background: var(--surface-elevated);
+  background: var(--accent-subtle);
 }
 
 .chev {
@@ -80,7 +82,7 @@
 }
 
 .statusRunning {
-  color: var(--accent);
+  color: var(--accent-deep);
   font-size: var(--size-meta);
   flex-shrink: 0;
 }
@@ -93,14 +95,22 @@
 }
 
 .body {
-  padding: 12px;
+  padding: 10px 12px;
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
 
+/* 工具输出落在一块淡暖色内嵌面板上 —— 跟卡片表面分层、等宽可读。 */
 .output {
   margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  box-shadow: inset 0 1px 2px rgba(120, 80, 50, 0.05);
+  font-family: var(--font-mono);
   font-size: 12px;
+  line-height: 1.5;
   color: var(--text-secondary);
   max-height: 240px;
   overflow: auto;

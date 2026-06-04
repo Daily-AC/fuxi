@@ -1,5 +1,6 @@
-/* 私聊页 modal · 整页橙色识别 (#N3 spec §C)
- *  顶栏 + 任务 banner + thread + composer，全部贴边铺满 NavigationStack 顶层。
+/* WorkerPage · daimeng 奶油糖果 · archetype B 详情/线程（门客私聊页）。
+ * 顶栏 ScreenHeader 风格（back ‹ 玄女 + 角色名/短 id + ⋯）；任务上下文 banner 走 peach
+ * Card + StatePill；thread 背景 u-mesh 暖光网格；空态走吉祥物 EmptyState。
  */
 .page {
   display: flex;
@@ -8,35 +9,41 @@
   background: var(--bg);
 }
 
-/* 橙色顶栏 · #D97757 实色（spec 写"渐变"，但宪法禁渐变 → 实色 + 顶栏底部 1px border 强化） */
+/* 顶栏 · 暖白浮起 + 柔影分隔（去旧橙色实色块） */
 .topbar {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
-  background: var(--accent);
-  color: var(--on-accent);
-  border-bottom: 1px solid #B5613D;
+  padding: max(var(--space-2), env(safe-area-inset-top)) var(--space-3) var(--space-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft1);
   min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+  position: relative;
+  z-index: 2;
 }
 
 .back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   min-height: var(--touch);
   min-width: var(--touch);
   padding: 0 var(--space-3);
-  margin-left: calc(var(--space-3) * -1);
+  margin-left: calc(var(--space-2) * -1);
   font-size: var(--size-aux);
-  font-weight: var(--weight-semibold);
-  color: var(--on-accent);
-  border-radius: 8px;
+  font-weight: var(--weight-medium);
+  color: var(--accent-deep);
+  border-radius: var(--radius-pill);
+  transition: background 0.18s var(--soft);
 }
 
 .back:active {
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--accent-subtle);
+}
+
+.backIcon {
+  display: block;
 }
 
 .titleWrap {
@@ -50,15 +57,16 @@
 }
 
 .role {
-  font-size: var(--size-heading);
+  font-size: var(--size-title);
   font-weight: var(--weight-semibold);
-  color: var(--on-accent);
+  color: var(--text-primary);
   line-height: 1.1;
 }
 
 .agentId {
+  font-family: var(--font-mono);
   font-size: var(--size-meta);
-  color: rgba(26, 15, 8, 0.65);
+  color: var(--text-muted);
   letter-spacing: 0;
 }
 
@@ -68,23 +76,26 @@
   justify-content: center;
   min-height: var(--touch);
   min-width: var(--touch);
-  font-size: 18px;
-  color: var(--on-accent);
-  border-radius: 8px;
+  color: var(--text-muted);
+  border-radius: var(--radius-pill);
+  transition: background 0.18s var(--soft), color 0.18s var(--soft);
 }
 
-.more:active {
-  background: rgba(0, 0, 0, 0.08);
+.more:disabled {
+  opacity: 0.45;
 }
 
-/* 任务上下文 banner · 橙色边 + 内容（#26 风格密集行） */
-.banner {
+/* 任务上下文 banner · peach Card 密集行 */
+.bannerWrap {
   flex-shrink: 0;
-  margin: var(--space-3) var(--space-4) 0;
-  padding: 10px 12px;
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-  background: var(--accent-subtle);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.banner {
+  padding: var(--space-3) var(--space-3x);
+}
+
+.bannerInner {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -92,7 +103,7 @@
 }
 
 .bannerLabel {
-  color: var(--accent);
+  color: var(--accent-deep);
   font-weight: var(--weight-semibold);
   flex-shrink: 0;
 }
@@ -112,7 +123,7 @@
   flex-shrink: 0;
 }
 
-/* thread · 滚动区 */
+/* thread · u-mesh 暖光网格背景 */
 .thread {
   flex: 1;
   display: flex;
@@ -129,20 +140,6 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  color: var(--text-muted);
-}
-
-.emptyTitle {
-  margin: 0;
-  font-size: var(--size-body);
-  color: var(--text-secondary);
-}
-
-.emptyHint {
-  margin: 0;
-  font-size: var(--size-aux);
-  color: var(--text-muted);
 }
 
 /* 用户气泡放右；其余左 */
@@ -156,17 +153,9 @@
   justify-content: flex-start;
 }
 
-/* composer 包裹 · 橙色化（accent placeholder + accent send） */
+/* composer 包裹 · 暖白浮起、柔影顶边（去旧 accent 硬边 + 橙色 placeholder） */
 .composerWrap {
   flex-shrink: 0;
-  border-top: 1px solid var(--accent);
-}
-
-.composerWrap :global(.composer) {
-  /* 让 accent 颜色透到 textarea/send · Composer 本身用 var(--accent)；额外给 placeholder 加 hint 色 */
-}
-
-.composerWrap :global(textarea::placeholder) {
-  color: var(--accent);
-  opacity: 0.85;
+  background: var(--surface);
+  box-shadow: 0 -2px 6px rgba(120, 80, 50, 0.06);
 }

@@ -1,26 +1,23 @@
-/* MorePage · v1-session17 task #9 · 「更多」hub
- * 8 tile grid（2 × 4）—— 节点 / 项目 / 工作者 / 交付物 / 记忆 / 角色 / 更漏 / 设置
- * 设计语言：每张 tile 是 #2A2925 surface 卡，圆角 12px，最少 ≥88px 高让标题
- * + 描述各占一行不挤；tap 高亮 #3F2E26 accent-subtle。
+/* MorePage · v1-session17 task #9 · 「更多」hub · daimeng 奶油糖果 · archetype C 宫格 hub。
+ * 8 tile grid（2 × 4）—— 节点 / 项目 / 工作者 / 交付物 / 记忆 / 角色 / 更漏 / 设置。
+ * 每张瓦片走 u-card 柔影 + 顶部渐变染色圆角 SVG 图标槽 + 粗 label + 淡 desc。
+ * 页底 u-mesh 暖光网格。
  */
 
 .page {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg);
 }
 
 .header {
   flex-shrink: 0;
-  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4) var(--space-3);
+  padding: max(var(--space-3), env(safe-area-inset-top)) var(--space-4)
+    var(--space-2);
 }
 
 .title {
   margin: 0;
-  font-size: var(--size-title);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
 }
 
 .subtitle {
@@ -34,7 +31,7 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
-  padding: var(--space-2) var(--space-4) var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-5);
 }
 
 .grid {
@@ -43,45 +40,77 @@
   gap: var(--space-3);
 }
 
+/* 宫格瓦片 · u-card 表面 + 竖排（图标 / label / desc）+ 按下回弹 */
 .tile {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: var(--space-1);
-  min-height: 92px;
-  padding: var(--space-3);
-  background: var(--surface);
-  border: 1px solid transparent;
-  border-radius: var(--radius-card);
+  gap: var(--space-2);
+  min-height: 116px;
+  padding: var(--space-4);
   text-align: left;
+  color: var(--text-primary);
   cursor: pointer;
   transition:
-    background var(--transition-fast, 150ms ease),
-    border-color var(--transition-fast, 150ms ease);
+    transform 0.16s var(--spring),
+    box-shadow 0.18s var(--soft);
 }
 
-.tile:active,
-.tile:focus-visible {
-  background: var(--accent-subtle);
-  border-color: var(--accent);
-  outline: none;
+.tile:active {
+  transform: scale(0.98);
+  box-shadow: var(--shadow-soft1), var(--inset-hi);
+}
+
+/* 渐变染色圆角图标槽 ~42px（默认暖橙 peach；mint / lavender 按 data-tone 切） */
+.iconSlot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: var(--space-1);
+  border-radius: 14px;
+  color: var(--accent-deep);
+  background: linear-gradient(
+    150deg,
+    rgba(255, 184, 119, 0.28) 0%,
+    rgba(255, 184, 119, 0.1) 100%
+  );
+  box-shadow: var(--inset-hi);
+}
+
+.iconSlot :global(svg) {
+  width: 23px;
+  height: 23px;
+  display: block;
+}
+
+.iconSlot[data-tone="mint"] {
+  color: #3f8f6a;
+  background: linear-gradient(
+    150deg,
+    rgba(143, 217, 182, 0.3) 0%,
+    rgba(143, 217, 182, 0.12) 100%
+  );
+}
+
+.iconSlot[data-tone="lavender"] {
+  color: #7c63a8;
+  background: linear-gradient(
+    150deg,
+    rgba(201, 182, 232, 0.32) 0%,
+    rgba(201, 182, 232, 0.12) 100%
+  );
 }
 
 .tileLabel {
-  font-size: var(--size-heading);
-  font-weight: var(--weight-medium);
+  font-size: var(--size-body);
+  font-weight: var(--weight-semibold);
   color: var(--text-primary);
 }
 
 .tileDesc {
   font-size: var(--size-meta);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   line-height: 1.4;
-}
-
-.tileBadge {
-  margin-top: auto;
-  font-size: var(--size-meta);
-  color: var(--accent);
-  font-weight: var(--weight-medium);
 }
