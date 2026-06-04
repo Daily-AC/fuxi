@@ -12,6 +12,10 @@
   border-top: 1px solid var(--border);
   border-top-left-radius: var(--radius-card, 16px);
   border-top-right-radius: var(--radius-card, 16px);
+  /* 自成 stacking context 且高于滚动内容——让探出栏外的悬浮玄女头像永远在最上层，
+   * 不被页面内容（卡片/composer 等）盖住造成「遮挡」。 */
+  position: relative;
+  z-index: 20;
 }
 
 .tab {
@@ -82,18 +86,21 @@
 .homeMascot {
   width: 46px;
   height: 46px;
-  margin-top: -28px;
+  margin-top: -24px;
   margin-bottom: -2px;
   border-radius: 50%;
   object-fit: cover;
+  /* 取脸/上半身（偏上一点，避免裙摆露进圆里显脏） */
   object-position: top center;
+  /* 不透明白底 disc——盖住身后内容，不让页面元素从透明处透出来造成「遮挡」感 */
   background: #fff;
   padding: 2px;
   box-shadow:
     0 4px 12px rgba(80, 50, 20, 0.2),
     0 0 0 3px #fff;
   position: relative;
-  z-index: 1;
+  /* 高于底栏其它内容 + 页面内容，确保悬浮头像永远在最上层不被遮 */
+  z-index: 5;
   transition: transform var(--transition-fast), box-shadow var(--transition-fast);
 }
 

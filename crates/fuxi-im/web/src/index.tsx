@@ -5,6 +5,7 @@ import "./styles/global.css";
 import "./styles/texture.css";
 import { App } from "./App";
 import { startVersionPoll } from "./lib/version-poll";
+import { startServiceWorkerAutoUpdate } from "./lib/sw-update";
 import { pushToast } from "./lib/toast";
 
 const root = document.getElementById("root");
@@ -19,3 +20,7 @@ render(() => <App />, root);
 startVersionPoll((newSha) => {
   pushToast(`检测到新版本 ${newSha}，4 秒后自动刷新…`, "info");
 });
+
+// 前端纯 rsync 部署（不重编 Rust，FUXI_BUILD_SHA 不变）走这条：探测到新 SW
+// 自动接管 + reload，无需用户强刷。补 version-poll 的盲区。
+startServiceWorkerAutoUpdate();
