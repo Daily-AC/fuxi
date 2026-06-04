@@ -77,9 +77,9 @@ export const HomePage: Component<{ unreadCount?: number }> = (props) => {
   // 气泡文案：戳了有 quip 就显示 quip，否则默认问候。
   const bubbleText = createMemo(() => quip() ?? "今天想做点什么呀～");
 
-  // 交付物入口：进「更多」hub 的 deliverables 子页。先切 tab 3 再设 sub。
+  // 交付物入口：进「更多」hub 的 deliverables 子页。先切 tab 4(更多) 再设 sub。
   const goDeliverables = (): void => {
-    setActiveTab(3);
+    setActiveTab(4);
     setMoreSub("deliverables");
   };
 
@@ -117,7 +117,7 @@ export const HomePage: Component<{ unreadCount?: number }> = (props) => {
               icon={<ChatIcon />}
               label="找玄女聊"
               desc="跟玄女说说话"
-              onClick={() => setActiveTab(1)}
+              onClick={() => setActiveTab(0)}
             />
           </div>
           <div data-testid="home-action-tasks">
@@ -125,7 +125,7 @@ export const HomePage: Component<{ unreadCount?: number }> = (props) => {
               icon={<TasksIcon />}
               label="看任务"
               desc="门客都在忙啥"
-              onClick={() => setActiveTab(2)}
+              onClick={() => setActiveTab(3)}
             />
           </div>
           <div data-testid="home-action-notifications">

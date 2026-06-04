@@ -51,7 +51,7 @@ function setup(unreadCount = 3) {
   };
 
   const tools = render(() => (
-    <ApiProvider initialAuth="in" initialTab={0}>
+    <ApiProvider initialAuth="in" initialTab={2}>
       <MascotProvider>
         <Capture />
       </MascotProvider>
@@ -89,17 +89,17 @@ describe("HomePage · 家·客厅主屏", () => {
     unmount();
   });
 
-  it("点「找玄女聊」→ 切到聊天 tab(1)", async () => {
+  it("点「找玄女聊」→ 切到聊天 tab(0)", async () => {
     const { getByTestId, getCtx, unmount } = setup();
     fireEvent.click(getByTestId("home-action-chat").querySelector("button")!);
-    expect(getCtx().activeTab()).toBe(1);
+    expect(getCtx().activeTab()).toBe(0);
     unmount();
   });
 
-  it("点「看任务」→ 切到任务 tab(2)", async () => {
+  it("点「看任务」→ 切到任务 tab(3)", async () => {
     const { getByTestId, getCtx, unmount } = setup();
     fireEvent.click(getByTestId("home-action-tasks").querySelector("button")!);
-    expect(getCtx().activeTab()).toBe(2);
+    expect(getCtx().activeTab()).toBe(3);
     unmount();
   });
 });

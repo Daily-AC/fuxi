@@ -16,7 +16,7 @@ describe("MorePage · 「更多」hub tile grid", () => {
   it("渲染 8 张 tile（节点 / 项目 / 工作者 / 交付物 / 记忆 / 角色 / 更漏 / 设置）", () => {
     setApiOverride(createMockApi());
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={4}>
         <MorePage />
       </ApiProvider>
     ));
@@ -38,7 +38,7 @@ describe("MorePage · 「更多」hub tile grid", () => {
   it("tap tile-memory · setMoreSub('memory')", () => {
     setApiOverride(createMockApi());
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={4}>
         <MorePage />
         <SubProbe />
       </ApiProvider>
@@ -51,7 +51,7 @@ describe("MorePage · 「更多」hub tile grid", () => {
   it("tap tile-roles · setMoreSub('roles')", () => {
     setApiOverride(createMockApi());
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={4}>
         <MorePage />
         <SubProbe />
       </ApiProvider>
@@ -64,7 +64,7 @@ describe("MorePage · 「更多」hub tile grid", () => {
   it("tap tile-cron · setMoreSub('cron')", () => {
     setApiOverride(createMockApi());
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={4}>
         <MorePage />
         <SubProbe />
       </ApiProvider>
