@@ -3,7 +3,7 @@ import styles from "./BottomTabBar.module.css";
 
 // Bottom tab bar · daimeng 奶油糖果重构 · 5 tab + 毛玻璃 + SVG 图标
 //
-// tab 模型：[聊天][通知][家][任务][更多]，不允许 tab 间手势切换。
+// tab 模型：[聊天][任务][家][通知][更多]，不允许 tab 间手势切换。
 // 「通知」重新升为一级 tab（带 unread 红点 badge）。
 // 「项目」「交付」「节点」「工作者」「记忆」「角色」「更漏」「设置」全部进
 // 「更多」hub 二级页面，PWA 内部 navPush 进入。
@@ -45,12 +45,17 @@ function tabIcon(key: TabKey): JSX.Element {
   };
   switch (key) {
     case "home":
+      // 家 tab 用小玄女头像（圆形裁剪自 idle 帧）替代纯线条房子图标——让「家」更显眼、
+      // 跟玄女这个产品主体绑定。img 不吃 currentColor，选中/未选的反馈靠 CSS 调
+      // 透明度 + accent 描边圈（见 .homeMascot）。
       return (
-        <svg {...common} data-testid="tab-home-icon">
-          <path d="M4 11 12 4l8 7" />
-          <path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9" />
-          <path d="M10 20v-5h4v5" />
-        </svg>
+        <img
+          class={styles.homeMascot}
+          src="/mascot/xuannv-idle.webp"
+          alt=""
+          aria-hidden="true"
+          data-testid="tab-home-icon"
+        />
       );
     case "xuannv":
       return (

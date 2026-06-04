@@ -75,3 +75,22 @@
   text-align: center;
   letter-spacing: 0;
 }
+
+/* 家 tab 的小玄女头像 · 圆形裁脸（object-position 取上半身/头）。
+ * 未选：略降透明度 + 中性描边；选中：满色 + accent 描边圈 + 轻放大（沿用 .icon scale）。 */
+.homeMascot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: top center;
+  background: var(--surface-soft, rgba(0, 0, 0, 0.04));
+  box-shadow: 0 0 0 1.5px var(--border);
+  opacity: 0.7;
+  transition: opacity var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.tab[aria-selected="true"] .homeMascot {
+  opacity: 1;
+  box-shadow: 0 0 0 1.5px var(--accent-deep);
+}
