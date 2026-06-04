@@ -261,3 +261,34 @@
   display: flex;
   justify-content: flex-start;
 }
+
+/* #4 · 门客 sub-tab 栏 · 横向 pill 组，门客多时可横滚 */
+.workerSubtabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 12px;
+  overflow-x: auto;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line, var(--accent-subtle));
+  scrollbar-width: none;
+}
+.workerSubtabs::-webkit-scrollbar {
+  display: none;
+}
+.workerSubtab {
+  flex: 0 0 auto;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background 0.18s var(--soft), color 0.18s var(--soft);
+}
+.workerSubtabActive {
+  color: var(--accent-deep);
+  background: var(--accent-subtle);
+}

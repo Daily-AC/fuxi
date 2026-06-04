@@ -12,7 +12,7 @@ function setup(overview?: TasksOverview, nodes?: NodesResponse) {
   const api = createMockApi({ tasksOverview: overview, nodes });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={2}>
+    <ApiProvider initialAuth="in" initialTab={3}>
       <TasksPage />
     </ApiProvider>
   ));
@@ -103,7 +103,7 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
       return null;
     };
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={2}>
+      <ApiProvider initialAuth="in" initialTab={3}>
         <TasksPage />
         <Probe />
       </ApiProvider>
@@ -146,6 +146,24 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
     ).filter((el) => !el.getAttribute("data-testid")?.startsWith("task-card-head-"));
     expect(cards[0]?.getAttribute("data-testid")).toBe("task-card-c-new");
     expect(cards[1]?.getAttribute("data-testid")).toBe("task-card-c-old");
+    unmount();
+  });
+
+  it("Bug · failed 任务显示「已失败」而非误导的「排队中」", async () => {
+    // 后端 tasks_view 把 Cancelled 任务映射成 status='failed'（且归入 completed 段）。
+    // 前端 pillFor 早先漏了 'failed' 分支 → 落到 default「排队中」，让一个已终结
+    // （取消/失败）的任务误显成「排队中」，正是用户实测「已完成却显示排队中」。
+    const overview: TasksOverview = {
+      running: [],
+      completed: [
+        { id: "c-fail", title: "被取消的活", status: "failed", created_at: "", last_active_at: "2026-06-04T10:00:00Z", duration_ms: 5_000, members: [] },
+      ],
+    };
+    const { getByTestId, unmount } = setup(overview);
+    await new Promise((r) => setTimeout(r, 30));
+    const card = getByTestId("task-card-c-fail");
+    expect(card.textContent).toContain("已失败");
+    expect(card.textContent).not.toContain("排队中");
     unmount();
   });
 

@@ -1,25 +1,25 @@
 import { For, type Component, type JSX } from "solid-js";
 import styles from "./BottomTabBar.module.css";
 
-// Bottom tab bar · daimeng 奶油糖果重构 · 4 tab + 毛玻璃 + SVG 图标
+// Bottom tab bar · daimeng 奶油糖果重构 · 5 tab + 毛玻璃 + SVG 图标
 //
-// tab 模型：[家][聊天][任务][更多]，不允许 tab 间手势切换。
-// 旧「通知」一级 tab 已废——通知并入「家」首页（红点 + 入口进 NotificationsPage）。
+// tab 模型：[聊天][通知][家][任务][更多]，不允许 tab 间手势切换。
+// 「通知」重新升为一级 tab（带 unread 红点 badge）。
 // 「项目」「交付」「节点」「工作者」「记忆」「角色」「更漏」「设置」全部进
 // 「更多」hub 二级页面，PWA 内部 navPush 进入。
 //
 // 图标：纯 inline SVG（无 emoji），currentColor 描边——选中走 --accent-deep，
 // 未选中走 --text-muted，靠 CSS 切换。
 
-export type TabIndex = 0 | 1 | 2 | 3;
+export type TabIndex = 0 | 1 | 2 | 3 | 4;
 
-export type TabKey = "home" | "xuannv" | "tasks" | "more";
+export type TabKey = "xuannv" | "notifications" | "home" | "tasks" | "more";
 
 export interface TabSpec {
   /** 内部 tab 标签，testid + aria + 图标分发用，不渲染文本。*/
   key: TabKey;
   label: string;
-  /** 红点 badge 数（>0 显，==0 不显）。家 tab 可用 unread_count；其他 tab 暂未用。*/
+  /** 红点 badge 数（>0 显，==0 不显）。通知 tab 用 unread_count；其他 tab 暂未用。*/
   badge?: number;
 }
 
@@ -56,6 +56,13 @@ function tabIcon(key: TabKey): JSX.Element {
       return (
         <svg {...common} data-testid="tab-xuannv-icon">
           <path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9l-4 3v-3a1 1 0 0 1 0 0V6a1 1 0 0 1 1-1Z" />
+        </svg>
+      );
+    case "notifications":
+      return (
+        <svg {...common} data-testid="tab-notifications-icon">
+          <path d="M6 16V10.5a6 6 0 0 1 12 0V16l1.5 2.5h-15L6 16Z" />
+          <path d="M10 19.5a2 2 0 0 0 4 0" />
         </svg>
       );
     case "tasks":

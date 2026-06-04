@@ -16,6 +16,7 @@ import { startReconnectingSocket, type ReconnectController } from "~/lib/reconne
 import { pushToast } from "~/lib/toast";
 import {
   applyTaskThreadEvent,
+  eqAgent,
   groupConsecutiveToolCalls,
   lookupMember,
   makeUserMessage,
@@ -95,6 +96,35 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
       }
     }
     return { members, xuannv_id };
+  });
+
+  // #4 · 门客 sub-tab：一个任务多门客并行时，按门客分 tab 过滤消息流（用户选型）。
+  // workers = 成员里非玄女的门客（保序）。只有 ≥2 个门客才出 sub-tab 栏，1 个无意义。
+  const workers = createMemo<{ agent_id: string; role_display: string }[]>(() => {
+    const t = task();
+    if (!t) return [];
+    return t.members
+      .filter((m) => m.role !== "xuannv")
+      .map((m) => ({ agent_id: m.agent_id, role_display: m.role_display }));
+  });
+  // 选中门客 agent_id；null = 「全部」（默认，显示整条时间线）。
+  const [selectedWorker, setSelectedWorker] = createSignal<string | null>(null);
+  // workers 变动时若选中项已不在列表，回退「全部」，避免空流。
+  createEffect(() => {
+    const sel = selectedWorker();
+    if (sel && !workers().some((w) => eqAgent(w.agent_id, sel))) {
+      setSelectedWorker(null);
+    }
+  });
+  // 过滤后的消息流：选中某门客 → 仅保留该门客 agent 的消息（worker bubble /
+  // 工具卡 / thinking）；user / 玄女 / 其他门客滤掉（对应「仅显示当前选中门客的流」）。
+  const visibleMessages = createMemo<Message[]>(() => {
+    const sel = selectedWorker();
+    const all = messages();
+    if (!sel) return all;
+    return all.filter(
+      (m) => "agent" in m && eqAgent((m as { agent: string | null }).agent, sel),
+    );
   });
 
   // composer 候选 = 全任务成员 + dist online 节点（v3 #60 加节点段）
@@ -349,7 +379,15 @@ export const TaskThreadPage: Component<TaskThreadPageProps> = (props) => {
         {(t) => <Banner task={t()} onlineNodeIds={onlineNodeIds()} />}
       </Show>
 
-      <Thread messages={messages} online={online} ctx={ctx} />
+      <Show when={workers().length >= 2}>
+        <WorkerSubTabs
+          workers={workers()}
+          selected={selectedWorker()}
+          onSelect={setSelectedWorker}
+        />
+      </Show>
+
+      <Thread messages={visibleMessages} online={online} ctx={ctx} />
 
       <MentionComposer
         candidates={candidates()}
@@ -536,6 +574,54 @@ function toolCallText(call: TaskGroupCard["members"][number]["last_tool_call"]):
   if (typeof call === "string") return call;
   return call.args_summary ? `${call.tool} ${call.args_summary}` : call.tool;
 }
+
+// #4 · 门客 sub-tab 栏：「全部」+ 每个门客一个 pill。横向可滚（门客多时）。
+// 纯文字 pill（禁 emoji），选中走 --accent-deep 底，未选走 muted。
+interface WorkerSubTabsProps {
+  workers: { agent_id: string; role_display: string }[];
+  selected: string | null;
+  onSelect: (id: string | null) => void;
+}
+
+const WorkerSubTabs: Component<WorkerSubTabsProps> = (props) => {
+  return (
+    <nav
+      class={styles.workerSubtabs}
+      role="tablist"
+      aria-label="按门客筛选"
+      data-testid="worker-subtabs"
+    >
+      <button
+        type="button"
+        role="tab"
+        class={styles.workerSubtab}
+        classList={{ [styles.workerSubtabActive ?? ""]: props.selected === null }}
+        aria-selected={props.selected === null}
+        data-testid="worker-subtab-all"
+        onClick={() => props.onSelect(null)}
+      >
+        全部
+      </button>
+      <For each={props.workers}>
+        {(w) => (
+          <button
+            type="button"
+            role="tab"
+            class={styles.workerSubtab}
+            classList={{
+              [styles.workerSubtabActive ?? ""]: eqAgent(props.selected, w.agent_id),
+            }}
+            aria-selected={eqAgent(props.selected, w.agent_id)}
+            data-testid={`worker-subtab-${w.agent_id}`}
+            onClick={() => props.onSelect(w.agent_id)}
+          >
+            {w.role_display}
+          </button>
+        )}
+      </For>
+    </nav>
+  );
+};
 
 interface ThreadProps {
   messages: Accessor<Message[]>;

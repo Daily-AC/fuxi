@@ -73,7 +73,7 @@ function setup(opts?: {
   });
   setApiOverride(api);
   const tools = render(() => (
-    <ApiProvider initialAuth="in" initialTab={1}>
+    <ApiProvider initialAuth="in" initialTab={3}>
       <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
       <Toast />
     </ApiProvider>
@@ -209,6 +209,52 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     expect(wb).toHaveLength(1);
     expect(wb[0]?.textContent).toContain("查到 12 条");
     expect(wb[0]?.textContent).toContain("鲁班");
+    unmount();
+  });
+
+  // #4（2026-06-04 用户选「按门客分 sub-tab」）：一个任务多门客并行时，顶部出
+  // worker sub-tab 栏，点选过滤到该门客的消息流；只有 1 个门客时不出 sub-tab。
+  it("#4 · 多门客 → 出 worker sub-tab 栏 + 点选过滤到该门客流", async () => {
+    const { api, getByTestId, unmount } = setup();
+    await new Promise((r) => setTimeout(r, 50));
+    api.pushTask(TASK_ID, ev({ type: "agent_responded", text: "鲁班查到 12 条" }, { agent: LUBAN }));
+    api.pushTask(TASK_ID, ev({ type: "agent_responded", text: "蒲松写完文档" }, { agent: PUSONG }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    // sub-tab 栏出现（≥2 门客），含「全部」+ 两个门客名
+    const subtabs = getByTestId("worker-subtabs");
+    expect(subtabs.textContent).toContain("全部");
+    expect(subtabs.textContent).toContain("鲁班");
+    expect(subtabs.textContent).toContain("蒲松");
+
+    // 默认「全部」：两条都在
+    expect(getByTestId("task-thread").textContent).toContain("鲁班查到 12 条");
+    expect(getByTestId("task-thread").textContent).toContain("蒲松写完文档");
+
+    // 点「蒲松」→ 仅蒲松的流（鲁班的隐藏）
+    fireEvent.click(getByTestId(`worker-subtab-${PUSONG}`));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(getByTestId("task-thread").textContent).toContain("蒲松写完文档");
+    expect(getByTestId("task-thread").textContent).not.toContain("鲁班查到 12 条");
+    unmount();
+  });
+
+  it("#4 · 仅 1 个门客 · 不出 sub-tab 栏（无意义不打扰）", async () => {
+    const oneWorker: TasksOverview = {
+      running: [
+        {
+          ...TASK_OVERVIEW.running[0]!,
+          members: [
+            { agent_id: XUANNV, role: "xuannv", role_display: "玄女", status: "busy" as const },
+            { agent_id: LUBAN, role: "luban", role_display: "鲁班", status: "busy" as const },
+          ],
+        },
+      ],
+      completed: [],
+    };
+    const { queryByTestId, unmount } = setup({ overview: oneWorker });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(queryByTestId("worker-subtabs")).toBeNull();
     unmount();
   });
 
@@ -510,7 +556,7 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     });
     setApiOverride(api);
     const { getByTestId, queryByTestId, queryAllByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={1}>
+      <ApiProvider initialAuth="in" initialTab={3}>
         <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
       </ApiProvider>
     ));
@@ -548,7 +594,7 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     });
     setApiOverride(api);
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={1}>
+      <ApiProvider initialAuth="in" initialTab={3}>
         <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
       </ApiProvider>
     ));
