@@ -60,6 +60,15 @@ use tracing::{debug, info, warn};
 /// 当前 sum = 1700ms（200+500+1000），delta 用 2.5s 留余量。
 pub(crate) const REVIEW_RETRY_BACKOFF_MS: &[u64] = &[200, 500, 1000];
 
+/// 把固定 `AgentId` 包成 `watch::Receiver`（sender 立即 drop，receiver 仍能 borrow
+/// 出最后值）。给非生产 spawn 路径（旧 `spawn_with` 兼容 + 单测）用——它们没有活的
+/// `Fuxi` watch。生产 `spawn` 走 `fuxi.xuannv_id_watch()` 真随 respawn 漂移。
+fn fixed_xuannv_watch(id: AgentId) -> watch::Receiver<Option<AgentId>> {
+    let (tx, rx) = watch::channel(Some(id));
+    drop(tx);
+    rx
+}
+
 /// 内部 role 黑名单：这些门客的 [`EventKind::AgentDead`] **不抄送**给玄女，
 /// 且 a58e45b4 引入的 TaskDone 兜底注入也对其静默。
 ///
@@ -466,15 +475,22 @@ impl SystemEventBridge {
     pub fn spawn(
         fuxi: Arc<Fuxi>,
         bus: EventBus,
-        xuannv_id: AgentId,
+        _xuannv_id: AgentId,
         trigger_lookup: Arc<dyn TriggerLookup>,
     ) -> JoinHandle<()> {
         let topic_watch = Some(fuxi.current_topic_watch());
+        // a01cfab5 修：玄女 id 在会话中会漂移（idle GC 重生 / handoff / fresh cc
+        // session）。bridge 必须订 watch 实时取**当前**玄女 id，不能用启动期 snapshot
+        // 的 `_xuannv_id`——否则玄女一旦 respawn，门客的 AgentRequestReview 全打到
+        // 已死的旧 id → AgentNotFound → retry 耗尽 → ReviewRequestTimeout 也打旧 id 失败
+        // → 完工信号蒸发，玄女永远不知道门客干完了（用户实测「门客干完不汇报」）。
+        // 同 conv WS 的 feedback_dynamic_agent_id_via_watch 教训。
+        let xuannv_watch = fuxi.xuannv_id_watch();
         let intervener: Arc<dyn Intervener> = fuxi;
         Self::spawn_inner(
             intervener,
             bus,
-            xuannv_id,
+            xuannv_watch,
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
             topic_watch,
@@ -493,7 +509,7 @@ impl SystemEventBridge {
         Self::spawn_inner(
             intervener,
             bus,
-            xuannv_id,
+            fixed_xuannv_watch(xuannv_id),
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
             None,
@@ -512,7 +528,7 @@ impl SystemEventBridge {
         Self::spawn_inner(
             intervener,
             bus,
-            xuannv_id,
+            fixed_xuannv_watch(xuannv_id),
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
             Some(topic_watch),
@@ -528,13 +544,38 @@ impl SystemEventBridge {
         trigger_lookup: Arc<dyn TriggerLookup>,
         backoff_ms: &'static [u64],
     ) -> JoinHandle<()> {
-        Self::spawn_inner(intervener, bus, xuannv_id, trigger_lookup, backoff_ms, None)
+        Self::spawn_inner(
+            intervener,
+            bus,
+            fixed_xuannv_watch(xuannv_id),
+            trigger_lookup,
+            backoff_ms,
+            None,
+        )
+    }
+
+    /// 测试专用：注入活的玄女 id watch，验证 bridge 实时跟随 id 漂移（a01cfab5）。
+    #[cfg(test)]
+    pub(crate) fn spawn_with_xuannv_watch_for_test(
+        intervener: Arc<dyn Intervener>,
+        bus: EventBus,
+        xuannv_watch: watch::Receiver<Option<AgentId>>,
+        trigger_lookup: Arc<dyn TriggerLookup>,
+    ) -> JoinHandle<()> {
+        Self::spawn_inner(
+            intervener,
+            bus,
+            xuannv_watch,
+            trigger_lookup,
+            REVIEW_RETRY_BACKOFF_MS,
+            None,
+        )
     }
 
     fn spawn_inner(
         intervener: Arc<dyn Intervener>,
         bus: EventBus,
-        xuannv_id: AgentId,
+        xuannv_watch: watch::Receiver<Option<AgentId>>,
         trigger_lookup: Arc<dyn TriggerLookup>,
         backoff_ms: &'static [u64],
         topic_watch: Option<watch::Receiver<fuxi_core::TopicId>>,
@@ -568,6 +609,12 @@ impl SystemEventBridge {
                         continue;
                     }
                 }
+                // a01cfab5 修：每条事件实时读**当前**玄女 id（跟随 respawn 漂移）。
+                // 玄女未就绪（None）→ 跳过——没有可注入对象，留给她下次就绪后的事件。
+                let Some(xuannv_id) = *xuannv_watch.borrow() else {
+                    debug!("bridge: 玄女 id 未就绪（None），跳过事件");
+                    continue;
+                };
                 handle_event(
                     &*intervener,
                     &*trigger_lookup,
@@ -1610,6 +1657,56 @@ mod tests {
         assert!(
             text.contains("commit:abc1234"),
             "prompt 含 artifact_ref: {text}"
+        );
+    }
+
+    /// a01cfab5 回归：玄女 id 在会话中 respawn 漂移后，门客 AgentRequestReview 必须
+    /// 注入【当前】玄女 id，不能打到启动期 snapshot 的旧（已死）id——否则
+    /// AgentNotFound → retry 耗尽 → 完工信号丢，玄女永远不知道门客干完了。
+    #[tokio::test]
+    async fn bridge_review_follows_xuannv_id_drift() {
+        use fuxi_core::DeliverableKind;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let old_xuannv = AgentId::new();
+        let new_xuannv = AgentId::new();
+        let worker = AgentId::new();
+        let (tx, rx) = watch::channel(Some(old_xuannv));
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        let _h = SystemEventBridge::spawn_with_xuannv_watch_for_test(
+            mock.clone(),
+            bus.clone(),
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // 玄女 respawn → id 漂到 new（bridge 不重启，靠 watch 跟随）。
+        tx.send_replace(Some(new_xuannv));
+
+        let task = fuxi_core::id::TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: DeliverableKind::CodeChange,
+                summary: "干完了，待审".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "AgentRequestReview 应触发 intervene 一次");
+        assert_eq!(
+            calls[0].0, new_xuannv,
+            "review 必须注入【当前】玄女 id，不是启动期 snapshot 的旧 id"
         );
     }
 
