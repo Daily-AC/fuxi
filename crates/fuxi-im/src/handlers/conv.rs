@@ -51,18 +51,31 @@ pub async fn conv_ws(
     Query(q): Query<StreamQuery>,
 ) -> Result<Response> {
     let cursor = parse_cursor(q.from.as_deref())?;
-    let xuannv = state.fuxi.xuannv_id().await.ok_or_else(|| {
+    // 玄女 id 会在**会话中**漂移（idle GC 重生 / handoff / fresh cc session——home 日志
+    // 实测单进程 15 分钟内换 3 个 id）。绝不能 snapshot 一次烤进 filter 闭包：长连 WS
+    // 不会因玄女换 id 重新 accept，旧 id 被烤死后她的 AgentResponded 全被静默滤掉，
+    // live 流断供，用户只能切 tab 重挂载重拉 id-无关的历史才看得到（P0 现象）。
+    // 改订 `watch::Receiver`，filter 每帧实时读当前 id 跟随漂移。
+    // 见 memory `feedback_dynamic_agent_id_via_watch`（同类 silent bug 的既定铁律）。
+    let id_watch = state.fuxi.xuannv_id_watch();
+    let xuannv_now = *id_watch.borrow();
+    if xuannv_now.is_none() {
         // 玄女还没起——前端应能区分"暂时无对话流"和"路由错"。返 503 比 400 合适，
         // 但本 crate 错误枚举只有 NOT_FOUND/UNAUTHORIZED/...，先归 NotFound 语义最近。
-        Error::NotFound("玄女尚未注入；请先 set_xuannv".into())
-    })?;
-    info!(?cursor, %xuannv, "ws /api/conv accept");
+        return Err(Error::NotFound("玄女尚未注入；请先 set_xuannv".into()));
+    }
+    info!(?cursor, xuannv = ?xuannv_now, "ws /api/conv accept");
 
     let bus = state.fuxi.bus().clone();
     let stream = build_event_stream(&bus, cursor);
 
     let resp = ws.on_upgrade(move |socket| async move {
-        run_ws_loop(socket, stream, move |ev| ev.meta.agent == Some(xuannv)).await;
+        run_ws_loop(socket, stream, move |ev| {
+            // 实时读当前玄女 id——跟随会话内漂移；`is_some()` 守掉平台级（agent=None）事件，
+            // 避免玄女 kill→respawn 的 None 空窗里 None==None 误放行非对话事件。
+            ev.meta.agent.is_some() && ev.meta.agent == *id_watch.borrow()
+        })
+        .await;
     });
     Ok(resp)
 }
