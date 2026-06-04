@@ -133,13 +133,17 @@ function parseTs(iso: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-// status → StatePill tone（running 桃 / completed 薄荷 / 其余 queued 薰衣草）。
+// status → StatePill tone（running 桃 / completed 薄荷 / failed 红 / 其余 queued 薰衣草）。
+// 后端只产出 running/completed/failed（tasks_view:489，Cancelled→failed）。漏 failed
+// 分支会让已终结的取消/失败任务落到 default「排队中」误导用户（实测 bug）。
 function pillFor(status: string): { label: string; tone: StatePillTone } {
   switch (status) {
     case "running":
       return { label: "进行中", tone: "running" };
     case "completed":
       return { label: "已完成", tone: "done" };
+    case "failed":
+      return { label: "已失败", tone: "danger" };
     default:
       return { label: "排队中", tone: "queued" };
   }

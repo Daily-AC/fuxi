@@ -268,7 +268,18 @@ export function applyEvent(prev: Message[], ev: ServerEvent): Message[] {
         // streaming bubble 结束但没文字 → 丢
         return prev.slice(0, -1);
       }
-      const updated: XuannvMessage = { ...last, text, streaming: false };
+      // 完结 streaming bubble 时**采纳本事件（agent_responded/agent_text）的 event id**，
+      // 不再留 thinking_started 的 id。理由：conv_store 落库时 source_event_id =
+      // AgentResponded 的 event id（handle_event:468），而 fromStoredMessage 用
+      // source_event_id 当 message id。两边对齐后 mergeMessages 才能去重，否则
+      // loadHistory（onVisible 不卸载触发）merge 历史副本会冒第二条——即用户实测
+      // 「消息重复显示两次，切 tab 复原」。
+      const updated: XuannvMessage = {
+        ...last,
+        id: ev.meta.id || last.id,
+        text,
+        streaming: false,
+      };
       return [...prev.slice(0, -1), updated];
     }
     if (isEmpty) return prev; // 没起 bubble + 空 text · noop
@@ -537,6 +548,10 @@ export function makeUserMessage(
  */
 export function fromStoredMessage(s: StoredMessage): Message | null {
   const ts = parseTs(s.ts);
+  // 历史副本的 id 用 source_event_id（= 原 event id）优先，跟 live 流的气泡 id
+  // 对齐，让 mergeMessages 能去重同一条消息的 live/历史两份。缺省回落 store 行 id。
+  // 见「消息重复显示两次，切 tab 复原」bug。
+  const stableId = s.source_event_id ?? s.id;
   if (s.kind === "text") {
     const text = textFromContent(s.content);
     // bug #77：conv_store 把系统注入（review_request/carbon_copy 等）role 写
@@ -572,7 +587,7 @@ export function fromStoredMessage(s: StoredMessage): Message | null {
     if (text.trim() === "") return null;
     return {
       kind: "xuannv",
-      id: s.id,
+      id: stableId,
       agent: s.agent_id ?? null,
       role: s.role,
       text,

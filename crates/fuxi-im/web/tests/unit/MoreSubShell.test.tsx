@@ -16,7 +16,7 @@ describe("MoreSubShell", () => {
   it("渲染 title + 返回按钮 + children body", () => {
     setApiOverride(createMockApi());
     const { getByTestId, getByText, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="memory">
+      <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="memory">
         <MoreSubShell title="记忆" testIdSuffix="memory">
           <p data-testid="payload">payload</p>
         </MoreSubShell>
@@ -32,7 +32,7 @@ describe("MoreSubShell", () => {
   it("点 ‹ 更多 · setMoreSub(null) 回 hub", () => {
     setApiOverride(createMockApi());
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="cron">
+      <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="cron">
         <MoreSubShell title="更漏" testIdSuffix="cron">
           <span>x</span>
         </MoreSubShell>
@@ -48,7 +48,7 @@ describe("MoreSubShell", () => {
   it("hideTitle=true · 不显 shell 标题（子页自带 header 时）", () => {
     setApiOverride(createMockApi());
     const { queryByText, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
+      <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="nodes">
         <MoreSubShell title="节点" hideTitle testIdSuffix="nodes">
           <h1>节点</h1>
         </MoreSubShell>

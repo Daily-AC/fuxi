@@ -12,7 +12,7 @@ function setup(nodes?: NodesResponse) {
   const api = createMockApi({ nodes });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
+    <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="nodes">
       <NodesPage />
     </ApiProvider>
   ));
@@ -154,7 +154,7 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
       return null;
     };
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
+      <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="nodes">
         <NodesPage />
         <Probe />
       </ApiProvider>
@@ -163,7 +163,7 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
     fireEvent.click(getByTestId("node-worker-a-luban").querySelector("button")!);
     await new Promise((r) => setTimeout(r, 10));
     expect(pushedTask).toBe("t-erp");
-    expect(switchedTab).toBe(2);
+    expect(switchedTab).toBe(3);
     unmount();
   });
 
@@ -199,7 +199,7 @@ describe("NodesPage v3 #58 · /api/nodes 真 topology", () => {
     const api = createMockApi({ nodes: initial });
     setApiOverride(api);
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3} initialMoreSub="nodes">
+      <ApiProvider initialAuth="in" initialTab={4} initialMoreSub="nodes">
         <NodesPage />
       </ApiProvider>
     ));
