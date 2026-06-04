@@ -125,7 +125,7 @@ export const HomePage: Component<{ unreadCount?: number }> = (props) => {
               icon={<TasksIcon />}
               label="看任务"
               desc="门客都在忙啥"
-              onClick={() => setActiveTab(3)}
+              onClick={() => setActiveTab(1)}
             />
           </div>
           <div data-testid="home-action-notifications">

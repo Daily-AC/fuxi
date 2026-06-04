@@ -73,7 +73,7 @@ function setup(opts?: {
   });
   setApiOverride(api);
   const tools = render(() => (
-    <ApiProvider initialAuth="in" initialTab={3}>
+    <ApiProvider initialAuth="in" initialTab={1}>
       <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
       <Toast />
     </ApiProvider>
@@ -556,7 +556,7 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     });
     setApiOverride(api);
     const { getByTestId, queryByTestId, queryAllByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={1}>
         <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
       </ApiProvider>
     ));
@@ -594,7 +594,7 @@ describe("TaskThreadPage · v3 #N4' / #39", () => {
     });
     setApiOverride(api);
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={1}>
         <TaskThreadPage task_id={TASK_ID} fallback_title="查 ERP API" />
       </ApiProvider>
     ));

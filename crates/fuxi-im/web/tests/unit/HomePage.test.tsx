@@ -96,10 +96,10 @@ describe("HomePage · 家·客厅主屏", () => {
     unmount();
   });
 
-  it("点「看任务」→ 切到任务 tab(3)", async () => {
+  it("点「看任务」→ 切到任务 tab(1)", async () => {
     const { getByTestId, getCtx, unmount } = setup();
     fireEvent.click(getByTestId("home-action-tasks").querySelector("button")!);
-    expect(getCtx().activeTab()).toBe(3);
+    expect(getCtx().activeTab()).toBe(1);
     unmount();
   });
 });
