@@ -12,7 +12,7 @@ function setup(overview?: TasksOverview, nodes?: NodesResponse) {
   const api = createMockApi({ tasksOverview: overview, nodes });
   setApiOverride(api);
   return render(() => (
-    <ApiProvider initialAuth="in" initialTab={3}>
+    <ApiProvider initialAuth="in" initialTab={1}>
       <TasksPage />
     </ApiProvider>
   ));
@@ -103,7 +103,7 @@ describe("TasksPage · v3 任务列表 (#N3' / #38)", () => {
       return null;
     };
     const { getByTestId, unmount } = render(() => (
-      <ApiProvider initialAuth="in" initialTab={3}>
+      <ApiProvider initialAuth="in" initialTab={1}>
         <TasksPage />
         <Probe />
       </ApiProvider>

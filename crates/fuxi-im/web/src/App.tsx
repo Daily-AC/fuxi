@@ -88,9 +88,9 @@ const AuthGate: Component = () => {
 
 const BASE_TABS: ReadonlyArray<TabSpec> = [
   { key: "xuannv", label: "聊天" },
-  { key: "notifications", label: "通知" },
-  { key: "home", label: "家" },
   { key: "tasks", label: "任务" },
+  { key: "home", label: "家" },
+  { key: "notifications", label: "通知" },
   { key: "more", label: "更多" },
 ];
 
@@ -183,18 +183,18 @@ const MainShell: Component = () => {
               <XuannvPage />
             </Match>
             <Match when={activeTab() === 1}>
-              {/* 通知(Notifications)：升为一级 tab，直接做 base，无二层 push */}
-              <NotificationsPage />
-            </Match>
-            <Match when={activeTab() === 2}>
-              <HomePage unreadCount={notif()?.unread_count ?? 0} />
-            </Match>
-            <Match when={activeTab() === 3}>
               <NavigationStack
                 base={<TasksPage />}
                 top={renderTaskTop()}
                 onPop={navPop}
               />
+            </Match>
+            <Match when={activeTab() === 2}>
+              <HomePage unreadCount={notif()?.unread_count ?? 0} />
+            </Match>
+            <Match when={activeTab() === 3}>
+              {/* 通知(Notifications)：一级 tab，直接做 base，无二层 push */}
+              <NotificationsPage />
             </Match>
             <Match when={activeTab() === 4}>
               <MoreTabContent
@@ -212,8 +212,8 @@ const MainShell: Component = () => {
         active={activeTab()}
         onChange={(i: TabIndex) => {
           setActiveTab(i);
-          // 切到通知 tab(1) 或家(2) 时刷一次 unread_count（badge / 家红点跟着更新）。
-          if (i === 1 || i === 2) {
+          // 切到家(2) 或通知 tab(3) 时刷一次 unread_count（badge / 家红点跟着更新）。
+          if (i === 2 || i === 3) {
             setTimeout(() => {
               void refetchNotif();
             }, 200);
