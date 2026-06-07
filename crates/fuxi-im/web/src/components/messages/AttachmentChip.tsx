@@ -1,6 +1,7 @@
-import { Show, type Component } from "solid-js";
+import { Show, createSignal, type Component } from "solid-js";
 import type { Upload } from "~/types/api";
 import styles from "./AttachmentChip.module.css";
+import { ImageViewer } from "./ImageViewer";
 
 function formatBytes(b: number): string {
   if (!b) return "";
@@ -16,6 +17,16 @@ function isImage(u: Upload): boolean {
 // 已上传完成的附件 chip · 渲染在消息 bubble 内（点击 → 直链 GET /api/uploads/:id）。
 export const AttachmentChip: Component<{ upload: Upload }> = (props) => {
   const href = (): string => `/api/uploads/${encodeURIComponent(props.upload.id)}`;
+  const [viewing, setViewing] = createSignal(false);
+
+  // issue 3b5b8f25：图片点击打开 in-app lightbox（fit-to-screen），不再走 WebView
+  // 原生打开（高分辨率原图会被 1:1 渲染只见左上角）。非图片附件仍直链下载。
+  const onClick = (e: MouseEvent) => {
+    if (!isImage(props.upload)) return;
+    e.preventDefault();
+    setViewing(true);
+  };
+
   return (
     <a
       class={styles.chip}
@@ -23,8 +34,12 @@ export const AttachmentChip: Component<{ upload: Upload }> = (props) => {
       href={href()}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={onClick}
       data-testid={`attachment-chip-${props.upload.id}`}
     >
+      <Show when={viewing()}>
+        <ImageViewer src={href()} alt={props.upload.name} onClose={() => setViewing(false)} />
+      </Show>
       <Show
         when={isImage(props.upload)}
         fallback={

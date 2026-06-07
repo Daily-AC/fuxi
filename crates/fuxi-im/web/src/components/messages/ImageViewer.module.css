@@ -1,0 +1,69 @@
+/* 全屏图片 lightbox · issue 3b5b8f25。深色遮罩 + 居中 fit-to-screen 大图。 */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 16, 12, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  /* 安全区内边距：避免图片顶到刘海 / Home indicator */
+  padding: max(16px, env(safe-area-inset-top, 0px)) 16px
+    max(16px, env(safe-area-inset-bottom, 0px));
+  animation: viewer-in 160ms ease-out;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.image {
+  /* 关键修复：初始按容器尺寸 contain，完整显示原图，不再 1:1 像素只见左上角 */
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  transform-origin: center center;
+  transition: transform 120ms ease-out;
+  cursor: zoom-in;
+  will-change: transform;
+}
+
+/* 放大态下取消过渡（拖动跟手）+ 改 grab 光标 */
+.image.zoomed {
+  transition: none;
+  cursor: grab;
+}
+
+.close {
+  position: absolute;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: 14px;
+  z-index: 1;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.close:active {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+@keyframes viewer-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
