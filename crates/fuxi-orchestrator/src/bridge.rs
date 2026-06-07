@@ -694,21 +694,30 @@ async fn handle_event(
                 debug!(%agent_id, %role, "AgentDead 内部 role，跳过抄送");
                 return;
             }
-            let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
-            let interrupt_first = should_interrupt_worker_report(lag_ms);
-            info!(
-                %agent_id,
-                %role,
-                lag_ms,
-                interrupt_first,
-                "bridge: 转发门客下线回报到玄女"
-            );
-            let prompt = build_death_prompt(agent_id, &role, &cause);
-            if let Err(e) = intervener
-                .intervene_system(xuannv_id, interrupt_first, &prompt, "agent_dead")
-                .await
-            {
-                warn!(error = %e, "bridge: intervene(AgentDead) 失败");
+            // issue 3871902a(a)：idle_ttl 正常回收下线不注入玄女。idle GC 只回收
+            // Idle 门客——按定义它没有在跑的 task，下线纯属生命周期回收，玄女除了
+            // 回「不续派」无事可做，是噪音。仅当下线 cause 非 idle_ttl（崩溃 / 异常 /
+            // 用户主动 kill 等）才报玄女。注意：仍要走下面的 L2 归档（idle 回收的
+            // ephemeral worker 的 worktree 也得归档），所以只跳过通知不 return。
+            if cause == "idle_ttl" {
+                debug!(%agent_id, %role, "AgentDead cause=idle_ttl 正常回收，跳过注入玄女（仍归档 L2）");
+            } else {
+                let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
+                let interrupt_first = should_interrupt_worker_report(lag_ms);
+                info!(
+                    %agent_id,
+                    %role,
+                    lag_ms,
+                    interrupt_first,
+                    "bridge: 转发门客下线回报到玄女"
+                );
+                let prompt = build_death_prompt(agent_id, &role, &cause);
+                if let Err(e) = intervener
+                    .intervene_system(xuannv_id, interrupt_first, &prompt, "agent_dead")
+                    .await
+                {
+                    warn!(error = %e, "bridge: intervene(AgentDead) 失败");
+                }
             }
             // Decision 21 phase 3：若该门客住在 L2 ephemeral 工作区 → 自动归档。
             // 反查门客 worktree path → 命中 ephemeral/<task>/ 形态 → 调
@@ -748,6 +757,14 @@ async fn handle_event(
                 .role_of(agent)
                 .await
                 .unwrap_or_else(|| "unknown".to_string());
+            // issue 3871902a(b)：内部 role（cangjie/extractor）的经验抽取产物
+            // （research_summary）由抽取管线自动唤起、反复呈递，是高频噪音——
+            // 玄女本就不该 review 内部角色产物（路由规则「内部角色不可派活」）。
+            // 跟 AgentDead / TaskDone 路径的内部 role 过滤保持一致。
+            if is_internal_role(&role) {
+                debug!(%agent, %role, "AgentRequestReview 内部 role，跳过注入玄女");
+                return;
+            }
             let lag_ms = bridge_delivery_lag_ms(ev.meta.at);
             info!(
                 %agent,
@@ -1657,6 +1674,78 @@ mod tests {
         assert!(
             text.contains("commit:abc1234"),
             "prompt 含 artifact_ref: {text}"
+        );
+    }
+
+    /// issue 3871902a(b) 回归：内部 role（cangjie/extractor）的 AgentRequestReview
+    /// 不该注入玄女——内部经验抽取产物（research_summary）反复呈递是高频噪音，
+    /// 玄女本就不该 review 内部角色产物（见路由规则「内部角色不可派活」）。
+    #[tokio::test]
+    async fn agent_request_review_from_internal_role_is_ignored() {
+        use fuxi_core::DeliverableKind;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "cangjie").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = fuxi_core::id::TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: DeliverableKind::ResearchSummary,
+                summary: "[{\"score\":0.7,\"reason\":\"...\"}]".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "内部 role 的 AgentRequestReview 不应注入玄女"
+        );
+    }
+
+    /// issue 3871902a(a) 回归：idle_ttl 正常回收下线不该注入玄女。idle GC 只回收
+    /// 处于 Idle 的门客——按定义它没有在跑的 task，下线纯属生命周期回收，玄女
+    /// 除了回「不续派」无事可做，是高频噪音。仅当下线 cause 非 idle_ttl（崩溃 /
+    /// 异常）才报玄女。
+    #[tokio::test]
+    async fn agent_dead_idle_ttl_is_suppressed() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "idle_ttl".into(),
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "idle_ttl 正常回收下线不应注入玄女"
         );
     }
 
