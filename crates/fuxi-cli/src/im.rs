@@ -481,6 +481,22 @@ pub async fn run(args: StartArgs) -> Result<()> {
     //     这是部署期就该看到的错（roles 路径错配 / cc 没装），不该静默降级。
     let xuannv_role = std::env::var("FUXI_IM_XUANNV_ROLE")
         .unwrap_or_else(|_| crate::xuannv_bootstrap::DEFAULT_XUANNV_ROLE.to_string());
+
+    // 块5：注入玄女分身懒启动 spawner——ensure_xuannv_for_topic 池 miss / dormant
+    // respawn 时调它，复用 spawn_with_prelude + topic 历史拉 prelude。持 Weak<Fuxi>
+    // 避免与 Fuxi 持有 spawner 成引用环。必须在 ensure_xuannv 之前注入，让首个 topic
+    // 切换/dormant 补发能用上。
+    fuxi.set_xuannv_spawner(Arc::new(
+        crate::xuannv_spawner_impl::TopicXuannvSpawner::new(
+            Arc::downgrade(&fuxi),
+            oracle.clone(),
+            xuannv_role.clone(),
+            conv_store.clone(),
+            topic_store.clone(),
+        ),
+    ))
+    .await;
+
     let conv_sync_handle =
         match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
             Ok(id) => {
