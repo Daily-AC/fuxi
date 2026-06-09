@@ -137,12 +137,15 @@ pub async fn run(args: StartArgs) -> Result<()> {
         ttl_from_env(),
         std::time::Duration::from_secs(DEFAULT_TICK_INTERVAL_SECS),
     )
-    .with_xuannv_exempt(fuxi.xuannv_id_watch())
+    // 块5 步7.2：切到分身池模式——idle_gc 对任一活分身走 dormant 回收（pool.remove +
+    // shutdown_idle），分身后续可由 ensure_xuannv_for_topic respawn（7.1）+ general 镜像
+    // reconciler 兜（7.4）。**必须在 7.1/7.4 之后切**：否则 general 分身被回收成黑洞。
+    .with_xuannv_pool(fuxi.xuannv_pool())
     .spawn();
     tracing::info!(
         ttl_secs = ttl_from_env().as_secs(),
         tick_secs = DEFAULT_TICK_INTERVAL_SECS,
-        "IdleGcTask 已启动（同 repl.rs 路径——bug #77 修：im start 此前漏启，worker 永不回收）"
+        "IdleGcTask 已启动（分身池 dormant 回收模式——bug #77 修：im start 此前漏启，worker 永不回收）"
     );
 
     // memory-v2 · 仓颉 InsightExtractorTask（论文 arXiv:2604.14004 Memory Transfer
@@ -462,6 +465,16 @@ pub async fn run(args: StartArgs) -> Result<()> {
     )))
     .await;
 
+    // 块5：注入持久队列 sink——bridge 在归属 topic 分身 dormant 时把完工/里程碑
+    // 信号落 im.db（a01cfab5「信号不丢」），分身 respawn 后 drain 补发（7.4）。
+    // 同 im.db pool（SqlitePool Arc，clone 廉价）。
+    // 块5：持久队列 store 一份，sink（落库）+ spawner（drain 补发）共用（SqlitePool Arc）。
+    let pending_store = fuxi_im::pending_notify::PendingNotifyStore::new(im_pool.clone());
+    fuxi.set_pending_sink(Arc::new(crate::pending_sink::PendingNotifyStoreSink::new(
+        pending_store.clone(),
+    )))
+    .await;
+
     // 6.5 自启玄女（Task #8）。home 长跑场景下用户不必先 ssh 跑 REPL——`fuxi im start`
     //     直接把玄女拉起来，PWA 第一次 `/api/conv` 就有人对面。
     //
@@ -473,6 +486,23 @@ pub async fn run(args: StartArgs) -> Result<()> {
     //     这是部署期就该看到的错（roles 路径错配 / cc 没装），不该静默降级。
     let xuannv_role = std::env::var("FUXI_IM_XUANNV_ROLE")
         .unwrap_or_else(|_| crate::xuannv_bootstrap::DEFAULT_XUANNV_ROLE.to_string());
+
+    // 块5：注入玄女分身懒启动 spawner——ensure_xuannv_for_topic 池 miss / dormant
+    // respawn 时调它，复用 spawn_with_prelude + topic 历史拉 prelude。持 Weak<Fuxi>
+    // 避免与 Fuxi 持有 spawner 成引用环。必须在 ensure_xuannv 之前注入，让首个 topic
+    // 切换/dormant 补发能用上。
+    fuxi.set_xuannv_spawner(Arc::new(
+        crate::xuannv_spawner_impl::TopicXuannvSpawner::new(
+            Arc::downgrade(&fuxi),
+            oracle.clone(),
+            xuannv_role.clone(),
+            conv_store.clone(),
+            topic_store.clone(),
+            pending_store.clone(),
+        ),
+    ))
+    .await;
+
     let conv_sync_handle =
         match crate::xuannv_bootstrap::ensure_xuannv(&fuxi, &oracle, &xuannv_role).await {
             Ok(id) => {
