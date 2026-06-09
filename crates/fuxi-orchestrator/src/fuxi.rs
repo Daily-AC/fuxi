@@ -148,6 +148,11 @@ pub struct Fuxi {
     /// trait 在本 crate，impl adapter 由 fuxi-cli 注入（依赖反转，见
     /// [`crate::PendingNotifySink`] doc）。
     pending_sink: Arc<RwLock<Option<Arc<dyn crate::PendingNotifySink>>>>,
+    /// 块5 玄女分身懒启动钩子——`ensure_xuannv_for_topic` 池 miss 时调它为该 topic
+    /// spawn 一只分身（拉历史 prelude + cc launch，逻辑在 fuxi-cli adapter）。
+    /// `Option`：未注入 = 单玄女兼容期 / 测试，`ensure_xuannv_for_topic` 退化为
+    /// 「池里有就返回，没有返 None」（不 spawn）。依赖反转见 [`crate::XuannvSpawner`]。
+    xuannv_spawner: Arc<RwLock<Option<Arc<dyn crate::XuannvSpawner>>>>,
 }
 
 /// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
@@ -200,6 +205,7 @@ impl Fuxi {
             xuannv_switcher: Arc::new(RwLock::new(None)),
             xuannv_pool: Arc::new(crate::xuannv_pool::XuannvPool::new(max_active)),
             pending_sink: Arc::new(RwLock::new(None)),
+            xuannv_spawner: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -268,13 +274,38 @@ impl Fuxi {
         self.xuannv_pool.clone()
     }
 
-    /// 块2 懒启动入口：拿某 topic 的活分身；已有直接返回。
+    /// 块5 懒启动入口：拿某 topic 的活分身；池有直接返回，**池 miss 则真 spawn**。
     ///
-    /// 当前阶段只做"池里有就返回"——无活分身时返回 None，由调用方（块5 的
-    /// bootstrap）负责 spawn 新分身后 [`Self::set_xuannv_for_topic`]。占位让块3/块5
-    /// 有统一入口，避免散落直接读池。
+    /// - 池有活分身 → 返回它（热路径，零 spawn）。
+    /// - 池 miss + 已注入 [`Self::set_xuannv_spawner`] → 调 spawner 为该 topic 起一只
+    ///   （adapter 负责拉历史 prelude + cc launch + `set_xuannv_for_topic` 入池），
+    ///   返回新 id。spawn 失败 → warn + 返回 None（调用方按需 fallback，不 panic）。
+    /// - 池 miss + 未注入 spawner（单玄女兼容期 / 测试）→ 返回 None（退化为查池）。
+    ///
+    /// 返回类型保持 `Option<AgentId>`（兼容块3 调用方）：None = 当前确实没有可用分身。
+    ///
+    /// WHY 不在此加锁防并发双 spawn：lazy 入口（用户消息 / bridge respawn）实际串行
+    /// 度高；真撞上 set_xuannv_for_topic 是 last-write-wins（同一 topic 最后那只赢，
+    /// 多起的那只 idle 后被 GC 回收）。加跨 spawn 的锁会把慢 cc launch 串死整条入口，
+    /// 得不偿失——同 spawn 语义「新建不去重」公理（fbba2ec）。
     pub async fn ensure_xuannv_for_topic(&self, topic: fuxi_core::TopicId) -> Option<AgentId> {
-        self.xuannv_id_for_topic(topic).await
+        if let Some(id) = self.xuannv_id_for_topic(topic).await {
+            return Some(id);
+        }
+        let spawner = self.xuannv_spawner.read().await.clone();
+        match spawner {
+            Some(s) => match s.spawn_for_topic(topic).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!(%topic, error = %e, "ensure_xuannv_for_topic: spawn 失败，返回 None");
+                    None
+                }
+            },
+            None => {
+                debug!(%topic, "ensure_xuannv_for_topic: 未注入 spawner，池 miss 返回 None");
+                None
+            }
+        }
     }
 
     /// 订阅玄女 id 变化——`#7` 公理 #3 真实时入口，替代旧 5min 轮询。
@@ -341,6 +372,13 @@ impl Fuxi {
     /// impl 用它转发；放 `pub(crate)` 不外泄 RwLock 细节。
     pub(crate) async fn pending_sink_handle(&self) -> Option<Arc<dyn crate::PendingNotifySink>> {
         self.pending_sink.read().await.clone()
+    }
+
+    /// 块5：注入玄女分身懒启动钩子（fuxi-cli adapter 复用 spawn_with_prelude +
+    /// topic 历史）。未注入时 [`Self::ensure_xuannv_for_topic`] 不 spawn 退化为查池。
+    /// 幂等。
+    pub async fn set_xuannv_spawner(&self, spawner: Arc<dyn crate::XuannvSpawner>) {
+        *self.xuannv_spawner.write().await = Some(spawner);
     }
 
     /// β · #57 注入 dispatch routing 钩子——dispatch 决策树命中 dist 路径
@@ -3223,5 +3261,79 @@ mod xuannv_pool_integration_tests {
             task.topic_id, None,
             "普通门客 degrade task 不该挂任何 topic（块5 补发起方 topic）"
         );
+    }
+
+    /// 块5 mock spawner：记录被请求 spawn 的 topic，并模拟 adapter 真实行为
+    /// （set_xuannv_for_topic 入池后返回新 id）。
+    struct MockSpawner {
+        fuxi: std::sync::Mutex<Option<std::sync::Weak<Fuxi>>>,
+        spawned: Arc<tokio::sync::Mutex<Vec<TopicId>>>,
+    }
+    #[async_trait]
+    impl crate::XuannvSpawner for MockSpawner {
+        async fn spawn_for_topic(&self, topic: TopicId) -> crate::Result<AgentId> {
+            self.spawned.lock().await.push(topic);
+            let id = AgentId::new();
+            // 模拟 adapter：spawn 后入池（真 adapter 走 spawn_with_prelude → set_xuannv_for_topic）。
+            let weak = self.fuxi.lock().unwrap().clone();
+            if let Some(fuxi) = weak.and_then(|w| w.upgrade()) {
+                fuxi.set_xuannv_for_topic(topic, id).await;
+            }
+            Ok(id)
+        }
+    }
+
+    /// Task 7.1：ensure_xuannv_for_topic 池有活分身 → 直接返回，**不** spawn。
+    #[tokio::test]
+    async fn ensure_xuannv_for_topic_returns_existing_without_spawn() {
+        let fuxi = make_fuxi().await;
+        let topic = TopicId::new();
+        let existing = AgentId::new();
+        fuxi.set_xuannv_for_topic(topic, existing).await;
+
+        let spawned = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fuxi.set_xuannv_spawner(Arc::new(MockSpawner {
+            fuxi: std::sync::Mutex::new(Some(Arc::downgrade(&fuxi))),
+            spawned: spawned.clone(),
+        }))
+        .await;
+
+        let got = fuxi.ensure_xuannv_for_topic(topic).await;
+        assert_eq!(got, Some(existing), "池有活分身应直接返回");
+        assert!(spawned.lock().await.is_empty(), "不该触发 spawn");
+    }
+
+    /// Task 7.1：ensure_xuannv_for_topic 池 miss → 调 spawner spawn 一只并入池返回。
+    #[tokio::test]
+    async fn ensure_xuannv_for_topic_spawns_on_miss() {
+        let fuxi = make_fuxi().await;
+        let topic = TopicId::new();
+
+        let spawned = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fuxi.set_xuannv_spawner(Arc::new(MockSpawner {
+            fuxi: std::sync::Mutex::new(Some(Arc::downgrade(&fuxi))),
+            spawned: spawned.clone(),
+        }))
+        .await;
+
+        let got = fuxi.ensure_xuannv_for_topic(topic).await;
+        assert!(got.is_some(), "池 miss + 有 spawner 应 spawn 出新分身");
+        assert_eq!(
+            spawned.lock().await.as_slice(),
+            &[topic],
+            "spawner 应按该 topic 调一次"
+        );
+        // 入池了：再 ensure 直接命中、不再 spawn。
+        let again = fuxi.ensure_xuannv_for_topic(topic).await;
+        assert_eq!(again, got, "spawn 后入池，再 ensure 命中同一只");
+        assert_eq!(spawned.lock().await.len(), 1, "第二次 ensure 不该再 spawn");
+    }
+
+    /// Task 7.1：池 miss + 未注入 spawner（兼容期/测试）→ 返回 None，不 panic。
+    #[tokio::test]
+    async fn ensure_xuannv_for_topic_none_without_spawner() {
+        let fuxi = make_fuxi().await;
+        let got = fuxi.ensure_xuannv_for_topic(TopicId::new()).await;
+        assert_eq!(got, None, "无 spawner 池 miss 应返 None");
     }
 }
