@@ -195,6 +195,18 @@ pub trait Intervener: Send + Sync {
         let _ = (task, reason);
         Ok(())
     }
+
+    /// issue 1d816926：查 task 事件流里有没有真的产出过 `DeliverableProduced`。
+    /// 用于强制校验门客 hallucinate 的「文件已交付 / apk 落 PWA」汇报——门客实际
+    /// 没跑 `fuxi deliverable produce` 时事件流里没有这条，桥据此拦下，不让玄女
+    /// 把幻觉当真转述给用户。
+    ///
+    /// 默认 `true`（视为已校验）——单测 mock 不强求实现、且「拿不到凭证就放行」比
+    /// 「拿不到凭证就误拒合法交付」更安全；生产 Fuxi 覆盖走真查询。
+    async fn has_deliverable_produced(&self, task: TaskId) -> bool {
+        let _ = task;
+        true
+    }
 }
 
 #[async_trait]
@@ -286,6 +298,22 @@ impl Intervener for Fuxi {
         reason: fuxi_core::ArchiveReason,
     ) -> Result<()> {
         Fuxi::archive_l2_for_task(self, task, reason).await
+    }
+
+    async fn has_deliverable_produced(&self, task: TaskId) -> bool {
+        // 扫 task 完整历史找 DeliverableProduced。事件 append-only 且
+        // DeliverableProduced（门客真跑 `fuxi deliverable produce` 时发）
+        // 必早于 AgentRequestReview（完工 sentinel）入库，故此处一定看得到。
+        // 查询失败按 true 放行——宁可漏拦也不误拒合法交付。
+        match self.bus().history_for_task(task).await {
+            Ok(events) => events
+                .iter()
+                .any(|ev| matches!(ev.kind, EventKind::DeliverableProduced { .. })),
+            Err(e) => {
+                warn!(error = %e, %task, "has_deliverable_produced 查历史失败，按已校验放行");
+                true
+            }
+        }
     }
 }
 
@@ -406,6 +434,32 @@ fn build_request_review_prompt(
     }
     prompt.push_str(
         "\n\n[INSTRUCTION: 该门客主动找你审阅。判断是否接受 / 改派 / 让他续做，并向用户汇报或追问]",
+    );
+    prompt
+}
+
+/// issue 1d816926：门客呈递 artifact（apk 等文件）待审，但事件流里**没有**
+/// 对应 `DeliverableProduced` 凭证——多半是 cc wind-down 阶段 hallucinate 了
+/// 「已交付」却没真跑 `fuxi deliverable produce`。给玄女注入「未核实」警告，
+/// 让她**别**按已交付转述给用户，而是打回门客真去交付。
+fn build_unverified_deliverable_prompt(
+    agent: AgentId,
+    role: &str,
+    summary: &str,
+    artifact_ref: Option<&str>,
+) -> String {
+    let mut prompt = format!(
+        "[REVIEW_REQUEST·未核实] 门客 {agent}（role={role}）呈递 deliverable_kind=artifact 待审，\
+         但事件流里**没有** DeliverableProduced 凭证——他很可能只是嘴上说交付了，\
+         实际没跑 `fuxi deliverable produce`，产物并未落到 PWA 收件箱。\n\n摘要：{summary}",
+    );
+    if let Some(r) = artifact_ref {
+        prompt.push_str(&format!("\n\n附件（门客自称）：{r}"));
+    }
+    prompt.push_str(
+        "\n\n[INSTRUCTION: 不要按「已交付」转述给用户——事件流无凭证。\
+         `fuxi intervene --to <门客id>` 让他真去跑 `fuxi deliverable produce` 把文件交付，\
+         核到 DeliverableProduced 事件后再向用户汇报。]",
     );
     prompt
 }
@@ -773,13 +827,29 @@ async fn handle_event(
                 lag_ms,
                 "bridge: 转发 AgentRequestReview 到玄女（带 retry）"
             );
-            let prompt = build_request_review_prompt(
-                agent,
-                &role,
-                deliverable_kind,
-                summary,
-                artifact_ref.as_deref(),
-            );
+            // issue 1d816926：artifact（apk 等文件）类必须有 DeliverableProduced
+            // 凭证。门客 hallucinate「已落 PWA」但没真跑 deliverable produce 时，
+            // 事件流里没有这条 → 换「未核实」prompt 让玄女打回，别把幻觉转述给用户。
+            // 只卡 artifact——code_change 走 WorkspaceCommitted 校验、研究类无文件，
+            // 都不该在这里误拒。
+            let prompt = if matches!(deliverable_kind, fuxi_core::DeliverableKind::Artifact)
+                && !intervener.has_deliverable_produced(task).await
+            {
+                warn!(
+                    %agent,
+                    %task,
+                    "bridge: 门客呈递 artifact 但事件流无 DeliverableProduced 凭证 → 注入未核实警告"
+                );
+                build_unverified_deliverable_prompt(agent, &role, summary, artifact_ref.as_deref())
+            } else {
+                build_request_review_prompt(
+                    agent,
+                    &role,
+                    deliverable_kind,
+                    summary,
+                    artifact_ref.as_deref(),
+                )
+            };
             // Decision 21 phase 1：kind=code_change + artifact_ref 形如 "sha:<hex>"
             // → 推断为 WorkspaceCommitted。从 worktree path 反查 (project, role)
             // 拼 WorkspaceId，命中即发；否则 silent skip。
@@ -1000,6 +1070,8 @@ mod tests {
         fail_first_n: Mutex<Option<usize>>,
         worktrees: Mutex<HashMap<AgentId, std::path::PathBuf>>,
         archive_calls: Mutex<Vec<(fuxi_core::ProjectId, TaskId, fuxi_core::ArchiveReason)>>,
+        /// 标记哪些 task 有真 DeliverableProduced 凭证（issue 1d816926 校验测试用）。
+        deliverable_tasks: Mutex<std::collections::HashSet<TaskId>>,
     }
 
     impl MockIntervener {
@@ -1027,6 +1099,11 @@ mod tests {
 
         async fn set_worktree(&self, id: AgentId, path: std::path::PathBuf) {
             self.worktrees.lock().await.insert(id, path);
+        }
+
+        /// 标记某 task 有真 DeliverableProduced 凭证。
+        async fn set_deliverable_produced(&self, task: TaskId) {
+            self.deliverable_tasks.lock().await.insert(task);
         }
 
         async fn archive_snapshot(
@@ -1094,6 +1171,9 @@ mod tests {
                 .await
                 .push((placeholder, task, reason));
             Ok(())
+        }
+        async fn has_deliverable_produced(&self, task: TaskId) -> bool {
+            self.deliverable_tasks.lock().await.contains(&task)
         }
     }
 
@@ -1674,6 +1754,93 @@ mod tests {
         assert!(
             text.contains("commit:abc1234"),
             "prompt 含 artifact_ref: {text}"
+        );
+    }
+
+    /// issue 1d816926 回归：门客呈递 artifact 但事件流无 DeliverableProduced 凭证
+    /// → 玄女收到「未核实」警告 prompt，而非按已交付的正常 REVIEW_REQUEST。
+    #[tokio::test]
+    async fn artifact_without_deliverable_produced_gets_unverified_warning() {
+        use fuxi_core::DeliverableKind;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        // 注意：不 set_deliverable_produced → 模拟门客没真跑 deliverable produce。
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = fuxi_core::id::TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: DeliverableKind::Artifact,
+                summary: "apk 已落 PWA，manifest 在 .../task-x/manifest.json".into(),
+                artifact_ref: Some("apk:9.4MB".into()),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "应 intervene 一次（未核实警告）");
+        let (target, _i, text) = &calls[0];
+        assert_eq!(*target, xuannv);
+        assert!(text.contains("未核实"), "应是未核实警告: {text}");
+        assert!(
+            text.contains("没有") && text.contains("DeliverableProduced"),
+            "应说明事件流无凭证: {text}"
+        );
+    }
+
+    /// issue 1d816926 回归（正路）：artifact 有真 DeliverableProduced 凭证时
+    /// 走正常 REVIEW_REQUEST，不误报未核实。
+    #[tokio::test]
+    async fn artifact_with_deliverable_produced_normal_review() {
+        use fuxi_core::DeliverableKind;
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let xuannv = AgentId::new();
+        let worker = AgentId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let task = fuxi_core::id::TaskId::new();
+        mock.set_deliverable_produced(task).await; // 门客真交付了
+
+        let _h = SystemEventBridge::spawn_with(mock.clone(), bus.clone(), xuannv, empty_lookup());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: DeliverableKind::Artifact,
+                summary: "apk 已交付".into(),
+                artifact_ref: Some("apk:9.4MB".into()),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        let (_t, _i, text) = &calls[0];
+        assert!(!text.contains("未核实"), "有凭证不应报未核实: {text}");
+        assert!(
+            text.contains("[REVIEW_REQUEST]"),
+            "应是正常审阅 prompt: {text}"
         );
     }
 
