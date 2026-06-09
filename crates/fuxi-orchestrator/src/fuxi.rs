@@ -1710,6 +1710,15 @@ impl Fuxi {
             if let Some(node) = pinned_node.clone() {
                 task = task.with_pinned_node(node);
             }
+            // 块3.1：若 intervene 目标本身是某个**玄女分身**（idle-degrade user-turn，
+            // 如 TUI Submit::Xuannv / PWA 对分身发话），把她服务的 topic 打到 task 上，
+            // 让这轮对话产生的事件 meta.topic_id 归位该 topic（门客适配器 emit 时已读
+            // task.topic_id → meta.topic_id）。`topic_of` None = 目标是普通门客（用户
+            // 直接 intervene 闲置门客）——发起方 topic 此入口拿不到，留块5 给玄女分身
+            // 子进程注入 topic env 后由 `fuxi dispatch` 带上，本处不硬猜。
+            if let Some(topic) = self.xuannv_pool.topic_of(agent_id).await {
+                task = task.with_topic_id(topic);
+            }
             self.dispatch(agent_id, task).await?;
             // 抄送玄女
             let xuannv = self.xuannv_id().await;
@@ -3086,6 +3095,113 @@ mod xuannv_pool_integration_tests {
         assert!(
             fuxi.status_of(clone_id).await.is_some(),
             "活分身不该被 shutdown_agent 永久 kill"
+        );
+    }
+
+    /// 记录被 dispatch 的 task（验 topic_id 透传）。idle 状态让 intervene 走
+    /// degrade-dispatch 分支。
+    struct RecordingAgent {
+        card: AgentCard,
+        last_task: Arc<tokio::sync::Mutex<Option<Task>>>,
+    }
+    impl RecordingAgent {
+        fn new(role: &str) -> (Arc<Self>, Arc<tokio::sync::Mutex<Option<Task>>>) {
+            let slot = Arc::new(tokio::sync::Mutex::new(None));
+            let agent = Arc::new(Self {
+                card: AgentCard {
+                    id: AgentId::new(),
+                    profile: AgentProfile {
+                        name: format!("rec-{role}"),
+                        role: role.into(),
+                        cli: "stub".into(),
+                        system_prompt: String::new(),
+                        tags: vec![],
+                        extra: Default::default(),
+                    },
+                    endpoint: "stub://".into(),
+                    status: AgentStatus::Idle,
+                },
+                last_task: slot.clone(),
+            });
+            (agent, slot)
+        }
+    }
+    #[async_trait]
+    impl Agent for RecordingAgent {
+        fn card(&self) -> &AgentCard {
+            &self.card
+        }
+        async fn dispatch(&self, task: Task) -> CoreResult<mpsc::Receiver<Event>> {
+            *self.last_task.lock().await = Some(task);
+            // 立即关闭 rx（无终态）——dispatch pump 会兜底 TaskCancelled，本测试不关心。
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+        async fn send_message(&self, _t: TaskId, _text: &str) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _t: TaskId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Task 3.1：玄女分身（服务 topic A）idle-degrade 出的 user-turn task，
+    /// 其 `topic_id == Some(A)`——让这轮对话事件归位该 topic。
+    #[tokio::test]
+    async fn clone_degrade_dispatch_stamps_owning_topic() {
+        let fuxi = make_fuxi().await;
+        let topic_a = TopicId::new();
+        // 把 RecordingAgent 当作 topic A 的玄女分身：既在 shelf（idle）又在池。
+        let (clone_agent, slot) = RecordingAgent::new("xuannv");
+        let clone_id = clone_agent.card().id;
+        fuxi.insert_agent(clone_agent, None).await;
+        fuxi.set_xuannv_for_topic(topic_a, clone_id).await;
+
+        // 对该分身 intervene（idle → degrade dispatch）。
+        fuxi.intervene(clone_id, false, "继续画头像", vec![], None, vec![], None)
+            .await
+            .expect("intervene 应 degrade-dispatch 成功");
+
+        let task = slot
+            .lock()
+            .await
+            .clone()
+            .expect("应捕获到被 dispatch 的 task");
+        assert_eq!(
+            task.topic_id,
+            Some(topic_a),
+            "分身的 user-turn task 应打上她服务的 topic"
+        );
+    }
+
+    /// Task 3.1 边界：intervene 目标是**普通门客**（不在池）→ degrade task 不挂
+    /// topic（发起方 topic 此入口拿不到，留块5 补 spawn env）。不能误挂别的 topic。
+    #[tokio::test]
+    async fn worker_degrade_dispatch_leaves_topic_none() {
+        let fuxi = make_fuxi().await;
+        // 池里放一个别的 topic 的分身，确认不会被误用到 worker task 上。
+        fuxi.set_xuannv_for_topic(TopicId::new(), AgentId::new())
+            .await;
+
+        let (worker_agent, slot) = RecordingAgent::new("luban");
+        let worker_id = worker_agent.card().id;
+        fuxi.insert_agent(worker_agent, None).await;
+
+        fuxi.intervene(worker_id, false, "改个 bug", vec![], None, vec![], None)
+            .await
+            .expect("intervene 应 degrade-dispatch 成功");
+
+        let task = slot
+            .lock()
+            .await
+            .clone()
+            .expect("应捕获到被 dispatch 的 task");
+        assert_eq!(
+            task.topic_id, None,
+            "普通门客 degrade task 不该挂任何 topic（块5 补发起方 topic）"
         );
     }
 }
