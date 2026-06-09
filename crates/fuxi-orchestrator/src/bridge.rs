@@ -207,6 +207,22 @@ pub trait Intervener: Send + Sync {
         let _ = task;
         true
     }
+
+    /// 块4：归属 topic 的分身 dormant 时，把完工/里程碑信号落持久队列
+    /// （a01cfab5「信号不丢」）——分身 respawn 后 drain 补发（块5 收口）。
+    ///
+    /// 默认实现 debug 跳过——单玄女兼容期 / 测试 mock 不强求落库；生产 Fuxi 覆盖
+    /// 走注入的 [`crate::PendingNotifySink`]（未注入时也 debug 跳过，不阻塞 bridge）。
+    async fn enqueue_pending(
+        &self,
+        topic_id: fuxi_core::TopicId,
+        prompt: &str,
+        system_origin: &str,
+    ) -> Result<()> {
+        let _ = (topic_id, prompt, system_origin);
+        debug!("enqueue_pending: 无 sink（默认实现），dormant 信号未落库");
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -312,6 +328,25 @@ impl Intervener for Fuxi {
             Err(e) => {
                 warn!(error = %e, %task, "has_deliverable_produced 查历史失败，按已校验放行");
                 true
+            }
+        }
+    }
+
+    async fn enqueue_pending(
+        &self,
+        topic_id: fuxi_core::TopicId,
+        prompt: &str,
+        system_origin: &str,
+    ) -> Result<()> {
+        // 块4：转发给注入的持久队列 sink（依赖反转，impl 在 fuxi-cli）。未注入 =
+        // 单玄女兼容期 / 测试，debug 跳过不阻塞 bridge——但生产**必须**注入，否则
+        // dormant 分身的完工信号真丢（a01cfab5 回归）。
+        let sink = self.pending_sink_handle().await;
+        match sink {
+            Some(s) => s.enqueue(topic_id, prompt, system_origin).await,
+            None => {
+                debug!(%topic_id, "enqueue_pending: pending_sink 未注入，dormant 信号未落库");
+                Ok(())
             }
         }
     }
@@ -680,28 +715,22 @@ impl SystemEventBridge {
                 let target_xuannv = if let Some(pool_rx) = pool_watch.as_ref() {
                     // 无 topic_id 的旧事件 / 平台级事件兜底 general（事件没归属 topic）。
                     let ev_topic = ev.meta.topic_id.unwrap_or_else(fuxi_core::TopicId::general);
+                    // borrow 要尽早 drop——下面 enqueue 分支有 .await，watch guard 不能跨 await。
                     let active = pool_rx.borrow().get(&ev_topic).copied();
                     match active {
                         Some(id) => Some(id),
+                        // 该 topic 无活分身（dormant / 从未起）。general 永远兜底到
+                        // xuannv_watch 镜像；非 general 的 dormant topic → 块4 持久队列
+                        // 落库「信号不丢」（a01cfab5），分身 respawn 后 drain 补发（块5）。
+                        None if ev_topic == fuxi_core::TopicId::general() => *xuannv_watch.borrow(),
                         None => {
-                            // 该 topic 无活分身（dormant / 从未起）。general 永远兜底到
-                            // xuannv_watch 镜像；非 general 的 dormant topic → 块4/6 接
-                            // 「持久队列 enqueue + respawn 补发」。本任务先 debug 留痕，
-                            // **里程碑事件不丢**靠块6 落库，这里暂不注入（避免误打到
-                            // 别的 topic 分身造成新串味）。
-                            if ev_topic == fuxi_core::TopicId::general() {
-                                *xuannv_watch.borrow()
-                            } else if is_cross_topic_milestone(&ev.kind) {
-                                debug!(
-                                    %ev_topic,
-                                    kind_tag = ?std::mem::discriminant(&ev.kind),
-                                    "bridge: 归属 topic 分身 dormant，里程碑暂不注入（块6 接持久队列+respawn）"
-                                );
-                                None
-                            } else {
-                                // 非里程碑 + dormant：本就不该打扰任何分身，silent skip。
-                                None
+                            // 块4：归属 topic 分身 dormant 时，里程碑落持久队列（不误打别
+                            // topic 分身造成新串味）。非里程碑 dormant 事件本就不该打扰任何
+                            // 分身，silent skip。enqueue 后 continue——本轮不注入。
+                            if is_cross_topic_milestone(&ev.kind) {
+                                enqueue_dormant_milestone(&*intervener, ev_topic, &ev).await;
                             }
+                            continue;
                         }
                     }
                 } else {
@@ -725,9 +754,9 @@ impl SystemEventBridge {
                     // a01cfab5 修：实时读**当前**玄女 id（跟随 respawn 漂移）。
                     *xuannv_watch.borrow()
                 };
-                // 无可注入 target（玄女未就绪 / dormant 待块6 补发）→ 跳过本事件。
+                // 无可注入 target（玄女未就绪 None）→ 跳过本事件。
                 let Some(xuannv_id) = target_xuannv else {
-                    debug!("bridge: 无可注入分身 target（未就绪 / dormant），跳过事件");
+                    debug!("bridge: 无可注入分身 target（玄女未就绪），跳过事件");
                     continue;
                 };
                 handle_event(
@@ -760,6 +789,101 @@ fn is_cross_topic_milestone(kind: &EventKind) -> bool {
             | EventKind::ReviewRequestTimeout { .. }
             | EventKind::DeliverableProduced { .. }
     )
+}
+
+/// 块4：归属 topic 分身 dormant 时，把里程碑事件落持久队列（a01cfab5「信号不丢」）。
+///
+/// 与活分身路径（[`handle_event`]）**同源**地 build prompt + system_origin——落库的就是
+/// 最终文本，块5 分身 respawn 后 drain 直接 `intervene_system(prompt, origin)` 补发，
+/// 气泡渲染一致。复用活路径的过滤口径：内部 role（extractor/cangjie）+ idle_ttl 正常
+/// 回收的 AgentDead 不入队（噪音，跟活路径 silent 一致）。
+///
+/// **维护者注意**：本 helper 与 [`handle_event`] 活分身分支共用同一批纯函数
+/// `build_request_review_prompt` / `build_death_prompt` / `build_review_timeout_prompt`
+/// 算 (prompt, origin)——故活/dormant 两路文本一致。改其中任一 build_* 或 origin 串时
+/// 两处自动同步；但**新增** milestone 类型或改过滤口径时要记得**两处都改**，否则
+/// dormant 补发会跟活路径不一致（改一处漏另一处的经典坑）。
+///
+/// 只覆盖会真注入玄女的 3 类 milestone（AgentRequestReview / AgentDead / ReviewRequestTimeout）；
+/// DeliverableProduced 虽属 milestone 但活路径从不注入（只当校验凭证），故 dormant 也不入队。
+async fn enqueue_dormant_milestone(
+    intervener: &dyn Intervener,
+    topic: fuxi_core::TopicId,
+    ev: &Event,
+) {
+    let (agent, prompt, origin) = match &ev.kind {
+        EventKind::AgentRequestReview {
+            agent,
+            task,
+            deliverable_kind,
+            summary,
+            artifact_ref,
+        } => {
+            let role = intervener
+                .role_of(*agent)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            if is_internal_role(&role) {
+                debug!(%agent, %role, "dormant AgentRequestReview 内部 role，不入队");
+                return;
+            }
+            // 注：artifact 未核实警告（has_deliverable_produced）是活路径的玄女侧产品决策，
+            // dormant 落库走常规 review prompt——核实逻辑等分身 respawn 醒来自己判断更稳，
+            // 不在补发链路里重复 IO。
+            let _ = task;
+            let prompt = build_request_review_prompt(
+                *agent,
+                &role,
+                *deliverable_kind,
+                summary,
+                artifact_ref.as_deref(),
+            );
+            (*agent, prompt, "review_request")
+        }
+        EventKind::AgentDead { cause } => {
+            let Some(agent) = ev.meta.agent else {
+                return;
+            };
+            // idle_ttl 正常回收不入队（同活路径——纯生命周期信号，玄女无事可做）。
+            if cause == "idle_ttl" {
+                debug!(%agent, "dormant AgentDead cause=idle_ttl，不入队");
+                return;
+            }
+            let role = intervener
+                .role_of(agent)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            if is_internal_role(&role) {
+                debug!(%agent, %role, "dormant AgentDead 内部 role，不入队");
+                return;
+            }
+            (agent, build_death_prompt(agent, &role, cause), "agent_dead")
+        }
+        EventKind::ReviewRequestTimeout {
+            agent,
+            task,
+            waited_for_ms,
+            ..
+        } => {
+            let role = intervener
+                .role_of(*agent)
+                .await
+                .unwrap_or_else(|| "unknown".to_string());
+            (
+                *agent,
+                build_review_timeout_prompt(*agent, &role, *task, *waited_for_ms),
+                "review_timeout",
+            )
+        }
+        // DeliverableProduced 等：活路径不注入，dormant 也不入队。
+        _ => return,
+    };
+    if let Err(e) = intervener.enqueue_pending(topic, &prompt, origin).await {
+        // 落库失败是「信号不丢」最后一道防线被击穿——必须 warn 可见（不像普通 skip）。
+        warn!(error = %e, %agent, %topic, "bridge: dormant 里程碑入持久队列失败，信号可能丢失");
+    } else {
+        debug!(%agent, %topic, origin, "bridge: dormant 里程碑已落持久队列，待 respawn 补发");
+    }
 }
 
 /// 事件分派——拆出单函数方便直接单测（不用 spawn 真任务）。
@@ -1133,6 +1257,8 @@ mod tests {
         archive_calls: Mutex<Vec<(fuxi_core::ProjectId, TaskId, fuxi_core::ArchiveReason)>>,
         /// 标记哪些 task 有真 DeliverableProduced 凭证（issue 1d816926 校验测试用）。
         deliverable_tasks: Mutex<std::collections::HashSet<TaskId>>,
+        /// 块4：记录 enqueue_pending 调用（topic, prompt, origin）——dormant 落库测试用。
+        enqueue_calls: Mutex<Vec<(fuxi_core::TopicId, String, String)>>,
     }
 
     impl MockIntervener {
@@ -1171,6 +1297,10 @@ mod tests {
             &self,
         ) -> Vec<(fuxi_core::ProjectId, TaskId, fuxi_core::ArchiveReason)> {
             self.archive_calls.lock().await.clone()
+        }
+
+        async fn enqueue_snapshot(&self) -> Vec<(fuxi_core::TopicId, String, String)> {
+            self.enqueue_calls.lock().await.clone()
         }
     }
 
@@ -1235,6 +1365,19 @@ mod tests {
         }
         async fn has_deliverable_produced(&self, task: TaskId) -> bool {
             self.deliverable_tasks.lock().await.contains(&task)
+        }
+        async fn enqueue_pending(
+            &self,
+            topic_id: fuxi_core::TopicId,
+            prompt: &str,
+            system_origin: &str,
+        ) -> Result<()> {
+            self.enqueue_calls.lock().await.push((
+                topic_id,
+                prompt.to_string(),
+                system_origin.to_string(),
+            ));
+            Ok(())
         }
     }
 
@@ -2688,10 +2831,10 @@ mod tests {
         assert_eq!(calls[0].0, general, "无 topic 事件应兜底 general 分身");
     }
 
-    /// 归属 topic 的分身 dormant（不在池里）→ 里程碑暂不注入（块6 接持久队列），
-    /// **不**误打到别的 topic 分身。
+    /// 块4 核心回归：归属 topic 分身 dormant（不在池）→ 里程碑落持久队列
+    /// （enqueue_pending 被调一次、topic 正确），**不**注入任何分身（不误打别 topic）。
     #[tokio::test]
-    async fn milestone_for_dormant_topic_clone_not_injected_pending_block6() {
+    async fn bridge_dormant_milestone_enqueues_pending() {
         use fuxi_core::TopicId;
         let bus = EventBus::with_memory_store().await.unwrap();
         let general = AgentId::new();
@@ -2735,12 +2878,119 @@ mod tests {
         })
         .expect("publish");
 
-        // 给足时间确保不会误注入。
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let calls = mock.snapshot().await;
+        // 等 enqueue 落库。
+        for _ in 0..100 {
+            if !mock.enqueue_snapshot().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let enq = mock.enqueue_snapshot().await;
+        assert_eq!(enq.len(), 1, "dormant 里程碑应入队一次：{enq:?}");
+        assert_eq!(enq[0].0, dormant_topic, "入队 topic 应为归属 dormant topic");
+        assert_eq!(enq[0].2, "review_request", "origin 应为 review_request");
         assert!(
-            calls.is_empty(),
-            "dormant topic 的里程碑本任务不注入任何分身（块6 接），实际：{calls:?}"
+            enq[0].1.contains("[REVIEW_REQUEST]"),
+            "落库的是最终 prompt 文本"
+        );
+        // 不该注入任何分身（不误打 live_clone / general）。
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "dormant 里程碑不应注入任何分身：{:?}",
+            mock.snapshot().await
+        );
+    }
+
+    /// 块4 对照：**活分身**的里程碑走注入、**不**入队（enqueue 只给 dormant）。
+    #[tokio::test]
+    async fn bridge_active_clone_milestone_injects_not_enqueues() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let general = AgentId::new();
+        let live_clone = AgentId::new();
+        let worker = AgentId::new();
+        let live_topic = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(live_topic, live_clone);
+        let (_tx, rx) = watch::channel(map);
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        meta.topic_id = Some(live_topic);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: fuxi_core::DeliverableKind::ResearchSummary,
+                summary: "活分身 topic 的活".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(mock.snapshot().await[0].0, live_clone, "活分身应被注入");
+        assert!(
+            mock.enqueue_snapshot().await.is_empty(),
+            "活分身路径不该入队"
+        );
+    }
+
+    /// 块4 噪音过滤：dormant topic 的 idle_ttl AgentDead 不入队（同活路径 silent）。
+    #[tokio::test]
+    async fn bridge_dormant_idle_ttl_agent_dead_not_enqueued() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let general = AgentId::new();
+        let worker = AgentId::new();
+        let dormant_topic = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        // 空池——dormant_topic 无活分身。
+        let (_tx, rx) = watch::channel(std::collections::HashMap::new());
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.topic_id = Some(dormant_topic);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "idle_ttl".into(),
+            },
+        })
+        .expect("publish");
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            mock.enqueue_snapshot().await.is_empty(),
+            "idle_ttl 正常回收不该入队（噪音过滤）"
         );
     }
 }

@@ -142,6 +142,12 @@ pub struct Fuxi {
     /// 单豁免 fallback）：`set_xuannv_for_topic(general, id)` 会同步 push 到它。
     /// 上限由 `FUXI_XUANNV_MAX_ACTIVE` 注入（默认 3）。
     xuannv_pool: Arc<crate::xuannv_pool::XuannvPool>,
+    /// 块4 持久队列钩子——bridge 在归属 topic 分身 dormant 时把完工/里程碑信号
+    /// 落库（a01cfab5「信号不丢」），分身 respawn 后 drain 补发（块5 收口）。
+    /// `Option`：未注入 = 单玄女兼容期 / 测试，`enqueue_pending` debug 跳过。
+    /// trait 在本 crate，impl adapter 由 fuxi-cli 注入（依赖反转，见
+    /// [`crate::PendingNotifySink`] doc）。
+    pending_sink: Arc<RwLock<Option<Arc<dyn crate::PendingNotifySink>>>>,
 }
 
 /// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
@@ -193,6 +199,7 @@ impl Fuxi {
             current_topic_id: topic_tx,
             xuannv_switcher: Arc::new(RwLock::new(None)),
             xuannv_pool: Arc::new(crate::xuannv_pool::XuannvPool::new(max_active)),
+            pending_sink: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
@@ -321,6 +328,19 @@ impl Fuxi {
     /// 幂等：再次调用以最新值为准（测试场景偶尔会换 sink）。
     pub async fn set_recall_sink(&self, sink: Arc<dyn RecallSink>) {
         *self.recall_sink.write().await = Some(sink);
+    }
+
+    /// 块4：注入持久队列钩子（dormant 分身的完工信号落库）。fuxi-cli 启动期注入
+    /// 包 `PendingNotifyStore` 的 adapter；未注入时 [`Self::enqueue_pending`] debug
+    /// 跳过（单玄女兼容期 / 测试）。幂等。
+    pub async fn set_pending_sink(&self, sink: Arc<dyn crate::PendingNotifySink>) {
+        *self.pending_sink.write().await = Some(sink);
+    }
+
+    /// 块4：读当前持久队列 sink（None = 未注入）。bridge 的 `Intervener::enqueue_pending`
+    /// impl 用它转发；放 `pub(crate)` 不外泄 RwLock 细节。
+    pub(crate) async fn pending_sink_handle(&self) -> Option<Arc<dyn crate::PendingNotifySink>> {
+        self.pending_sink.read().await.clone()
     }
 
     /// β · #57 注入 dispatch routing 钩子——dispatch 决策树命中 dist 路径
