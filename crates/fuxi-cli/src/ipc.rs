@@ -74,12 +74,6 @@ pub enum Command {
         /// 兼容老 daemon。
         #[serde(default)]
         required_tags: Vec<String>,
-        /// 块5：发起 dispatch 的玄女分身所属 topic（UUID 字符串）。玄女 cc 子进程
-        /// 跑 `fuxi dispatch --topic <FUXI_TOPIC>` 时带上 → daemon 串进
-        /// `task.topic_id` → 门客事件 meta.topic_id 归位该 topic（bridge 路由到归属
-        /// 分身）。`None` = 老 daemon / 无 topic（兜底 general）。serde default 兼容。
-        #[serde(default)]
-        topic_id: Option<String>,
     },
     /// 介入——向指定门客发话。
     Intervene {

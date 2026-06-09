@@ -157,8 +157,7 @@ async fn run_handoff(fuxi: &Fuxi, oracle: &OracleStore, role: &str) -> Result<()
 
     info!("spawn 新玄女副本（注入 handoff prelude）");
     let prelude = format_handoff_prelude(&body);
-    // handoff 是 general 主线交接，不挂特定 topic env（保留原行为）。
-    let new_id = spawn_with_prelude(fuxi, oracle, role, &prelude, Vec::new()).await?;
+    let new_id = spawn_with_prelude(fuxi, oracle, role, &prelude).await?;
     fuxi.set_xuannv(new_id).await;
 
     // 删除 handoff 文件——下次启动不会误以为又要交接
@@ -220,7 +219,6 @@ pub async fn spawn_with_prelude(
     oracle: &OracleStore,
     role: &str,
     prelude_text: &str,
-    extra_env: Vec<(String, String)>,
 ) -> Result<AgentId> {
     let loaded = skill_loader::load(role).with_context(|| format!("加载 roles/{role}/ROLE.md"))?;
     let xuannv_profile = loaded.profile.clone();
@@ -234,15 +232,12 @@ pub async fn spawn_with_prelude(
         format!("{}{}", prelude_text, loaded.append_system_prompt)
     };
 
-    // 块5：extra_env（如 FUXI_TOPIC=<topic>）让该分身 shell 的 fuxi dispatch 继承后
-    // 默认带 --topic。session_id None/resume None 红线不动。
     let cc_cfg = CcLaunchConfig {
         append_system_prompt: Some(combined),
         allowed_tools: loaded.allowed_tools,
         disallowed_tools: loaded.disallowed_tools,
         resume_session_id: None,
         session_id: None,
-        extra_env,
         ..Default::default()
     };
 

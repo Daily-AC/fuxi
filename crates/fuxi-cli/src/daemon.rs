@@ -379,7 +379,6 @@ async fn dispatch_command(
             body,
             pinned_node,
             required_tags,
-            topic_id,
         } => match parse_agent_id(&agent_id) {
             Err(e) => Response::err(e),
             Ok(id) => {
@@ -432,17 +431,6 @@ async fn dispatch_command(
                     }
                     if !required_tags.is_empty() {
                         task = task.with_required_tags(required_tags);
-                    }
-                    // 块5：玄女分身经 FUXI_TOPIC/--topic 带来的归属 topic → task.topic_id，
-                    // 让门客事件 meta.topic_id 归位该 topic（适配器已消费 task.topic_id，
-                    // bridge 据此路由到归属分身）。解析失败只 warn 不挂（不阻断派活）。
-                    if let Some(raw) = topic_id.as_deref().filter(|s| !s.trim().is_empty()) {
-                        match uuid::Uuid::parse_str(raw.trim()) {
-                            Ok(u) => task = task.with_topic_id(fuxi_core::TopicId::from(u)),
-                            Err(e) => {
-                                tracing::warn!(topic = raw, error = %e, "dispatch --topic 非法 UUID，本次不挂 topic")
-                            }
-                        }
                     }
                     let task_id = task.id;
                     match fuxi.dispatch(id, task).await {
@@ -2180,107 +2168,6 @@ mod tests {
         }
     }
 
-    /// 块5：捕获被 dispatch 的 task，验 daemon 把 Command::Dispatch.topic_id 串进
-    /// task.topic_id。
-    struct TopicCapturingAgent {
-        card: fuxi_core::agent::AgentCard,
-        last: std::sync::Arc<tokio::sync::Mutex<Option<fuxi_core::task::Task>>>,
-    }
-    impl TopicCapturingAgent {
-        fn new() -> (
-            std::sync::Arc<Self>,
-            std::sync::Arc<tokio::sync::Mutex<Option<fuxi_core::task::Task>>>,
-        ) {
-            let slot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-            let card = fuxi_core::agent::AgentCard {
-                id: AgentId::new(),
-                profile: fuxi_core::agent::AgentProfile {
-                    name: "cap".into(),
-                    role: "dev".into(),
-                    cli: "stub".into(),
-                    system_prompt: String::new(),
-                    tags: vec![],
-                    extra: Default::default(),
-                },
-                endpoint: "stub://cap".into(),
-                status: fuxi_core::agent::AgentStatus::Idle,
-            };
-            (
-                std::sync::Arc::new(Self {
-                    card,
-                    last: slot.clone(),
-                }),
-                slot,
-            )
-        }
-    }
-    #[async_trait::async_trait]
-    impl fuxi_core::agent::Agent for TopicCapturingAgent {
-        fn card(&self) -> &fuxi_core::agent::AgentCard {
-            &self.card
-        }
-        async fn dispatch(
-            &self,
-            task: fuxi_core::task::Task,
-        ) -> fuxi_core::Result<tokio::sync::mpsc::Receiver<fuxi_core::Event>> {
-            *self.last.lock().await = Some(task);
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
-            Ok(rx)
-        }
-        async fn send_message(&self, _t: fuxi_core::id::TaskId, _x: &str) -> fuxi_core::Result<()> {
-            Ok(())
-        }
-        async fn cancel(&self, _t: fuxi_core::id::TaskId) -> fuxi_core::Result<()> {
-            Ok(())
-        }
-        async fn shutdown(&self) -> fuxi_core::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// 块5 步7.5：Command::Dispatch{topic_id: Some(uuid)} → 被派 task.topic_id 命中该 topic。
-    #[tokio::test]
-    async fn dispatch_stamps_topic_id_from_command() {
-        let (fuxi, bus, store, keeper, oracle) = mock_daemon_parts().await;
-        let (agent, slot) = TopicCapturingAgent::new();
-        let id = fuxi.insert_agent(agent, None).await;
-        let topic = fuxi_core::TopicId::new();
-
-        let _ = dispatch_command(
-            fuxi.clone(),
-            bus,
-            store,
-            keeper,
-            oracle,
-            None,
-            Command::Dispatch {
-                agent_id: id.to_string(),
-                task_id: None,
-                title: "t".into(),
-                body: Some("do x".into()),
-                pinned_node: None,
-                required_tags: vec![],
-                topic_id: Some(topic.as_uuid().to_string()),
-            },
-            Arc::new(Notify::new()),
-        )
-        .await;
-
-        // dispatch pump 异步——给点时间让 agent.dispatch 收到 task。
-        for _ in 0..50 {
-            if slot.lock().await.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let task = slot.lock().await.clone().expect("agent 应收到 task");
-        assert_eq!(
-            task.topic_id,
-            Some(topic),
-            "daemon 应把 --topic 串进 task.topic_id"
-        );
-    }
-
     /// `Command::Kill` 把指定门客从 shelf 摘走。daemon 不再返「暂未实装」错误。
     #[tokio::test]
     async fn kill_via_command_calls_shutdown_agent() {
@@ -2484,7 +2371,6 @@ mod tests {
                 body: Some("echo hi".into()),
                 pinned_node: Some("ghost-node".into()),
                 required_tags: vec![],
-                topic_id: None,
             },
             Arc::new(Notify::new()),
         )
@@ -2523,7 +2409,6 @@ mod tests {
                 body: Some("echo hi".into()),
                 pinned_node: Some("real-node".into()),
                 required_tags: vec![],
-                topic_id: None,
             },
             Arc::new(Notify::new()),
         )
