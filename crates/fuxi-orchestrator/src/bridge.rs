@@ -3092,4 +3092,83 @@ mod tests {
             "dormant 路径不该直接注入分身"
         );
     }
+
+    /// 块5 步7.7 串味隔离 e2e（两 topic 各有活分身）：topic A / B 各自 worker 完工
+    /// milestone 严格只注入自己 topic 的分身，互不串。357da78a 串味的核心治愈断言。
+    ///
+    /// 注：本测覆盖 milestone→归属分身 路由（已实装）。worker-dispatch 让门客事件
+    /// **带上**正确 meta.topic_id 那条链是 7.5（DEFER follow-up）——本测直接 stamp
+    /// meta.topic_id 模拟 7.5 生效后的世界，验证路由层隔离正确。
+    #[tokio::test]
+    async fn two_topics_milestones_stay_isolated_no_cross_talk() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let clone_a = AgentId::new();
+        let clone_b = AgentId::new();
+        let general = AgentId::new();
+        let worker_a = AgentId::new();
+        let worker_b = AgentId::new();
+        let topic_a = TopicId::new();
+        let topic_b = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker_a, "luban").await;
+        mock.set_role(worker_b, "codex").await;
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(topic_a, clone_a);
+        map.insert(topic_b, clone_b);
+        let (_tx, rx) = watch::channel(map);
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        for (worker, topic, summary) in
+            [(worker_a, topic_a, "A 的活"), (worker_b, topic_b, "B 的活")]
+        {
+            let task = TaskId::new();
+            let mut meta = EventMeta::now();
+            meta.agent = Some(worker);
+            meta.task = Some(task);
+            meta.topic_id = Some(topic);
+            bus.publish(Event {
+                meta,
+                kind: EventKind::AgentRequestReview {
+                    agent: worker,
+                    task,
+                    deliverable_kind: fuxi_core::DeliverableKind::ResearchSummary,
+                    summary: summary.into(),
+                    artifact_ref: None,
+                },
+            })
+            .expect("publish");
+        }
+
+        wait_call(&mock, 2).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 2, "两条 milestone 各注入一次：{calls:?}");
+        let a_targets: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, text)| text.contains("A 的活"))
+            .map(|(t, _, _)| *t)
+            .collect();
+        let b_targets: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, text)| text.contains("B 的活"))
+            .map(|(t, _, _)| *t)
+            .collect();
+        assert_eq!(a_targets, vec![clone_a], "A 的完工只该到分身A");
+        assert_eq!(b_targets, vec![clone_b], "B 的完工只该到分身B");
+        assert!(
+            calls.iter().all(|(t, _, _)| *t != general),
+            "活分身路由不该兜底 general：{calls:?}"
+        );
+    }
 }
