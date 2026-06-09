@@ -27,6 +27,7 @@ pub mod notifications;
 pub mod orphan_sweep;
 pub mod pair;
 pub mod password;
+pub mod pending_notify;
 pub mod push;
 pub mod state;
 pub mod tasks_view;
