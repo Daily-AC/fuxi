@@ -1281,6 +1281,8 @@ mod tests {
         deliverable_tasks: Mutex<std::collections::HashSet<TaskId>>,
         /// 块4：记录 enqueue_pending 调用（topic, prompt, origin）——dormant 落库测试用。
         enqueue_calls: Mutex<Vec<(fuxi_core::TopicId, String, String)>>,
+        /// 块5：记录 ensure_xuannv_for_topic 调用（respawn 触发）——dormant 补发回归用。
+        respawn_calls: Mutex<Vec<fuxi_core::TopicId>>,
     }
 
     impl MockIntervener {
@@ -1323,6 +1325,10 @@ mod tests {
 
         async fn enqueue_snapshot(&self) -> Vec<(fuxi_core::TopicId, String, String)> {
             self.enqueue_calls.lock().await.clone()
+        }
+
+        async fn respawn_snapshot(&self) -> Vec<fuxi_core::TopicId> {
+            self.respawn_calls.lock().await.clone()
         }
     }
 
@@ -1400,6 +1406,10 @@ mod tests {
                 system_origin.to_string(),
             ));
             Ok(())
+        }
+        async fn ensure_xuannv_for_topic(&self, topic: fuxi_core::TopicId) -> Option<AgentId> {
+            self.respawn_calls.lock().await.push(topic);
+            None
         }
     }
 
@@ -3013,6 +3023,73 @@ mod tests {
         assert!(
             mock.enqueue_snapshot().await.is_empty(),
             "idle_ttl 正常回收不该入队（噪音过滤）"
+        );
+    }
+
+    /// 块5 步7.7 跨块集成回归（仿今天玄女卡死场景）：dormant topic 分身在它睡着期间
+    /// 门客完工 → bridge **既** enqueue 落库 **又** 触发 ensure_xuannv_for_topic respawn，
+    /// 顺序是先 enqueue 再 respawn（spawn 内 drain 一定看得到刚入队的信号）。
+    #[tokio::test]
+    async fn dormant_milestone_enqueues_then_triggers_respawn() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let general = AgentId::new();
+        let worker = AgentId::new();
+        let dormant_topic = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+        // 空池——dormant_topic 无活分身（模拟分身已被 idle_gc dormant 回收）。
+        let (_tx, rx) = watch::channel(std::collections::HashMap::new());
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        meta.topic_id = Some(dormant_topic);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: fuxi_core::DeliverableKind::ResearchSummary,
+                summary: "分身睡着期间门客干完了".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish");
+
+        // 等 enqueue + respawn 都发生。
+        for _ in 0..100 {
+            if !mock.enqueue_snapshot().await.is_empty()
+                && !mock.respawn_snapshot().await.is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let enq = mock.enqueue_snapshot().await;
+        let resp = mock.respawn_snapshot().await;
+        assert_eq!(enq.len(), 1, "dormant 里程碑应落库一次");
+        assert_eq!(enq[0].0, dormant_topic);
+        assert_eq!(
+            resp.as_slice(),
+            &[dormant_topic],
+            "应触发该 topic 的 respawn 补发"
+        );
+        // 不注入任何活分身（不误打 general / 别 topic）。
+        assert!(
+            mock.snapshot().await.is_empty(),
+            "dormant 路径不该直接注入分身"
         );
     }
 }
