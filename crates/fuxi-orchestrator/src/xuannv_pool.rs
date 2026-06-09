@@ -92,6 +92,24 @@ impl XuannvPool {
         self.tx.subscribe()
     }
 
+    /// 反查：某 agent id 当前归属哪个 topic 的活分身。
+    /// idle GC 只拿到 id，要 dormant 它必须先反查 topic 才能 [`XuannvPool::remove`]。
+    /// 不命中（已被移除 / 非池中分身）返回 None。
+    pub async fn topic_of(&self, id: AgentId) -> Option<TopicId> {
+        let inner = self.inner.lock().await;
+        inner
+            .active
+            .iter()
+            .find_map(|(t, aid)| (*aid == id).then_some(*t))
+    }
+
+    /// 判定某 id 是否是池中任一活分身——shutdown_agent 豁免用：命中即拒绝永久 kill
+    /// （玄女分身是用户对话入口，误 kill 等价于单玄女被杀的旧 bug）。
+    pub async fn is_active_clone(&self, id: AgentId) -> bool {
+        let inner = self.inner.lock().await;
+        inner.active.values().any(|aid| *aid == id)
+    }
+
     /// 超 `max_active` 时返回应被 LRU 回收的 topic（最久未活跃的活分身）。
     /// 调用方负责 dormant 它（进程回收 + [`XuannvPool::remove`]）。未超返回 None。
     pub async fn lru_victim_if_over_cap(&self) -> Option<TopicId> {
@@ -149,6 +167,32 @@ mod tests {
         pool.remove(topic).await;
         let snap = rx.borrow_and_update().clone();
         assert!(!snap.contains_key(&topic));
+    }
+
+    #[tokio::test]
+    async fn topic_of_reverse_lookup() {
+        let pool = XuannvPool::new(3);
+        let a = AgentId::new();
+        let topic = TopicId(uuid::Uuid::from_u128(7));
+        pool.set_active(topic, a).await;
+        assert_eq!(pool.topic_of(a).await, Some(topic));
+        // 不在池中的 id 反查不到。
+        assert_eq!(pool.topic_of(AgentId::new()).await, None);
+        // dormant 后反查不到。
+        pool.remove(topic).await;
+        assert_eq!(pool.topic_of(a).await, None);
+    }
+
+    #[tokio::test]
+    async fn is_active_clone_tracks_membership() {
+        let pool = XuannvPool::new(3);
+        let a = AgentId::new();
+        let topic = TopicId::new();
+        assert!(!pool.is_active_clone(a).await);
+        pool.set_active(topic, a).await;
+        assert!(pool.is_active_clone(a).await);
+        pool.remove(topic).await;
+        assert!(!pool.is_active_clone(a).await);
     }
 
     #[tokio::test]
