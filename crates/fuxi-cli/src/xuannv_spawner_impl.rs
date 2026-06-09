@@ -136,17 +136,12 @@ impl XuannvSpawner for TopicXuannvSpawner {
         let prelude = crate::topic_switch::build_topic_prelude(&title, &recent);
 
         // spawn_with_prelude 内部 session_id None / resume None（红线，已守）。
-        // 块5：注入 FUXI_TOPIC，让分身 shell 的 fuxi dispatch 默认带 --topic（worker
-        // 事件归位本 topic）。
-        let id = crate::xuannv_handoff::spawn_with_prelude(
-            &fuxi,
-            &self.oracle,
-            &self.role,
-            &prelude,
-            vec![("FUXI_TOPIC".to_string(), topic.as_uuid().to_string())],
-        )
-        .await
-        .map_err(|e| OrchestratorError::Other(format!("spawn_for_topic 起新分身失败: {e}")))?;
+        let id =
+            crate::xuannv_handoff::spawn_with_prelude(&fuxi, &self.oracle, &self.role, &prelude)
+                .await
+                .map_err(|e| {
+                    OrchestratorError::Other(format!("spawn_for_topic 起新分身失败: {e}"))
+                })?;
 
         // 入池——绑 topic → 新分身（general topic 还会同步 xuannv_id watch 镜像）。
         fuxi.set_xuannv_for_topic(topic, id).await;

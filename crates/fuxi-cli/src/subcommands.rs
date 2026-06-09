@@ -134,11 +134,6 @@ pub struct DispatchArgs {
     /// 非空时走 dist enqueue。pinned_node 优先级高于 tags（玄女只需选其一）。
     #[arg(long = "required-tags", value_delimiter = ',')]
     pub required_tags: Vec<String>,
-    /// 块5：本次 dispatch 归属的 topic（UUID）。玄女分身一般不显式传——spawn 时注入
-    /// 的 `FUXI_TOPIC` env 作默认值（见 run_dispatch fallback），让门客事件归位发起方
-    /// topic。显式 `--topic` 覆盖 env。`None`（且无 env）= 不挂 topic（兜底 general）。
-    #[arg(long = "topic")]
-    pub topic_id: Option<String>,
 }
 
 pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
@@ -148,12 +143,6 @@ pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| derive_title_from_body(&body));
-    // 块5：显式 --topic 优先；否则回落 spawn 注入的 FUXI_TOPIC env（玄女子进程继承）。
-    // 两者皆无 = None（不挂 topic，daemon 兜底 general）。
-    let topic_id = args
-        .topic_id
-        .or_else(|| std::env::var("FUXI_TOPIC").ok())
-        .filter(|s| !s.trim().is_empty());
     let resp = client::send(Command::Dispatch {
         agent_id: args.agent_id,
         task_id: args.task_id,
@@ -161,7 +150,6 @@ pub async fn run_dispatch(args: DispatchArgs) -> Result<()> {
         body: if body.is_empty() { None } else { Some(body) },
         pinned_node: args.pinned_node,
         required_tags: args.required_tags,
-        topic_id,
     })
     .await?;
     if !args.print_task_id {
@@ -1137,34 +1125,6 @@ mod tests {
         assert_eq!(w.a.pinned_node.as_deref(), Some("mac-local"));
         assert!(w.a.required_tags.is_empty());
         assert_eq!(w.a.body, vec!["ls", "erp"]);
-    }
-
-    /// 块5 `--topic <uuid>` flag 解析；省略时为 None（由 run_dispatch 回落 FUXI_TOPIC env）。
-    #[test]
-    fn dispatch_args_parse_topic() {
-        use clap::Parser;
-        #[derive(Parser)]
-        struct W {
-            #[command(flatten)]
-            a: DispatchArgs,
-        }
-        let w = W::try_parse_from([
-            "w",
-            "--to",
-            "agent-1",
-            "--topic",
-            "00000000-0000-0000-0000-000000000001",
-            "do",
-            "x",
-        ])
-        .unwrap();
-        assert_eq!(
-            w.a.topic_id.as_deref(),
-            Some("00000000-0000-0000-0000-000000000001")
-        );
-
-        let w2 = W::try_parse_from(["w", "--to", "agent-1", "do", "x"]).unwrap();
-        assert_eq!(w2.a.topic_id, None, "省略 --topic 应为 None");
     }
 
     /// β · #70 `--required-tags local,erp` 逗号分隔解析为 Vec。
