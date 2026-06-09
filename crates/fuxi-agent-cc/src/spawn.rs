@@ -33,28 +33,7 @@ pub fn spawn_claude(cfg: &CcLaunchConfig) -> std::io::Result<SpawnedCc> {
         // kill_on_drop 防止测试进程退出后 cc 变孤儿进程。
         .kill_on_drop(true);
 
-    // ── 环境变量处理 —— 两坑都要避 ──
-    // 坑 1：嵌套检测。我们自己若在 Claude Code 会话里运行，子 cc 继承 env 会触发
-    //        嵌套检测进入卡住状态。参照 sia/src/core/cc-process.ts:cleanEnv 和
-    //        anya/apps/server/src/broker/backends/claude-code-backend.ts:307-326。
-    cmd.env_remove("CLAUDECODE");
-    for (k, _) in std::env::vars() {
-        if k.starts_with("CLAUDE_CODE_")
-            && !matches!(
-                k.as_str(),
-                "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
-                    | "CLAUDE_CODE_USE_BEDROCK"
-                    | "CLAUDE_CODE_USE_VERTEX"
-            )
-        {
-            cmd.env_remove(&k);
-        }
-    }
-    // 坑 2：Clash/Surge TUN 代理可能把 127.0.0.1 也代理走，导致 cc 反连 WS 时
-    //        TCP SYN 被拦。**实测本机不设 NO_PROXY → --sdk-url 30s 永远 timeout**。
-    //        参照 sia/src/core/cc-process.ts:666-667（它就是踩过这个坑）。
-    cmd.env("NO_PROXY", "127.0.0.1,localhost");
-    cmd.env("no_proxy", "127.0.0.1,localhost");
+    apply_cc_env(&mut cmd, cfg);
 
     if let Some(cwd) = &cfg.cwd {
         cmd.current_dir(cwd);
@@ -83,6 +62,43 @@ pub fn spawn_claude(cfg: &CcLaunchConfig) -> std::io::Result<SpawnedCc> {
         stdout,
         pid,
     })
+}
+
+/// cc 子进程环境变量处理——抽出独立 fn 便于单测（验 strip + extra_env 注入互不干扰）。
+///
+/// 顺序要点：先 strip（嵌套检测）→ 再注 NO_PROXY → **最后**注 extra_env。extra_env
+/// 放最后保证不被 strip 循环（按 CLAUDECODE/CLAUDE_CODE_ 前缀删）误删；调用方自律
+/// 不用那两个前缀当 extra_env 键。
+fn apply_cc_env(cmd: &mut Command, cfg: &CcLaunchConfig) {
+    // ── 两坑都要避 ──
+    // 坑 1：嵌套检测。我们自己若在 Claude Code 会话里运行，子 cc 继承 env 会触发
+    //        嵌套检测进入卡住状态。参照 sia/src/core/cc-process.ts:cleanEnv 和
+    //        anya/apps/server/src/broker/backends/claude-code-backend.ts:307-326。
+    cmd.env_remove("CLAUDECODE");
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CLAUDE_CODE_")
+            && !matches!(
+                k.as_str(),
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+                    | "CLAUDE_CODE_USE_BEDROCK"
+                    | "CLAUDE_CODE_USE_VERTEX"
+            )
+        {
+            cmd.env_remove(&k);
+        }
+    }
+    // 坑 2：Clash/Surge TUN 代理可能把 127.0.0.1 也代理走，导致 cc 反连 WS 时
+    //        TCP SYN 被拦。**实测本机不设 NO_PROXY → --sdk-url 30s 永远 timeout**。
+    //        参照 sia/src/core/cc-process.ts:666-667（它就是踩过这个坑）。
+    cmd.env("NO_PROXY", "127.0.0.1,localhost");
+    cmd.env("no_proxy", "127.0.0.1,localhost");
+
+    // 块5：白名单式注入 extra_env（如玄女分身的 FUXI_TOPIC）。strip 循环只删
+    // CLAUDECODE/CLAUDE_CODE_ 前缀继承 env，不碰这里显式 set 的键。子进程（含玄女
+    // shell 的 fuxi dispatch）继承 → 默认带 --topic。
+    for (k, v) in &cfg.extra_env {
+        cmd.env(k, v);
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +141,45 @@ mod tests {
             ..Default::default()
         };
         assert!(spawn_claude(&cfg).is_err());
+    }
+
+    /// 块5：apply_cc_env 把 extra_env（如 FUXI_TOPIC）注进子进程，且**不**被嵌套检测
+    /// 的 strip 循环误删；同时验证继承的 CLAUDE_CODE_* 仍被 strip。用 `printenv` 打全
+    /// 量 env 断言。
+    #[tokio::test]
+    async fn apply_cc_env_injects_extra_env_and_strips_claude_code() {
+        // 父进程设一个 CLAUDE_CODE_ 变量——子进程应看不到（被 strip）。
+        // SAFETY: 本测串行设/删自有 env，不与并发测试共享键。
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_TESTSTRIP", "should-be-removed");
+        }
+        let cfg = CcLaunchConfig {
+            binary: "printenv".to_string(),
+            extra_env: vec![("FUXI_TOPIC".to_string(), "t-7-uuid".to_string())],
+            ..Default::default()
+        };
+        let mut cmd = Command::new(&cfg.binary);
+        apply_cc_env(&mut cmd, &cfg);
+        let out = cmd.output().await.expect("run printenv");
+        let env_dump = String::from_utf8_lossy(&out.stdout);
+
+        assert!(
+            env_dump.lines().any(|l| l == "FUXI_TOPIC=t-7-uuid"),
+            "extra_env 应注入子进程：\n{env_dump}"
+        );
+        assert!(
+            !env_dump.contains("CLAUDE_CODE_TESTSTRIP"),
+            "继承的 CLAUDE_CODE_* 应被 strip：\n{env_dump}"
+        );
+        assert!(
+            env_dump
+                .lines()
+                .any(|l| l == "NO_PROXY=127.0.0.1,localhost"),
+            "NO_PROXY 应注入：\n{env_dump}"
+        );
+
+        unsafe {
+            std::env::remove_var("CLAUDE_CODE_TESTSTRIP");
+        }
     }
 }
