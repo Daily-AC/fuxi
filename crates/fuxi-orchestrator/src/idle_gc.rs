@@ -72,6 +72,11 @@ pub struct IdleGcTask {
     /// 用 watch 而非裸 Option：GC 启动早于 xuannv spawn（im.rs 顺序），且 xuannv
     /// 重生后 id 会变；watch 让 tick_once 每次都 borrow 到当前真值。None = 测试。
     xuannv_id: Option<tokio::sync::watch::Receiver<Option<AgentId>>>,
+    /// 块2 玄女分身池——注入后 GC 对**任一活分身**走 dormant 回收：先
+    /// `pool.remove(topic)` 摘掉映射，再正常 `shutdown_idle`（进程回收 + AgentDead
+    /// idle_ttl），分身后续可 respawn。未注入（None）时退回 `xuannv_id` 单豁免
+    /// （旧单玄女语义，过渡期 / 测试用）。
+    xuannv_pool: Option<Arc<crate::xuannv_pool::XuannvPool>>,
 }
 
 impl IdleGcTask {
@@ -91,17 +96,28 @@ impl IdleGcTask {
             ttl,
             tick_interval,
             xuannv_id: None,
+            xuannv_pool: None,
         }
     }
 
     /// 注入 xuannv id watch handle —— GC tick_once 跳过她，不预发 AgentShuttingDown。
     /// 生产用 `fuxi.xuannv_id_watch()`；测试可手 build：
     /// `let (_, rx) = tokio::sync::watch::channel(Some(id));`
+    ///
+    /// 块2 后这是 **fallback**：未注入 [`Self::with_xuannv_pool`] 时才生效（旧单玄女
+    /// 语义）。注入池后分身走 dormant 回收，不再 skip。
     pub fn with_xuannv_exempt(
         mut self,
         watch: tokio::sync::watch::Receiver<Option<AgentId>>,
     ) -> Self {
         self.xuannv_id = Some(watch);
+        self
+    }
+
+    /// 块2：注入玄女分身池——GC 对任一活分身走 dormant 回收（pool.remove + 正常
+    /// shutdown_idle），分身后续可 respawn。生产用 `fuxi.xuannv_pool()`。
+    pub fn with_xuannv_pool(mut self, pool: Arc<crate::xuannv_pool::XuannvPool>) -> Self {
+        self.xuannv_pool = Some(pool);
         self
     }
 
@@ -138,11 +154,22 @@ impl IdleGcTask {
         // 取当前 xuannv id 一次（watch borrow 廉价，但避免在 for 内每次 borrow）。
         let xuannv_now = self.xuannv_id.as_ref().and_then(|w| *w.borrow());
         for id in stale {
-            // Bug 修：xuannv 不能被 GC 关（shutdown_agent silent return Ok），
-            // 但旧版 GC 仍预发 AgentShuttingDown 事件 → 30s 一次永远循环。这里
-            // 在预发之前就跳过她，从源头消噪音。事件库实证：单 xuannv 实例
-            // 触发 1830 噪音事件（agent f6e2b1a2，2026-05-04 17:29 起 15h）。
-            if xuannv_now == Some(id) {
+            // 块2：池模式优先。命中池中活分身 → dormant 回收：先 pool.remove(topic)
+            // 摘掉映射（之后 shutdown_agent 的 is_active_clone 豁免不再拦），再走
+            // 正常 shutdown_idle（进程回收 + AgentDead idle_ttl），分身后续可 respawn。
+            // 不 skip——dormant 正是本特性的目的（空闲分身释放资源，下条消息再起）。
+            if let Some(pool) = self.xuannv_pool.as_ref() {
+                if let Some(topic) = pool.topic_of(id).await {
+                    debug!(agent = %id, %topic, "idle GC: 分身超时 → dormant 回收");
+                    pool.remove(topic).await;
+                }
+                // 落到下面正常回收路径（无论是否分身）。
+            } else if xuannv_now == Some(id) {
+                // Fallback（未注入池）：旧单玄女语义——xuannv 不能被 GC 关
+                // （shutdown_agent silent return Ok），且旧版仍预发 AgentShuttingDown
+                // → 30s 一次永远循环。这里在预发之前就跳过她，从源头消噪音。事件库
+                // 实证：单 xuannv 实例触发 1830 噪音事件（agent f6e2b1a2，
+                // 2026-05-04 17:29 起 15h）。
                 continue;
             }
             // 先发 AgentShuttingDown——激活 publisher-orphan + 让订阅者能在
@@ -506,6 +533,57 @@ mod tests {
         let hits = shutdowner.hits.lock().unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, worker_id);
+    }
+
+    /// 块2.3：池模式下，idle 超 TTL 的分身走 dormant 路径——池中映射被移除，
+    /// 且仍发出 `shutdown_idle`（进程回收），但**不**走永久 kill 旁路。
+    /// 这是单玄女 skip 语义的升级：分身可被回收 + 后续 respawn。
+    #[tokio::test]
+    async fn idle_gc_reaps_dormant_not_permanent_kill_of_xuannv_clone() {
+        use crate::xuannv_pool::XuannvPool;
+        use fuxi_core::TopicId;
+
+        let shelf = Arc::new(Shelf::new());
+        let clone = NullAgent::new("xuannv") as Arc<dyn Agent>;
+        let clone_id = clone.card().id;
+        shelf
+            .insert(ShelfEntry {
+                card: clone.card().clone(),
+                agent: clone,
+                status: ShelfStatus::Idle,
+                worktree: None,
+                idle_since: Some(Instant::now() - Duration::from_secs(3600)),
+            })
+            .await;
+
+        let pool = Arc::new(XuannvPool::new(3));
+        let topic = TopicId::new();
+        pool.set_active(topic, clone_id).await;
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let shutdowner = CountingShutdowner::new();
+        let gc = IdleGcTask::new(
+            shelf.clone(),
+            shutdowner.clone(),
+            bus,
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+        .with_xuannv_pool(pool.clone());
+
+        let n = gc.tick_once().await.unwrap();
+        assert_eq!(n, 1, "分身应被 dormant 回收（计入 shutdown）");
+        // 池中映射已移除——下次 active_id 为 None（dormant），可被 respawn 重建。
+        assert_eq!(
+            pool.active_id(topic).await,
+            None,
+            "dormant 后池中 topic 映射应被移除"
+        );
+        // shutdown_idle 被调，reason=idle_ttl（非永久 kill 旁路）。
+        let hits = shutdowner.hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, clone_id);
+        assert_eq!(hits[0].1, "idle_ttl");
     }
 
     #[tokio::test]

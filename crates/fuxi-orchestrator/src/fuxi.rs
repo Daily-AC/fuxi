@@ -137,6 +137,22 @@ pub struct Fuxi {
     /// trait 在 orchestrator（最小 vocab），impl 在 fuxi-cli `topic_switch` 包
     /// switch_topic_to 注入。`Option` 未注入 = handler 返 503（同 RecallSink pattern）。
     xuannv_switcher: Arc<RwLock<Option<Arc<dyn crate::XuannvSwitcher>>>>,
+    /// 块2 玄女分身池：topic_id → 活分身 AgentId。替代单 `xuannv_id` 的多分身模型。
+    /// `xuannv_id` watch 仍保留为 **general topic 分身的镜像**（兼容壳 + idle_gc
+    /// 单豁免 fallback）：`set_xuannv_for_topic(general, id)` 会同步 push 到它。
+    /// 上限由 `FUXI_XUANNV_MAX_ACTIVE` 注入（默认 3）。
+    xuannv_pool: Arc<crate::xuannv_pool::XuannvPool>,
+    /// 块4 持久队列钩子——bridge 在归属 topic 分身 dormant 时把完工/里程碑信号
+    /// 落库（a01cfab5「信号不丢」），分身 respawn 后 drain 补发（块5 收口）。
+    /// `Option`：未注入 = 单玄女兼容期 / 测试，`enqueue_pending` debug 跳过。
+    /// trait 在本 crate，impl adapter 由 fuxi-cli 注入（依赖反转，见
+    /// [`crate::PendingNotifySink`] doc）。
+    pending_sink: Arc<RwLock<Option<Arc<dyn crate::PendingNotifySink>>>>,
+    /// 块5 玄女分身懒启动钩子——`ensure_xuannv_for_topic` 池 miss 时调它为该 topic
+    /// spawn 一只分身（拉历史 prelude + cc launch，逻辑在 fuxi-cli adapter）。
+    /// `Option`：未注入 = 单玄女兼容期 / 测试，`ensure_xuannv_for_topic` 退化为
+    /// 「池里有就返回，没有返 None」（不 spawn）。依赖反转见 [`crate::XuannvSpawner`]。
+    xuannv_spawner: Arc<RwLock<Option<Arc<dyn crate::XuannvSpawner>>>>,
 }
 
 /// memory-v2 注入桥需要的两个 store 句柄。两者来自同一 SQLite 文件
@@ -166,6 +182,13 @@ impl Fuxi {
         // Phase 1：current_topic_id 初值 general。switch_topic 前所有玄女对话都
         // 落在 general topic（兼容老行为）。
         let (topic_tx, _) = watch::channel(fuxi_core::TopicId::general());
+        // 块2：玄女分身池上限走 env，非法 / 缺省 = 3（同时活 3 个 topic 的分身，
+        // 超出按 LRU dormant 回收）。
+        let max_active = std::env::var("FUXI_XUANNV_MAX_ACTIVE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(3);
         let me = Self {
             bus: bus.clone(),
             workspace,
@@ -180,11 +203,21 @@ impl Fuxi {
             node_load_provider: Arc::new(RwLock::new(None)),
             current_topic_id: topic_tx,
             xuannv_switcher: Arc::new(RwLock::new(None)),
+            xuannv_pool: Arc::new(crate::xuannv_pool::XuannvPool::new(max_active)),
+            pending_sink: Arc::new(RwLock::new(None)),
+            xuannv_spawner: Arc::new(RwLock::new(None)),
         };
         // 死亡检测：Fuxi 自订阅 bus，看到 AgentDead 即把对应 shelf 条目翻 Dead。
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
         // Fuxi::shutdown 主动发、外部 publish）全部汇入这一条路径。
         spawn_death_watcher(bus, shelf);
+        // 块5：general 镜像 reconciler——`xuannv_id` watch（兼容壳 + bridge general
+        // fallback + conv_store sync 读它）必须始终跟随池里 general 分身。让池做唯一
+        // 真相源：任何 mutator（set_xuannv_for_topic / handoff remove / **idle_gc
+        // dormant remove**）改了 general 入口，reconciler 自动把镜像同步成最新值（含
+        // 回收后置 None）。**修今天的黑洞坑**：dormant 回收 general 只 pool.remove 不清
+        // 镜像 → xuannv_id() 返已死 id → 用户消息黑洞；reconciler 兜住这条。
+        spawn_general_mirror_sync(me.xuannv_pool.watch(), me.xuannv_id.clone());
         me
     }
 
@@ -202,14 +235,87 @@ impl Fuxi {
     /// 告知 Fuxi 哪个 agent 是玄女——抄送路径用这个判定 target≠xuannv。
     /// 幂等：再次调用以最新值为准。订阅方 ([`Self::xuannv_id_watch`]) 会收到
     /// `changed()` 通知。
+    ///
+    /// 块2 兼容壳：等价于把分身绑到 [`TopicId::general`]——未迁移到 topic 维度的
+    /// 调用方（repl 启动、handoff、抄送判定）继续走单玄女语义，落在 general topic。
     pub async fn set_xuannv(&self, id: AgentId) {
-        // send_replace：无 receiver 也不 panic（Fuxi 启动早于 IM 订阅时也安全）
-        let _ = self.xuannv_id.send_replace(Some(id));
+        self.set_xuannv_for_topic(fuxi_core::TopicId::general(), id)
+            .await;
     }
 
     /// 读玄女 id——未设置返回 None。
+    ///
+    /// 块2 兼容壳：返回 general topic 的活分身（单玄女语义下的"那一个"玄女）。
+    /// 抄送 / handoff / shutdown 单豁免 fallback 仍读这个。
     pub async fn xuannv_id(&self) -> Option<AgentId> {
         *self.xuannv_id.borrow()
+    }
+
+    /// 块2：绑定某 topic → 活分身（spawn / respawn 后调）。
+    ///
+    /// general topic 的绑定**同步**写一次 `xuannv_id` watch——保持兼容壳
+    /// [`Self::xuannv_id`] + bridge general fallback 立即读到新值（零 lag，老测试
+    /// 紧跟 `rx.changed()` 的语义不破）。general 的**移除**（dormant 回收 / handoff）
+    /// 不走本方法，由 [`spawn_general_mirror_sync`] reconciler 兜（置 None）。两路对
+    /// 同一值幂等。非 general topic 只进池。
+    pub async fn set_xuannv_for_topic(&self, topic: fuxi_core::TopicId, id: AgentId) {
+        self.xuannv_pool.set_active(topic, id).await;
+        if topic == fuxi_core::TopicId::general() {
+            // send_replace：无 receiver 也不 panic（Fuxi 启动早于 IM 订阅时也安全）
+            let _ = self.xuannv_id.send_replace(Some(id));
+        }
+    }
+
+    /// 块2：读某 topic 的活分身 id——无活分身（从未起 / 已 dormant）返回 None。
+    pub async fn xuannv_id_for_topic(&self, topic: fuxi_core::TopicId) -> Option<AgentId> {
+        self.xuannv_pool.active_id(topic).await
+    }
+
+    /// 块2：订阅 topic→分身全量映射的实时视图（跟随 respawn 漂移）。
+    /// SystemEventBridge 块3 用它把里程碑事件路由到归属 topic 的分身。
+    pub fn xuannv_pool_watch(
+        &self,
+    ) -> tokio::sync::watch::Receiver<HashMap<fuxi_core::TopicId, AgentId>> {
+        self.xuannv_pool.watch()
+    }
+
+    /// 块2：克隆池 Arc——idle_gc 需要它做 dormant 回收（topic_of + remove）。
+    pub fn xuannv_pool(&self) -> Arc<crate::xuannv_pool::XuannvPool> {
+        self.xuannv_pool.clone()
+    }
+
+    /// 块5 懒启动入口：拿某 topic 的活分身；池有直接返回，**池 miss 则真 spawn**。
+    ///
+    /// - 池有活分身 → 返回它（热路径，零 spawn）。
+    /// - 池 miss + 已注入 [`Self::set_xuannv_spawner`] → 调 spawner 为该 topic 起一只
+    ///   （adapter 负责拉历史 prelude + cc launch + `set_xuannv_for_topic` 入池），
+    ///   返回新 id。spawn 失败 → warn + 返回 None（调用方按需 fallback，不 panic）。
+    /// - 池 miss + 未注入 spawner（单玄女兼容期 / 测试）→ 返回 None（退化为查池）。
+    ///
+    /// 返回类型保持 `Option<AgentId>`（兼容块3 调用方）：None = 当前确实没有可用分身。
+    ///
+    /// WHY 不在此加锁防并发双 spawn：lazy 入口（用户消息 / bridge respawn）实际串行
+    /// 度高；真撞上 set_xuannv_for_topic 是 last-write-wins（同一 topic 最后那只赢，
+    /// 多起的那只 idle 后被 GC 回收）。加跨 spawn 的锁会把慢 cc launch 串死整条入口，
+    /// 得不偿失——同 spawn 语义「新建不去重」公理（fbba2ec）。
+    pub async fn ensure_xuannv_for_topic(&self, topic: fuxi_core::TopicId) -> Option<AgentId> {
+        if let Some(id) = self.xuannv_id_for_topic(topic).await {
+            return Some(id);
+        }
+        let spawner = self.xuannv_spawner.read().await.clone();
+        match spawner {
+            Some(s) => match s.spawn_for_topic(topic).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!(%topic, error = %e, "ensure_xuannv_for_topic: spawn 失败，返回 None");
+                    None
+                }
+            },
+            None => {
+                debug!(%topic, "ensure_xuannv_for_topic: 未注入 spawner，池 miss 返回 None");
+                None
+            }
+        }
     }
 
     /// 订阅玄女 id 变化——`#7` 公理 #3 真实时入口，替代旧 5min 轮询。
@@ -263,6 +369,26 @@ impl Fuxi {
     /// 幂等：再次调用以最新值为准（测试场景偶尔会换 sink）。
     pub async fn set_recall_sink(&self, sink: Arc<dyn RecallSink>) {
         *self.recall_sink.write().await = Some(sink);
+    }
+
+    /// 块4：注入持久队列钩子（dormant 分身的完工信号落库）。fuxi-cli 启动期注入
+    /// 包 `PendingNotifyStore` 的 adapter；未注入时 [`Self::enqueue_pending`] debug
+    /// 跳过（单玄女兼容期 / 测试）。幂等。
+    pub async fn set_pending_sink(&self, sink: Arc<dyn crate::PendingNotifySink>) {
+        *self.pending_sink.write().await = Some(sink);
+    }
+
+    /// 块4：读当前持久队列 sink（None = 未注入）。bridge 的 `Intervener::enqueue_pending`
+    /// impl 用它转发；放 `pub(crate)` 不外泄 RwLock 细节。
+    pub(crate) async fn pending_sink_handle(&self) -> Option<Arc<dyn crate::PendingNotifySink>> {
+        self.pending_sink.read().await.clone()
+    }
+
+    /// 块5：注入玄女分身懒启动钩子（fuxi-cli adapter 复用 spawn_with_prelude +
+    /// topic 历史）。未注入时 [`Self::ensure_xuannv_for_topic`] 不 spawn 退化为查池。
+    /// 幂等。
+    pub async fn set_xuannv_spawner(&self, spawner: Arc<dyn crate::XuannvSpawner>) {
+        *self.xuannv_spawner.write().await = Some(spawner);
     }
 
     /// β · #57 注入 dispatch routing 钩子——dispatch 决策树命中 dist 路径
@@ -1652,6 +1778,15 @@ impl Fuxi {
             if let Some(node) = pinned_node.clone() {
                 task = task.with_pinned_node(node);
             }
+            // 块3.1：若 intervene 目标本身是某个**玄女分身**（idle-degrade user-turn，
+            // 如 TUI Submit::Xuannv / PWA 对分身发话），把她服务的 topic 打到 task 上，
+            // 让这轮对话产生的事件 meta.topic_id 归位该 topic（门客适配器 emit 时已读
+            // task.topic_id → meta.topic_id）。`topic_of` None = 目标是普通门客（用户
+            // 直接 intervene 闲置门客）——发起方 topic 此入口拿不到，留块5 给玄女分身
+            // 子进程注入 topic env 后由 `fuxi dispatch` 带上，本处不硬猜。
+            if let Some(topic) = self.xuannv_pool.topic_of(agent_id).await {
+                task = task.with_topic_id(topic);
+            }
             self.dispatch(agent_id, task).await?;
             // 抄送玄女
             let xuannv = self.xuannv_id().await;
@@ -1890,13 +2025,15 @@ impl Fuxi {
     /// 被 kill 整个 TUI 崩。只有 `Fuxi::shutdown()`（平台整体下线）能碰她。
     /// GC / 将来的 `fuxi kill --id` 都走这个豁免。
     pub async fn shutdown_agent(&self, id: AgentId, reason: String) -> Result<()> {
-        if let Some(xn) = self.xuannv_id().await
-            && xn == id
-        {
+        // 块2：豁免从"单 general 玄女"升级为"池中任一活分身"——每个 topic 的分身
+        // 都是该话题的用户对话入口，误 kill 等价旧的单玄女被杀 bug。dormant 回收
+        // （idle_gc）会**先** pool.remove 再走 shutdown_idle，那时 is_active_clone
+        // 已为 false，正常回收进程；本豁免只拦"映射还在却要永久 kill"的误路径。
+        if self.xuannv_pool.is_active_clone(id).await {
             warn!(
                 agent = %id,
                 reason = %reason,
-                "shutdown_agent: 拒绝杀玄女（豁免）——平台整体 shutdown 才能关玄女"
+                "shutdown_agent: 拒绝杀玄女分身（豁免）——dormant 回收须先 pool.remove"
             );
             return Ok(());
         }
@@ -1910,6 +2047,12 @@ impl Fuxi {
     /// 是用户**显式**主动交接（写了 handoff），等价于「我自己要换副本」。
     pub async fn shutdown_xuannv_for_handoff(&self, id: AgentId, reason: String) -> Result<()> {
         info!(agent = %id, reason = %reason, "shutdown_xuannv_for_handoff: 用户主动交接，绕过豁免");
+        // 块2：先把这个分身从池里摘掉，否则 is_active_clone 会对已死 id 持续返 true，
+        // 也避免 watch 订阅者拿到将死的 id。caller 紧接着 set_xuannv(new) 重建映射。
+        // general 绑定即便不摘，后续 set_xuannv 也会覆盖；非 general 交接则必须摘。
+        if let Some(topic) = self.xuannv_pool.topic_of(id).await {
+            self.xuannv_pool.remove(topic).await;
+        }
         self.shutdown_agent_inner(id, reason).await
     }
 
@@ -2058,6 +2201,41 @@ fn spawn_death_watcher(bus: EventBus, shelf: Arc<Shelf>) {
             }
         }
         debug!("death_watcher: bus 订阅流结束，退出");
+    });
+}
+
+/// 块5：general 镜像 reconciler——把 `xuannv_id` watch 始终同步成池里 general 分身。
+///
+/// WHY：`xuannv_id` watch 是兼容壳 [`Fuxi::xuannv_id`] + bridge general fallback +
+/// conv_store sync 的真相来源，但池的 **remove**（dormant 回收 / handoff）路径不写
+/// 它——只 `set_xuannv_for_topic` 写。后果（今天的黑洞坑）：general 分身被 idle_gc
+/// dormant 回收后，镜像仍指已死 id，用户消息打到死分身。让池做唯一真相源：订
+/// `pool.watch()`，每次快照变化就把镜像设成 `snapshot.get(general)`（含回收后 None）。
+///
+/// 与 `set_xuannv_for_topic` 的同步直写并存：set 路径两边写同一值幂等；remove 路径
+/// 只有本 reconciler 写（置 None）。`send_if_modified` 避免无谓 changed 通知。
+fn spawn_general_mirror_sync(
+    mut pool_rx: watch::Receiver<HashMap<fuxi_core::TopicId, AgentId>>,
+    xuannv_tx: watch::Sender<Option<AgentId>>,
+) {
+    let general = fuxi_core::TopicId::general();
+    tokio::spawn(async move {
+        loop {
+            // 先按当前快照对齐一次（启动期 / 漏掉的变更兜底），再等下次变化。
+            let desired = pool_rx.borrow().get(&general).copied();
+            xuannv_tx.send_if_modified(|cur| {
+                if *cur != desired {
+                    *cur = desired;
+                    true
+                } else {
+                    false
+                }
+            });
+            if pool_rx.changed().await.is_err() {
+                debug!("general_mirror_sync: 池 watch 关闭，退出");
+                break;
+            }
+        }
     });
 }
 
@@ -2893,6 +3071,371 @@ mod dispatch_routing_tests {
             count.load(Ordering::SeqCst),
             1,
             "agent 不在本地 + required_tags → 走 dist enqueue"
+        );
+    }
+}
+
+#[cfg(test)]
+mod xuannv_pool_integration_tests {
+    //! 块2.2/2.3：Fuxi 持 XuannvPool 后的 topic 维度 API + 豁免改造。
+
+    use super::*;
+    use async_trait::async_trait;
+    use fuxi_core::Result as CoreResult;
+    use fuxi_core::TopicId;
+    use fuxi_core::agent::{AgentCard, AgentProfile, AgentStatus};
+    use fuxi_events::EventBus;
+    use fuxi_workspace::GitWorktreeWorkspace;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// 最小 agent stub——只为占 shelf 一个 id，dispatch 不跑。
+    struct NullAgent {
+        card: AgentCard,
+    }
+    impl NullAgent {
+        fn new(role: &str) -> Arc<Self> {
+            Arc::new(Self {
+                card: AgentCard {
+                    id: AgentId::new(),
+                    profile: AgentProfile {
+                        name: format!("null-{role}"),
+                        role: role.into(),
+                        cli: "stub".into(),
+                        system_prompt: String::new(),
+                        tags: vec![],
+                        extra: Default::default(),
+                    },
+                    endpoint: "stub://".into(),
+                    status: AgentStatus::Idle,
+                },
+            })
+        }
+    }
+    #[async_trait]
+    impl Agent for NullAgent {
+        fn card(&self) -> &AgentCard {
+            &self.card
+        }
+        async fn dispatch(&self, _task: Task) -> CoreResult<mpsc::Receiver<Event>> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+        async fn send_message(&self, _t: TaskId, _text: &str) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _t: TaskId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn make_fuxi() -> Arc<Fuxi> {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let bus = EventBus::with_memory_store().await.unwrap();
+        std::mem::forget(dir);
+        Arc::new(Fuxi::new(bus, ws))
+    }
+
+    /// Task 2.2：set_xuannv_for_topic / xuannv_id_for_topic 走池往返。
+    #[tokio::test]
+    async fn fuxi_xuannv_id_for_topic_follows_pool() {
+        let fuxi = make_fuxi().await;
+        let topic = TopicId(uuid::Uuid::nil());
+        let id = AgentId::new();
+        fuxi.set_xuannv_for_topic(topic, id).await;
+        assert_eq!(fuxi.xuannv_id_for_topic(topic).await, Some(id));
+        // 未绑定的 topic 返回 None。
+        assert_eq!(fuxi.xuannv_id_for_topic(TopicId::new()).await, None);
+    }
+
+    /// Task 2.2 兼容壳：set_xuannv(id) 等价于绑 general topic；xuannv_id() 读回它。
+    #[tokio::test]
+    async fn legacy_set_xuannv_routes_to_general_topic() {
+        let fuxi = make_fuxi().await;
+        let id = AgentId::new();
+        fuxi.set_xuannv(id).await;
+        assert_eq!(fuxi.xuannv_id().await, Some(id));
+        assert_eq!(
+            fuxi.xuannv_id_for_topic(TopicId::general()).await,
+            Some(id),
+            "set_xuannv 应绑到 general topic"
+        );
+    }
+
+    /// Task 2.2 兼容壳：xuannv_id_watch 仍跟随 general 分身漂移（idle_gc 豁免靠它）。
+    #[tokio::test]
+    async fn legacy_xuannv_id_watch_follows_general_clone() {
+        let fuxi = make_fuxi().await;
+        let mut rx = fuxi.xuannv_id_watch();
+        let id = AgentId::new();
+        fuxi.set_xuannv_for_topic(TopicId::general(), id).await;
+        // changed 后 borrow 拿到新值。
+        assert!(rx.changed().await.is_ok());
+        assert_eq!(*rx.borrow_and_update(), Some(id));
+    }
+
+    /// Task 2.3：shutdown_agent 命中池中任一活分身（非 general 也算）→ 拒绝永久 kill。
+    #[tokio::test]
+    async fn shutdown_agent_exempts_any_active_clone() {
+        let fuxi = make_fuxi().await;
+        // 把一个分身 id 同时放进 shelf 和池（非 general topic）。
+        let clone_agent = NullAgent::new("xuannv") as Arc<dyn Agent>;
+        let clone_id = clone_agent.card().id;
+        fuxi.insert_agent(clone_agent, None).await;
+        let topic = TopicId::new();
+        fuxi.set_xuannv_for_topic(topic, clone_id).await;
+
+        // shutdown_agent 应豁免：返回 Ok 且 shelf 仍持有该分身（没被 take 走）。
+        fuxi.shutdown_agent(clone_id, "idle_ttl".into())
+            .await
+            .expect("豁免应返回 Ok noop");
+        assert!(
+            fuxi.status_of(clone_id).await.is_some(),
+            "活分身不该被 shutdown_agent 永久 kill"
+        );
+    }
+
+    /// 记录被 dispatch 的 task（验 topic_id 透传）。idle 状态让 intervene 走
+    /// degrade-dispatch 分支。
+    struct RecordingAgent {
+        card: AgentCard,
+        last_task: Arc<tokio::sync::Mutex<Option<Task>>>,
+    }
+    impl RecordingAgent {
+        fn new(role: &str) -> (Arc<Self>, Arc<tokio::sync::Mutex<Option<Task>>>) {
+            let slot = Arc::new(tokio::sync::Mutex::new(None));
+            let agent = Arc::new(Self {
+                card: AgentCard {
+                    id: AgentId::new(),
+                    profile: AgentProfile {
+                        name: format!("rec-{role}"),
+                        role: role.into(),
+                        cli: "stub".into(),
+                        system_prompt: String::new(),
+                        tags: vec![],
+                        extra: Default::default(),
+                    },
+                    endpoint: "stub://".into(),
+                    status: AgentStatus::Idle,
+                },
+                last_task: slot.clone(),
+            });
+            (agent, slot)
+        }
+    }
+    #[async_trait]
+    impl Agent for RecordingAgent {
+        fn card(&self) -> &AgentCard {
+            &self.card
+        }
+        async fn dispatch(&self, task: Task) -> CoreResult<mpsc::Receiver<Event>> {
+            *self.last_task.lock().await = Some(task);
+            // 立即关闭 rx（无终态）——dispatch pump 会兜底 TaskCancelled，本测试不关心。
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+        async fn send_message(&self, _t: TaskId, _text: &str) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _t: TaskId) -> CoreResult<()> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> CoreResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Task 3.1：玄女分身（服务 topic A）idle-degrade 出的 user-turn task，
+    /// 其 `topic_id == Some(A)`——让这轮对话事件归位该 topic。
+    #[tokio::test]
+    async fn clone_degrade_dispatch_stamps_owning_topic() {
+        let fuxi = make_fuxi().await;
+        let topic_a = TopicId::new();
+        // 把 RecordingAgent 当作 topic A 的玄女分身：既在 shelf（idle）又在池。
+        let (clone_agent, slot) = RecordingAgent::new("xuannv");
+        let clone_id = clone_agent.card().id;
+        fuxi.insert_agent(clone_agent, None).await;
+        fuxi.set_xuannv_for_topic(topic_a, clone_id).await;
+
+        // 对该分身 intervene（idle → degrade dispatch）。
+        fuxi.intervene(clone_id, false, "继续画头像", vec![], None, vec![], None)
+            .await
+            .expect("intervene 应 degrade-dispatch 成功");
+
+        let task = slot
+            .lock()
+            .await
+            .clone()
+            .expect("应捕获到被 dispatch 的 task");
+        assert_eq!(
+            task.topic_id,
+            Some(topic_a),
+            "分身的 user-turn task 应打上她服务的 topic"
+        );
+    }
+
+    /// Task 3.1 边界：intervene 目标是**普通门客**（不在池）→ degrade task 不挂
+    /// topic（发起方 topic 此入口拿不到，留块5 补 spawn env）。不能误挂别的 topic。
+    #[tokio::test]
+    async fn worker_degrade_dispatch_leaves_topic_none() {
+        let fuxi = make_fuxi().await;
+        // 池里放一个别的 topic 的分身，确认不会被误用到 worker task 上。
+        fuxi.set_xuannv_for_topic(TopicId::new(), AgentId::new())
+            .await;
+
+        let (worker_agent, slot) = RecordingAgent::new("luban");
+        let worker_id = worker_agent.card().id;
+        fuxi.insert_agent(worker_agent, None).await;
+
+        fuxi.intervene(worker_id, false, "改个 bug", vec![], None, vec![], None)
+            .await
+            .expect("intervene 应 degrade-dispatch 成功");
+
+        let task = slot
+            .lock()
+            .await
+            .clone()
+            .expect("应捕获到被 dispatch 的 task");
+        assert_eq!(
+            task.topic_id, None,
+            "普通门客 degrade task 不该挂任何 topic（块5 补发起方 topic）"
+        );
+    }
+
+    /// 块5 mock spawner：记录被请求 spawn 的 topic，并模拟 adapter 真实行为
+    /// （set_xuannv_for_topic 入池后返回新 id）。
+    struct MockSpawner {
+        fuxi: std::sync::Mutex<Option<std::sync::Weak<Fuxi>>>,
+        spawned: Arc<tokio::sync::Mutex<Vec<TopicId>>>,
+    }
+    #[async_trait]
+    impl crate::XuannvSpawner for MockSpawner {
+        async fn spawn_for_topic(&self, topic: TopicId) -> crate::Result<AgentId> {
+            self.spawned.lock().await.push(topic);
+            let id = AgentId::new();
+            // 模拟 adapter：spawn 后入池（真 adapter 走 spawn_with_prelude → set_xuannv_for_topic）。
+            let weak = self.fuxi.lock().unwrap().clone();
+            if let Some(fuxi) = weak.and_then(|w| w.upgrade()) {
+                fuxi.set_xuannv_for_topic(topic, id).await;
+            }
+            Ok(id)
+        }
+    }
+
+    /// Task 7.1：ensure_xuannv_for_topic 池有活分身 → 直接返回，**不** spawn。
+    #[tokio::test]
+    async fn ensure_xuannv_for_topic_returns_existing_without_spawn() {
+        let fuxi = make_fuxi().await;
+        let topic = TopicId::new();
+        let existing = AgentId::new();
+        fuxi.set_xuannv_for_topic(topic, existing).await;
+
+        let spawned = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fuxi.set_xuannv_spawner(Arc::new(MockSpawner {
+            fuxi: std::sync::Mutex::new(Some(Arc::downgrade(&fuxi))),
+            spawned: spawned.clone(),
+        }))
+        .await;
+
+        let got = fuxi.ensure_xuannv_for_topic(topic).await;
+        assert_eq!(got, Some(existing), "池有活分身应直接返回");
+        assert!(spawned.lock().await.is_empty(), "不该触发 spawn");
+    }
+
+    /// Task 7.1：ensure_xuannv_for_topic 池 miss → 调 spawner spawn 一只并入池返回。
+    #[tokio::test]
+    async fn ensure_xuannv_for_topic_spawns_on_miss() {
+        let fuxi = make_fuxi().await;
+        let topic = TopicId::new();
+
+        let spawned = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fuxi.set_xuannv_spawner(Arc::new(MockSpawner {
+            fuxi: std::sync::Mutex::new(Some(Arc::downgrade(&fuxi))),
+            spawned: spawned.clone(),
+        }))
+        .await;
+
+        let got = fuxi.ensure_xuannv_for_topic(topic).await;
+        assert!(got.is_some(), "池 miss + 有 spawner 应 spawn 出新分身");
+        assert_eq!(
+            spawned.lock().await.as_slice(),
+            &[topic],
+            "spawner 应按该 topic 调一次"
+        );
+        // 入池了：再 ensure 直接命中、不再 spawn。
+        let again = fuxi.ensure_xuannv_for_topic(topic).await;
+        assert_eq!(again, got, "spawn 后入池，再 ensure 命中同一只");
+        assert_eq!(spawned.lock().await.len(), 1, "第二次 ensure 不该再 spawn");
+    }
+
+    /// Task 7.1：池 miss + 未注入 spawner（兼容期/测试）→ 返回 None，不 panic。
+    #[tokio::test]
+    async fn ensure_xuannv_for_topic_none_without_spawner() {
+        let fuxi = make_fuxi().await;
+        let got = fuxi.ensure_xuannv_for_topic(TopicId::new()).await;
+        assert_eq!(got, None, "无 spawner 池 miss 应返 None");
+    }
+
+    /// 等 general 镜像 reconciler 把 xuannv_id() 收敛到期望值（异步传播，给点时间）。
+    async fn wait_xuannv_id(fuxi: &Fuxi, want: Option<AgentId>) -> bool {
+        for _ in 0..100 {
+            if fuxi.xuannv_id().await == want {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// 块5 硬回归（守今天的「玄女假活黑洞」）：general 分身被 dormant 回收后，下一条
+    /// 用户消息触发 respawn——新 id 入池 + xuannv_id 镜像更新到新 id，不打到死 id。
+    #[tokio::test]
+    async fn general_clone_dormant_reaped_then_user_message_respawns_not_blackhole() {
+        let fuxi = make_fuxi().await;
+        let general = TopicId::general();
+
+        // 1. 起始：general 分身在池（bootstrap set_xuannv 等价）。
+        let old = AgentId::new();
+        fuxi.set_xuannv_for_topic(general, old).await;
+        assert!(wait_xuannv_id(&fuxi, Some(old)).await, "镜像应同步到 old");
+
+        let spawned = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fuxi.set_xuannv_spawner(Arc::new(MockSpawner {
+            fuxi: std::sync::Mutex::new(Some(Arc::downgrade(&fuxi))),
+            spawned: spawned.clone(),
+        }))
+        .await;
+
+        // 2. 模拟 idle_gc dormant 回收 general（pool.remove，不碰镜像）。
+        fuxi.xuannv_pool().remove(general).await;
+        // reconciler 必须把镜像清成 None——否则就是黑洞（xuannv_id 还指死 old）。
+        assert!(
+            wait_xuannv_id(&fuxi, None).await,
+            "dormant 回收 general 后镜像必须清 None（不留死 id 黑洞）"
+        );
+
+        // 3. 下一条用户消息走 ensure_xuannv_for_topic(general) → respawn。
+        let new = fuxi
+            .ensure_xuannv_for_topic(general)
+            .await
+            .expect("respawn 应起出新分身");
+        assert_ne!(new, old, "应是全新分身 id，不是复活死 id");
+        assert_eq!(
+            spawned.lock().await.as_slice(),
+            &[general],
+            "spawner 按 general 调一次"
+        );
+        // 4. 新 id 入池 + 镜像更新到新 id（用户消息打到活分身，不黑洞）。
+        assert_eq!(fuxi.xuannv_id_for_topic(general).await, Some(new));
+        assert!(
+            wait_xuannv_id(&fuxi, Some(new)).await,
+            "镜像应更新到 respawn 的新 id"
         );
     }
 }

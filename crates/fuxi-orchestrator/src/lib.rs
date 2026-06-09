@@ -26,10 +26,13 @@ pub mod idle_gc;
 pub mod insight_extractor;
 pub mod mailbox;
 pub mod node_load;
+pub mod pending_notify_sink;
 pub mod recall;
 pub mod registry;
 pub mod sentinel_addendum;
 pub mod xuannv_context;
+pub mod xuannv_pool;
+pub mod xuannv_spawner;
 pub mod xuannv_switcher;
 
 pub use bridge::{Intervener, SystemEventBridge};
@@ -50,6 +53,9 @@ pub use mailbox::{
     queue_agent_message,
 };
 pub use node_load::{NodeLoadProvider, NodeLoadSnapshot, pick_least_loaded};
+pub use pending_notify_sink::PendingNotifySink;
 pub use recall::{RecallContext, RecallSink};
 pub use registry::{Shelf, ShelfEntry, ShelfStatus};
+pub use xuannv_pool::XuannvPool;
+pub use xuannv_spawner::XuannvSpawner;
 pub use xuannv_switcher::XuannvSwitcher;
