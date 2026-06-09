@@ -137,12 +137,15 @@ pub async fn run(args: StartArgs) -> Result<()> {
         ttl_from_env(),
         std::time::Duration::from_secs(DEFAULT_TICK_INTERVAL_SECS),
     )
-    .with_xuannv_exempt(fuxi.xuannv_id_watch())
+    // 块5 步7.2：切到分身池模式——idle_gc 对任一活分身走 dormant 回收（pool.remove +
+    // shutdown_idle），分身后续可由 ensure_xuannv_for_topic respawn（7.1）+ general 镜像
+    // reconciler 兜（7.4）。**必须在 7.1/7.4 之后切**：否则 general 分身被回收成黑洞。
+    .with_xuannv_pool(fuxi.xuannv_pool())
     .spawn();
     tracing::info!(
         ttl_secs = ttl_from_env().as_secs(),
         tick_secs = DEFAULT_TICK_INTERVAL_SECS,
-        "IdleGcTask 已启动（同 repl.rs 路径——bug #77 修：im start 此前漏启，worker 永不回收）"
+        "IdleGcTask 已启动（分身池 dormant 回收模式——bug #77 修：im start 此前漏启，worker 永不回收）"
     );
 
     // memory-v2 · 仓颉 InsightExtractorTask（论文 arXiv:2604.14004 Memory Transfer
