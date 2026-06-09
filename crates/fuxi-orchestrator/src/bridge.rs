@@ -532,13 +532,13 @@ impl SystemEventBridge {
         _xuannv_id: AgentId,
         trigger_lookup: Arc<dyn TriggerLookup>,
     ) -> JoinHandle<()> {
-        let topic_watch = Some(fuxi.current_topic_watch());
-        // a01cfab5 修：玄女 id 在会话中会漂移（idle GC 重生 / handoff / fresh cc
-        // session）。bridge 必须订 watch 实时取**当前**玄女 id，不能用启动期 snapshot
-        // 的 `_xuannv_id`——否则玄女一旦 respawn，门客的 AgentRequestReview 全打到
-        // 已死的旧 id → AgentNotFound → retry 耗尽 → ReviewRequestTimeout 也打旧 id 失败
-        // → 完工信号蒸发，玄女永远不知道门客干完了（用户实测「门客干完不汇报」）。
-        // 同 conv WS 的 feedback_dynamic_agent_id_via_watch 教训。
+        // 块3：生产路径改走**分身池路由**——每条事件按 `ev.meta.topic_id` 路由到
+        // 归属 topic 的活分身，而非单玄女 + current_topic filter。pool_watch 实时跟随
+        // respawn 漂移（同 feedback_dynamic_agent_id_via_watch）。pool 模式下不再用
+        // current_topic filter / is_cross_topic_milestone 透传——每事件有明确 topic 归属。
+        let pool_watch = fuxi.xuannv_pool_watch();
+        // a01cfab5 修：玄女 id 在会话中会漂移；xuannv_watch 仍传作 general 兜底
+        // （无 topic_id 的旧事件 / 平台级事件路由到 general 分身——它镜像在此 watch）。
         let xuannv_watch = fuxi.xuannv_id_watch();
         let intervener: Arc<dyn Intervener> = fuxi;
         Self::spawn_inner(
@@ -547,7 +547,8 @@ impl SystemEventBridge {
             xuannv_watch,
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
-            topic_watch,
+            None,
+            Some(pool_watch),
         )
     }
 
@@ -566,6 +567,7 @@ impl SystemEventBridge {
             fixed_xuannv_watch(xuannv_id),
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
+            None,
             None,
         )
     }
@@ -586,6 +588,30 @@ impl SystemEventBridge {
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
             Some(topic_watch),
+            None,
+        )
+    }
+
+    /// 块3 测试路径：注入**分身池** watch——每条事件按 `ev.meta.topic_id` 路由到
+    /// 归属 topic 的活分身。生产 `spawn` 走同一 `spawn_inner` 路径（pool 模式）；
+    /// 这里给单测一个能塞自定义 topic→分身映射的入口。`general_fallback` 是
+    /// 无 topic_id / 平台级事件的兜底分身（生产里是 general 分身，镜像 xuannv watch）。
+    #[cfg(test)]
+    pub(crate) fn spawn_with_pool_for_test(
+        intervener: Arc<dyn Intervener>,
+        bus: EventBus,
+        general_fallback: AgentId,
+        pool_watch: watch::Receiver<std::collections::HashMap<fuxi_core::TopicId, AgentId>>,
+        trigger_lookup: Arc<dyn TriggerLookup>,
+    ) -> JoinHandle<()> {
+        Self::spawn_inner(
+            intervener,
+            bus,
+            fixed_xuannv_watch(general_fallback),
+            trigger_lookup,
+            REVIEW_RETRY_BACKOFF_MS,
+            None,
+            Some(pool_watch),
         )
     }
 
@@ -605,6 +631,7 @@ impl SystemEventBridge {
             trigger_lookup,
             backoff_ms,
             None,
+            None,
         )
     }
 
@@ -623,6 +650,7 @@ impl SystemEventBridge {
             trigger_lookup,
             REVIEW_RETRY_BACKOFF_MS,
             None,
+            None,
         )
     }
 
@@ -633,6 +661,7 @@ impl SystemEventBridge {
         trigger_lookup: Arc<dyn TriggerLookup>,
         backoff_ms: &'static [u64],
         topic_watch: Option<watch::Receiver<fuxi_core::TopicId>>,
+        pool_watch: Option<watch::Receiver<std::collections::HashMap<fuxi_core::TopicId, AgentId>>>,
     ) -> JoinHandle<()> {
         let mut sub = bus.subscribe();
         // bus 既要喂 subscribe（已 move 进上面这行），又要在 handle_event 里用作 publish
@@ -644,29 +673,61 @@ impl SystemEventBridge {
                     // 即使底层出错也尽量继续；具体 Lagged 已被 subscribe 过滤。
                     continue;
                 };
-                // Phase 1 #6：topic filter——非当前 topic 的事件**默认 silent**。
-                // 例外（milestone 仍透传，跟决策 7 阈值对齐）：AgentDead / 错误类
-                // 已在各 EventKind 内有专门处理；这里只对"普通对话事件"过滤。
-                if let Some(rx) = topic_watch.as_ref()
-                    && let Some(ev_topic) = ev.meta.topic_id
-                {
-                    let current: fuxi_core::TopicId = *rx.borrow();
-                    if ev_topic != current && !is_cross_topic_milestone(&ev.kind) {
-                        // 跨 topic 普通事件：silent skip，避免污染当前玄女 prompt。
-                        // 玄女想看自己 `fuxi events --topic <id>` 主动查。
-                        debug!(
-                            ev_topic = %ev_topic,
-                            current = %current,
-                            kind_tag = ?std::mem::discriminant(&ev.kind),
-                            "bridge: 跨 topic 普通事件 silent 跳过"
-                        );
-                        continue;
+                // 块3：分身池模式优先——每条事件按 `ev.meta.topic_id` 路由到归属
+                // topic 的**活分身**作为注入 target，而非单玄女 + current_topic filter。
+                // 这是跨 topic 串味的根因修复（357da78a）：milestone 不再透传到「当前
+                // 玄女」，而是定向给它归属 topic 的分身——别的 topic 分身零打扰。
+                let target_xuannv = if let Some(pool_rx) = pool_watch.as_ref() {
+                    // 无 topic_id 的旧事件 / 平台级事件兜底 general（事件没归属 topic）。
+                    let ev_topic = ev.meta.topic_id.unwrap_or_else(fuxi_core::TopicId::general);
+                    let active = pool_rx.borrow().get(&ev_topic).copied();
+                    match active {
+                        Some(id) => Some(id),
+                        None => {
+                            // 该 topic 无活分身（dormant / 从未起）。general 永远兜底到
+                            // xuannv_watch 镜像；非 general 的 dormant topic → 块4/6 接
+                            // 「持久队列 enqueue + respawn 补发」。本任务先 debug 留痕，
+                            // **里程碑事件不丢**靠块6 落库，这里暂不注入（避免误打到
+                            // 别的 topic 分身造成新串味）。
+                            if ev_topic == fuxi_core::TopicId::general() {
+                                *xuannv_watch.borrow()
+                            } else if is_cross_topic_milestone(&ev.kind) {
+                                debug!(
+                                    %ev_topic,
+                                    kind_tag = ?std::mem::discriminant(&ev.kind),
+                                    "bridge: 归属 topic 分身 dormant，里程碑暂不注入（块6 接持久队列+respawn）"
+                                );
+                                None
+                            } else {
+                                // 非里程碑 + dormant：本就不该打扰任何分身，silent skip。
+                                None
+                            }
+                        }
                     }
-                }
-                // a01cfab5 修：每条事件实时读**当前**玄女 id（跟随 respawn 漂移）。
-                // 玄女未就绪（None）→ 跳过——没有可注入对象，留给她下次就绪后的事件。
-                let Some(xuannv_id) = *xuannv_watch.borrow() else {
-                    debug!("bridge: 玄女 id 未就绪（None），跳过事件");
+                } else {
+                    // ── 兼容路径（spawn_with / spawn_with_topic，无 pool）：旧单玄女语义 ──
+                    // Phase 1 #6：topic filter——非当前 topic 的普通事件 silent，
+                    // milestone（决策 7 阈值）仍透传到单玄女。
+                    if let Some(rx) = topic_watch.as_ref()
+                        && let Some(ev_topic) = ev.meta.topic_id
+                    {
+                        let current: fuxi_core::TopicId = *rx.borrow();
+                        if ev_topic != current && !is_cross_topic_milestone(&ev.kind) {
+                            debug!(
+                                ev_topic = %ev_topic,
+                                current = %current,
+                                kind_tag = ?std::mem::discriminant(&ev.kind),
+                                "bridge: 跨 topic 普通事件 silent 跳过"
+                            );
+                            continue;
+                        }
+                    }
+                    // a01cfab5 修：实时读**当前**玄女 id（跟随 respawn 漂移）。
+                    *xuannv_watch.borrow()
+                };
+                // 无可注入 target（玄女未就绪 / dormant 待块6 补发）→ 跳过本事件。
+                let Some(xuannv_id) = target_xuannv else {
+                    debug!("bridge: 无可注入分身 target（未就绪 / dormant），跳过事件");
                     continue;
                 };
                 handle_event(
@@ -2513,6 +2574,173 @@ mod tests {
         assert!(
             !calls.is_empty(),
             "老事件 meta.topic_id=None 应透传，不参与 filter"
+        );
+    }
+
+    // ─── 块3：分身池路由（跨 topic 串味根因修复 357da78a）──────────────
+
+    /// 核心串味回归：池里 topicA→分身A、topicB→分身B。发 topicA 门客的
+    /// AgentRequestReview（meta.topic_id=A）→ **只**注入分身A，分身B 零打扰。
+    #[tokio::test]
+    async fn worker_milestone_routes_to_owning_topic_clone_not_others() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let clone_a = AgentId::new();
+        let clone_b = AgentId::new();
+        let general = AgentId::new();
+        let worker = AgentId::new();
+        let topic_a = TopicId::new();
+        let topic_b = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        // 池映射：topicA→分身A、topicB→分身B。
+        let mut map = std::collections::HashMap::new();
+        map.insert(topic_a, clone_a);
+        map.insert(topic_b, clone_b);
+        let (_tx, rx) = watch::channel(map);
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // topicA 门客的求审 milestone。
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        meta.topic_id = Some(topic_a);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: fuxi_core::DeliverableKind::ResearchSummary,
+                summary: "topicA 的活干完了".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1, "应且仅注入一次");
+        assert_eq!(calls[0].0, clone_a, "里程碑应路由到归属 topicA 的分身A");
+        assert!(
+            calls.iter().all(|(t, _, _)| *t != clone_b),
+            "分身B（topicB）一次都不该被打扰：{calls:?}"
+        );
+        assert!(
+            calls.iter().all(|(t, _, _)| *t != general),
+            "也不该兜底打到 general 分身"
+        );
+    }
+
+    /// 无 topic_id 的旧事件 / 平台级事件 → 兜底 general 分身。
+    #[tokio::test]
+    async fn event_without_topic_falls_back_to_general_clone() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let general = AgentId::new();
+        let other_clone = AgentId::new();
+        let worker = AgentId::new();
+        let other_topic = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        // 池里只有 other_topic→other_clone；general 不在池里（靠 xuannv_watch 镜像兜底）。
+        let mut map = std::collections::HashMap::new();
+        map.insert(other_topic, other_clone);
+        let (_tx, rx) = watch::channel(map);
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // 无 topic_id 的 AgentDead（平台级 / 老事件）。
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        // 故意不设 topic_id
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentDead {
+                cause: "crash".into(),
+            },
+        })
+        .expect("publish");
+
+        wait_call(&mock, 1).await;
+        let calls = mock.snapshot().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, general, "无 topic 事件应兜底 general 分身");
+    }
+
+    /// 归属 topic 的分身 dormant（不在池里）→ 里程碑暂不注入（块6 接持久队列），
+    /// **不**误打到别的 topic 分身。
+    #[tokio::test]
+    async fn milestone_for_dormant_topic_clone_not_injected_pending_block6() {
+        use fuxi_core::TopicId;
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let general = AgentId::new();
+        let live_clone = AgentId::new();
+        let worker = AgentId::new();
+        let live_topic = TopicId::new();
+        let dormant_topic = TopicId::new();
+
+        let mock = MockIntervener::new();
+        mock.set_role(worker, "luban").await;
+
+        // 池里只有 live_topic→live_clone；dormant_topic 无活分身。
+        let mut map = std::collections::HashMap::new();
+        map.insert(live_topic, live_clone);
+        let (_tx, rx) = watch::channel(map);
+
+        let _h = SystemEventBridge::spawn_with_pool_for_test(
+            mock.clone(),
+            bus.clone(),
+            general,
+            rx,
+            empty_lookup(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // dormant_topic 门客的 milestone——归属分身不在池里。
+        let task = TaskId::new();
+        let mut meta = EventMeta::now();
+        meta.agent = Some(worker);
+        meta.task = Some(task);
+        meta.topic_id = Some(dormant_topic);
+        bus.publish(Event {
+            meta,
+            kind: EventKind::AgentRequestReview {
+                agent: worker,
+                task,
+                deliverable_kind: fuxi_core::DeliverableKind::ResearchSummary,
+                summary: "dormant topic 的活".into(),
+                artifact_ref: None,
+            },
+        })
+        .expect("publish");
+
+        // 给足时间确保不会误注入。
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let calls = mock.snapshot().await;
+        assert!(
+            calls.is_empty(),
+            "dormant topic 的里程碑本任务不注入任何分身（块6 接），实际：{calls:?}"
         );
     }
 }
