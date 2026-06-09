@@ -223,6 +223,17 @@ pub trait Intervener: Send + Sync {
         debug!("enqueue_pending: 无 sink（默认实现），dormant 信号未落库");
         Ok(())
     }
+
+    /// 块5：触发某 topic 的玄女分身懒启动/重启（dormant 补发用）。bridge 在归属
+    /// 分身 dormant + enqueue 后调它——分身一起来就 drain 持久队列把刚入队的信号
+    /// 补发，不必等用户下次开该 topic。
+    ///
+    /// 默认 no-op 返 None——单测 mock / 未注入 spawner 时不触发 respawn（信号仍在
+    /// 队列里，等用户下次进该 topic 时 drain）；生产 Fuxi 覆盖走真 ensure。
+    async fn ensure_xuannv_for_topic(&self, topic: fuxi_core::TopicId) -> Option<AgentId> {
+        let _ = topic;
+        None
+    }
 }
 
 #[async_trait]
@@ -349,6 +360,11 @@ impl Intervener for Fuxi {
                 Ok(())
             }
         }
+    }
+
+    async fn ensure_xuannv_for_topic(&self, topic: fuxi_core::TopicId) -> Option<AgentId> {
+        // 块5：转发到 Fuxi 真懒启动（池有返回、miss 走注入的 XuannvSpawner respawn）。
+        Fuxi::ensure_xuannv_for_topic(self, topic).await
     }
 }
 
@@ -729,6 +745,12 @@ impl SystemEventBridge {
                             // 分身，silent skip。enqueue 后 continue——本轮不注入。
                             if is_cross_topic_milestone(&ev.kind) {
                                 enqueue_dormant_milestone(&*intervener, ev_topic, &ev).await;
+                                // 块5：enqueue 后触发该 topic 分身 respawn——分身一起来就
+                                // drain 持久队列把刚入队的信号补发，不必等用户下次开该 topic。
+                                // 已先 enqueue 再 respawn：spawn 内的 drain 一定看得到这条。
+                                // 未注入 spawner（mock/兼容期）→ no-op None，信号留队列等
+                                // 用户下次进 topic 时 drain。
+                                let _ = intervener.ensure_xuannv_for_topic(ev_topic).await;
                             }
                             continue;
                         }

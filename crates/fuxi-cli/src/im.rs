@@ -465,8 +465,10 @@ pub async fn run(args: StartArgs) -> Result<()> {
     // 块5：注入持久队列 sink——bridge 在归属 topic 分身 dormant 时把完工/里程碑
     // 信号落 im.db（a01cfab5「信号不丢」），分身 respawn 后 drain 补发（7.4）。
     // 同 im.db pool（SqlitePool Arc，clone 廉价）。
+    // 块5：持久队列 store 一份，sink（落库）+ spawner（drain 补发）共用（SqlitePool Arc）。
+    let pending_store = fuxi_im::pending_notify::PendingNotifyStore::new(im_pool.clone());
     fuxi.set_pending_sink(Arc::new(crate::pending_sink::PendingNotifyStoreSink::new(
-        fuxi_im::pending_notify::PendingNotifyStore::new(im_pool.clone()),
+        pending_store.clone(),
     )))
     .await;
 
@@ -493,6 +495,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
             xuannv_role.clone(),
             conv_store.clone(),
             topic_store.clone(),
+            pending_store.clone(),
         ),
     ))
     .await;

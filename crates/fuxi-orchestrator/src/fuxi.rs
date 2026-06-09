@@ -211,6 +211,13 @@ impl Fuxi {
         // why 放在这里：唯一拥有 shelf 写权限的地方；具体死亡检测源头（cc WS 关闭、
         // Fuxi::shutdown 主动发、外部 publish）全部汇入这一条路径。
         spawn_death_watcher(bus, shelf);
+        // 块5：general 镜像 reconciler——`xuannv_id` watch（兼容壳 + bridge general
+        // fallback + conv_store sync 读它）必须始终跟随池里 general 分身。让池做唯一
+        // 真相源：任何 mutator（set_xuannv_for_topic / handoff remove / **idle_gc
+        // dormant remove**）改了 general 入口，reconciler 自动把镜像同步成最新值（含
+        // 回收后置 None）。**修今天的黑洞坑**：dormant 回收 general 只 pool.remove 不清
+        // 镜像 → xuannv_id() 返已死 id → 用户消息黑洞；reconciler 兜住这条。
+        spawn_general_mirror_sync(me.xuannv_pool.watch(), me.xuannv_id.clone());
         me
     }
 
@@ -246,8 +253,11 @@ impl Fuxi {
 
     /// 块2：绑定某 topic → 活分身（spawn / respawn 后调）。
     ///
-    /// general topic 的绑定额外同步到 `xuannv_id` watch——保持兼容壳 [`Self::xuannv_id`]
-    /// + idle_gc 单豁免 fallback 仍能读到"那一个"玄女。非 general topic 只进池。
+    /// general topic 的绑定**同步**写一次 `xuannv_id` watch——保持兼容壳
+    /// [`Self::xuannv_id`] + bridge general fallback 立即读到新值（零 lag，老测试
+    /// 紧跟 `rx.changed()` 的语义不破）。general 的**移除**（dormant 回收 / handoff）
+    /// 不走本方法，由 [`spawn_general_mirror_sync`] reconciler 兜（置 None）。两路对
+    /// 同一值幂等。非 general topic 只进池。
     pub async fn set_xuannv_for_topic(&self, topic: fuxi_core::TopicId, id: AgentId) {
         self.xuannv_pool.set_active(topic, id).await;
         if topic == fuxi_core::TopicId::general() {
@@ -2194,6 +2204,41 @@ fn spawn_death_watcher(bus: EventBus, shelf: Arc<Shelf>) {
     });
 }
 
+/// 块5：general 镜像 reconciler——把 `xuannv_id` watch 始终同步成池里 general 分身。
+///
+/// WHY：`xuannv_id` watch 是兼容壳 [`Fuxi::xuannv_id`] + bridge general fallback +
+/// conv_store sync 的真相来源，但池的 **remove**（dormant 回收 / handoff）路径不写
+/// 它——只 `set_xuannv_for_topic` 写。后果（今天的黑洞坑）：general 分身被 idle_gc
+/// dormant 回收后，镜像仍指已死 id，用户消息打到死分身。让池做唯一真相源：订
+/// `pool.watch()`，每次快照变化就把镜像设成 `snapshot.get(general)`（含回收后 None）。
+///
+/// 与 `set_xuannv_for_topic` 的同步直写并存：set 路径两边写同一值幂等；remove 路径
+/// 只有本 reconciler 写（置 None）。`send_if_modified` 避免无谓 changed 通知。
+fn spawn_general_mirror_sync(
+    mut pool_rx: watch::Receiver<HashMap<fuxi_core::TopicId, AgentId>>,
+    xuannv_tx: watch::Sender<Option<AgentId>>,
+) {
+    let general = fuxi_core::TopicId::general();
+    tokio::spawn(async move {
+        loop {
+            // 先按当前快照对齐一次（启动期 / 漏掉的变更兜底），再等下次变化。
+            let desired = pool_rx.borrow().get(&general).copied();
+            xuannv_tx.send_if_modified(|cur| {
+                if *cur != desired {
+                    *cur = desired;
+                    true
+                } else {
+                    false
+                }
+            });
+            if pool_rx.changed().await.is_err() {
+                debug!("general_mirror_sync: 池 watch 关闭，退出");
+                break;
+            }
+        }
+    });
+}
+
 /// Decision 21 phase 3：递归求 `path` 子树所有 regular file 的字节数和。
 ///
 /// - 不跟 symlink（避免 `<projects_root>/<project>/sandboxes/<role>` worktree 里的
@@ -3335,5 +3380,62 @@ mod xuannv_pool_integration_tests {
         let fuxi = make_fuxi().await;
         let got = fuxi.ensure_xuannv_for_topic(TopicId::new()).await;
         assert_eq!(got, None, "无 spawner 池 miss 应返 None");
+    }
+
+    /// 等 general 镜像 reconciler 把 xuannv_id() 收敛到期望值（异步传播，给点时间）。
+    async fn wait_xuannv_id(fuxi: &Fuxi, want: Option<AgentId>) -> bool {
+        for _ in 0..100 {
+            if fuxi.xuannv_id().await == want {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// 块5 硬回归（守今天的「玄女假活黑洞」）：general 分身被 dormant 回收后，下一条
+    /// 用户消息触发 respawn——新 id 入池 + xuannv_id 镜像更新到新 id，不打到死 id。
+    #[tokio::test]
+    async fn general_clone_dormant_reaped_then_user_message_respawns_not_blackhole() {
+        let fuxi = make_fuxi().await;
+        let general = TopicId::general();
+
+        // 1. 起始：general 分身在池（bootstrap set_xuannv 等价）。
+        let old = AgentId::new();
+        fuxi.set_xuannv_for_topic(general, old).await;
+        assert!(wait_xuannv_id(&fuxi, Some(old)).await, "镜像应同步到 old");
+
+        let spawned = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fuxi.set_xuannv_spawner(Arc::new(MockSpawner {
+            fuxi: std::sync::Mutex::new(Some(Arc::downgrade(&fuxi))),
+            spawned: spawned.clone(),
+        }))
+        .await;
+
+        // 2. 模拟 idle_gc dormant 回收 general（pool.remove，不碰镜像）。
+        fuxi.xuannv_pool().remove(general).await;
+        // reconciler 必须把镜像清成 None——否则就是黑洞（xuannv_id 还指死 old）。
+        assert!(
+            wait_xuannv_id(&fuxi, None).await,
+            "dormant 回收 general 后镜像必须清 None（不留死 id 黑洞）"
+        );
+
+        // 3. 下一条用户消息走 ensure_xuannv_for_topic(general) → respawn。
+        let new = fuxi
+            .ensure_xuannv_for_topic(general)
+            .await
+            .expect("respawn 应起出新分身");
+        assert_ne!(new, old, "应是全新分身 id，不是复活死 id");
+        assert_eq!(
+            spawned.lock().await.as_slice(),
+            &[general],
+            "spawner 按 general 调一次"
+        );
+        // 4. 新 id 入池 + 镜像更新到新 id（用户消息打到活分身，不黑洞）。
+        assert_eq!(fuxi.xuannv_id_for_topic(general).await, Some(new));
+        assert!(
+            wait_xuannv_id(&fuxi, Some(new)).await,
+            "镜像应更新到 respawn 的新 id"
+        );
     }
 }

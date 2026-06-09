@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use fuxi_core::TopicId;
 use fuxi_core::id::AgentId;
 use fuxi_im::conv_store::{ConvStore, SCOPE_XUANNV};
+use fuxi_im::pending_notify::PendingNotifyStore;
 use fuxi_im::topic_store::TopicStore;
 use fuxi_memory::OracleStore;
 use fuxi_orchestrator::{Fuxi, OrchestratorError, Result as OrchResult, XuannvSpawner};
@@ -31,6 +32,7 @@ pub struct TopicXuannvSpawner {
     role: String,
     conv_store: ConvStore,
     topic_store: TopicStore,
+    pending_store: PendingNotifyStore,
 }
 
 impl TopicXuannvSpawner {
@@ -40,6 +42,7 @@ impl TopicXuannvSpawner {
         role: String,
         conv_store: ConvStore,
         topic_store: TopicStore,
+        pending_store: PendingNotifyStore,
     ) -> Self {
         Self {
             fuxi,
@@ -47,6 +50,43 @@ impl TopicXuannvSpawner {
             role,
             conv_store,
             topic_store,
+            pending_store,
+        }
+    }
+
+    /// 块5：分身刚 spawn 入池后，drain 该 topic 的持久队列把 dormant 期间攒下的
+    /// 完工/里程碑信号补发给它（intervene_system 注入首 turn）→ mark_delivered
+    /// 幂等不重投。失败只 warn 不挡 spawn——分身已活，补发是 best-effort（drain
+    /// 没 mark 的下次 respawn 还会再 drain，不丢）。
+    async fn drain_pending_to(&self, fuxi: &Fuxi, topic: TopicId, agent: AgentId) {
+        let pending = match self
+            .pending_store
+            .drain_undelivered(&topic.as_uuid().to_string())
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(%topic, error = %e, "drain_pending: 读持久队列失败，跳过补发");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(%topic, xuannv = %agent, n = pending.len(), "drain_pending: 补发 dormant 期间攒下的信号");
+        for p in pending {
+            // 落库的就是活路径同源 prompt（块4 enqueue_dormant_milestone），直接注入。
+            if let Err(e) = fuxi
+                .intervene_system_origin(agent, true, &p.prompt, p.system_origin.clone())
+                .await
+            {
+                // 注入失败：**不** mark_delivered，留队列等下次 respawn 重投（信号不丢）。
+                tracing::warn!(%topic, id = %p.id, error = %e, "drain_pending: 补发注入失败，留队列重投");
+                continue;
+            }
+            if let Err(e) = self.pending_store.mark_delivered(&p.id).await {
+                tracing::warn!(%topic, id = %p.id, error = %e, "drain_pending: mark_delivered 失败（可能重投一次，幂等可容忍）");
+            }
         }
     }
 
@@ -106,6 +146,10 @@ impl XuannvSpawner for TopicXuannvSpawner {
         // 入池——绑 topic → 新分身（general topic 还会同步 xuannv_id watch 镜像）。
         fuxi.set_xuannv_for_topic(topic, id).await;
         tracing::info!(%topic, xuannv = %id, role = %self.role, "spawn_for_topic: 玄女分身已懒启动入池");
+
+        // 块5：drain 该 topic 的持久队列补发 dormant 期间攒下的信号（a01cfab5 收口）。
+        // 必须在入池后——补发走 intervene 要分身已在 shelf。
+        self.drain_pending_to(&fuxi, topic, id).await;
         Ok(id)
     }
 }
