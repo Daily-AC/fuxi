@@ -462,6 +462,14 @@ pub async fn run(args: StartArgs) -> Result<()> {
     )))
     .await;
 
+    // 块5：注入持久队列 sink——bridge 在归属 topic 分身 dormant 时把完工/里程碑
+    // 信号落 im.db（a01cfab5「信号不丢」），分身 respawn 后 drain 补发（7.4）。
+    // 同 im.db pool（SqlitePool Arc，clone 廉价）。
+    fuxi.set_pending_sink(Arc::new(crate::pending_sink::PendingNotifyStoreSink::new(
+        fuxi_im::pending_notify::PendingNotifyStore::new(im_pool.clone()),
+    )))
+    .await;
+
     // 6.5 自启玄女（Task #8）。home 长跑场景下用户不必先 ssh 跑 REPL——`fuxi im start`
     //     直接把玄女拉起来，PWA 第一次 `/api/conv` 就有人对面。
     //
