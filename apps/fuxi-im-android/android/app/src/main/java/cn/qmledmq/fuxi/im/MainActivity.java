@@ -40,17 +40,9 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
-        AppVisibility.setForeground(true);
         FcmRegistrar.register(this);
         startVoiceLoopIfPermitted();
         navigatePending();
-    }
-
-    @Override
-    public void onPause() {
-        super.onPause();
-        // 切后台 → 原生常听接管（service 的 paused() 实时读这个标志）
-        AppVisibility.setForeground(false);
     }
 
     @Override
