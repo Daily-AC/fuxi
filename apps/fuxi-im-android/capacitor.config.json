@@ -2,6 +2,7 @@
   "appId": "cn.qmledmq.fuxi.im",
   "appName": "玄女",
   "webDir": "www",
+  "appendUserAgent": "FuxiShell/1.3",
   "server": {
     "url": "https://im.qmledmq.cn:8443",
     "cleartext": false
