@@ -16,7 +16,7 @@ import com.getcapacitor.BridgeActivity;
  *  - onResume：尝试上报 FCM token（cookie 就绪即成功，否则下次重试）。
  *  - 通知点击：FCM data.url 进 intent extras → 切 PWA hash 路由。 */
 public class MainActivity extends BridgeActivity {
-    private static final int REQ_NOTIF_PERM = 9001;
+    private static final int REQ_STARTUP_PERMS = 9001;
 
     /** 待跳转的 PWA 路径（来自被点击的推送）；导航完成即清空。 */
     private String pendingUrl;
@@ -25,7 +25,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Notifications.ensureChannel(this);
-        requestNotificationPermissionIfNeeded();
+        requestStartupPermissionsIfNeeded();
         pendingUrl = extractUrl(getIntent());
     }
 
@@ -40,8 +40,32 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        AppVisibility.setForeground(true);
         FcmRegistrar.register(this);
+        startVoiceLoopIfPermitted();
         navigatePending();
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        // 切后台 → 原生常听接管（service 的 paused() 实时读这个标志）
+        AppVisibility.setForeground(false);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        // 首启授权框点完立刻拉起常听，不用等下次 onResume
+        startVoiceLoopIfPermitted();
+    }
+
+    /** mic 权限就绪才起后台常听服务（服务内 AudioRecord 需要它）。 */
+    private void startVoiceLoopIfPermitted() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+            cn.qmledmq.fuxi.im.voice.VoiceLoopService.startIfEnabled(this);
+        }
     }
 
     /** 把待跳转路径切到 PWA 的 hash 路由。冷启动时 server.url 还在加载，
@@ -78,14 +102,24 @@ public class MainActivity extends BridgeActivity {
         return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
     }
 
-    private void requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return; // Android 13 以下通知无需运行时授权
+    /** 首启一次性请求全部运行时权限：通知（Android 13+）+ 麦克风（PWA 语音）。
+     *  一起弹而不是等用户点语音开关再弹——用户装好 app 第一件事就把权限给齐，
+     *  之后语音模式 / 推送都零摩擦。已授过的不重复弹（requestPermissions 只收
+     *  未授权项）。用户拒绝也不阻塞——对应功能各自降级（无通知 / 语音开关报错）。 */
+    private void requestStartupPermissionsIfNeeded() {
+        java.util.ArrayList<String> wanted = new java.util.ArrayList<>();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+            wanted.add(Manifest.permission.POST_NOTIFICATIONS);
         }
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
+            wanted.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (!wanted.isEmpty()) {
             ActivityCompat.requestPermissions(this,
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF_PERM);
+                    wanted.toArray(new String[0]), REQ_STARTUP_PERMS);
         }
     }
 }

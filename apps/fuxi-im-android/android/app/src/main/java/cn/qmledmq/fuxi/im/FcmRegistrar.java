@@ -24,7 +24,7 @@ import java.nio.charset.StandardCharsets;
  *  cookie 为空，跳过，等下次 onResume 重试。 */
 public final class FcmRegistrar {
     private static final String TAG = "FcmRegistrar";
-    static final String BASE = "https://im.qmledmq.cn:8443";
+    public static final String BASE = "https://im.qmledmq.cn:8443";
     private static final String REGISTER_URL = BASE + "/api/push/fcm-register";
     private static final String PREFS = "fuxi_fcm";
     private static final String KEY_LAST_TOKEN = "last_registered_token";
