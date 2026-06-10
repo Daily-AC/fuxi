@@ -1,11 +1,12 @@
 //! `POST /api/intervene` —— PWA 顶部"跟玄女说"输入条的出口。
 //!
-//! 流程：
-//! 1. 取 `state.fuxi.xuannv_id().await` —— 没起 → 503（PWA 应在 LoginView 后
-//!    第一次访问就被 ζ 的 `ensure_xuannv` 自启拉起；理论上不该 503，但兜底）
-//! 2. 解出路由 target：
+//! 流程（Phase 2）：
+//! 1. 解出路由 target：
 //!    - body.target 显式指定 → 用它（PWA 任务 thread 里 @ 门客的场景）
-//!    - 否则 → 玄女（PWA 玄女 tab 默认对话）
+//!    - 否则 → `ensure_xuannv_for_topic(current_topic)`：当前 topic 的常驻分身，
+//!      池有秒返、无则懒启动；都 miss → 503（兜底，理论上 general 镜像永驻）
+//! 2. 「target 是玄女」判定走 `xuannv_pool().is_active_clone(target)`——任一活
+//!    分身都算玄女，不再单值比对 general 镜像
 //! 3. 调 `Fuxi::intervene(target, interrupt, text, mentions)`
 //!    - Idle → 自动 degrade 成 dispatch（Decision 04，Fuxi 内部已实装）
 //!    - Busy → enqueue 到 pending（M2.1 已实装）
@@ -113,8 +114,10 @@ pub async fn intervene(
         return Err(Error::BadRequest("text 不能为空".into()));
     }
 
-    // target 解析：body 显式 → 用之；否则 fallback 玄女。
+    // Phase 2 路由：缺省 target / dead-target fallback 都落「当前 topic 的分身」。
+    // ensure：池 miss 时懒启动（热路径只是池查询 + LRU touch，毫秒级）。
     // bug #77：接受 `agent-<uuid>` 前缀（前端 AgentId Display 形式）+ 裸 uuid。
+    let current_topic = state.fuxi.current_topic_id();
     let mut target = match body
         .target
         .as_deref()
@@ -123,22 +126,32 @@ pub async fn intervene(
     {
         Some(t) => parse_agent_id_lenient(t)
             .map_err(|e| Error::BadRequest(format!("target 解析失败: {e}")))?,
-        None => state.fuxi.xuannv_id().await.ok_or_else(|| {
-            Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
-        })?,
+        None => state
+            .fuxi
+            .ensure_xuannv_for_topic(current_topic)
+            .await
+            .ok_or_else(|| {
+                Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
+            })?,
     };
 
     // bug fix（v1-session15+）：用户 @ 已 dead 的门客 → shelf 查不到 → 旧代码
     // bubble Orchestrator(AgentNotFound) 被 IntoResponse 映射成 503 "玄女不在"。
     // 用户视角："这个鲁班咋回事" 这类话通常是想问玄女关于该门客，不是真跟 dead 门客说。
-    // 自动 fallback 到玄女 + prepend 一行提示让她知道用户原本 @ 谁，由她接续答复。
-    let xuannv_for_fallback = state.fuxi.xuannv_id().await;
-    let target_is_xuannv_pre = xuannv_for_fallback == Some(target);
+    // 自动 fallback 到当前 topic 分身 + prepend 一行提示让她知道用户原本 @ 谁，由她接续答复。
+    //
+    // 「target 是玄女」的判定从单值比对改池成员判定——任一活分身都是玄女。
+    let pool = state.fuxi.xuannv_pool();
+    let target_is_xuannv_pre = pool.is_active_clone(target).await;
     let mut dead_target_hint: Option<String> = None;
     if !target_is_xuannv_pre && state.fuxi.status_of(target).await.is_none() {
-        let xn = xuannv_for_fallback.ok_or_else(|| {
-            Error::Unavailable("玄女尚未就绪——目标门客已下线，无法 fallback".into())
-        })?;
+        let xn = state
+            .fuxi
+            .ensure_xuannv_for_topic(current_topic)
+            .await
+            .ok_or_else(|| {
+                Error::Unavailable("玄女尚未就绪——目标门客已下线，无法 fallback".into())
+            })?;
         dead_target_hint = Some(format!(
             "[用户原本 @ 了门客 {target}，但该门客已下线（可走 `fuxi spawn --recall-task <id>` 召回 session）。请你接续答复用户。]"
         ));
@@ -198,8 +211,7 @@ pub async fn intervene(
     //
     // target 是 worker 时（PWA 任务 thread @ 门客）保持原行为：pinned_node 直接
     // 走 idle-degrade 退化 dispatch 时注入 task.pinned_node，命中 dist 决策树。
-    let xuannv_id = xuannv_for_fallback;
-    let target_is_xuannv = xuannv_id == Some(target);
+    let target_is_xuannv = pool.is_active_clone(target).await;
     let (mut effective_text, effective_pinned_node): (String, Option<String>) =
         match (target_is_xuannv, body.pinned_node.as_deref()) {
             (true, Some(node)) if !node.is_empty() => (
@@ -724,6 +736,40 @@ mod tests {
             resp.status(),
             StatusCode::BAD_REQUEST,
             "裸 uuid task_id 应被解析"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_target_routes_to_current_topic_clone() {
+        // Phase 2 路由回归：current_topic = B 且池里有 B 分身时，缺省 target 必须
+        // 路由到 B 分身（而非 general 镜像）。B 分身不在 shelf → Fuxi::intervene
+        // 撞 AgentNotFound → 503，但 message 是 orchestrator 错——证明 fallback
+        // 已找到分身并继续走了 intervene（若仍走旧 xuannv_id() 路径，general 镜像
+        // 为 None，会 503 "玄女尚未就绪"，在 publish 之前就断）。
+        let (_dir, app, fuxi) = build_app().await;
+        let topic = fuxi_core::TopicId::new();
+        let clone = AgentId::new();
+        fuxi.set_xuannv_for_topic(topic, clone).await;
+        fuxi.set_current_topic(topic).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/intervene")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"你好"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            !text.contains("玄女尚未就绪"),
+            "不应再走旧 xuannv_id() 路径报『尚未就绪』，实际: {text}"
         );
     }
 
