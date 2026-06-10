@@ -103,7 +103,10 @@ rsync -avP /Users/e0_7/fuxi/Linux_ivw_e867a88f2_v1.0.11_v2.2.15-rc5/ home:/opt/f
 
 `include/aikit_biz_api_c.h:12` `#include "../api_aee/aee_biz_api_c.h"` —— 这个头在 v1.0.11
 包里**没有**。bindgen 跑 clang 时 transitive include 失败，不到 ifndef 守门就 panic。
-解：手写一个空 stub header 让 clang 找得到、又不定义 `AEE_BIZ_API_C_H` macro：
+解：手写一个空 stub header 让 clang 找得到、又不定义 `AEE_BIZ_API_C_H` macro。
+**2026-06-10 起 stub 已持久化进仓库 SDK 副本** `Linux_ivw_*/api_aee/aee_biz_api_c.h`
+（mac + home 两侧都有），直接用 `FUXI_XFYUN_SDK_DIR=$HOME/fuxi/Linux_ivw_e867a88f2_v1.0.11_v2.2.15-rc5`
+在 home 编即可，不再依赖 /tmp/fuxi-wake-sdk 或 /opt 临时目录。以下为历史手工步骤：
 
 ```bash
 ssh home
