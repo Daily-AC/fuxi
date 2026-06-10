@@ -63,6 +63,11 @@ pub struct CcLaunchConfig {
     /// `--session-id <uuid>`——新起 session 时指定 id（以便后续 `--resume` 精准续写）。
     /// 和 `resume_session_id` 互斥。
     pub session_id: Option<String>,
+    /// 块5：额外注入 cc 子进程的环境变量（白名单式，spawn 在 strip 之后注入，不被
+    /// 嵌套检测的 env_remove 误删）。用途：给玄女分身注 `FUXI_TOPIC=<uuid>`，让她
+    /// shell 的 `fuxi dispatch` 继承后默认带 `--topic`（worker 事件归位 topic）。
+    /// **别用 CLAUDECODE*/CLAUDE_CODE_* 前缀**（那是 strip 目标，会被前面循环删）。默认空。
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Default for CcLaunchConfig {
@@ -78,6 +83,7 @@ impl Default for CcLaunchConfig {
             sdk_url: None,
             resume_session_id: None,
             session_id: None,
+            extra_env: Vec::new(),
         }
     }
 }

@@ -82,9 +82,17 @@ pub async fn switch_topic_to(
         "spawn 新玄女副本（注入 topic prelude）"
     );
 
-    let new_id = spawn_with_prelude(fuxi, oracle, role, &prelude)
-        .await
-        .context("spawn 新玄女失败")?;
+    // 块5：切到的 topic 注入 FUXI_TOPIC，让该玄女 shell 的 fuxi dispatch 默认带 --topic
+    // → worker 事件归位本 topic（不串别的 topic 分身）。
+    let new_id = spawn_with_prelude(
+        fuxi,
+        oracle,
+        role,
+        &prelude,
+        vec![("FUXI_TOPIC".to_string(), target_id.as_uuid().to_string())],
+    )
+    .await
+    .context("spawn 新玄女失败")?;
     fuxi.set_xuannv(new_id).await;
     fuxi.set_current_topic(target_id).await;
     if let Err(err) = topic_store.touch_last_active(target_id).await {
