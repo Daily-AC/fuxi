@@ -21,6 +21,7 @@ use crate::push::fcm::{FcmPusher, notify_fcm};
 use crate::push::notify::{PushPayload, PushSender, notify};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
+use fuxi_core::TopicId;
 use fuxi_core::event::{Event, EventKind};
 use fuxi_core::id::{AgentId, TaskId};
 use fuxi_events::EventBus;
@@ -28,8 +29,11 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
+
+/// 玄女分身池快照——`Fuxi::xuannv_pool_watch()` 的 Receiver 类型别名。
+pub type XuannvPoolWatch = watch::Receiver<HashMap<TopicId, AgentId>>;
 
 /// 玄女 idle 推送的等待窗口——超过即视为"在等用户"。
 pub const XUANNV_IDLE_WINDOW: Duration = Duration::from_secs(30);
@@ -45,20 +49,24 @@ pub const TASK_DONE_DEDUP_TTL: Duration = Duration::from_secs(60);
 /// `fcm_sender`：FCM fan-out 实装（生产用 [`super::fcm::HttpFcmSender`]，
 /// 无凭据时退化 [`super::fcm::NoopFcmSender`]；测试注 mock）。
 /// `bus`：EventBus 句柄（玄女订阅源）。
-/// `xuannv_id`：玄女 AgentId——只关心她的 AgentResponded。
+/// `xuannv_watch`：玄女分身池 watch——过滤 AgentResponded 时**每帧实时读**当前
+/// 全部活分身 id。绝不能 snapshot 一个 AgentId 烤进闭包：玄女 id 会在会话中
+/// 漂移（topic 切换 handoff / idle GC 重生 / 服务重启 fresh session），烤死的
+/// 旧 id 永不匹配 → 「玄女在等你」推送静默死掉（2026-06-10 用户实测命中；
+/// 同 conv WS snapshot bug，见 memory `feedback_dynamic_agent_id_via_watch`）。
 pub fn spawn(
     pool: SqlitePool,
     sender: Arc<dyn PushSender>,
     fcm_sender: Arc<dyn FcmPusher>,
     bus: EventBus,
-    xuannv_id: AgentId,
+    xuannv_watch: XuannvPoolWatch,
 ) -> JoinHandle<()> {
     spawn_with_windows(
         pool,
         sender,
         fcm_sender,
         bus,
-        xuannv_id,
+        xuannv_watch,
         XUANNV_IDLE_WINDOW,
         TASK_DONE_DEDUP_TTL,
     )
@@ -70,7 +78,7 @@ pub fn spawn_with_windows(
     sender: Arc<dyn PushSender>,
     fcm_sender: Arc<dyn FcmPusher>,
     bus: EventBus,
-    xuannv_id: AgentId,
+    xuannv_watch: XuannvPoolWatch,
     idle_window: Duration,
     dedup_ttl: Duration,
 ) -> JoinHandle<()> {
@@ -86,7 +94,7 @@ pub fn spawn_with_windows(
                 sender.clone(),
                 fcm_sender.clone(),
                 &state,
-                xuannv_id,
+                &xuannv_watch,
                 idle_window,
                 dedup_ttl,
                 ev,
@@ -113,15 +121,20 @@ async fn handle_event(
     sender: Arc<dyn PushSender>,
     fcm_sender: Arc<dyn FcmPusher>,
     state: &Arc<Mutex<HookState>>,
-    xuannv_id: AgentId,
+    xuannv_watch: &XuannvPoolWatch,
     idle_window: Duration,
     dedup_ttl: Duration,
     ev: Event,
 ) {
     match ev.kind {
         EventKind::AgentResponded { .. } => {
-            // 仅当来自玄女才计 idle。门客响应是另一回事——他们不直接面向用户。
-            if ev.meta.agent != Some(xuannv_id) {
+            // 仅当来自玄女（任一活跃分身）才计 idle。门客响应是另一回事——
+            // 他们不直接面向用户。实时读 watch 跟随 id 漂移，见 spawn doc。
+            let is_xuannv = ev
+                .meta
+                .agent
+                .is_some_and(|a| xuannv_watch.borrow().values().any(|v| *v == a));
+            if !is_xuannv {
                 return;
             }
             let mut s = state.lock().await;
@@ -256,6 +269,12 @@ mod tests {
         }
     }
 
+    /// 单 id 包成分身池 watch——多数测试只需要一个固定玄女。
+    fn watch_of(id: AgentId) -> (watch::Sender<HashMap<TopicId, AgentId>>, XuannvPoolWatch) {
+        let (tx, rx) = watch::channel(HashMap::from([(TopicId::general(), id)]));
+        (tx, rx)
+    }
+
     async fn fresh_pool() -> SqlitePool {
         let dir = tempdir().expect("tmp");
         let path = dir.path().join("im.db");
@@ -293,12 +312,13 @@ mod tests {
         let sender = Arc::new(CountingSender::default());
         let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
+        let (_tx, xuannv_rx) = watch_of(xuannv);
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
             fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
-            xuannv,
+            xuannv_rx,
             Duration::from_millis(50), // idle window
             Duration::from_secs(60),   // task done dedup
         );
@@ -325,6 +345,63 @@ mod tests {
         assert_eq!(fcm.snapshot()[0].title, "玄女在等你");
     }
 
+    /// 回归门禁（2026-06-10 用户实测 bug）：玄女 id 漂移后（handoff/重生换新 id），
+    /// 新 id 的 AgentResponded 仍要触发推送——hooks 必须实时读 watch，不能 snapshot。
+    #[tokio::test]
+    async fn xuannv_id_drift_still_triggers_notification() {
+        let bus = EventBus::with_memory_store().await.expect("bus");
+        let pool = fresh_pool().await;
+        let sender = Arc::new(CountingSender::default());
+        let fcm = Arc::new(CountingFcmSender::default());
+        let old_id = AgentId::new();
+        let (tx, xuannv_rx) = watch_of(old_id);
+        let _h = spawn_with_windows(
+            pool,
+            sender.clone() as Arc<dyn PushSender>,
+            fcm.clone() as Arc<dyn FcmPusher>,
+            bus.clone(),
+            xuannv_rx,
+            Duration::from_millis(50),
+            Duration::from_secs(60),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // 模拟 handoff：分身池换成新 id（老 id 退场）
+        let new_id = AgentId::new();
+        tx.send(HashMap::from([(TopicId::general(), new_id)]))
+            .expect("watch send");
+
+        // 老 id 的响应不再属于玄女——不触发
+        let mut meta_old = EventMeta::now();
+        meta_old.agent = Some(old_id);
+        bus.publish(Event {
+            meta: meta_old,
+            kind: EventKind::AgentResponded {
+                text: "stale".into(),
+                artifact_ref: None,
+            },
+        })
+        .unwrap();
+
+        // 新 id 的响应必须触发
+        let mut meta_new = EventMeta::now();
+        meta_new.agent = Some(new_id);
+        bus.publish(Event {
+            meta: meta_new,
+            kind: EventKind::AgentResponded {
+                text: "我回来了".into(),
+                artifact_ref: None,
+            },
+        })
+        .unwrap();
+
+        wait_pushes(&sender, 1, 500).await;
+        let pushes = sender.snapshot();
+        assert_eq!(pushes.len(), 1, "漂移后新 id 应触发恰好一条");
+        assert_eq!(pushes[0].title, "玄女在等你");
+        assert_eq!(fcm.snapshot().len(), 1);
+    }
+
     /// 玄女响应后立刻 user 开口 → idle 推送被取消。
     #[tokio::test]
     async fn user_prompt_cancels_idle_timer() {
@@ -333,12 +410,13 @@ mod tests {
         let sender = Arc::new(CountingSender::default());
         let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
+        let (_tx, xuannv_rx) = watch_of(xuannv);
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
             fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
-            xuannv,
+            xuannv_rx,
             Duration::from_millis(80),
             Duration::from_secs(60),
         );
@@ -384,12 +462,13 @@ mod tests {
         let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
         let worker = AgentId::new();
+        let (_tx, xuannv_rx) = watch_of(xuannv);
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
             fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
-            xuannv,
+            xuannv_rx,
             Duration::from_millis(50),
             Duration::from_secs(60),
         );
@@ -419,12 +498,13 @@ mod tests {
         let sender = Arc::new(CountingSender::default());
         let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
+        let (_tx, xuannv_rx) = watch_of(xuannv);
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
             fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
-            xuannv,
+            xuannv_rx,
             Duration::from_secs(60),
             Duration::from_secs(60),
         );
@@ -465,12 +545,13 @@ mod tests {
         let sender = Arc::new(CountingSender::default());
         let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
+        let (_tx, xuannv_rx) = watch_of(xuannv);
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
             fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
-            xuannv,
+            xuannv_rx,
             Duration::from_secs(60),
             Duration::from_millis(200), // 短 dedup 让测试快
         );
@@ -506,12 +587,13 @@ mod tests {
         let sender = Arc::new(CountingSender::default());
         let fcm = Arc::new(CountingFcmSender::default());
         let xuannv = AgentId::new();
+        let (_tx, xuannv_rx) = watch_of(xuannv);
         let _h = spawn_with_windows(
             pool,
             sender.clone() as Arc<dyn PushSender>,
             fcm.clone() as Arc<dyn FcmPusher>,
             bus.clone(),
-            xuannv,
+            xuannv_rx,
             Duration::from_secs(60),
             Duration::from_secs(60),
         );
