@@ -2621,7 +2621,19 @@ async fn cc_publish_line(
 }
 
 /// 流式执行 codex 任务：spawn + 按行读 stdout + 增量 POST progress。
-///
+/// FU-2 跨节点收尾：解 `DistJob.topic_id` → `TopicId`。home 端 `to_string()` 是
+/// `topic-<uuid>` Display 形（同 `task-<uuid>`），必须 strip 前缀再解 UUID，否则
+/// 裸 parse 失败 → worker 不 stamp topic → 跨节点完工串味 general（2 节点实测踩穿）。
+fn parse_job_topic_id(raw: Option<&str>) -> Option<fuxi_core::TopicId> {
+    raw.and_then(|s| {
+        s.strip_prefix("topic-")
+            .unwrap_or(s)
+            .parse::<uuid::Uuid>()
+            .ok()
+    })
+    .map(fuxi_core::TopicId)
+}
+
 /// 返回 `(ok, final_output)`——外层负责发 `/dist/report`。`final_output` 是
 /// 整轮回复的文本汇总（给老 `/dist/job` 非流式消费者兜底），已做长度截断。
 async fn run_codex_job(
@@ -2681,11 +2693,7 @@ async fn run_codex_job(
         .map(TaskId::from)
         .or_else(|| Some(TaskId::new()));
     // FU-2 跨节点收尾：同 cc 路径——解 job.topic_id 给 worker 事件 stamp meta.topic_id。
-    let job_topic_id = job
-        .topic_id
-        .as_deref()
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .map(fuxi_core::TopicId);
+    let job_topic_id = parse_job_topic_id(job.topic_id.as_deref());
     let pid_hint = child.id();
     let mut translate_state = fuxi_agent_codex::TranslateState::new();
 
@@ -2973,11 +2981,7 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         .or_else(|| Some(TaskId::new()));
     // FU-2 跨节点收尾：解 job.topic_id → 给 worker 跑出来的事件 stamp meta.topic_id，
     // 跟本地适配器口径一致，home bridge 才能把完工路由回归属 topic 分身（不串 general）。
-    let job_topic_id = job
-        .topic_id
-        .as_deref()
-        .and_then(|s| s.parse::<uuid::Uuid>().ok())
-        .map(fuxi_core::TopicId);
+    let job_topic_id = parse_job_topic_id(job.topic_id.as_deref());
     let pid_hint = child.id();
     let mut translate_state = fuxi_agent_cc::TranslateState::new();
 
@@ -3276,6 +3280,28 @@ mod tests {
             back.topic_id.as_deref(),
             Some("1bf5390e-fdd4-4647-b976-84705dc0d735")
         );
+    }
+
+    /// FU-2 跨节点收尾 · 2 节点实测踩穿的 bug：home 端 `task.topic_id.to_string()` 是
+    /// `topic-<uuid>` Display 形，worker 必须 strip 前缀才解得出 UUID。裸 `parse` 会
+    /// 失败→topic 丢→跨节点完工串味 general。
+    #[test]
+    fn parse_job_topic_id_strips_display_prefix() {
+        let uuid = "1bf5390e-fdd4-4647-b976-84705dc0d735";
+        // Display 形（home to_string 产出）——必须解得出。
+        assert_eq!(
+            parse_job_topic_id(Some(&format!("topic-{uuid}"))),
+            Some(fuxi_core::TopicId(uuid.parse().unwrap())),
+            "topic- 前缀 Display 形必须 strip 后解出"
+        );
+        // 裸 UUID 也接受（向后兼容）。
+        assert_eq!(
+            parse_job_topic_id(Some(uuid)),
+            Some(fuxi_core::TopicId(uuid.parse().unwrap()))
+        );
+        // None / 非法 → None。
+        assert_eq!(parse_job_topic_id(None), None);
+        assert_eq!(parse_job_topic_id(Some("garbage")), None);
     }
 
     // ─── Decision 21 phase 3 跨节点 sandbox 解析 ─────────────────
