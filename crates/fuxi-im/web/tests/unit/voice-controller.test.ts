@@ -246,6 +246,41 @@ describe("VoiceController 按住说话（独立于语音模式）", () => {
     expect(f.mic.stopped).toBe(true);
   });
 
+  it("快速按放：pttStop 在 pttStart 的 ASR 连接完成前执行，不崩溃不残留", async () => {
+    const f = makeFakes();
+    // 让 asr.connect 慢半拍——复现真机「按一下立刻松」时 connect 还在路上
+    let releaseConnect: () => void = () => {};
+    const slowDeps = {
+      ...f.deps,
+      createAsr: () => {
+        const inst = f.deps.createAsr({ token: "im-tok" });
+        const orig = inst.connect.bind(inst);
+        inst.connect = () =>
+          new Promise<void>((res) => {
+            releaseConnect = () => {
+              void orig().then(res);
+            };
+          });
+        return inst;
+      },
+    };
+    const vc = new VoiceController(slowDeps);
+
+    const startP = vc.pttStart();
+    await tick();
+    const stopP = vc.pttStop(); // connect 未完成就松手
+    await tick();
+    releaseConnect();
+    // 真机 bug：pttStart 恢复后 this.mic 已被 pttStop 清空 → 读 null.subscribe 抛
+    // "Cannot read properties of null"。修后 start 应静默放弃，不抛。
+    await expect(startP).resolves.toBeUndefined();
+    await stopP;
+    expect(vc.state).toBe("off");
+    // 放弃的 ASR 不该留订阅——后续 feedMic 不应有任何 asr 收到 PCM
+    f.feedMic(CHUNK);
+    expect(f.asrInstances.every((a) => a.pcm.length === 0)).toBe(true);
+  });
+
   it("语音模式开着时 PTT 借用现有 mic，结束后 mic 不关、wake 恢复", async () => {
     const f = makeFakes();
     const vc = new VoiceController(f.deps);
