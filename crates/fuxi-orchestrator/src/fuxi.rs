@@ -1368,6 +1368,9 @@ impl Fuxi {
         // 桶——`upsert_task` 不会被触发。这里补上让 TUI / 观察器知道
         // 「task X 派给了 agent Y」。
         let task_id = task.id;
+        // FU-2 收尾：task 下面会被 move 进 agent.dispatch，先把 topic 捞出来给 pump
+        // 闭包（always-nudge 兜底 AgentRequestReview 用它 stamp meta.topic_id）。
+        let task_topic_id = task.topic_id;
         let title = task.title.clone();
         let description = task.description.clone();
         {
@@ -1560,6 +1563,9 @@ impl Fuxi {
                 let mut meta = EventMeta::now();
                 meta.agent = Some(agent_id);
                 meta.task = Some(task_id);
+                // FU-2 收尾：兜底信号归位发起 task 的 topic，跟适配器 emit 的 worker
+                // 事件口径一致（meta.topic_id），订阅方按 topic 过滤不漏完工信号。
+                meta.topic_id = task_topic_id;
                 let _ = bus.publish(Event {
                     meta,
                     kind: EventKind::AgentRequestReview {
@@ -2908,6 +2914,63 @@ mod pump_orphan_recovery_tests {
         assert_eq!(
             cancelled_count, 0,
             "saw_terminal=true 时不应再补 TaskCancelled（避免重复终态）"
+        );
+    }
+
+    /// FU-2 收尾（2026-06-10）：always-nudge fallback 的 `AgentRequestReview` 也要带
+    /// 发起 task 的 `topic_id`，否则门客完工兜底信号 meta.topic_id 为空——bridge 虽按
+    /// task.topic_id 解析路由仍对，但事件元数据不全，订阅方按 topic 过滤会漏。
+    #[tokio::test]
+    async fn always_nudge_stamps_task_topic_id() {
+        let fuxi = make_fuxi().await;
+        let bus = fuxi.bus();
+        let mut sub = bus.subscribe();
+
+        let topic = fuxi_core::TopicId::new();
+        let (agent, tx) = ControllableAgent::new("luban");
+        fuxi.insert_agent(agent.clone(), None).await;
+        let task = Task::new("topic-nudge", "noop").with_topic_id(topic);
+        let task_id = task.id;
+        fuxi.dispatch(agent.card().id, task)
+            .await
+            .expect("dispatch");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // push 真终态 Done（无 review_request → 触发 always-nudge）。
+        let mut meta = EventMeta::now();
+        meta.agent = Some(agent.card().id);
+        meta.task = Some(task_id);
+        tx.send(Event {
+            meta,
+            kind: EventKind::TaskStateChanged {
+                from: fuxi_core::task::TaskState::InProgress,
+                to: fuxi_core::task::TaskState::Done,
+            },
+        })
+        .await
+        .expect("push done");
+
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+        let mut found = None;
+        for _ in 0..50 {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), sub.next()).await {
+                Ok(Some(Ok(ev))) => {
+                    if matches!(&ev.kind, EventKind::AgentRequestReview { .. })
+                        && ev.meta.task == Some(task_id)
+                    {
+                        found = Some(ev);
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let ev = found.expect("always-nudge 应兜底发 AgentRequestReview");
+        assert_eq!(
+            ev.meta.topic_id,
+            Some(topic),
+            "always-nudge 的 AgentRequestReview 应带发起 task 的 topic_id"
         );
     }
 }
