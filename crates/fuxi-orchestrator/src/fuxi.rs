@@ -52,6 +52,9 @@ pub struct FuxiConfig {
     pub allocate_worktree: bool,
     /// worktree 基于哪个 branch 切出。默认 "main"。
     pub base_branch: String,
+    /// 玄女分身并发上限覆盖——None 走 env `FUXI_XUANNV_MAX_ACTIVE` / 默认 3。
+    /// 测试注小值用；生产一般不设。
+    pub xuannv_max_active: Option<usize>,
 }
 
 impl Default for FuxiConfig {
@@ -59,6 +62,7 @@ impl Default for FuxiConfig {
         Self {
             allocate_worktree: true,
             base_branch: "main".to_string(),
+            xuannv_max_active: None,
         }
     }
 }
@@ -182,13 +186,15 @@ impl Fuxi {
         // Phase 1：current_topic_id 初值 general。switch_topic 前所有玄女对话都
         // 落在 general topic（兼容老行为）。
         let (topic_tx, _) = watch::channel(fuxi_core::TopicId::general());
-        // 块2：玄女分身池上限走 env，非法 / 缺省 = 3（同时活 3 个 topic 的分身，
-        // 超出按 LRU dormant 回收）。
-        let max_active = std::env::var("FUXI_XUANNV_MAX_ACTIVE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(3);
+        // 块2：玄女分身池上限——cfg 覆盖（测试注小值）优先，否则走 env，非法 / 缺省
+        // = 3（同时活 3 个 topic 的分身，超出按 LRU dormant 回收）。
+        let max_active = cfg.xuannv_max_active.unwrap_or_else(|| {
+            std::env::var("FUXI_XUANNV_MAX_ACTIVE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(3)
+        });
         let me = Self {
             bus: bus.clone(),
             workspace,
@@ -263,6 +269,36 @@ impl Fuxi {
         if topic == fuxi_core::TopicId::general() {
             // send_replace：无 receiver 也不 panic（Fuxi 启动早于 IM 订阅时也安全）
             let _ = self.xuannv_id.send_replace(Some(id));
+        }
+        self.enforce_xuannv_cap().await;
+    }
+
+    /// 块D：池超 cap 时 dormant 最久未活跃的非 general 分身（spec §4.6）。
+    ///
+    /// - victim **busy**（正跑 turn）→ 本轮放过（软上限，不丢 turn，等 idle_gc 收）。
+    /// - 先 `pool.remove` 摘映射再 shutdown——`shutdown_agent` 的分身豁免
+    ///   （is_active_clone）才放行，同 idle_gc 顺序。
+    /// - shutdown 失败 warn + return 防死循环（victim 不可关时下次 set 再试）。
+    async fn enforce_xuannv_cap(&self) {
+        while let Some((topic, victim)) = self.xuannv_pool.lru_victim_if_over_cap().await {
+            if self.shelf.status_of(victim).await == Some(crate::registry::ShelfStatus::Busy) {
+                debug!(%topic, agent = %victim, "分身池超限但 victim busy——本轮放过（软上限）");
+                return;
+            }
+            info!(%topic, agent = %victim, "分身池超限 → dormant LRU victim");
+            self.xuannv_pool.remove(topic).await;
+            let mut meta = EventMeta::now();
+            meta.agent = Some(victim);
+            let _ = self.bus.publish(Event {
+                meta,
+                kind: EventKind::AgentShuttingDown {
+                    reason: "xuannv_cap_lru".into(),
+                },
+            });
+            if let Err(e) = self.shutdown_agent(victim, "xuannv_cap_lru".into()).await {
+                warn!(agent = %victim, error = %e, "cap 回收 shutdown 失败（victim 可能不在 shelf）");
+                return;
+            }
         }
     }
 
@@ -3203,6 +3239,75 @@ mod xuannv_pool_integration_tests {
         let bus = EventBus::with_memory_store().await.unwrap();
         std::mem::forget(dir);
         Arc::new(Fuxi::new(bus, ws))
+    }
+
+    async fn make_fuxi_with_cap(cap: usize) -> Arc<Fuxi> {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let bus = EventBus::with_memory_store().await.unwrap();
+        std::mem::forget(dir);
+        Arc::new(Fuxi::with_config(
+            bus,
+            ws,
+            FuxiConfig {
+                allocate_worktree: false,
+                base_branch: "main".into(),
+                xuannv_max_active: Some(cap),
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn cap_overflow_dormants_lru_idle_victim() {
+        let fuxi = make_fuxi_with_cap(1).await;
+        let t1 = TopicId::new();
+        let t2 = TopicId::new();
+        fuxi.set_xuannv_for_topic(t1, AgentId::new()).await;
+        fuxi.set_xuannv_for_topic(t2, AgentId::new()).await;
+        // cap=1：t1（最老、不在 shelf = 非 busy）应被 dormant 摘出池
+        assert_eq!(
+            fuxi.xuannv_id_for_topic(t1).await,
+            None,
+            "LRU victim 应被回收"
+        );
+        assert!(fuxi.xuannv_id_for_topic(t2).await.is_some(), "新分身保留");
+    }
+
+    #[tokio::test]
+    async fn cap_never_evicts_general() {
+        let fuxi = make_fuxi_with_cap(1).await;
+        let general = TopicId::general();
+        fuxi.set_xuannv_for_topic(general, AgentId::new()).await;
+        let t2 = TopicId::new();
+        fuxi.set_xuannv_for_topic(t2, AgentId::new()).await;
+        // 超 cap 但 general 豁免——victim 只能是 t2 自己（cap=1 + general 常驻的
+        // 退化配置；默认 cap=3 不会这样，断言语义即可）
+        assert!(
+            fuxi.xuannv_id_for_topic(general).await.is_some(),
+            "general 永不被 cap 回收"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_skips_busy_victim() {
+        // 软上限：victim 正跑 turn（Busy）则本轮放过，等 idle_gc 收。
+        let fuxi = make_fuxi_with_cap(1).await;
+        let agent = NullAgent::new("xuannv");
+        let id = fuxi.insert_agent(agent, None).await;
+        let t1 = TopicId::new();
+        fuxi.set_xuannv_for_topic(t1, id).await;
+        fuxi.shelf
+            .set_status(id, crate::registry::ShelfStatus::Busy)
+            .await;
+        let t2 = TopicId::new();
+        fuxi.set_xuannv_for_topic(t2, AgentId::new()).await;
+        assert!(
+            fuxi.xuannv_id_for_topic(t1).await.is_some(),
+            "busy victim 本轮放过"
+        );
+        assert!(fuxi.xuannv_id_for_topic(t2).await.is_some());
     }
 
     /// Task 2.2：set_xuannv_for_topic / xuannv_id_for_topic 走池往返。
