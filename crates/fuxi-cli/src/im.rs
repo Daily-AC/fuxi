@@ -377,6 +377,17 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 .unwrap_or_else(|_| PathBuf::from("roles"))
         });
 
+    // PWA 语音：wake server 预共享 token 文件。env 覆盖给测试/非常规部署；
+    // 缺省 `~/.fuxi/wake.token`（deploy/wake/README.md 约定位置）。文件不存在
+    // 不报错——handler 降级 wake_token=null，前端隐藏唤醒开关。
+    let wake_token_path = std::env::var_os("FUXI_WAKE_TOKEN_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            fuxi_im::auth::default_fuxi_dir()
+                .map(|d| d.join("wake.token"))
+                .unwrap_or_else(|_| PathBuf::from("wake.token"))
+        });
+
     // Phase 1 · topic_store 跟 conv_store 同 im.db pool。
     let topic_store = fuxi_im::topic_store::TopicStore::new(im_pool.clone());
 
@@ -393,7 +404,8 @@ pub async fn run(args: StartArgs) -> Result<()> {
         .with_hetu(hetu_for_state)
         .with_user_profile_store(user_profile_store)
         .with_triggers(sched_store.clone())
-        .with_roles_root(roles_root);
+        .with_roles_root(roles_root)
+        .with_wake_token_path(wake_token_path);
     let app_state = match project_registry {
         Ok(reg) => app_state_base.with_project_registry(reg),
         Err(e) => {
