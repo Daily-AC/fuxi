@@ -266,8 +266,3 @@ pub(crate) fn format_handoff_prelude(handoff_body: &str) -> String {
         handoff_body
     )
 }
-
-/// 等当前玄女 turn idle 的兜底 helper——topic_switch 也要等 idle 再 kill。
-pub(crate) async fn wait_xuannv_idle(fuxi: &Fuxi, agent: AgentId) {
-    wait_idle(fuxi, agent).await;
-}

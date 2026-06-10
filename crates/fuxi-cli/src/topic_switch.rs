@@ -1,43 +1,39 @@
-//! Phase 1 · 切 topic 入口。
+//! Phase 2 · 切 topic 入口。
 //!
-//! 用户从 topic A 切到 topic B 时：fuxi 关掉当前玄女 cc 进程 → 拉 B 的对话历史
-//! 拼 prelude → 起新 cc 进程注入 prelude → set_xuannv + set_current_topic。
+//! Phase 1（kill 当前 cc → 拉历史拼 prelude → spawn 新 cc）已废：切 topic 不再
+//! 杀进程。现在切 = `set_current_topic` + `ensure_xuannv_for_topic`——池里有活
+//! 分身就毫秒级秒切（上下文真留内存，不重灌回顾）；没有则懒启动（走
+//! [`crate::xuannv_spawner_impl::TopicXuannvSpawner`]：按 topic 过滤的回顾
+//! prelude + FUXI_TOPIC env + drain 持久队列）。旧分身留给 idle_gc dormant 回收。
 //!
-//! 复用 [`crate::xuannv_handoff::spawn_with_prelude`]：handoff 跟 topic 切换都
-//! 走 kill+spawn-with-prelude pattern，区别只在 prelude 内容（handoff = 上一只
-//! 副本的 handoff 摘要；topic = 新 topic 的对话回顾）。
+//! 本文件剩下的 prelude 拼装函数（[`build_topic_prelude`] 等）是懒启动路径的
+//! 共享件，被 spawner impl 复用——别删。
 //!
-//! 设计依据：handoff `v1-session19.md` §3.2 + 决策 1（fuxi 重建 prelude 不依赖
-//! cc resume）。
+//! 设计依据：spec `2026-06-11-玄女分身-phase2-路由-design.md` §4.1。
 
 use anyhow::{Context, Result};
 use fuxi_core::TopicId;
-use fuxi_im::conv_store::{ConvStore, Message, SCOPE_XUANNV};
+use fuxi_im::conv_store::Message;
 use fuxi_im::topic_store::TopicStore;
-use fuxi_memory::OracleStore;
 use fuxi_orchestrator::Fuxi;
-use std::time::Duration;
 use tracing::{info, warn};
 
-use crate::xuannv_handoff::{spawn_with_prelude, wait_xuannv_idle};
-
-/// prelude 拼接时拉的玄女主线最近消息条数。
+/// 懒启动拉 topic 历史拼 prelude 时的最近消息条数。
 pub const DEFAULT_RECENT_MESSAGES: usize = 50;
 /// 单条消息文本预览截断字符上限——避免单条爆炸长把 prelude 撑爆。
 pub const MESSAGE_PREVIEW_CHAR_LIMIT: usize = 240;
 /// prelude 文本总字符上限（粗保护，超出按整段截尾）。handoff §3.2 给的指标：≤ 1500 字。
 pub const PRELUDE_TOTAL_CHAR_LIMIT: usize = 1500;
 
-/// 切 topic 到 `target_id`——完整路径：等 idle → kill old → 拉 prelude → spawn new
-/// → set_xuannv + set_current_topic + touch_last_active。
+/// 切 topic 到 `target_id`——Phase 2 路径：验证 topic 存在 → ensure 分身
+/// （热路径 = 池查询毫秒级；冷路径 = spawner 懒启动数秒）→ commit
+/// `set_current_topic` → touch_last_active。
 ///
-/// 失败语义：若 kill 老玄女失败仍继续 spawn 新副本（老进程可能已死）。spawn 失败
-/// 整体 bail——current_topic / xuannv 不更新，调用方按需 retry。
+/// 失败语义：ensure 失败（spawner 未注入 / spawn 炸）整体 bail，
+/// current_topic **不** flip——调用方按需 retry（HTTP 5xx）。
+/// 不杀旧分身、不等旧分身 idle：旧 turn 跑完输出落它自己的 topic。
 pub async fn switch_topic_to(
     fuxi: &Fuxi,
-    oracle: &OracleStore,
-    role: &str,
-    conv_store: &ConvStore,
     topic_store: &TopicStore,
     target_id: TopicId,
 ) -> Result<()> {
@@ -48,74 +44,22 @@ pub async fn switch_topic_to(
         .with_context(|| format!("查 topic {target_id} 失败"))?
         .with_context(|| format!("topic {target_id} 不存在，先创建"))?;
 
-    let old_xuannv = fuxi
-        .xuannv_id()
+    let clone = fuxi
+        .ensure_xuannv_for_topic(target_id)
         .await
-        .context("玄女 id 未设——尚未 spawn 完成？")?;
-    info!(old = %old_xuannv, target = %target_id, "等玄女当前 turn idle 后切 topic");
-    wait_xuannv_idle(fuxi, old_xuannv).await;
+        .context("ensure 分身失败（spawner 未注入或 spawn 失败）")?;
 
-    info!(old = %old_xuannv, "kill 老玄女副本");
-    if let Err(err) = fuxi
-        .shutdown_xuannv_for_handoff(old_xuannv, format!("topic_switch_to:{target_id}"))
-        .await
-    {
-        warn!(?err, "kill 老玄女失败——继续 spawn 新副本（老进程可能已死）");
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // 拉新 topic 的对话回顾。失败 warn 不 bail——空回顾仍能 spawn，玄女首条消息
-    // 由用户接着说。
-    let recent = match load_recent_messages(conv_store, DEFAULT_RECENT_MESSAGES).await {
-        Ok(v) => v,
-        Err(err) => {
-            warn!(?err, "拉对话回顾失败，prelude 走空回顾");
-            Vec::new()
-        }
-    };
-    let prelude = build_topic_prelude(&target_meta.title, &recent);
-    info!(
-        target = %target_id,
-        title = %target_meta.title,
-        msgs = recent.len(),
-        prelude_chars = prelude.chars().count(),
-        "spawn 新玄女副本（注入 topic prelude）"
-    );
-
-    // 块5：切到的 topic 注入 FUXI_TOPIC，让该玄女 shell 的 fuxi dispatch 默认带 --topic
-    // → worker 事件归位本 topic（不串别的 topic 分身）。
-    let new_id = spawn_with_prelude(
-        fuxi,
-        oracle,
-        role,
-        &prelude,
-        vec![("FUXI_TOPIC".to_string(), target_id.as_uuid().to_string())],
-    )
-    .await
-    .context("spawn 新玄女失败")?;
-    fuxi.set_xuannv(new_id).await;
     fuxi.set_current_topic(target_id).await;
     if let Err(err) = topic_store.touch_last_active(target_id).await {
         warn!(?err, "touch_last_active 失败，sidebar 排序可能滞后");
     }
-    info!(new = %new_id, target = %target_id, "topic 切换完成");
+    info!(
+        %clone,
+        target = %target_id,
+        title = %target_meta.title,
+        "topic 切换完成（常驻分身，未 kill）"
+    );
     Ok(())
-}
-
-/// 从 conv_store 拉玄女主线（[`SCOPE_XUANNV`]）最近 N 条消息。
-///
-/// Phase 1 v1：先拉主线最近若干条作 prelude 回顾。Phase 1 v2 拆 topic 后改为按
-/// `messages.topic_id = target` 过滤拉。当前是过渡——保证切 topic 总有上文兜底。
-pub async fn load_recent_messages(conv_store: &ConvStore, n: usize) -> Result<Vec<Message>> {
-    let conv_id = conv_store
-        .ensure_scope(SCOPE_XUANNV, None)
-        .await
-        .context("ensure xuannv scope")?;
-    let (msgs, _has_more, _oldest) = conv_store
-        .page_messages(&conv_id, n, None)
-        .await
-        .context("page_messages")?;
-    Ok(msgs)
 }
 
 /// 把 topic 标题 + 最近消息拼成给新玄女副本的 prelude 文本。
@@ -189,7 +133,78 @@ fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use fuxi_core::id::AgentId;
+    use fuxi_events::EventBus;
     use fuxi_im::conv_store::Message;
+    use fuxi_im::db::init_at;
+    use fuxi_im::topic_store::TopicStore;
+    use fuxi_orchestrator::Fuxi;
+    use fuxi_workspace::GitWorktreeWorkspace;
+    use std::sync::Arc;
+
+    async fn make_fuxi() -> Arc<Fuxi> {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Arc::new(GitWorktreeWorkspace::with_default_base(
+            dir.path().to_path_buf(),
+        ));
+        let bus = EventBus::with_memory_store().await.unwrap();
+        std::mem::forget(dir);
+        Arc::new(Fuxi::new(bus, ws))
+    }
+
+    async fn open_topic_store() -> (tempfile::TempDir, TopicStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = init_at(&dir.path().join("im.db")).await.unwrap();
+        (dir, TopicStore::new(pool))
+    }
+
+    #[tokio::test]
+    async fn switch_hot_path_keeps_clone_and_flips_topic() {
+        // Phase 2 核心：池里已有活分身 → 秒切，分身 id 不变（不 kill 不 respawn）。
+        let (_dir, topic_store) = open_topic_store().await;
+        let fuxi = make_fuxi().await;
+        let meta = topic_store.create("画画").await.unwrap();
+        let clone = AgentId::new();
+        fuxi.set_xuannv_for_topic(meta.id, clone).await;
+
+        switch_topic_to(&fuxi, &topic_store, meta.id)
+            .await
+            .expect("热路径 switch 应成功");
+
+        assert_eq!(fuxi.current_topic_id(), meta.id);
+        assert_eq!(
+            fuxi.xuannv_id_for_topic(meta.id).await,
+            Some(clone),
+            "热路径不得 kill / 换分身"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_cold_path_without_spawner_bails_and_keeps_topic() {
+        // 池 miss + spawner 未注入 → ensure 返 None → bail，current_topic 不动
+        //（Phase 1 失败语义保留：失败不 flip）。
+        let (_dir, topic_store) = open_topic_store().await;
+        let fuxi = make_fuxi().await;
+        let meta = topic_store.create("新话题").await.unwrap();
+        let before = fuxi.current_topic_id();
+
+        let r = switch_topic_to(&fuxi, &topic_store, meta.id).await;
+
+        assert!(r.is_err(), "ensure 失败应 bail");
+        assert_eq!(
+            fuxi.current_topic_id(),
+            before,
+            "失败不得 flip current_topic"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_rejects_unknown_topic() {
+        let (_dir, topic_store) = open_topic_store().await;
+        let fuxi = make_fuxi().await;
+        let r = switch_topic_to(&fuxi, &topic_store, fuxi_core::TopicId::new()).await;
+        assert!(r.is_err(), "不存在的 topic 应拒切");
+    }
 
     fn msg(role: &str, text: &str) -> Message {
         Message {
