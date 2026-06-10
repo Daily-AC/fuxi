@@ -57,6 +57,11 @@ const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv";
 /** 语音模式持久开关——"1" 时回到玄女 tab 自动恢复常驻唤醒。 */
 const VOICE_MODE_KEY = "fuxi.voice-mode";
+/** 安卓壳内（capacitor.config appendUserAgent 标记）禁用 web 语音模式：
+ *  原生 VoiceLoopService 全场景接管唤醒/TTS，讯飞引擎进程级单 session，
+ *  web 端再开一条必撞 18310 互相抢。PTT 不受影响（不占 wake session）。 */
+const IN_SHELL =
+  typeof navigator !== "undefined" && navigator.userAgent.includes("FuxiShell");
 
 export const XuannvPage: Component = () => {
   const { client, currentTopicId, setSidebarOpen, isSwitchingTopic } = useApi();
@@ -170,6 +175,11 @@ export const XuannvPage: Component = () => {
   };
 
   onMount(() => {
+    if (IN_SHELL) {
+      // 壳内原生 VoiceLoopService 接管，web 语音模式不开（开关也不渲染）
+      setVoiceAvailable(false);
+      return;
+    }
     void client
       .voiceTokens()
       .then((t) => {

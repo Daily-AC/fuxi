@@ -155,6 +155,22 @@ pub fn shutdown_process() {
     info!("xfyun: shutdown_process done");
 }
 
+/// AIKIT_End 失败时的进程级遗留 session 槽——下一个 start_session 先回收它。
+///
+/// WHY 进程级 static：Session 对象一连接一个，泄漏者连接已断、对象已 drop，
+/// 回收责任只能落在后来者头上。SDK 进程级单 session，槽位至多一个。
+/// 没有这层，End 一次失败 = handle 永久丢失 = 后续所有 AIKIT_Start 18310，
+/// 唤醒全聋直到人工 systemctl restart（2026-06-10 用户实测命中）。
+struct LeakedSession {
+    handle: *mut raw::AIKIT_HANDLE,
+    sender_ptr: *mut UnboundedSender<(String, f32)>,
+}
+
+// 安全：槽位只在 Mutex 下存取；指针仅作回收凭据，不在此解引用。
+unsafe impl Send for LeakedSession {}
+
+static LEAKED_SESSION: Mutex<Option<LeakedSession>> = Mutex::new(None);
+
 /// 单连接会话——内部裹 `Mutex` 让 `&self` 接口下做可变操作（讯飞 handle 单线程使用）。
 pub struct Session {
     state: Mutex<SessionState>,
@@ -191,6 +207,21 @@ impl Session {
         let mut s = self.state.lock().expect("session state lock");
         if !s.handle.is_null() {
             anyhow::bail!("xfyun session 已 start，重复 init");
+        }
+
+        // 先回收遗留 session——上一个连接 AIKIT_End 失败留下的。不回收的话
+        // 下面 AIKIT_Start 必撞 18310（SDK 认为 session 还开着）。
+        let leaked = LEAKED_SESSION.lock().expect("leaked slot lock").take();
+        if let Some(l) = leaked {
+            let ret = unsafe { raw::AIKIT_End(l.handle) };
+            if ret == 0 {
+                // End 成功后 SDK 不再回调 usrContext，sender box 可安全释放
+                unsafe { drop(Box::from_raw(l.sender_ptr)) };
+                info!("xfyun: 遗留 session 回收成功");
+            } else {
+                *LEAKED_SESSION.lock().expect("leaked slot lock") = Some(l);
+                anyhow::bail!("遗留 xfyun session 回收失败 err={ret}——唤醒暂不可用，等下次连接重试");
+            }
         }
 
         let ability = CString::new(ABILITY_ID)?;
@@ -332,13 +363,19 @@ impl Session {
         }
         let ret = unsafe { raw::AIKIT_End(s.handle) };
         if ret != 0 {
-            warn!(err = ret, "xfyun: AIKIT_End 失败（继续清理）");
+            // End 失败时 handle + sender 移入遗留槽，下次 start_session 前回收。
+            // 老行为是直接丢弃：handle 永久丢失 → SDK 永久 18310；sender box 提前
+            // free 还可能被 OnOutput 回调写成 UAF。宁可暂泄，不可丢凭据。
+            warn!(err = ret, "xfyun: AIKIT_End 失败——session 移入遗留槽待回收");
+            *LEAKED_SESSION.lock().expect("leaked slot lock") = Some(LeakedSession {
+                handle: s.handle,
+                sender_ptr: s.sender_ptr,
+            });
+        } else if !s.sender_ptr.is_null() {
+            unsafe { drop(Box::from_raw(s.sender_ptr)) };
         }
         s.handle = std::ptr::null_mut();
-        if !s.sender_ptr.is_null() {
-            unsafe { drop(Box::from_raw(s.sender_ptr)) };
-            s.sender_ptr = std::ptr::null_mut();
-        }
+        s.sender_ptr = std::ptr::null_mut();
         s.rx = None;
         Ok(())
     }

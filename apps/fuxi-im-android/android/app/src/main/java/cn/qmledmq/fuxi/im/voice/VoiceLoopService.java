@@ -26,7 +26,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
 
-import cn.qmledmq.fuxi.im.AppVisibility;
 import cn.qmledmq.fuxi.im.FcmRegistrar;
 import cn.qmledmq.fuxi.im.R;
 
@@ -43,9 +42,9 @@ import okio.ByteString;
  *  听写（能量 VAD 1.5s 静音断）→ POST /api/intervene（[语音] 前缀，公理 #8）
  *  → conv WS 收 xuannv_voice_line → POST /api/tts → MediaPlayer 播。
  *
- *  让位规则：app 在前台（{@link AppVisibility}）或用户在通知里点了「暂停」
- *  时，整条链静默（释放麦克风、不响应 wake、不播 TTS）——前台体验交给
- *  PWA 语音模式，避免双麦克风双唤醒双 TTS。
+ *  v1.3 起原生全场景唯一接管（前台/后台/锁屏）：讯飞引擎进程级单 session，
+ *  壳内 PWA 语音模式已按 UA 标记禁用，否则双端互抢 18310。唯一暂停源是
+ *  常驻通知里的「暂停常听」按钮（释放麦克风、不响应 wake、不播 TTS）。
  *
  *  WHY 控制面只有通知按钮：远端 URL 模式 WebView 没有 Capacitor JS 桥，
  *  PWA 调不了原生插件（同 FcmRegistrar 注释）。 */
@@ -265,7 +264,17 @@ public class VoiceLoopService extends Service {
     }
 
     private boolean paused() {
-        return userPaused || AppVisibility.isForeground();
+        // v1.3 起前台不再让位：壳内 PWA 语音模式已禁用（讯飞引擎单 session，
+        // 双端会互抢 18310），原生全场景唯一接管。只剩用户通知按钮一个暂停源。
+        return userPaused;
+    }
+
+    /** RFC3339 UTC 时间串——wake 协议 Pong.at 用。minSdk 23 无 java.time，走 SimpleDateFormat。 */
+    private static String utcNow() {
+        java.text.SimpleDateFormat f =
+                new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return f.format(new java.util.Date());
     }
 
     // ── wake WS ──────────────────────────────────────────────────────────
@@ -290,7 +299,8 @@ public class VoiceLoopService extends Service {
                     if ("wake".equals(t)) {
                         onWakeDetected();
                     } else if ("ping".equals(t)) {
-                        ws.send("{\"type\":\"pong\"}");
+                        // 协议 Pong 必须带 at（RFC3339）——缺字段 server 解析失败刷 warn
+                        ws.send("{\"type\":\"pong\",\"at\":\"" + utcNow() + "\"}");
                     } else if ("ready".equals(t)) {
                         Log.i(TAG, "wake ready");
                     }
