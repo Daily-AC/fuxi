@@ -90,6 +90,7 @@ export const TopicSidebar: Component = () => {
 
   const handleSwitch = async (id: string): Promise<void> => {
     if (switching()) return; // 期间禁止再点
+    const prev = currentTopicId();
     if (id === currentTopicId()) {
       // 已是当前 topic——移动端关掉抽屉即可
       setSidebarOpen(false);
@@ -100,6 +101,10 @@ export const TopicSidebar: Component = () => {
     try {
       const resp = await client.switchTopic(id);
       setCurrentTopicId(resp.current_topic_id);
+      // Phase 2 · 未读水位：进入新话题立即标读；离开的旧话题也标读（看过的不算未读）。
+      // fire-and-forget——badge 是辅助信息，失败不挡切换。
+      void client.markTopicRead(id).catch(() => {});
+      if (prev && prev !== id) void client.markTopicRead(prev).catch(() => {});
       await refetch();
       setSidebarOpen(false);
     } catch (err) {
@@ -511,6 +516,15 @@ const TopicRow: Component<TopicRowProps> = (props) => {
       >
         <span class={styles.rowDot} aria-hidden="true" />
         <span class={styles.rowTitle}>{props.topic.title}</span>
+        <Show when={!props.current && (props.topic.unread_count ?? 0) > 0}>
+          <span
+            class={styles.rowBadge}
+            data-testid={`topic-unread-${props.topic.id}`}
+            aria-label={`${props.topic.unread_count} 条未读`}
+          >
+            {(props.topic.unread_count ?? 0) > 99 ? "99+" : props.topic.unread_count}
+          </span>
+        </Show>
         <Show when={props.switching}>
           <span
             class={styles.spinner}

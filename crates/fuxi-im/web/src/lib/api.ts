@@ -156,6 +156,8 @@ export interface ApiClient {
   switchTopic(id: string): Promise<CurrentTopicResponse>;
   /** Phase 1 · 归档 topic（不删，include_archived=1 才能再列出）。 */
   archiveTopic(id: string): Promise<void>;
+  /** Phase 2 · 推进未读水位（PWA 进入/离开话题时调，清该 topic 小红点）。 */
+  markTopicRead(id: string): Promise<void>;
 }
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -342,6 +344,17 @@ export function createHttpClient(): ApiClient {
     archiveTopic: async (id) => {
       // 204 No Content——jsonFetch 会 await res.json() 撞空 body，单独 fetch。
       const res = await fetch(`/api/topics/${encodeURIComponent(id)}/archive`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new ApiError(res.status, body || res.statusText);
+      }
+    },
+    markTopicRead: async (id) => {
+      // 204 No Content——同 archiveTopic，单独 fetch 不走 jsonFetch。
+      const res = await fetch(`/api/topics/${encodeURIComponent(id)}/read`, {
         method: "POST",
         credentials: "include",
       });
