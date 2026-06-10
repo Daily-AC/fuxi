@@ -43,6 +43,13 @@
             </intent-filter>
         </service>
 
+        <!-- 后台常听：喊「玄女」→ 听写 → intervene → 回复 TTS，全原生闭环。
+             targetSdk 35 起开机广播不能直接起 mic 型 FGS——重启后打开 app 一次即恢复。 -->
+        <service
+            android:name=".voice.VoiceLoopService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
         <!-- FCM 后台 notification 消息的默认小图标 / 颜色 / 渠道。 -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
@@ -64,4 +71,8 @@
          自动弹运行时授权并放行——不需要 MainActivity 写代码。 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- 后台常听：麦克风型前台服务（锁屏可持续采音）+ 防 doze 断流的部分唤醒锁。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 </manifest>
