@@ -26,6 +26,7 @@ use fuxi_core::{AgentId, Event, EventKind, TopicId};
 use fuxi_events::EventBus;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
@@ -394,11 +395,14 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
 ///
 /// 返回 JoinHandle，调用方可 abort。
 ///
-/// `xuannv_id_watch`：来自 [`fuxi_orchestrator::Fuxi::xuannv_id_watch`] 的 watch
-/// channel——每条事件**实时取最新值**做"我 vs 别人"的过滤。WHY watch 而不是
-/// 静态 `AgentId`：handoff 路径会 kill 旧 xuannv 再 spawn 新副本（agent_id 变），
-/// 静态 id 会让 sync 用旧 id 死过滤新副本的所有事件，新副本发言全部落不进
-/// messages 表，PWA IM 看不到——bug "handoff 后新玄女副本发言不进 PWA IM 历史"。
+/// `pool_watch`：来自 [`fuxi_orchestrator::Fuxi::xuannv_pool_watch`] 的 watch
+/// channel——Phase 2 玄女是「每 topic 一只常驻分身」的池，不再是单值。每条事件
+/// **实时 borrow 当前池快照**判「subject 是不是某个活分身」并反查它服务的 topic。
+/// WHY watch 而不是静态快照（精神同 memory `feedback_dynamic_agent_id_via_watch`）：
+/// 分身 respawn / dormant 回收 / 切 topic 懒启动都会改池映射；快照会让 sync 用旧池
+/// 死过滤新分身的所有事件，新分身发言全部落不进 messages 表，PWA 历史看不到。
+/// 单值时代的 latent bug：非 general 分身的回复因「agent != 单值 xuannv_id」被
+/// 直接 drop——dormant 补发的「门客干完了」用户只收 push，PWA 历史里没这条话。
 ///
 /// **同步期完成**：
 /// - 进 conv `ensure_scope`
@@ -410,7 +414,7 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
 pub async fn spawn_xuannv_sync(
     store: Arc<ConvStore>,
     bus: EventBus,
-    xuannv_id_watch: watch::Receiver<Option<AgentId>>,
+    pool_watch: watch::Receiver<HashMap<TopicId, AgentId>>,
     current_topic_watch: watch::Receiver<TopicId>,
 ) -> tokio::task::JoinHandle<()> {
     // 同步期：先 ensure conv + 先 subscribe
@@ -424,7 +428,7 @@ pub async fn spawn_xuannv_sync(
     let mut stream = bus.subscribe();
     debug!(
         conv = %conv_id,
-        xuannv = ?*xuannv_id_watch.borrow(),
+        pool_size = pool_watch.borrow().len(),
         topic = %current_topic_watch.borrow().0,
         "conv_store xuannv sync 准备就绪"
     );
@@ -439,16 +443,17 @@ pub async fn spawn_xuannv_sync(
                     continue;
                 }
             };
-            // 每条事件 borrow 当前 xuannv id——handoff 切副本后立刻用新值过滤。
-            // None = 玄女尚未上线（理论上 spawn 这个 sync 之前 set_xuannv 已调过，
-            // 所以此分支极少；保留兜底防 daemon 启动顺序 race）。
-            let Some(current_xn) = *xuannv_id_watch.borrow() else {
+            // 每条事件 borrow 当前池快照——respawn / dormant 漂移实时跟随
+            //（克隆开销 = cap 个 entry，可忽略）。空池 = 玄女尚未上线，兜底防
+            // daemon 启动顺序 race（理论上 spawn 这个 sync 前 set_xuannv 已入池）。
+            let pool_snapshot = pool_watch.borrow().clone();
+            if pool_snapshot.is_empty() {
                 continue;
-            };
-            // bug "新建话题不空"：必读当前 topic_id 落库，否则所有消息都进 general，
-            // 切 topic 看到旧 topic 历史漏出来。watch 跟随 set_current_topic 实时变。
+            }
+            // current_topic 兜底分身刚 dormant 的 in-flight 残留事件归属（见
+            // `attribute_topic`）；watch 跟随 set_current_topic 实时变。
             let topic = *current_topic_watch.borrow();
-            if let Err(e) = handle_event(&store, &conv_id, current_xn, topic, &ev).await {
+            if let Err(e) = handle_event(&store, &conv_id, &pool_snapshot, topic, &ev).await {
                 warn!(error = %e, kind = ?ev.kind, "conv_store sync 写库失败");
             }
         }
@@ -456,22 +461,52 @@ pub async fn spawn_xuannv_sync(
     })
 }
 
+/// 池槽位反查：`id` 是哪个 topic 的活分身。非分身（门客 / 平台级）返 None。
+fn clone_topic_of(pool: &HashMap<TopicId, AgentId>, id: AgentId) -> Option<TopicId> {
+    pool.iter().find_map(|(t, a)| (*a == id).then_some(*t))
+}
+
+/// 消息 topic 归属：事件自带 stamp 优先（门客适配器写的）→ 池槽位反查（分身
+/// 自己的事件不一定带 stamp）→ current_topic 兜底（分身刚 dormant 的 in-flight
+/// 残留事件，按旧行为落当前 topic，不丢消息）。
+fn attribute_topic(
+    pool: &HashMap<TopicId, AgentId>,
+    current: TopicId,
+    ev: &Event,
+    subject: AgentId,
+) -> TopicId {
+    ev.meta
+        .topic_id
+        .or_else(|| clone_topic_of(pool, subject))
+        .unwrap_or(current)
+}
+
 /// 把单条 Event 翻成 messages 行（如果该事件该入对话视图）。
-/// `topic_id` 来自调用方 watch borrow，每条事件实时取——topic 切了立刻按新值落库。
+/// Phase 2：subject 是不是「池中活分身」决定入不入玄女主线；归属 topic 由
+/// [`attribute_topic`] 按事件 + 池逐条算（不再函数头算一次），让 B 分身的回复
+/// 落进 B 的历史而非当前 topic。`current_topic` 仅作残留事件兜底。
 async fn handle_event(
     store: &ConvStore,
     conv_id: &str,
-    xuannv_id: AgentId,
-    topic_id: TopicId,
+    pool: &HashMap<TopicId, AgentId>,
+    current_topic: TopicId,
     ev: &Event,
 ) -> Result<()> {
     let source_id = ev.meta.id.to_string();
-    let topic_str = topic_id.0.to_string();
     match &ev.kind {
         // 用户对玄女说话的两种入口都翻 user role：
         // - UserPrompted（玄女当前 turn 的 prompt）
         // - UserInterventionSent target=xuannv（用户主动 intervene 玄女）
-        EventKind::UserPrompted { text } if ev.meta.agent == Some(xuannv_id) => {
+        EventKind::UserPrompted { text }
+            if ev
+                .meta
+                .agent
+                .is_some_and(|a| clone_topic_of(pool, a).is_some()) =>
+        {
+            let subject = ev.meta.agent.expect("guard 保证 agent 是池内活分身");
+            let topic_str = attribute_topic(pool, current_topic, ev, subject)
+                .0
+                .to_string();
             store
                 .append_message_in_topic(
                     conv_id,
@@ -492,7 +527,10 @@ async fn handle_event(
             attachments,
             system_origin,
             ..
-        } if *target == xuannv_id => {
+        } if clone_topic_of(pool, *target).is_some() => {
+            let topic_str = attribute_topic(pool, current_topic, ev, *target)
+                .0
+                .to_string();
             // 阶段 3：附件 id 列表落 messages.attachments JSON 数组，PWA 历史回显时
             // AttachmentChip 直接拿 id 拼直链 GET /api/uploads/:id 渲缩略。空 = None
             // （让旧前端 fromStoredMessage 走 `Array.isArray` 兜空稳）。
@@ -539,13 +577,23 @@ async fn handle_event(
                 )
                 .await?;
         }
-        // 玄女自己的回应
-        EventKind::AgentResponded { text, .. } if ev.meta.agent == Some(xuannv_id) => {
+        // 玄女自己的回应——agent_id 写真实分身 id（非单值镜像），让前端历史回放
+        // 能区分是哪个 topic 分身说的。
+        EventKind::AgentResponded { text, .. }
+            if ev
+                .meta
+                .agent
+                .is_some_and(|a| clone_topic_of(pool, a).is_some()) =>
+        {
+            let subject = ev.meta.agent.expect("guard 保证 agent 是池内活分身");
+            let topic_str = attribute_topic(pool, current_topic, ev, subject)
+                .0
+                .to_string();
             store
                 .append_message_in_topic(
                     conv_id,
                     "xuannv",
-                    Some(&xuannv_id.to_string()),
+                    Some(&subject.to_string()),
                     "text",
                     &serde_json::json!({ "text": text }),
                     None,
@@ -556,13 +604,22 @@ async fn handle_event(
                 .await?;
         }
         // 玄女派的 task → 卡片消息（前端可点进去看 task chat）
-        EventKind::TaskCreated { title, description } if ev.meta.agent == Some(xuannv_id) => {
+        EventKind::TaskCreated { title, description }
+            if ev
+                .meta
+                .agent
+                .is_some_and(|a| clone_topic_of(pool, a).is_some()) =>
+        {
+            let subject = ev.meta.agent.expect("guard 保证 agent 是池内活分身");
+            let topic_str = attribute_topic(pool, current_topic, ev, subject)
+                .0
+                .to_string();
             let task_id = ev.meta.task.map(|t| t.to_string()).unwrap_or_default();
             store
                 .append_message_in_topic(
                     conv_id,
                     "xuannv",
-                    Some(&xuannv_id.to_string()),
+                    Some(&subject.to_string()),
                     "task_card",
                     &serde_json::json!({
                         "task_id": task_id,
@@ -579,7 +636,15 @@ async fn handle_event(
         // 用户对别的门客说话 → 玄女抄送（呈报）也进玄女主线
         EventKind::OrchestratorCcReceived {
             from_user_to, text, ..
-        } if ev.meta.agent == Some(xuannv_id) => {
+        } if ev
+            .meta
+            .agent
+            .is_some_and(|a| clone_topic_of(pool, a).is_some()) =>
+        {
+            let subject = ev.meta.agent.expect("guard 保证 agent 是池内活分身");
+            let topic_str = attribute_topic(pool, current_topic, ev, subject)
+                .0
+                .to_string();
             store
                 .append_message_in_topic(
                     conv_id,
@@ -780,6 +845,108 @@ mod tests {
         }
     }
 
+    fn ev_responded(agent: AgentId, text: &str, topic: Option<TopicId>) -> Event {
+        let mut meta = EventMeta::now();
+        meta.agent = Some(agent);
+        if let Some(t) = topic {
+            meta.topic_id = Some(t);
+        }
+        Event {
+            meta,
+            kind: EventKind::AgentResponded {
+                text: text.to_string(),
+                artifact_ref: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn clone_response_lands_in_its_topic_not_current() {
+        use std::collections::HashMap;
+        // latent-bug 核心回归：topic B 分身回话（meta.topic_id 缺省），current=general
+        // → 必须落库且归 B（旧实现：单值过滤直接 drop，PWA 历史丢失）。
+        let (_dir, store) = open_store().await;
+        let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        let topic_b = TopicId::new();
+        let clone_b = AgentId::new();
+        let pool: HashMap<TopicId, AgentId> = [(topic_b, clone_b)].into();
+
+        handle_event(
+            &store,
+            &conv,
+            &pool,
+            TopicId::general(),
+            &ev_responded(clone_b, "门客干完了", None),
+        )
+        .await
+        .unwrap();
+
+        let (msgs, _, _) = store
+            .page_messages_in_topic(&conv, &topic_b.0.to_string(), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "B 分身的回复必须落 B 的历史");
+        assert_eq!(msgs[0].role, "xuannv");
+        let (general_msgs, _, _) = store
+            .page_messages_in_topic(&conv, &TopicId::general().0.to_string(), 10, None)
+            .await
+            .unwrap();
+        assert!(general_msgs.is_empty(), "不得串进 current topic");
+    }
+
+    #[tokio::test]
+    async fn non_clone_agent_response_not_persisted() {
+        use std::collections::HashMap;
+        // 门客（非分身）的 AgentResponded 不入玄女主线——保持旧契约。
+        let (_dir, store) = open_store().await;
+        let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        let pool: HashMap<TopicId, AgentId> = [(TopicId::general(), AgentId::new())].into();
+
+        handle_event(
+            &store,
+            &conv,
+            &pool,
+            TopicId::general(),
+            &ev_responded(AgentId::new(), "我是门客", None),
+        )
+        .await
+        .unwrap();
+
+        let (msgs, _, _) = store
+            .page_messages_in_topic(&conv, &TopicId::general().0.to_string(), 10, None)
+            .await
+            .unwrap();
+        assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn meta_topic_id_takes_precedence_over_pool_slot() {
+        use std::collections::HashMap;
+        // 事件已带 meta.topic_id（门客适配器 stamp 过）→ 以它为准，不看池槽位。
+        let (_dir, store) = open_store().await;
+        let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        let topic_b = TopicId::new();
+        let topic_c = TopicId::new();
+        let clone_b = AgentId::new();
+        let pool: HashMap<TopicId, AgentId> = [(topic_b, clone_b)].into();
+
+        handle_event(
+            &store,
+            &conv,
+            &pool,
+            TopicId::general(),
+            &ev_responded(clone_b, "带 stamp 的", Some(topic_c)),
+        )
+        .await
+        .unwrap();
+
+        let (msgs, _, _) = store
+            .page_messages_in_topic(&conv, &topic_c.0.to_string(), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "meta.topic_id 优先于池槽位反查");
+    }
+
     fn task_created_event(agent: AgentId, task: TaskId, title: &str) -> Event {
         let mut meta = EventMeta::now();
         meta.agent = Some(agent);
@@ -804,7 +971,7 @@ mod tests {
         let xuannv = AgentId::new();
         let task = TaskId::new();
 
-        let (_tx, rx) = watch::channel(Some(xuannv));
+        let (_tx, rx) = watch::channel(HashMap::from([(TopicId::general(), xuannv)]));
         let (_topic_tx, topic_rx) = watch::channel(TopicId::general());
         let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx, topic_rx).await;
 
@@ -860,7 +1027,7 @@ mod tests {
         let old_xn = AgentId::new();
         let new_xn = AgentId::new();
 
-        let (tx, rx) = watch::channel(Some(old_xn));
+        let (tx, rx) = watch::channel(HashMap::from([(TopicId::general(), old_xn)]));
         let (_topic_tx, topic_rx) = watch::channel(TopicId::general());
         let h = spawn_xuannv_sync(store.clone(), bus.clone(), rx, topic_rx).await;
 
@@ -884,8 +1051,9 @@ mod tests {
         }
         assert!(old_landed, "旧副本发言应先落库");
 
-        // handoff：watch 切到新副本 id
-        tx.send(Some(new_xn)).expect("watch send 新 id 不该失败");
+        // handoff：池的 general 槽位 respawn 到新副本 id
+        tx.send(HashMap::from([(TopicId::general(), new_xn)]))
+            .expect("watch send 新 id 不该失败");
 
         // 新副本继续发言——这条在 buggy 版本不会落库
         bus.publish(agent_responded_event(new_xn, "新副本：接班完成"))
@@ -909,23 +1077,26 @@ mod tests {
         h.abort();
     }
 
-    /// 反回归：切 topic 后玄女新发言必须按"新 topic_id"落库；
-    /// `page_messages_in_topic` 按 topic 过滤的结果不混旧 topic 消息。
-    /// 修复 bug "新建话题不空"——之前 handle_event 永远写 general。
+    /// 反回归（Phase 2 重写）：每只分身的发言按「池槽位反查」落进它服务的 topic，
+    /// 而非当前 topic。general 分身说话落 general；新 topic 懒启动的分身入池后，
+    /// 它的发言落新 topic——`page_messages_in_topic` 过滤互不串味。
+    /// （Phase 1 旧语义「单分身跟随 current_topic 漂移」已被精神分裂修复废弃。）
     #[tokio::test]
     async fn sync_tags_message_with_current_topic() {
         use fuxi_events::EventBus;
         let (_dir, store) = open_store().await;
         let store = Arc::new(store);
         let bus = EventBus::with_memory_store().await.unwrap();
-        let xuannv = AgentId::new();
+        let clone_g = AgentId::new();
 
-        let (_id_tx, id_rx) = watch::channel(Some(xuannv));
-        let (topic_tx, topic_rx) = watch::channel(TopicId::general());
-        let h = spawn_xuannv_sync(store.clone(), bus.clone(), id_rx, topic_rx).await;
+        // 起始池：只有 general 槽位一只分身。current_topic 全程留 general
+        //（多端单值，不随分身漂移）。
+        let (pool_tx, pool_rx) = watch::channel(HashMap::from([(TopicId::general(), clone_g)]));
+        let (_topic_tx, topic_rx) = watch::channel(TopicId::general());
+        let h = spawn_xuannv_sync(store.clone(), bus.clone(), pool_rx, topic_rx).await;
 
-        // 在 general topic 下玄女说一句
-        bus.publish(agent_responded_event(xuannv, "general 期"))
+        // general 分身说一句 → 落 general
+        bus.publish(agent_responded_event(clone_g, "general 期"))
             .unwrap();
 
         let conv = store.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
@@ -940,12 +1111,18 @@ mod tests {
             }
         }
 
-        // 切到新 topic
+        // 新 topic 懒启动：池里加它自己的槽位 + 分身
         let new_topic = TopicId::from(Uuid::new_v4());
-        topic_tx.send(new_topic).expect("topic watch send 不应失败");
+        let clone_b = AgentId::new();
+        pool_tx
+            .send(HashMap::from([
+                (TopicId::general(), clone_g),
+                (new_topic, clone_b),
+            ]))
+            .expect("pool watch send 不应失败");
 
-        // 切完后玄女在新 topic 下发言
-        bus.publish(agent_responded_event(xuannv, "new topic 期"))
+        // 新分身在它的 topic 下发言（meta 不带 stamp，靠池槽位反查归属）
+        bus.publish(agent_responded_event(clone_b, "new topic 期"))
             .unwrap();
 
         // 等新发言落库
