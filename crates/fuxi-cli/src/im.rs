@@ -565,10 +565,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 fuxi.set_xuannv_switcher(Arc::new(
                     crate::topic_switcher_impl::CliXuannvSwitcher::new(
                         fuxi.clone(),
-                        oracle.clone(),
-                        conv_store.clone(),
                         topic_store.clone(),
-                        xuannv_role.clone(),
                     ),
                 ))
                 .await;
