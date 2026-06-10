@@ -506,7 +506,11 @@ mod tests {
         // 当前 topic = A：A 分身可见，B 分身不可见（落库走小红点），门客/平台级不可见
         assert!(conv_event_visible(&pool, topic_a, &ev(Some(clone_a))));
         assert!(!conv_event_visible(&pool, topic_a, &ev(Some(clone_b))));
-        assert!(!conv_event_visible(&pool, topic_a, &ev(Some(AgentId::new()))));
+        assert!(!conv_event_visible(
+            &pool,
+            topic_a,
+            &ev(Some(AgentId::new()))
+        ));
         assert!(!conv_event_visible(&pool, topic_a, &ev(None)));
         // 切到 B 后跟随
         assert!(conv_event_visible(&pool, topic_b, &ev(Some(clone_b))));
