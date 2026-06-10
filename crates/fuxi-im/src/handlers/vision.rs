@@ -186,10 +186,11 @@ pub async fn look(
     validate_target(&req.target)?;
     let timeout = clamp_timeout(req.timeout_secs);
 
-    // 玄女未起 → 503（与 conv_ws 同语义：路径正确但暂时不可服务）。
+    // 玄女未起 → 503。Phase 2：look 注入「当前 topic 的分身」——conv WS 按
+    // current_topic 过滤（块B），打错分身桌宠收不到帧请求。
     let xuannv = state
         .fuxi
-        .xuannv_id()
+        .ensure_xuannv_for_topic(state.fuxi.current_topic_id())
         .await
         .ok_or_else(|| Error::Unavailable("玄女尚未注入；请先 set_xuannv".into()))?;
 
