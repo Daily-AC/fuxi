@@ -1830,10 +1830,13 @@ impl Fuxi {
                 task = task.with_topic_id(topic);
             }
             self.dispatch(agent_id, task).await?;
-            // 抄送玄女
+            // 抄送玄女。Phase 2 豁免：target 是池中活分身 = 玄女本人在被对话，
+            // 自我抄送只会让 general 分身白跑一轮 + general 历史进 CC 噪音
+            //（home 实测：PWA 在非 general topic 每句话都触发）。
             let xuannv = self.xuannv_id().await;
             if let Some(xn) = xuannv
                 && xn != agent_id
+                && !self.xuannv_pool.is_active_clone(agent_id).await
             {
                 let mut meta = EventMeta::now();
                 meta.agent = Some(xn);
@@ -1911,9 +1914,12 @@ impl Fuxi {
         // 5. 抄送（呈报）——target 非玄女且玄女 id 已设时，把副本发给玄女。
         // meta.agent 置为玄女，让订阅者知道"这条信归她知情"。
         // 公理 #2：玄女有知情权无否决权，不阻塞当前 intervene。
+        // Phase 2 豁免：target 是池中活分身 = 玄女本人在被对话，不自我抄送
+        //（同上面 degrade 分支，home 实测撞见的噪音源）。
         let xuannv = self.xuannv_id().await;
         if let Some(xn) = xuannv
             && xn != agent_id
+            && !self.xuannv_pool.is_active_clone(agent_id).await
         {
             let mut meta = EventMeta::now();
             meta.agent = Some(xn);
@@ -3308,6 +3314,58 @@ mod xuannv_pool_integration_tests {
             "busy victim 本轮放过"
         );
         assert!(fuxi.xuannv_id_for_topic(t2).await.is_some());
+    }
+
+    /// 收集 intervene 后短窗口内是否出现 OrchestratorCcReceived。
+    async fn saw_cc_after(fuxi: &Fuxi, target: AgentId) -> bool {
+        let mut sub = fuxi.bus().subscribe();
+        fuxi.intervene(target, false, "hi", vec![], None, vec![], None)
+            .await
+            .expect("intervene");
+        let mut saw = false;
+        while let Ok(Some(item)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), sub.next()).await
+        {
+            if let Ok(ev) = item
+                && matches!(ev.kind, EventKind::OrchestratorCcReceived { .. })
+            {
+                saw = true;
+            }
+        }
+        saw
+    }
+
+    /// Phase 2 home 实测撞见：对玄女分身 intervene 会抄送 general 分身——分身即
+    /// 玄女本人，自我抄送让 general 白跑一轮 + general 历史进 CC 噪音（PWA 在
+    /// 非 general topic 说每句话都会触发）。修后：target 是池中任一活分身 →
+    /// 不发 OrchestratorCcReceived。
+    #[tokio::test]
+    async fn intervene_clone_target_skips_carbon_copy() {
+        let fuxi = make_fuxi().await;
+        let g_id = fuxi.insert_agent(NullAgent::new("xuannv"), None).await;
+        fuxi.set_xuannv_for_topic(TopicId::general(), g_id).await;
+        let clone_id = fuxi.insert_agent(NullAgent::new("xuannv"), None).await;
+        fuxi.set_xuannv_for_topic(TopicId::new(), clone_id).await;
+
+        assert!(
+            !saw_cc_after(&fuxi, clone_id).await,
+            "对分身 intervene 不得抄送 general（自我抄送噪音）"
+        );
+    }
+
+    /// 反向回归：普通门客 intervene 照旧抄送玄女（公理 #2 知情权不许被上面的
+    /// 豁免误伤）。
+    #[tokio::test]
+    async fn intervene_worker_target_still_carbon_copies() {
+        let fuxi = make_fuxi().await;
+        let g_id = fuxi.insert_agent(NullAgent::new("xuannv"), None).await;
+        fuxi.set_xuannv_for_topic(TopicId::general(), g_id).await;
+        let w_id = fuxi.insert_agent(NullAgent::new("luban"), None).await;
+
+        assert!(
+            saw_cc_after(&fuxi, w_id).await,
+            "门客 intervene 仍须抄送玄女（公理 #2）"
+        );
     }
 
     /// Task 2.2：set_xuannv_for_topic / xuannv_id_for_topic 走池往返。
