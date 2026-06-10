@@ -370,6 +370,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
         created_at: new Date(0).toISOString(),
         last_active_at: new Date().toISOString(),
         pinned: false,
+        unread_count: 0,
       };
       return { topics: [general], current_topic_id: "general" };
     },
@@ -387,6 +388,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
         created_at: now,
         last_active_at: now,
         pinned: false,
+        unread_count: 0,
       };
       const prev = state.topics ?? {
         topics: [],
@@ -410,6 +412,7 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
         current_topic_id: prev.current_topic_id,
       };
     },
+    markTopicRead: async (_id: string): Promise<void> => {},
   };
 }
 

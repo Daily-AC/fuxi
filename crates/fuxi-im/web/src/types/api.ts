@@ -425,6 +425,8 @@ export interface TopicView {
   pinned?: boolean;
   /** ISO 8601 UTC. 非空 = 已归档。include_archived=1 时才会出现归档项。 */
   archived_at?: string | null;
+  /** Phase 2 · 未读数（非 user 消息、水位之后）。current topic 恒 0。 */
+  unread_count?: number;
 }
 
 export interface TopicsResponse {
