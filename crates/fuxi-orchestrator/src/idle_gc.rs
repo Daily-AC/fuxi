@@ -160,6 +160,14 @@ impl IdleGcTask {
             // 不 skip——dormant 正是本特性的目的（空闲分身释放资源，下条消息再起）。
             if let Some(pool) = self.xuannv_pool.as_ref() {
                 if let Some(topic) = pool.topic_of(id).await {
+                    // 块5 修（2026-06-10 home 实测）：general 分身是常驻 home base，
+                    // **永不 dormant 回收**。否则回收后 `xuannv_id` 置 None，而
+                    // `ensure_xuannv` 只 boot 时调一次、无 HTTP 触发 respawn → general
+                    // 玄女永久 503 到重启（CLAUDE.md 公理「IdleGcTask 必须豁免玄女」）。
+                    // 非 general 的 topic 分身仍可 dormant——由 bridge 里程碑 respawn。
+                    if topic == fuxi_core::TopicId::general() {
+                        continue;
+                    }
                     debug!(agent = %id, %topic, "idle GC: 分身超时 → dormant 回收");
                     pool.remove(topic).await;
                 }
@@ -584,6 +592,59 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, clone_id);
         assert_eq!(hits[0].1, "idle_ttl");
+    }
+
+    /// 块5 修（2026-06-10 home 实测撞穿）：**general 分身是常驻 home base，
+    /// 永不 dormant 回收**。根因——general 被回收后 `xuannv_id` 置 None，而
+    /// `ensure_xuannv` 只在 boot 调一次、没有任何 HTTP 请求触发它 respawn →
+    /// general 玄女永久 503 到重启。复现：home general 04:25 被 GC，9.5h 后用户
+    /// 发消息一律「玄女尚未就绪」。治法同 CLAUDE.md 公理「IdleGcTask 必须豁免玄女」，
+    /// 池模式下豁免对象 = general topic 分身（非 general 的 topic 分身仍可 dormant，
+    /// 由 bridge 里程碑 respawn）。
+    #[tokio::test]
+    async fn idle_gc_never_reclaims_general_clone() {
+        use crate::xuannv_pool::XuannvPool;
+        use fuxi_core::TopicId;
+
+        let shelf = Arc::new(Shelf::new());
+        let clone = NullAgent::new("xuannv") as Arc<dyn Agent>;
+        let clone_id = clone.card().id;
+        shelf
+            .insert(ShelfEntry {
+                card: clone.card().clone(),
+                agent: clone,
+                status: ShelfStatus::Idle,
+                worktree: None,
+                idle_since: Some(Instant::now() - Duration::from_secs(3600)),
+            })
+            .await;
+
+        let pool = Arc::new(XuannvPool::new(3));
+        // general topic 的分身——绝不能被 GC 回收。
+        pool.set_active(TopicId::general(), clone_id).await;
+
+        let bus = EventBus::with_memory_store().await.unwrap();
+        let shutdowner = CountingShutdowner::new();
+        let gc = IdleGcTask::new(
+            shelf.clone(),
+            shutdowner.clone(),
+            bus,
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+        .with_xuannv_pool(pool.clone());
+
+        let n = gc.tick_once().await.unwrap();
+        assert_eq!(n, 0, "general 分身不该被回收（计 0）");
+        assert_eq!(
+            pool.active_id(TopicId::general()).await,
+            Some(clone_id),
+            "general 分身映射必须保留，否则 xuannv_id 置 None 后无 respawn 入口 → 永久 503"
+        );
+        assert!(
+            shutdowner.hits.lock().unwrap().is_empty(),
+            "general 分身不该触发任何 shutdown_idle"
+        );
     }
 
     #[tokio::test]
