@@ -3,9 +3,9 @@
 //! 用户在 PWA 用"派活"入口（区别于"跟玄女说"）时调用——明确表达"这是一条新任务，
 //! 不要追加到当前对话"。
 //!
-//! 流程：
-//! 1. 取 `state.fuxi.xuannv_id().await`
-//! 2. 调 `Fuxi::dispatch(xuannv, Task::new(title, description))`
+//! 流程（Phase 2）：
+//! 1. `ensure_xuannv_for_topic(current_topic)`——当前 topic 的常驻分身
+//! 2. 调 `Fuxi::dispatch(xuannv, Task::new(...).with_topic_id(current_topic))`
 //! 3. 返 200 `{ "task_id": "<uuid>" }` 让前端能拿到任务 id 直接跳到 task chat 视图
 
 use crate::error::{Error, Result};
@@ -48,12 +48,16 @@ pub async fn dispatch(
         return Err(Error::BadRequest("description 不能为空".into()));
     }
 
-    let xuannv =
-        state.fuxi.xuannv_id().await.ok_or_else(|| {
-            Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into())
-        })?;
+    let topic = state.fuxi.current_topic_id();
+    let xuannv = state
+        .fuxi
+        .ensure_xuannv_for_topic(topic)
+        .await
+        .ok_or_else(|| Error::Unavailable("玄女尚未就绪——请稍后重试或检查 daemon 启动".into()))?;
 
     let mut task = Task::new(title, description);
+    // Phase 2：root task 打 current topic——门客事件经 bridge 归位本 topic 分身。
+    task = task.with_topic_id(topic);
     if let Some(slug) = body
         .project
         .as_deref()
