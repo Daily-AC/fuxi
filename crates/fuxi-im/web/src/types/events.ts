@@ -55,6 +55,8 @@ export type EventKind =
   | { type: "tool_call"; tool: string; input?: unknown }
   | { type: "tool_result"; tool: string; output?: unknown; ok: boolean }
   | { type: "custom"; [k: string]: unknown }
+  /** 玄女 `say` 口语短句（公理 #8）——语音模式下 PWA 拿它走 TTS，emotion 透传 sovits。*/
+  | { type: "xuannv_voice_line"; text: string; emotion?: string | null }
   | { type: "result_success"; summary?: string }
   | { type: "result_error"; error: string }
   // 兜底：未知事件（forward-compat，让 reducer noop）

@@ -158,6 +158,61 @@
   }
 }
 
+/* ===== 按住说话 · PWA 语音 ===== */
+
+.pttBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--touch);
+  min-height: var(--touch);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--inset-hi);
+  color: var(--text-secondary);
+  touch-action: none; /* 长按不触发滚动/文本选择 */
+  -webkit-user-select: none;
+  user-select: none;
+  transition: color var(--transition-fast), border-color var(--transition-fast),
+    background var(--transition-fast), transform 160ms var(--spring);
+}
+
+.pttBtn:hover,
+.pttBtn:focus-visible {
+  color: var(--accent-deep);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.pttBtnHeld,
+.pttBtnHeld:hover {
+  color: #fff;
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+  transform: scale(1.08);
+  animation: ptt-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes ptt-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-deep) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent-deep) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pttBtnHeld,
+  .pttBtnHeld:hover {
+    transform: none;
+    animation: none;
+  }
+}
+
 .attachBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;

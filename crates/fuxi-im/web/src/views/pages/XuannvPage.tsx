@@ -35,6 +35,8 @@ import {
   type SerializedIntervene,
 } from "~/lib/mentions";
 import { pushToast } from "~/lib/toast";
+import { realVoiceDeps } from "~/voice/realVoiceDeps";
+import { VoiceController, type VoiceState } from "~/voice/voiceController";
 import styles from "./XuannvPage.module.css";
 
 // 玄女 tab · v3 #N5' / #40
@@ -53,6 +55,8 @@ import styles from "./XuannvPage.module.css";
 const RETRY_DELAY_MS = 1500;
 const HISTORY_LIMIT = 50;
 const CONV_ID = "xuannv";
+/** 语音模式持久开关——"1" 时回到玄女 tab 自动恢复常驻唤醒。 */
+const VOICE_MODE_KEY = "fuxi.voice-mode";
 
 export const XuannvPage: Component = () => {
   const { client, currentTopicId, setSidebarOpen, isSwitchingTopic } = useApi();
@@ -127,6 +131,64 @@ export const XuannvPage: Component = () => {
 
   let controller: ReconnectController | null = null;
 
+  // ── PWA 语音 · 喊「玄女」唤醒 + 听写 + 回复 TTS（贾维斯同款闭环） ──
+  // wake_token null（home 未部署唤醒服务）时隐藏开关，PTT 仍可用。
+  const [voiceState, setVoiceState] = createSignal<VoiceState>("off");
+  const [voiceAvailable, setVoiceAvailable] = createSignal(false);
+
+  const vc = new VoiceController({
+    ...realVoiceDeps(client),
+    // 听写文本走 handleSubmit：optimistic 气泡 + 503 重试跟手打同一条路。
+    // `[语音] ` 前缀 = jarvis 约定（公理 #8），玄女见此用 say 回口语短句
+    // （xuannv_voice_line 带 emotion），长 markdown 不会被硬念出来。
+    intervene: (text) =>
+      handleSubmit({
+        text: `[语音] ${text}`,
+        mentions: [],
+        multi: false,
+        multi_node: false,
+        multi_project: false,
+      }),
+  });
+  vc.onState(setVoiceState);
+  vc.onError((msg) => pushToast(msg, "error"));
+
+  const toggleVoice = (): void => {
+    if (vc.enabled) {
+      localStorage.setItem(VOICE_MODE_KEY, "0");
+      void vc.disable();
+      return;
+    }
+    vc.enable()
+      .then(() => localStorage.setItem(VOICE_MODE_KEY, "1"))
+      .catch((e) => {
+        pushToast(
+          `语音模式开启失败：${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        );
+      });
+  };
+
+  onMount(() => {
+    void client
+      .voiceTokens()
+      .then((t) => {
+        setVoiceAvailable(t.wake_token !== null);
+        // 上次开着 → 回到玄女 tab 自动恢复（mic 权限已授过则无感重连）
+        if (t.wake_token !== null && localStorage.getItem(VOICE_MODE_KEY) === "1") {
+          vc.enable().catch((e) => {
+            pushToast(
+              `语音模式恢复失败：${e instanceof Error ? e.message : String(e)}`,
+              "warn",
+            );
+          });
+        }
+      })
+      .catch(() => setVoiceAvailable(false));
+  });
+
+  onCleanup(() => void vc.disable());
+
   const handleEvent = (ev: ServerEvent): void => {
     setMessages((prev) => applyEvent(prev, ev));
     // Task 32 · 任务完成 → 玄女开心。task_completed 是单一可靠信号（后端
@@ -134,6 +196,14 @@ export const XuannvPage: Component = () => {
     // 派一次 happy（瞬时态 1.8s 自归位），多任务连完会重置计时不抖。
     if (ev.kind.type === "task_completed") {
       dispatchMascot({ type: "task-done" });
+    }
+    // 玄女 say 口语短句 → 语音模式下念出来（emotion 透传 sovits 选 ref）
+    if (ev.kind.type === "xuannv_voice_line" && typeof ev.kind.text === "string") {
+      const emo = ev.kind.emotion;
+      vc.onXuannvReply(
+        ev.kind.text,
+        typeof emo === "string" && emo.length > 0 ? emo : undefined,
+      );
     }
   };
 
@@ -335,6 +405,47 @@ export const XuannvPage: Component = () => {
         </div>
         {/* 右侧占位 · 跟 menuBtn 镜像保持标题居中 */}
         <span class={styles.menuRightSpacer} aria-hidden="true" />
+        {/* 语音模式开关 · 绝对定位贴右不挤标题。home 没部署 wake server 时不显。 */}
+        <Show when={voiceAvailable()}>
+          <button
+            type="button"
+            class={styles.voiceBtn}
+            classList={{
+              [styles.voiceBtnOn ?? ""]: voiceState() !== "off",
+              [styles.voiceBtnDictating ?? ""]: voiceState() === "dictating",
+              [styles.voiceBtnSpeaking ?? ""]: voiceState() === "speaking",
+            }}
+            onClick={toggleVoice}
+            aria-label={voiceState() === "off" ? "开启语音模式" : "关闭语音模式"}
+            title={
+              voiceState() === "off"
+                ? "语音模式：喊「玄女」唤醒"
+                : voiceState() === "dictating"
+                  ? "听写中…"
+                  : voiceState() === "speaking"
+                    ? "玄女说话中…"
+                    : "聆听中（点击关闭）"
+            }
+            data-testid="voice-toggle"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              aria-hidden="true"
+            >
+              <path d="M3 10v4" />
+              <path d="M7.5 7v10" />
+              <path d="M12 4v16" />
+              <path d="M16.5 7v10" />
+              <path d="M21 10v4" />
+            </svg>
+          </button>
+        </Show>
       </header>
       <Conversation messages={messages} />
       {/* bug B · 切 topic 5-15s 全程显 overlay，让用户知道在切（不是卡住） */}
@@ -355,6 +466,7 @@ export const XuannvPage: Component = () => {
         candidates={candidates()}
         placeholder="对玄女说... (@ 角色或节点)"
         onSubmit={handleSubmit}
+        ptt={{ start: () => vc.pttStart(), stop: () => vc.pttStop() }}
       />
     </div>
   );

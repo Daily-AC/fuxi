@@ -121,6 +121,71 @@
   display: inline-block;
 }
 
+/* ===== 语音模式开关 · PWA 语音 ===== */
+
+.voiceBtn {
+  position: absolute;
+  right: var(--space-2);
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--touch);
+  height: var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--inset-hi);
+  color: var(--text-secondary);
+  transition: color var(--transition-fast), border-color var(--transition-fast),
+    background var(--transition-fast);
+  z-index: 11;
+}
+
+.voiceBtn:hover {
+  color: var(--accent-deep);
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.voiceBtnOn,
+.voiceBtnOn:hover {
+  color: #fff;
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+}
+
+/* 听写中：呼吸光圈提示「正在收音」 */
+.voiceBtnDictating,
+.voiceBtnDictating:hover {
+  animation: voice-breath 1.2s ease-in-out infinite;
+}
+
+/* 玄女说话中：柔和高亮区分于聆听 */
+.voiceBtnSpeaking,
+.voiceBtnSpeaking:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+@keyframes voice-breath {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-deep) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--accent-deep) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voiceBtnDictating,
+  .voiceBtnDictating:hover {
+    animation: none;
+  }
+}
+
 @media (min-width: 768px) {
   .menuBtn,
   .menuRightSpacer {
