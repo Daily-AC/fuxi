@@ -205,6 +205,21 @@
   font-weight: var(--weight-medium);
 }
 
+/* 未读小红点 · 纯色小药丸（禁 emoji），复用 accent 体系不引入新色值。
+ * current topic 不显（TopicRow 内 Show 守卫），故无需 current 变体。 */
+.rowBadge {
+  flex: none;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: var(--size-aux);
+  font-weight: var(--weight-semibold);
+  line-height: 16px;
+  text-align: center;
+  background: var(--accent-deep);
+  color: var(--on-accent);
+}
+
 /* spinner · 切换 loading 唯一允许的 motion */
 .spinner {
   flex-shrink: 0;

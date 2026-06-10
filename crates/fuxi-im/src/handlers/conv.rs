@@ -1,12 +1,14 @@
 //! `/api/conv` + `/api/tasks/:id/stream` —— WebSocket 事件流。
 //!
-//! `/api/conv`（玄女对话流）：
-//!   - 仅推 `meta.agent == xuannv_id` 的事件——所有跟玄女对话相关的 EventKind
+//! `/api/conv`（玄女对话流，Phase 2 池版）：
+//!   - 仅推「池中活分身且其归属 topic == 当前 topic」的事件——分身相关的 EventKind
 //!     （`UserPrompted` / `AgentResponded` / `OrchestratorCcReceived` /
 //!     `UserInterventionSent` / `AgentInterrupted` / `ThinkingStarted/Finished` /
-//!     `ToolCallStarted/Finished`）都会带 `meta.agent = xuannv` 或抄送时 set 为玄女。
-//!     直接按 agent id 过滤，**不维护一份白名单**——哪天加新 EventKind，只要 publisher
-//!     正确 set `meta.agent` 就自动出现在玄女流里，不需要改 IM 代码。
+//!     `ToolCallStarted/Finished`）都会带 `meta.agent = 某分身`。按「是不是池内分身 +
+//!     归属 topic 匹配」过滤（[`conv_event_visible`]），**不维护一份 EventKind 白名单**
+//!     ——哪天加新 EventKind，只要 publisher 正确 set `meta.agent` 就自动出现，不改 IM。
+//!   - 非当前 topic 分身的主动汇报被本过滤拦下，走 conv_store 落库 + 未读小红点 +
+//!     push 三件套，不插进当前视图实时流。
 //!
 //! `/api/tasks/:id/stream`（单任务流）：
 //!   - 仅推 `meta.task == Some(:id)` 的事件——任务级实时观察。
@@ -43,6 +45,24 @@ pub struct StreamQuery {
     pub from: Option<String>,
 }
 
+/// 玄女对话流过滤（Phase 2）：只放行「池中活分身」的事件，且分身归属 topic ==
+/// 当前 topic。归属用池槽位反查——分身自己的事件不一定带 meta.topic_id，池是
+/// 「谁服务哪个 topic」的唯一真相源。B 分身的主动汇报被本过滤拦下，走
+/// 落库 + 未读小红点 + push 三件套，不插进 A 的实时视图。
+pub(crate) fn conv_event_visible(
+    pool: &std::collections::HashMap<fuxi_core::TopicId, fuxi_core::id::AgentId>,
+    current: fuxi_core::TopicId,
+    ev: &fuxi_core::event::Event,
+) -> bool {
+    let Some(agent) = ev.meta.agent else {
+        return false;
+    };
+    let Some(topic) = pool.iter().find_map(|(t, a)| (*a == agent).then_some(*t)) else {
+        return false;
+    };
+    topic == current
+}
+
 /// `WS /api/conv` —— 玄女对话事件流。
 #[tracing::instrument(skip(ws, state))]
 pub async fn conv_ws(
@@ -51,12 +71,13 @@ pub async fn conv_ws(
     Query(q): Query<StreamQuery>,
 ) -> Result<Response> {
     let cursor = parse_cursor(q.from.as_deref())?;
-    // 玄女 id 会在**会话中**漂移（idle GC 重生 / handoff / fresh cc session——home 日志
-    // 实测单进程 15 分钟内换 3 个 id）。绝不能 snapshot 一次烤进 filter 闭包：长连 WS
-    // 不会因玄女换 id 重新 accept，旧 id 被烤死后她的 AgentResponded 全被静默滤掉，
-    // live 流断供，用户只能切 tab 重挂载重拉 id-无关的历史才看得到（P0 现象）。
-    // 改订 `watch::Receiver`，filter 每帧实时读当前 id 跟随漂移。
-    // 见 memory `feedback_dynamic_agent_id_via_watch`（同类 silent bug 的既定铁律）。
+    // Phase 2：filter 改池 watch + current_topic watch 双实时——分身 respawn 漂移、
+    // 用户切 topic 都即时跟随（绝不 snapshot，见 memory
+    // `feedback_dynamic_agent_id_via_watch`：长连 WS 不会因漂移重 accept，烤死的
+    // 旧值会让对应分身的 AgentResponded 全被静默滤掉，live 流断供）。503 判断保留
+    // general 镜像：general 永驻（idle_gc 豁免），镜像 None = 玄女体系尚未 boot。
+    let pool_watch = state.fuxi.xuannv_pool_watch();
+    let topic_watch = state.fuxi.current_topic_watch();
     let id_watch = state.fuxi.xuannv_id_watch();
     let xuannv_now = *id_watch.borrow();
     if xuannv_now.is_none() {
@@ -71,9 +92,7 @@ pub async fn conv_ws(
 
     let resp = ws.on_upgrade(move |socket| async move {
         run_ws_loop(socket, stream, move |ev| {
-            // 实时读当前玄女 id——跟随会话内漂移；`is_some()` 守掉平台级（agent=None）事件，
-            // 避免玄女 kill→respawn 的 None 空窗里 None==None 误放行非对话事件。
-            ev.meta.agent.is_some() && ev.meta.agent == *id_watch.borrow()
+            conv_event_visible(&pool_watch.borrow(), *topic_watch.borrow(), ev)
         })
         .await;
     });
@@ -457,6 +476,44 @@ mod tests {
                     .unwrap_or(true),
             "无 upload_store 时应不带 attachment_uploads 或空数组"
         );
+    }
+
+    #[test]
+    fn conv_visible_only_current_topic_clone_events() {
+        use fuxi_core::TopicId;
+        use fuxi_core::event::{EventKind, EventMeta};
+        use fuxi_core::id::AgentId;
+        use std::collections::HashMap;
+
+        let topic_a = TopicId::new();
+        let topic_b = TopicId::new();
+        let clone_a = AgentId::new();
+        let clone_b = AgentId::new();
+        let pool: HashMap<TopicId, AgentId> = [(topic_a, clone_a), (topic_b, clone_b)].into();
+
+        let ev = |agent: Option<AgentId>| {
+            let mut meta = EventMeta::now();
+            meta.agent = agent;
+            fuxi_core::event::Event {
+                meta,
+                kind: EventKind::AgentResponded {
+                    text: "hi".into(),
+                    artifact_ref: None,
+                },
+            }
+        };
+
+        // 当前 topic = A：A 分身可见，B 分身不可见（落库走小红点），门客/平台级不可见
+        assert!(conv_event_visible(&pool, topic_a, &ev(Some(clone_a))));
+        assert!(!conv_event_visible(&pool, topic_a, &ev(Some(clone_b))));
+        assert!(!conv_event_visible(
+            &pool,
+            topic_a,
+            &ev(Some(AgentId::new()))
+        ));
+        assert!(!conv_event_visible(&pool, topic_a, &ev(None)));
+        // 切到 B 后跟随
+        assert!(conv_event_visible(&pool, topic_b, &ev(Some(clone_b))));
     }
 
     #[tokio::test]

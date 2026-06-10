@@ -535,14 +535,15 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 // `spawn_xuannv_sync` 是 async 函数，**返回前**完成 ensure_scope + subscribe，
                 // 这样玄女后续任何 publish 都不会丢。
                 //
-                // 传 watch 而不是静态 id：handoff 后 ensure_xuannv 会 spawn 新副本并
-                // `set_xuannv(new_id)`，watch::Receiver 立刻看到新值，sync task
-                // 用新 id 过滤新副本事件——不切 watch 的话新副本发言全部 drop（
-                // bug "handoff 后新玄女副本发言不进 PWA IM 历史"）。
+                // Phase 2：传分身池 watch 而不是单值 id——玄女是「每 topic 一只常驻
+                // 分身」的池。handoff respawn / 切 topic 懒启动都改 pool 映射，
+                // watch::Receiver 立刻看到新池，sync 按「subject 是不是池内活分身」
+                // 过滤并反查归属 topic 落库。单值时代漏掉非 general 分身的回复
+                //（latent bug：dormant 补发的汇报落不进 PWA 历史）。
                 let h = fuxi_im::conv_store::spawn_xuannv_sync(
                     Arc::new(conv_store.clone()),
                     bus.clone(),
-                    fuxi.xuannv_id_watch(),
+                    fuxi.xuannv_pool_watch(),
                     fuxi.current_topic_watch(),
                 )
                 .await;
@@ -564,10 +565,7 @@ pub async fn run(args: StartArgs) -> Result<()> {
                 fuxi.set_xuannv_switcher(Arc::new(
                     crate::topic_switcher_impl::CliXuannvSwitcher::new(
                         fuxi.clone(),
-                        oracle.clone(),
-                        conv_store.clone(),
                         topic_store.clone(),
-                        xuannv_role.clone(),
                     ),
                 ))
                 .await;
