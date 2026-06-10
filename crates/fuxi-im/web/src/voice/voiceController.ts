@@ -171,6 +171,13 @@ export class VoiceController {
       this.unsubWake = null
       const asr = this.deps.createAsr({ token: this.imToken })
       await asr.connect()
+      // 快速按放竞态：connect 还在路上时 pttStop 已跑完（pttActive 翻 false、
+      // off 态下 mic 已被清）。此时静默放弃本轮，不能再碰 this.mic（真机
+      // 实测 null.subscribe 抛 TypeError 弹「录音启动失败」toast）。
+      if (!this.pttActive || !this.mic) {
+        asr.abort()
+        return
+      }
       this.curAsr = asr
       this.unsubAsr = this.mic.subscribe(c => asr.sendPcm(c))
       if (this._state !== 'off') this.setState('dictating')
@@ -214,6 +221,12 @@ export class VoiceController {
       await this.tts?.play(WAKE_ACK).catch(() => {})
       const asr = this.deps.createAsr({ token: this.imToken })
       await asr.connect()
+      // 同 pttStart 的竞态防卫：await 期间 disable() 可能已把 mic 清掉。
+      // cast：TS 把 _state 窄化成入口处的 'listening'，看不见 await 间的变化
+      if ((this._state as VoiceState) !== 'dictating' || !this.mic) {
+        asr.abort()
+        return
+      }
       const vad = this.deps.createVad(() => void this.finishDictation())
       this.curAsr = asr
       this.unsubAsr = this.mic.subscribe(c => {
