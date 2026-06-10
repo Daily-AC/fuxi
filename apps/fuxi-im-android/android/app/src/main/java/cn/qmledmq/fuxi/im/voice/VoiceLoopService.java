@@ -83,6 +83,10 @@ public class VoiceLoopService extends Service {
     private PowerManager.WakeLock wakeLock;
 
     private volatile WebSocket wakeWs;
+    /** wake 握手完成（收到 server ready）前不得喂 PCM——audioLoop 在 WS 连接期间
+     *  send() 会被 OkHttp 排队、握手后先于 onOpen 的 hello 冲出去，server 首帧
+     *  校验「期望 hello 收到二进制」直接拒，1s 重连死循环（2026-06-10 实测）。 */
+    private volatile boolean wakeReady = false;
     private volatile WebSocket convWs;
     private volatile WebSocket asrWs;
     private volatile boolean asrReady = false;
@@ -233,7 +237,7 @@ public class VoiceLoopService extends Service {
                 }
             } else {
                 WebSocket wake = wakeWs;
-                if (wake != null) {
+                if (wake != null && wakeReady) {
                     wake.send(bs);
                 }
             }
@@ -284,11 +288,12 @@ public class VoiceLoopService extends Service {
             return;
         }
         String url = wsBase() + "/wake/api/wake?token=" + tokens.wakeToken;
+        wakeReady = false;
         wakeWs = http.newWebSocket(new Request.Builder().url(url).build(), new WebSocketListener() {
             @Override
             public void onOpen(WebSocket ws, Response r) {
                 wakeBackoffMs = 1000;
-                ws.send("{\"type\":\"hello\",\"client\":\"fuxi-android\",\"version\":\"1.2.0\"}");
+                ws.send("{\"type\":\"hello\",\"client\":\"fuxi-android\",\"version\":\"1.3.1\"}");
             }
 
             @Override
@@ -303,6 +308,7 @@ public class VoiceLoopService extends Service {
                         ws.send("{\"type\":\"pong\",\"at\":\"" + utcNow() + "\"}");
                     } else if ("ready".equals(t)) {
                         Log.i(TAG, "wake ready");
+                        wakeReady = true;
                     }
                 } catch (Exception ignored) {
                 }
@@ -310,11 +316,13 @@ public class VoiceLoopService extends Service {
 
             @Override
             public void onFailure(WebSocket ws, Throwable t, Response r) {
+                wakeReady = false;
                 scheduleWakeReconnect();
             }
 
             @Override
             public void onClosed(WebSocket ws, int code, String reason) {
+                wakeReady = false;
                 if (code != 1000) {
                     scheduleWakeReconnect();
                 }
