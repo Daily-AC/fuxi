@@ -110,9 +110,11 @@ impl XuannvPool {
         inner.active.values().any(|aid| *aid == id)
     }
 
-    /// 超 `max_active` 时返回应被 LRU 回收的 topic（最久未活跃的活分身）。
-    /// 调用方负责 dormant 它（进程回收 + [`XuannvPool::remove`]）。未超返回 None。
-    pub async fn lru_victim_if_over_cap(&self) -> Option<TopicId> {
+    /// 超 `max_active` 时返回应被 LRU 回收的 (topic, 分身 id)（最久未活跃的活分身）。
+    /// **general 永不入选**（永驻公理 9151f54——cap 对 general 等于少占一个名额）。
+    /// 直接带回 agent id：调用方不要再 `active_id` 反查（那会 touch LRU 把 victim
+    /// 救活）。调用方负责 dormant（进程回收 + [`XuannvPool::remove`]）。未超返回 None。
+    pub async fn lru_victim_if_over_cap(&self) -> Option<(TopicId, AgentId)> {
         let inner = self.inner.lock().await;
         if inner.active.len() <= self.max_active {
             return None;
@@ -120,9 +122,10 @@ impl XuannvPool {
         // 只在活分身里挑；lru_tick 缺失的 topic 视为最久（tick 0），优先回收。
         inner
             .active
-            .keys()
-            .copied()
-            .min_by_key(|t| inner.lru_tick.get(t).copied().unwrap_or(0))
+            .iter()
+            .filter(|(t, _)| **t != TopicId::general())
+            .min_by_key(|(t, _)| inner.lru_tick.get(t).copied().unwrap_or(0))
+            .map(|(t, a)| (*t, *a))
     }
 }
 
@@ -202,7 +205,7 @@ mod tests {
             pool.set_active(TopicId::new(), AgentId::new()).await;
         }
         // 恰好等于 cap，不该回收。
-        assert_eq!(pool.lru_victim_if_over_cap().await, None);
+        assert_eq!(pool.lru_victim_if_over_cap().await.map(|(t, _)| t), None);
     }
 
     #[tokio::test]
@@ -219,6 +222,40 @@ mod tests {
         pool.set_active(t3, AgentId::new()).await; // tick 4 —— 现在 3 个，超 cap=2
 
         // t2 是最久未活跃的，应被选为受害者。
-        assert_eq!(pool.lru_victim_if_over_cap().await, Some(t2));
+        assert_eq!(
+            pool.lru_victim_if_over_cap().await.map(|(t, _)| t),
+            Some(t2)
+        );
+    }
+
+    #[tokio::test]
+    async fn lru_victim_never_selects_general() {
+        // general 永驻公理（9151f54）：即使 general 是最久未活跃，victim 也必须
+        // 跳过它选下一个。
+        let pool = XuannvPool::new(1);
+        let general = TopicId::general();
+        let t2 = TopicId(uuid::Uuid::from_u128(2));
+        pool.set_active(general, AgentId::new()).await; // tick 1（最老）
+        pool.set_active(t2, AgentId::new()).await; // tick 2 —— 超 cap=1
+
+        let victim = pool.lru_victim_if_over_cap().await;
+        assert_eq!(
+            victim.map(|(t, _)| t),
+            Some(t2),
+            "general 豁免，victim 应是 t2"
+        );
+    }
+
+    #[tokio::test]
+    async fn lru_victim_returns_agent_id_without_touching_lru() {
+        // victim 返 (topic, agent)——调用方拿 id 直接 shutdown，不再 active_id
+        // 反查（active_id 会 touch LRU，把 victim 救活成最新）。
+        let pool = XuannvPool::new(0);
+        let t = TopicId(uuid::Uuid::from_u128(7));
+        let a = AgentId::new();
+        pool.set_active(t, a).await;
+        assert_eq!(pool.lru_victim_if_over_cap().await, Some((t, a)));
+        // 连问两次仍是它——证明没 touch LRU
+        assert_eq!(pool.lru_victim_if_over_cap().await, Some((t, a)));
     }
 }
