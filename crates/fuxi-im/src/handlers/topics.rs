@@ -5,8 +5,9 @@
 //! 端点：
 //! - `GET    /api/topics?include_archived=0|1`  列 topic
 //! - `POST   /api/topics`                       建 topic（body `{title}`）
-//! - `POST   /api/topics/:id/switch`            切玄女当前 topic（kill+spawn）
+//! - `POST   /api/topics/:id/switch`            切玄女当前 topic（常驻分身秒切，Phase 2）
 //! - `POST   /api/topics/:id/archive`           归档
+//! - `POST   /api/topics/:id/read`              推进未读水位（PWA 进/离话题时调）
 //! - `GET    /api/topics/current`               读当前 topic（PWA 启动时拉，避免轮询）
 //!
 //! 鉴权走全局 cookie_auth_layer（已 wire 在 router.rs）。topic_store / fuxi 未注入
@@ -34,6 +35,9 @@ pub struct TopicView {
     pub pinned: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<DateTime<Utc>>,
+    /// Phase 2 · 未读数（水位之后的非 user 消息）。current topic 恒 0。
+    #[serde(default)]
+    pub unread_count: i64,
 }
 
 impl From<TopicMeta> for TopicView {
@@ -45,6 +49,7 @@ impl From<TopicMeta> for TopicView {
             last_active_at: m.last_active_at,
             pinned: m.pinned,
             archived_at: m.archived_at,
+            unread_count: 0,
         }
     }
 }
@@ -87,9 +92,24 @@ pub async fn list_topics(
         .list(include_archived)
         .await
         .map_err(|e| Error::Internal(format!("topic list: {e}")))?;
+    let unread = store.unread_counts().await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "unread_counts 失败——badge 退化为 0，不挡列表");
+        Default::default()
+    });
     let current_topic_id = state.fuxi.current_topic_id().0.to_string();
+    let topics = items
+        .into_iter()
+        .map(|m| {
+            let mut v = TopicView::from(m);
+            // current topic 用户正看着（WS 实时在喂）→ 恒 0，不显小红点。
+            if v.id != current_topic_id {
+                v.unread_count = unread.get(&v.id).copied().unwrap_or(0);
+            }
+            v
+        })
+        .collect();
     Ok(Json(TopicsResponse {
-        topics: items.into_iter().map(TopicView::from).collect(),
+        topics,
         current_topic_id,
     }))
 }
@@ -120,7 +140,8 @@ pub async fn create_topic(
 /// `POST /api/topics/:id/switch` —— 切玄女当前 topic。
 /// 走 `XuannvSwitcher` trait（fuxi-cli `topic_switch::switch_topic_to` 注入实现），
 /// 避免 fuxi-im 直接依赖 fuxi-cli（循环依赖）。
-/// 该路径执行可能 ≥ 数秒（等 idle + spawn cc），axum handler 等到完成才返回。
+/// Phase 2：ensure 常驻分身 + set_current_topic，热路径毫秒级（池命中）；
+/// 懒启动冷路径数秒（spawn 分身 + drain 持久队列），axum handler 等到完成才返回。
 pub async fn switch_topic(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -152,6 +173,23 @@ pub async fn archive_topic(
         .archive(topic_id)
         .await
         .map_err(|e| Error::Internal(format!("topic archive: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/topics/:id/read` —— 推进未读水位（PWA 进入/离开话题时调）。
+pub async fn mark_topic_read(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode> {
+    let topic_id = parse_topic_id(&id)?;
+    let store = state
+        .topic_store
+        .as_ref()
+        .ok_or_else(|| Error::Unavailable("topic_store 未注入".into()))?;
+    store
+        .mark_read(topic_id)
+        .await
+        .map_err(|e| Error::Internal(format!("topic mark_read: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -192,19 +230,112 @@ mod tests {
     use tower::ServiceExt;
 
     async fn build_router() -> (tempfile::TempDir, Router) {
+        let (dir, app, _store, _conv) = build_router_with_store().await;
+        (dir, app)
+    }
+
+    /// build_router 的扩展版：TopicStore + 同 pool 的 ConvStore 一并返出来，
+    /// 未读水位测试要直接灌消息库（TopicStore.pool 是私有字段，跨模块拿不到）。
+    async fn build_router_with_store() -> (
+        tempfile::TempDir,
+        Router,
+        TopicStore,
+        crate::conv_store::ConvStore,
+    ) {
         let dir = tempfile::tempdir().expect("tmp");
         let pool = db::init_at(&dir.path().join("im.db")).await.expect("init");
-        let store = TopicStore::new(pool);
+        let store = TopicStore::new(pool.clone());
+        let conv = crate::conv_store::ConvStore::new(pool);
         let bus = EventBus::with_memory_store().await.unwrap();
         let ws = Arc::new(GitWorktreeWorkspace::with_default_base(dir.path()));
         let fuxi = Arc::new(Fuxi::new(bus, ws));
-        let state = AppState::new(fuxi).with_topic_store(store);
+        let state = AppState::new(fuxi).with_topic_store(store.clone());
         let app = Router::new()
             .route("/api/topics", get(list_topics).post(create_topic))
             .route("/api/topics/current", get(current_topic))
             .route("/api/topics/{id}/archive", post(archive_topic))
+            .route("/api/topics/{id}/read", post(mark_topic_read))
             .with_state(state);
-        (dir, app)
+        (dir, app, store, conv)
+    }
+
+    /// 往 topic 灌一条 xuannv 消息——未读计数口径用（同 topic_store.rs C1 的 seed）。
+    async fn seed_xuannv_msg(conv: &crate::conv_store::ConvStore, topic: TopicId) {
+        let conv_id = conv
+            .ensure_scope(crate::conv_store::SCOPE_XUANNV, None)
+            .await
+            .unwrap();
+        conv.append_message_in_topic(
+            &conv_id,
+            "xuannv",
+            None,
+            "text",
+            &serde_json::json!({"text": "完工汇报"}),
+            None,
+            None,
+            chrono::Utc::now(),
+            &topic.0.to_string(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_topics_carries_unread_and_forces_current_zero() {
+        // current topic 强制 0（用户正看着，WS 实时在喂）；其他 topic 按水位计数。
+        let (_dir, app, store, conv) = build_router_with_store().await;
+        let m = store.create("别的话题").await.unwrap();
+        store.mark_read(m.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        seed_xuannv_msg(&conv, m.id).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/topics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: TopicsResponse = serde_json::from_slice(&bytes).unwrap();
+        let view = parsed
+            .topics
+            .iter()
+            .find(|t| t.id == m.id.0.to_string())
+            .unwrap();
+        assert_eq!(view.unread_count, 1, "非 current topic 按水位计未读");
+        let general = parsed
+            .topics
+            .iter()
+            .find(|t| t.id == TopicId::general().0.to_string())
+            .unwrap();
+        assert_eq!(general.unread_count, 0, "current topic 强制 0");
+    }
+
+    #[tokio::test]
+    async fn mark_topic_read_endpoint_returns_204_and_clears() {
+        let (_dir, app, store, conv) = build_router_with_store().await;
+        let m = store.create("读我").await.unwrap();
+        store.mark_read(m.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        seed_xuannv_msg(&conv, m.id).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/topics/{}/read", m.id.0))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let counts = store.unread_counts().await.unwrap();
+        assert_eq!(counts.get(&m.id.0.to_string()), None, "read 后未读清零");
     }
 
     #[tokio::test]
