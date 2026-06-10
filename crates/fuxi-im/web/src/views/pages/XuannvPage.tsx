@@ -468,7 +468,7 @@ export const XuannvPage: Component = () => {
           <div class={styles.switchCard}>
             <span class={styles.switchSpinner} aria-hidden="true" />
             <span class={styles.switchLabel}>切换话题中…</span>
-            <span class={styles.switchHint}>玄女正在重新接班</span>
+            <span class={styles.switchHint}>正在唤醒该话题的分身…</span>
           </div>
         </div>
       </Show>

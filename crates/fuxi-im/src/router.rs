@@ -160,6 +160,10 @@ pub fn build(state: AppState) -> Router {
             "/api/topics/{id}/archive",
             post(handlers::topics::archive_topic),
         )
+        .route(
+            "/api/topics/{id}/read",
+            post(handlers::topics::mark_topic_read),
+        )
         // v1-session17 task #9 「更多」hub 三个新页：策府事实 / 角色卡 / 更漏 trigger
         .route("/api/memory", get(handlers::memory::list))
         .route("/api/roles", get(handlers::roles::list))
