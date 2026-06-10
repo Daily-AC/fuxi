@@ -132,6 +132,47 @@ impl TopicStore {
             .map_err(|e| Error::Internal(format!("topic rename: {e}")))?;
         Ok(())
     }
+
+    /// 把 topic 的未读水位推到 now——PWA 进入/离开话题时调（POST /api/topics/:id/read）。
+    pub async fn mark_read(&self, id: TopicId) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO topic_read_watermarks (topic_id, last_read_at) VALUES (?1, ?2) \
+             ON CONFLICT(topic_id) DO UPDATE SET last_read_at = excluded.last_read_at",
+        )
+        .bind(id.0.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("topic mark_read: {e}")))?;
+        Ok(())
+    }
+
+    /// 每 topic 未读数：水位之后的非 user 消息（自己说的话不算未读）。
+    /// 无水位行的 topic 不出现在结果里（= 0，视为全读）。
+    /// ts 与水位同为 RFC3339 字符串比较——与 page_messages 的排序口径一致。
+    pub async fn unread_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let rows = sqlx::query(
+            "SELECT m.topic_id AS topic_id, COUNT(*) AS n \
+             FROM messages m \
+             JOIN topic_read_watermarks w ON w.topic_id = m.topic_id \
+             WHERE m.role != 'user' AND m.ts > w.last_read_at \
+             GROUP BY m.topic_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("topic unread_counts: {e}")))?;
+        rows.into_iter()
+            .map(|row| {
+                let topic_id: String = row
+                    .try_get("topic_id")
+                    .map_err(|e| Error::Internal(format!("unread row topic_id: {e}")))?;
+                let n: i64 = row
+                    .try_get("n")
+                    .map_err(|e| Error::Internal(format!("unread row n: {e}")))?;
+                Ok((topic_id, n))
+            })
+            .collect()
+    }
 }
 
 fn row_to_topic(row: sqlx::sqlite::SqliteRow) -> Result<TopicMeta> {
@@ -178,6 +219,7 @@ fn parse_rfc3339(s: &str, field: &str) -> Result<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conv_store::{ConvStore, SCOPE_XUANNV};
     use crate::db::init_at;
 
     async fn open_store() -> (tempfile::TempDir, TopicStore) {
@@ -185,6 +227,59 @@ mod tests {
         let pool = init_at(&dir.path().join("im.db")).await.expect("init");
         let store = TopicStore::new(pool);
         (dir, store)
+    }
+
+    /// 往 topic 灌一条消息（role 可指定）——unread 口径测试用。
+    async fn seed_msg(pool: &sqlx::SqlitePool, topic: TopicId, role: &str) {
+        let conv = ConvStore::new(pool.clone());
+        let conv_id = conv.ensure_scope(SCOPE_XUANNV, None).await.unwrap();
+        conv.append_message_in_topic(
+            &conv_id,
+            role,
+            None,
+            "text",
+            &serde_json::json!({"text": "msg"}),
+            None,
+            None,
+            chrono::Utc::now(),
+            &topic.0.to_string(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_watermark_means_zero_unread() {
+        let (_dir, store) = open_store().await;
+        let m = store.create("新话题").await.unwrap();
+        seed_msg(&store.pool, m.id, "xuannv").await;
+        let counts = store.unread_counts().await.unwrap();
+        assert_eq!(counts.get(&m.id.0.to_string()), None, "无水位 = 全读");
+    }
+
+    #[tokio::test]
+    async fn unread_counts_after_watermark_excludes_user_messages() {
+        let (_dir, store) = open_store().await;
+        let m = store.create("画画").await.unwrap();
+        store.mark_read(m.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        seed_msg(&store.pool, m.id, "xuannv").await;
+        seed_msg(&store.pool, m.id, "user").await; // 自己说的话不算未读
+        let counts = store.unread_counts().await.unwrap();
+        assert_eq!(counts.get(&m.id.0.to_string()).copied(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn mark_read_clears_unread() {
+        let (_dir, store) = open_store().await;
+        let m = store.create("画画").await.unwrap();
+        store.mark_read(m.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        seed_msg(&store.pool, m.id, "xuannv").await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        store.mark_read(m.id).await.unwrap();
+        let counts = store.unread_counts().await.unwrap();
+        assert_eq!(counts.get(&m.id.0.to_string()), None, "read 后清零");
     }
 
     #[tokio::test]
