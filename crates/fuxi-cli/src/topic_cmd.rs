@@ -3,11 +3,11 @@
 //! 四个动作：
 //! - `fuxi topic new <title>` — 在 im.db 建一个新 topic，stdout 输出 uuid
 //! - `fuxi topic list [--include-archived] [--json]` — 列 topic
-//! - `fuxi topic switch <id|title>` — 通过 daemon ipc 触发玄女 cc 重启切到此 topic
+//! - `fuxi topic switch <id|title>` — 通过 daemon ipc 切玄女当前 topic（Phase 2 常驻分身秒切）
 //! - `fuxi topic archive <id|title>` — 把 topic 设归档（不删消息）
 //!
 //! `new/list/archive` 直接操 ~/.fuxi/im.db（同 issue_cmd / bug_cmd pattern）。
-//! `switch` 走 daemon ipc，因为需要在线 fuxi 进程 kill 老 cc + spawn 新 cc。
+//! `switch` 走 daemon ipc，因为需要在线 fuxi 进程操作分身池（懒启动/秒切）。
 //! daemon 不在线时 switch 报"daemon 未运行"。
 //!
 //! `id|title` 二选一解析：
@@ -34,7 +34,7 @@ pub enum TopicCmd {
     New(NewArgs),
     /// 列 topic。默认只列活跃；--include-archived 一并列归档。
     List(ListArgs),
-    /// 切到某 topic——daemon ipc 触发 kill 老玄女 cc + spawn 新副本注 prelude。
+    /// 切到某 topic——常驻分身秒切；池中无活分身才懒启动（topic 回顾 prelude）。
     Switch(SwitchArgs),
     /// 归档 topic（不删消息；sidebar 默认不显）。
     Archive(ArchiveArgs),
