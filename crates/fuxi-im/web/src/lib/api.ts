@@ -47,11 +47,20 @@ export interface AuthResponse {
   device_id: string;
 }
 
+/** GET /api/voice/tokens——cookie 登录态换语音三件套 token。
+ *  wake_token=null 表示 home 未部署唤醒服务（UI 隐藏语音模式开关，PTT 仍可用）。*/
+export interface VoiceTokensResponse {
+  im_token: string;
+  wake_token: string | null;
+}
+
 export interface ApiClient {
   fetchTasks(rootOnly: boolean): Promise<TaskListResponse>;
   fetchTaskEvents(taskId: string, fromCursor?: string): Promise<EventHistoryResponse>;
   /** 阶段 3 升级：intervene 接受可选 attachments。后端 β #17 兼容旧无 attachments。*/
   intervene(req: InterveneRequest | InterveneRequestV2): Promise<{ ok: true }>;
+  /** PWA 语音：登录态换 asr/tts/wake token（src/voice/ 模块直连各代理用）。*/
+  voiceTokens(): Promise<VoiceTokensResponse>;
   dispatch(req: DispatchRequest): Promise<DispatchResponse>;
   vapidPub(): Promise<VapidPubResponse>;
   pushSubscribe(sub: PushSubscribeRequest): Promise<{ ok: true }>;
@@ -186,6 +195,7 @@ export function createHttpClient(): ApiClient {
     },
     intervene: (req) =>
       jsonFetch<{ ok: true }>(`/api/intervene`, { method: "POST", body: JSON.stringify(req) }),
+    voiceTokens: () => jsonFetch<VoiceTokensResponse>(`/api/voice/tokens`),
     dispatch: (req) =>
       jsonFetch<DispatchResponse>(`/api/dispatch`, { method: "POST", body: JSON.stringify(req) }),
     vapidPub: () => jsonFetch<VapidPubResponse>(`/api/push/vapid-pub`),

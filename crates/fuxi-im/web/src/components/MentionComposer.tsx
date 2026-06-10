@@ -51,6 +51,12 @@ export interface MentionComposerProps {
   disabled?: boolean;
   /** send 回调：父级负责拼 intervene 请求。*/
   onSubmit(req: SerializedIntervene): Promise<void>;
+  /** PWA 语音 · 按住说话。提供才渲染 mic 按钮：按下 start 起 ASR，
+   *  松手 stop 拿识别文本追加进输入框（空串 = 没识别出话，不动输入框）。*/
+  ptt?: {
+    start(): Promise<void>;
+    stop(): Promise<string>;
+  };
 }
 
 /** 附件 chip 状态机（v3 #46 加 / #50 改"选完立即上传"）。
@@ -81,8 +87,32 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
   const [query, setQuery] = createSignal<string | null>(null); // null = 不在 @ 模式
   const [hi, setHi] = createSignal(0);
   const [attachChips, setAttachChips] = createSignal<AttachChip[]>([]);
+  const [pttHeld, setPttHeld] = createSignal(false);
   let composing = false; // IME 中文输入态
   let fileInput: HTMLInputElement | undefined;
+
+  const pttDown = (): void => {
+    if (busy() || props.disabled || pttHeld() || !props.ptt) return;
+    setPttHeld(true);
+    props.ptt.start().catch((e) => {
+      setPttHeld(false);
+      pushToast(`录音启动失败：${e instanceof Error ? e.message : String(e)}`, "error");
+    });
+  };
+
+  const pttUp = (): void => {
+    // pointerup + pointercancel + pointerleave 可能连发——held 标志保证 stop 只走一次
+    if (!pttHeld() || !props.ptt) return;
+    setPttHeld(false);
+    void props.ptt
+      .stop()
+      .then((text) => {
+        if (text) setTailText(tailText() + text);
+      })
+      .catch((e) => {
+        pushToast(`听写失败：${e instanceof Error ? e.message : String(e)}`, "error");
+      });
+  };
 
   /** 把最末 text 段的内容写入 segments。
    *  保证：segments 末尾必为 text 段（即使空）。*/
@@ -481,6 +511,42 @@ export const MentionComposer: Component<MentionComposerProps> = (props) => {
           data-testid="composer-file-input"
           onChange={onFilesPicked}
         />
+        {/* PWA 语音 · 按住说话。touch-action none 防长按触发滚动/选择；
+            contextmenu 拦掉安卓长按弹菜单。 */}
+        <Show when={props.ptt}>
+          <button
+            type="button"
+            class={styles.pttBtn}
+            classList={{ [styles.pttBtnHeld ?? ""]: pttHeld() }}
+            aria-label={pttHeld() ? "松开结束听写" : "按住说话"}
+            data-testid="composer-ptt"
+            disabled={busy() || props.disabled}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              pttDown();
+            }}
+            onPointerUp={pttUp}
+            onPointerCancel={pttUp}
+            onPointerLeave={pttUp}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="18"
+              height="18"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="9" y="2" width="6" height="12" rx="3" />
+              <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+              <line x1="12" y1="18" x2="12" y2="22" />
+            </svg>
+          </button>
+        </Show>
         <textarea
           class={styles.editor}
           value={tailText()}

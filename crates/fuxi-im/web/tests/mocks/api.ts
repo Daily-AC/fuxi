@@ -213,6 +213,12 @@ export function createMockApi(initial?: Partial<MockState>): MockApi {
       state.dispatches.push(req);
       return { task_id: `t-${state.dispatches.length}` };
     },
+    // 与后端真 wire 对齐（handlers/voice.rs VoiceTokensResponse）：snake_case +
+    // wake_token 可 null——别改成驼峰或省字段（feedback_mock_match_real_wire）
+    voiceTokens: async () => ({
+      im_token: "mock-im-token.sig",
+      wake_token: "mock-wake-token",
+    }),
     vapidPub: async () => state.vapid,
     pushSubscribe: async (sub) => {
       state.pushed.push(sub);
