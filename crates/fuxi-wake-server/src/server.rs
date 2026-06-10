@@ -195,29 +195,45 @@ async fn run_wake_loop_inner(
     state: &Arc<AppState>,
     client_id: &str,
 ) -> anyhow::Result<()> {
-    // 第一帧必须是 hello——握手带超时。
-    let hello = match tokio::time::timeout(Duration::from_secs(10), socket.recv()).await {
-        Ok(Some(Ok(Message::Text(t)))) => t,
-        Ok(Some(Ok(other))) => {
-            warn!(%client_id, ?other, "wake ws: 期望 hello，收到非文本帧");
-            send_error(
-                &mut socket,
-                "audio_format_invalid",
-                "first frame must be hello",
-            )
-            .await;
-            return Ok(());
-        }
-        Ok(Some(Err(e))) => {
-            warn!(%client_id, error = ?e, "wake ws: 入站错误");
-            return Ok(());
-        }
-        Ok(None) => return Ok(()),
-        Err(_) => {
-            warn!(%client_id, "wake ws: hello 超时");
-            return Ok(());
+    // 首个**文本**帧必须是 hello——握手带超时。等待期间宽容跳过二进制帧：
+    // 客户端音频线程和 hello 发送存在竞态（OkHttp 在握手期排队的 PCM 会先于
+    // onOpen 的 hello 冲出来，2026-06-10 安卓壳实测），早到的 PCM 丢掉即可，
+    // 不该一帧拒杀让客户端陷入重连死循环。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut skipped_binary = 0usize;
+    let hello = loop {
+        let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remain, socket.recv()).await {
+            Ok(Some(Ok(Message::Text(t)))) => break t,
+            Ok(Some(Ok(Message::Binary(_)))) => {
+                skipped_binary += 1;
+                continue;
+            }
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+            Ok(Some(Ok(other))) => {
+                warn!(%client_id, ?other, "wake ws: 期望 hello，收到非文本帧");
+                send_error(
+                    &mut socket,
+                    "audio_format_invalid",
+                    "first frame must be hello",
+                )
+                .await;
+                return Ok(());
+            }
+            Ok(Some(Err(e))) => {
+                warn!(%client_id, error = ?e, "wake ws: 入站错误");
+                return Ok(());
+            }
+            Ok(None) => return Ok(()),
+            Err(_) => {
+                warn!(%client_id, skipped_binary, "wake ws: hello 超时");
+                return Ok(());
+            }
         }
     };
+    if skipped_binary > 0 {
+        debug!(%client_id, skipped_binary, "wake ws: hello 前跳过早到 PCM 帧");
+    }
 
     let parsed: Result<ClientMessage, _> = serde_json::from_str(&hello);
     let keywords = match parsed {
