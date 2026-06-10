@@ -436,9 +436,18 @@ pub async fn run(args: StartArgs) -> Result<()> {
         }
     };
     let push_hooks_task = tokio::spawn(async move {
-        let xuannv = wait_for_xuannv(&hooks_fuxi).await;
         let sender = Arc::new(HyperPushSender::new(vapid_for_hooks));
-        let _h = fuxi_im::push::hooks::spawn(hooks_pool, sender, fcm_sender, hooks_bus, xuannv);
+        // 传分身池 watch 而非 snapshot id：玄女 id 会话内漂移（topic handoff /
+        // idle GC 重生），snapshot 烤死后推送静默失效（2026-06-10 实测 bug）。
+        // 也因此不必再 wait_for_xuannv——池空时 AgentResponded 自然不匹配，
+        // task done 推送则从启动第一秒就可用。
+        let _h = fuxi_im::push::hooks::spawn(
+            hooks_pool,
+            sender,
+            fcm_sender,
+            hooks_bus,
+            hooks_fuxi.xuannv_pool_watch(),
+        );
         // hooks::spawn 返回的 JoinHandle 持续到订阅流结束，由它自己清理；这里
         // detach 不动它即可（task 进程退出统一终结）。
     });
@@ -700,45 +709,6 @@ pub async fn run(args: StartArgs) -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     result.context("axum serve 异常")
-}
-
-/// 等玄女 spawn 出来——当 push hooks 想准确判断"是不是玄女回响应"时需要她的
-/// AgentId。home 长跑期间玄女早晚由 REPL 起来。在此之前，hooks task 会被 await
-/// 阻塞但 IM API 已可用。
-///
-/// `#7` 公理 #3 真实时不轮询——`Fuxi::xuannv_id_watch()` 拿 watch::Receiver，
-/// 直接 `.changed().await` 等 set_xuannv 触发。旧 2s 轮询路径已弃用（违反公理）。
-///
-/// 兜底：如果 5 分钟内还没玄女（没有人开 REPL），fallback 到内存 UUID——push
-/// hooks 仍能跑 task done 路径（基于 task_id），玄女 idle 路径会因不匹配 agent
-/// 而静默——可接受降级。
-async fn wait_for_xuannv(fuxi: &Fuxi) -> fuxi_core::id::AgentId {
-    let mut rx = fuxi.xuannv_id_watch();
-    // 已就绪 → 立即返回；否则 await changed()。
-    if let Some(id) = *rx.borrow_and_update() {
-        return id;
-    }
-
-    let timeout = std::time::Duration::from_secs(300);
-    match tokio::time::timeout(timeout, async {
-        loop {
-            if rx.changed().await.is_err() {
-                // sender 已 drop（Fuxi 销毁）——返 None 走 placeholder 兜底
-                return None;
-            }
-            if let Some(id) = *rx.borrow_and_update() {
-                return Some(id);
-            }
-        }
-    })
-    .await
-    {
-        Ok(Some(id)) => id,
-        Ok(None) | Err(_) => {
-            tracing::warn!("玄女 5 分钟未上线，push hooks 用 placeholder agent id 兜底");
-            fuxi_core::id::AgentId::new()
-        }
-    }
 }
 
 fn default_events_db_path() -> Option<PathBuf> {

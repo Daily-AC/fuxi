@@ -179,7 +179,7 @@ impl FcmCredentials {
             private_key_pem: sa.private_key,
             token_uri: sa.token_uri,
             cached: Mutex::new(None),
-            http: reqwest::Client::new(),
+            http: fcm_http_client_from_env(),
         })
     }
 
@@ -297,6 +297,38 @@ impl FcmPusher for NoopFcmSender {
 /// FCM HTTP v1 API 的 messages:send 端点模板。
 const FCM_SEND_URL_TMPL: &str = "https://fcm.googleapis.com/v1/projects/{project}/messages:send";
 
+/// FCM 出口代理 env——如 `http://127.0.0.1:7890`。
+///
+/// WHY 单独配而不用全局 `HTTPS_PROXY`：home 直连 Google 端点（oauth2 /
+/// fcm.googleapis.com）间歇性被墙（2026-06-10 日志实锤「error sending request」
+/// 连败数日），但全局代理 env 会把 fuxi 所有 reqwest（dist controller / a2a /
+/// 本机回环）都拖进代理，内网调用反而坏。只给 FCM 这两个 client 配。
+pub const FCM_PROXY_ENV: &str = "FUXI_FCM_PROXY";
+
+/// 构造 FCM 出口 HTTP client：`proxy` 给了且合法就走代理，否则直连。
+/// 非法 proxy 串 warn 后降级直连——配置写错不该让 FCM 全瘫。
+pub(crate) fn build_fcm_http_client(proxy: Option<&str>) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20));
+    if let Some(p) = proxy.map(str::trim).filter(|p| !p.is_empty()) {
+        match reqwest::Proxy::all(p) {
+            Ok(proxy) => {
+                tracing::info!(proxy = %p, "FCM 出口走代理");
+                builder = builder.proxy(proxy);
+            }
+            Err(e) => {
+                tracing::warn!(proxy = %p, error = %e, "FUXI_FCM_PROXY 非法，FCM 走直连");
+            }
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// 从 env 读代理配置的便捷包装。
+fn fcm_http_client_from_env() -> reqwest::Client {
+    let proxy = std::env::var(FCM_PROXY_ENV).ok();
+    build_fcm_http_client(proxy.as_deref())
+}
+
 /// 用 FCM HTTP v1 API 真发推送。
 pub struct HttpFcmSender {
     creds: Arc<FcmCredentials>,
@@ -307,7 +339,7 @@ impl HttpFcmSender {
     pub fn new(creds: Arc<FcmCredentials>) -> Self {
         Self {
             creds,
-            http: reqwest::Client::new(),
+            http: fcm_http_client_from_env(),
         }
     }
 }
@@ -638,5 +670,15 @@ mod tests {
             .await
             .expect("noop");
         assert_eq!(out, FcmSendOutcome::Delivered);
+    }
+
+    /// FCM 出口 client 构造：合法代理 / 非法代理 / 不配，三种都不 panic。
+    /// 非法串降级直连——配置写错不该让整条 FCM 路瘫掉。
+    #[test]
+    fn build_fcm_http_client_never_panics() {
+        let _ok = build_fcm_http_client(Some("http://127.0.0.1:7890"));
+        let _bad = build_fcm_http_client(Some("不是 url"));
+        let _empty = build_fcm_http_client(Some("  "));
+        let _none = build_fcm_http_client(None);
     }
 }
