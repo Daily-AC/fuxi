@@ -86,6 +86,10 @@ pub struct AppState {
     /// v1-session17 task #9 「更多 → 角色」：roles 目录根（含 `<role>/ROLE.md`）。
     /// production = 项目根 `roles/`；`Option` None 时 handler 返 503。
     pub roles_root: Option<PathBuf>,
+    /// PWA 语音：wake server 预共享 token 文件（production = `~/.fuxi/wake.token`）。
+    /// `Option` None / 文件缺失都降级为响应里 wake_token=null——唤醒不可用
+    /// 不拖垮按住说话 + TTS。
+    pub wake_token_path: Option<PathBuf>,
     /// 玄女眼睛 v1：`/api/xuannv/look` ↔ `/api/xuannv/look/frame` 的 oneshot
     /// 配对表。每次 `look` 调用注入 sender，桌宠 frame 上传时按 request_id 反
     /// 查 take 出来通知阻塞中的 caller。**默认空 Arc——production 与 smoke
@@ -154,6 +158,7 @@ impl AppState {
             user_profile_store: None,
             triggers: None,
             roles_root: None,
+            wake_token_path: None,
             vision_pairs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -241,6 +246,12 @@ impl AppState {
     /// v1-session17 task #9：声明 roles 目录根（`<role>/ROLE.md`），激活 `/api/roles`。
     pub fn with_roles_root(mut self, root: PathBuf) -> Self {
         self.roles_root = Some(root);
+        self
+    }
+
+    /// PWA 语音：声明 wake token 文件路径，激活 `/api/voice/tokens` 的 wake_token 下发。
+    pub fn with_wake_token_path(mut self, path: PathBuf) -> Self {
+        self.wake_token_path = Some(path);
         self
     }
 }

@@ -138,6 +138,8 @@ pub fn build(state: AppState) -> Router {
         // /look/frame 桌宠 multipart 回传一帧。两者通过 oneshot 配对（state.vision_pairs）。
         // /look/frame 用 `image/png` 中等图，body limit 与 /api/upload 同口径，
         // 避免 axum 默认 2MB 拦截。
+        // PWA 语音：登录态换 asr/tts/wake 三件套 token（语音模块直连各代理用）
+        .route("/api/voice/tokens", get(handlers::voice::voice_tokens))
         .route("/api/xuannv/look", post(handlers::vision::look))
         .route(
             "/api/xuannv/look/frame",

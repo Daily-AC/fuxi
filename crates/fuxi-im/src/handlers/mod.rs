@@ -28,6 +28,8 @@ pub mod tasks;
 pub mod upload;
 // 玄女眼睛 v1：召唤式 webcam/screen capture（spec 2026-05-14）
 pub mod vision;
+// PWA 语音：cookie 登录态换 asr/tts HMAC token + wake 预共享 token
+pub mod voice;
 // Phase 1 · 话题 CRUD + 切换 HTTP 端点
 pub mod topics;
 // β · #27 镜像 /api/conv 但按 agent_id 过滤——私聊页（重设计 #N5）数据源
