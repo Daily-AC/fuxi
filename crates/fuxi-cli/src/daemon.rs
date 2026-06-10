@@ -947,6 +947,8 @@ impl Agent for DistGatewayAgent {
                 // 解 ProjectRegistry 拿 sandbox cwd 把 cc/codex 起在那里。
                 project: cfg.project.clone(),
                 ephemeral_task: cfg.ephemeral_task.clone(),
+                // FU-2 跨节点收尾：透传发起 task 的 topic，让远端 worker 事件归位。
+                topic_id: task.topic_id.map(|t| t.to_string()),
             };
             let enq =
                 crate::dist_auth_client::signed_post(&client, &secret, &enqueue_url, &enqueue_req)

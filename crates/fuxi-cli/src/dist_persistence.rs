@@ -372,6 +372,7 @@ mod tests {
             role: None,
             project: None,
             ephemeral_task: None,
+            topic_id: None,
         }
     }
 

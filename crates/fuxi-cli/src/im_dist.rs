@@ -433,6 +433,9 @@ impl DistEnqueuer for DistControllerEnqueuer {
                 opts.role,
                 project_slug.clone(),
                 None,
+                // FU-2 跨节点收尾：透传发起 task 的 topic 给 DistJob，让远端 worker
+                // 事件 meta.topic_id 归位、完工路由回归属 topic 分身（不串 general）。
+                task.topic_id.map(|t| t.to_string()),
             )
             .await;
         tracing::info!(

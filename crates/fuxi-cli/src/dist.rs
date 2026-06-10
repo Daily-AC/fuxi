@@ -90,6 +90,13 @@ pub struct DistJob {
     /// 见 `project` 字段说明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_task: Option<String>,
+    /// FU-2 跨节点收尾（2026-06-10）：home 端发起 task 的 `topic_id`（`Task.topic_id`
+    /// 的 UUID 形）——worker 端用本字段给跑出来的 events.meta.topic_id 归位发起
+    /// topic，让 home bridge 把跨节点门客的完工/里程碑精确路由回归属 topic 分身（不
+    /// 兜底串 general）。`None` = 不绑 topic（兜底 general，同本地 task.topic_id=None）。
+    /// 老版 worker 无此字段 → `#[serde(default)]` → None 旧行为。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +126,9 @@ pub struct DistEnqueueReq {
     /// Decision 21 phase 3 · L2 一次性 task 显示形。见 `DistJob.project`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_task: Option<String>,
+    /// FU-2 跨节点收尾 · 发起 task 的 topic（UUID 形）。见 `DistJob.topic_id`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -814,6 +824,7 @@ impl DistController {
             role,
             None,
             None,
+            None,
         )
         .await
     }
@@ -834,6 +845,7 @@ impl DistController {
         role: Option<String>,
         project: Option<String>,
         ephemeral_task: Option<String>,
+        topic_id: Option<String>,
     ) -> String {
         let id = format!("job-{}", Uuid::new_v4());
         let job = DistJob {
@@ -851,6 +863,7 @@ impl DistController {
             role,
             project,
             ephemeral_task,
+            topic_id,
         };
         let cli_label = cli_label_of(&job.cli);
         // dual-write：先持久化（SQLite 是真相源）再 push 到 in-memory queue。
@@ -1387,6 +1400,7 @@ async fn enqueue_handler(
             req.role,
             req.project,
             req.ephemeral_task,
+            req.topic_id,
         )
         .await;
     Json(DistEnqueueResp { job_id }).into_response()
@@ -1692,6 +1706,8 @@ pub async fn run_enqueue(args: DistEnqueueArgs) -> Result<()> {
         // 时走 gateway 路径（`fuxi spawn --node X --project erp`）。
         project: None,
         ephemeral_task: None,
+        // CLI 裸派无 topic 概念——兜底 general（同 task.topic_id=None）。
+        topic_id: None,
     };
     let resp = crate::dist_auth_client::signed_post(&client, &secret, &url, &req)
         .await
@@ -2664,6 +2680,12 @@ async fn run_codex_job(
         })
         .map(TaskId::from)
         .or_else(|| Some(TaskId::new()));
+    // FU-2 跨节点收尾：同 cc 路径——解 job.topic_id 给 worker 事件 stamp meta.topic_id。
+    let job_topic_id = job
+        .topic_id
+        .as_deref()
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(fuxi_core::TopicId);
     let pid_hint = child.id();
     let mut translate_state = fuxi_agent_codex::TranslateState::new();
 
@@ -2673,6 +2695,7 @@ async fn run_codex_job(
         let mut meta = fuxi_core::event::EventMeta::now();
         meta.agent = Some(job_agent_id);
         meta.task = job_task_id;
+        meta.topic_id = job_topic_id;
         let _ = bus
             .enqueue(fuxi_core::event::Event {
                 meta,
@@ -2723,13 +2746,17 @@ async fn run_codex_job(
                     // 跨节点 bus。push_progress（gateway 兜底）和 bus（home 实时订阅）
                     // 共享一次 parse_line 结果，state 跨调用累积（per-job）。
                     if let Some(bus) = ctx.bus_client {
-                        for event in fuxi_agent_codex::translate(
+                        for mut event in fuxi_agent_codex::translate(
                             ev,
                             job_agent_id,
                             job_task_id,
                             &mut translate_state,
                             pid_hint,
                         ) {
+                            // FU-2：worker 事件归位发起 topic（translate 不知 topic）。
+                            if event.meta.topic_id.is_none() {
+                                event.meta.topic_id = job_topic_id;
+                            }
                             let _ = bus.enqueue(event).await;
                         }
                     }
@@ -2944,6 +2971,13 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         })
         .map(TaskId::from)
         .or_else(|| Some(TaskId::new()));
+    // FU-2 跨节点收尾：解 job.topic_id → 给 worker 跑出来的事件 stamp meta.topic_id，
+    // 跟本地适配器口径一致，home bridge 才能把完工路由回归属 topic 分身（不串 general）。
+    let job_topic_id = job
+        .topic_id
+        .as_deref()
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(fuxi_core::TopicId);
     let pid_hint = child.id();
     let mut translate_state = fuxi_agent_cc::TranslateState::new();
 
@@ -2956,6 +2990,7 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         let mut meta = fuxi_core::event::EventMeta::now();
         meta.agent = Some(job_agent_id);
         meta.task = job_task_id;
+        meta.topic_id = job_topic_id;
         let _ = bus
             .enqueue(fuxi_core::event::Event {
                 meta,
@@ -3010,13 +3045,17 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
                     }
                     // γ：第二个消费者——translate 同一 CcEvent 灌跨节点 bus。
                     if let Some(bus) = ctx.bus_client {
-                        for event in fuxi_agent_cc::translate(
+                        for mut event in fuxi_agent_cc::translate(
                             ev,
                             job_agent_id,
                             job_task_id,
                             &mut translate_state,
                             pid_hint,
                         ) {
+                            // FU-2：worker 跑出来的事件归位发起 topic（translate 不知 topic）。
+                            if event.meta.topic_id.is_none() {
+                                event.meta.topic_id = job_topic_id;
+                            }
                             // #79：track cc 是否真发了 sentinel——没发的话末尾兜底。
                             if matches!(
                                 event.kind,
@@ -3099,6 +3138,7 @@ async fn run_cc_job(ctx: &WorkerCtx<'_>, bin: &str, job: &DistJob) -> Result<(bo
         let mut meta = fuxi_core::event::EventMeta::now();
         meta.agent = Some(job_agent_id);
         meta.task = Some(t);
+        meta.topic_id = job_topic_id;
         let _ = bus
             .enqueue(fuxi_core::event::Event {
                 meta,
@@ -3212,7 +3252,30 @@ mod tests {
             role: None,
             project: None,
             ephemeral_task: None,
+            topic_id: None,
         }
+    }
+
+    /// FU-2 跨节点收尾：`DistJob.topic_id` 是新加的持久化字段，必须 `#[serde(default)]`
+    /// 兼容旧库/旧 worker 的 JSON（无此字段）——否则 controller 重启读旧 dist_jobs 行
+    /// 或老 worker pull 时反序列化全炸（CLAUDE.md「加字段必 serde default」教训）。
+    #[test]
+    fn distjob_topic_id_serde_default_compat() {
+        // 老 DistJob JSON（无 topic_id）→ 反序列化为 None，不炸。
+        let legacy = r#"{"id":"job-x","node_id":"n","title":"t","body":"b","created_at":0}"#;
+        let job: DistJob =
+            serde_json::from_str(legacy).expect("老 DistJob 无 topic_id 字段应兼容反序列化");
+        assert_eq!(job.topic_id, None, "缺字段应回落 None");
+
+        // 带 topic_id 的 round-trip 保形。
+        let mut j2 = job.clone();
+        j2.topic_id = Some("1bf5390e-fdd4-4647-b976-84705dc0d735".into());
+        let s = serde_json::to_string(&j2).unwrap();
+        let back: DistJob = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            back.topic_id.as_deref(),
+            Some("1bf5390e-fdd4-4647-b976-84705dc0d735")
+        );
     }
 
     // ─── Decision 21 phase 3 跨节点 sandbox 解析 ─────────────────
@@ -3395,6 +3458,7 @@ mod tests {
             role: None,
             project: None,
             ephemeral_task: None,
+            topic_id: None,
         };
         let encoded = serde_json::to_string(&req).unwrap();
         let decoded: DistEnqueueReq = serde_json::from_str(&encoded).unwrap();
@@ -4176,6 +4240,7 @@ mod tests {
             role: None,
             project: None,
             ephemeral_task: None,
+            topic_id: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: DistEnqueueReq = serde_json::from_str(&s).unwrap();
@@ -4465,6 +4530,7 @@ mod tests {
                 role: None,
                 project: None,
                 ephemeral_task: None,
+                topic_id: None,
             };
             let job_b = DistJob {
                 id: "B".into(),
@@ -4481,6 +4547,7 @@ mod tests {
                 role: None,
                 project: None,
                 ephemeral_task: None,
+                topic_id: None,
             };
             g.inflight.insert("A".into(), job_a.clone());
             g.inflight.insert("B".into(), job_b.clone());
@@ -4731,6 +4798,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Some("luban".into()),
+                None,
                 None,
                 None,
             )
@@ -5969,6 +6037,7 @@ mod tests {
             role: None,
             project: None,
             ephemeral_task: None,
+            topic_id: None,
         };
         let r = signed_post(&client, &secret, &format!("{base}/dist/enqueue"), &enq_req)
             .await
