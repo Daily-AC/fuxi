@@ -431,6 +431,14 @@ pub async fn notify_fcm(
             Err(e) => tracing::warn!(error = %e, "FCM fan-out 单条失败"),
         }
     }
+    // 成功也出声——2026-06-10 排查「通知没到」时全靠 warn 缺席反推，太弱。
+    tracing::info!(
+        attempted = tokens.len(),
+        delivered,
+        pruned,
+        title = %payload.title,
+        "FCM fan-out 完成"
+    );
     Ok(FcmNotifyOutcome {
         attempted: tokens.len(),
         delivered,
