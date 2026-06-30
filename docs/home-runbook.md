@@ -140,8 +140,8 @@ ssh winhome 'wsl -d Ubuntu-24.04 -- openssl x509 -in /etc/nginx/ssl/qmledmq.cn.c
 `qm` 是 Rust 写的子域名管理 CLI，跑在 winhome（`C:\Caddy\qm.exe`，已加进 System PATH）。维护 `C:\ProgramData\qm\domains.yaml` 注册表 + 生成 `C:\Caddy\Caddyfile.qm` 片段（主 Caddyfile 已加 `import`） + 调 `caddy.exe reload`。
 
 ```pwsh
-# agent ssh winhome 后直接调（System PATH 已配；ssh session 内可能要 $env:Path+';C:\Caddy' 立即生效，
-# 或者用绝对路径 C:\Caddy\qm.exe）
+# agent ssh winhome 后直接调（C:\Caddy 已在 Machine PATH，每次新 ssh session
+# spawn 的 shell 自动拾取，无需带路径）
 qm list                                    # 列已注册
 qm add im --backend localhost:18080 --tier 1 --purpose "fuxi IM PWA"
 qm add mood --backend localhost:7777 --tier 2
@@ -150,6 +150,9 @@ qm sync                                    # 生成 Caddyfile.qm + caddy reload
 qm retire foo                              # 摘除
 qm status                                  # 看 registry 状态
 ```
+
+agent 调用范式：`ssh winhome-pub 'qm add <name> --backend localhost:<port> --tier <1|2|3>'`，
+`ssh winhome-pub 'qm sync'`。已 quoting-safe 实测通过。
 
 Tier 模型：
 - **tier1**：canonical 核心服务，路径 `<name>.qmledmq.cn`
