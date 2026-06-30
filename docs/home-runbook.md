@@ -387,9 +387,24 @@ AuthenticationMethods publickey   # 强制只公钥（已加）
 
 `dnspod` 没出现过，用户记忆有误。
 
-### 当前 records 速览（2026-06-30 快照）
+### 当前 records 速览（2026-06-30 16:30 清理后）
 
-详见 `docs/cf-dns-cleanup-2026-06-30.md`（user 勾选清单）。
+```
+A      home.qmledmq.cn      -> 124.126.5.223           (ddns-go 维护)
+A      qmledmq.cn           -> 124.126.5.223
+CNAME  *.qmledmq.cn         -> home.qmledmq.cn         (三级 wildcard，cert 已覆盖)
+CNAME  *.lab.qmledmq.cn     -> home.qmledmq.cn         (四级 wildcard，cert 已覆盖)
+```
+
+**就这 4 条，再无显式 CNAME**。任意新子域名（im / fuxi / voice / sia / blog / ...）都走 `*.qmledmq.cn` wildcard 自动解析到 home。Caddyfile 现 3 个 site block（`home.qmledmq.cn` / `*.lab.qmledmq.cn` / `*.qmledmq.cn`）兜底所有访问。
+
+清理前 42 条详见 `docs/cf-dns-cleanup-2026-06-30.md` 历史 + backup `~/.claude/jobs/ec81ecb3/tmp/cf-records-backup-2026-06-30.json`。
+
+### 重建 CF Tunnel CNAME（未来用 tunnel 时）
+
+CF Tunnel 链路对象（id `42a9693a-8809-4ef3-b011-a797340d3498`）本身在 CF Zero Trust → Networks → Tunnels 仍存在（DNS records 和 tunnel 对象是分开的）。要重新通过 tunnel 暴露公网时：
+- **GUI**：CF Dashboard → Zero Trust → Networks → Tunnels → 选 tunnel → Public Hostnames → Add → 填子域名（自动建 CNAME proxied=true）
+- **API**：直接 POST CNAME `<sub>.qmledmq.cn -> 42a9693a-...cfargotunnel.com` proxied=true
 
 ---
 
