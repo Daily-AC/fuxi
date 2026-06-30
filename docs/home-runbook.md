@@ -288,35 +288,34 @@ caddy 即使绝对路径也可能受 cwd 影响（如 Caddyfile 内 import 用�
 - `ssh -v` 看 banner 阶段输出，banner 内容（如 `Not allowed at this time`）是 sshd 给的，不是 Clash 编的
 **何时撞过**：本次诊断 sshd reset 时绕了 30 分钟以为是 TUN。
 
-### #11. sshd `Not allowed at this time` = OpenSSH 服务层 deny（2026-06-30 发现，**未修复**）
+### #11. sshd `Not allowed at this time` 真因 = **公网 brute force 打满 MaxStartups 池**（2026-06-30 诊断闭环）
 
-**症状**：`ssh -v winhome-pub` 看到 `banner line 0: Not allowed at this time` 紧接 `Connection closed`。**TCP 握手成功**（不是网络/转发问题），是 sshd 主动拒绝认证。
-**触发条件**（OpenSSH `auth.c` 源码层面 3 类）：
-1. `C:\ProgramData\ssh\nologin` 文件存在（Unix 等价 `/etc/nologin`，维护模式标记）
-2. `sshd_config` 里 `Match Time/Address/User/Group` 拒绝当前时段/IP/用户
-3. Win32-OpenSSH 的 lockout / fail2ban 类限流模块把客户端 IP 临时禁
-**诊断（要在 winhome 本地跑，外面进不去）**：
-```pwsh
-# 1. 看 nologin 文件
-Test-Path C:\ProgramData\ssh\nologin
-Get-Content C:\ProgramData\ssh\nologin -ErrorAction SilentlyContinue
-
-# 2. 看 sshd_config 有没有 Match block
-Select-String -Path C:\ProgramData\ssh\sshd_config -Pattern "^Match|^Deny|^Allow"
-
-# 3. 看 sshd Event Log（错误原因详细）
-Get-WinEvent -LogName "OpenSSH/Operational" -MaxEvents 30 |
-  Where-Object Message -Match "denied|reject|disable|nologin|Match" |
-  Format-List TimeCreated, LevelDisplayName, Message
-
-# 4. 重启 sshd 服务
-Restart-Service sshd
+**症状**：`ssh -v winhome-pub` 看到 `banner line 0: Not allowed at this time` 紧接 `Connection timed out during banner exchange`。但 `Caddy:8443 HTTP 200` + `RDP:3389 listen` = 机器/路由器都活，**仅 sshd auth 阶段拒**。
+**最初 3 个假设全部**否定（沉淀诊断顺序，下次省时间）：
+1. ❌ `nologin` 文件存在 — 不存在
+2. ❌ `sshd_config` 有 `Match Time/Deny/Allow` 拒绝 — 只有标准 `Match Group administrators` + AuthorizedKeysFile path
+3. ❌ Windows 账户 `Logon Hours / Lockout` 限制 — `net user "yilin zhang"` 显示 `Logon hours allowed: All` + `Account active: Yes`
+**真因（OpenSSH Operational event log 给的）**：
 ```
-**修复（按诊断结果）**：
-- nologin 文件 → `Remove-Item C:\ProgramData\ssh\nologin -Force`
-- Match 规则误配 → 编辑 sshd_config 删除该 block + `Restart-Service sshd`
-- IP 锁 → 看 event log 找 lockout 模块，临时禁用或加白
-**预防**：本次教训之一就是 ssh 入口挂了 = mac 全远程能力归零。建议把 RDP 也做为备用通道（见 quirk #12）。
+sshd: drop connection #46 from [5.231.242.53] on [192.168.1.19]:22 Maxstartups
+sshd-session: Invalid user root from 5.231.242.53
+```
+- 公网 :2222 → 路由器 → 内 :22，**全球 SSH 扫描机器人疯狂打 root**（伊朗 5.231.242.0/24 一秒几十个连接）
+- OpenSSH 默认 `MaxStartups 10:30:100` = 10 个未认证并发后 30% 概率 drop，100 个全 drop
+- mac 合法 ssh 进来时**也被 Maxstartups drop**，sshd 在 Windows 版本下关闭 banner = "Not allowed at this time"（与 Linux 版的 "Too many authentication failures" 映射不同）
+**修复（已 ship 2026-06-30 15:30）**：
+```pwsh
+# sshd_config: 把 MaxStartups + LoginGraceTime 加在 Match block 之前（否则 sshd -t 报「not allowed in Match block」）
+MaxStartups 200:30:500
+LoginGraceTime 30
+AuthenticationMethods publickey   # 强制只公钥（已加）
+# 删 'UsePAM no' — Win32-OpenSSH 不支持
+```
++ 路由器公网端口换 20777（删 2222 转发，机器人扫 2222 远多于 20777）
++ Windows Firewall: `New-NetFirewallRule -DisplayName "Block-IR-5.231.242.0_24" -Direction Inbound -Action Block -RemoteAddress 5.231.242.0/24 -LocalPort 22`
++ mac `~/.ssh/config` winhome-pub Port 20777
+
+### #12. RDP 3389 当前公网开放（2026-06-30 发现，**安全风险待决策**）
 
 ### #12. RDP 3389 当前公网开放（2026-06-30 发现，**安全风险待决策**）
 
@@ -330,7 +329,25 @@ Restart-Service sshd
 - (c) 用 Cloudflare Tunnel 代理 RDP（Zero Trust 鉴权），公网零暴露
 **短期**：先用 RDP 修 sshd，回头再决策。
 
-### #13. Bash tool 子 shell `unset HTTPS_PROXY` 不持久
+### #13. sshd_config `Match` block 之后所有 directive 都属于该 Match（2026-06-30 踩）
+
+**症状**：往 sshd_config 末尾 append 全局 directive（`MaxStartups`/`LoginGraceTime`），`sshd -t` 报 `Directive 'MaxStartups' is not allowed within a Match block`。
+**根因**：OpenSSH `Match` block 没有显式结束符——一旦出现，后续 directive 全部归属该 block 直到下一个 `Match` 或 EOF。
+**正确写法**：全局 directive **必须放在第一个 `Match` 之前**。修法 — 解析 sshd_config + 在 Match 行前插入新 directive。
+
+### #14. Win32-OpenSSH 不识别 `UsePAM` directive（2026-06-30）
+
+**症状**：sshd Operational log 反复出现 `sshd-session: user: (null): rexec line 12: Unsupported option UsePAM [preauth]`，每个新连接打一条 warn。
+**根因**：Win32-OpenSSH 没有 PAM 子系统，对 `UsePAM no/yes` 直接报 unsupported（不致命，但 log 噪音）。
+**修法**：从 sshd_config 删 `UsePAM` 行。Linux OpenSSH 才需要这条。
+
+### #15. Defender ML 把 `Start-Job + TCP listener + 立刻自连` 模式误报为 `Trojan:Win32/ClickFix.CCJ!MTB`（2026-06-30）
+
+**症状**：`Get-MpThreat` 显示 `Trojan:Win32/ClickFix.CCJ!MTB`，但 `DidThreatExecute=False` `IsActive=False` `ThreatStatusID=4 (Cleaned)`，`Resources` CmdLine 是自己跑过的 PS 诊断脚本（停 WSL nginx + `Start-Job { New TcpListener :8443 → AcceptTcpClient → WriteLine HELLO_FROM_WINDOWS_8443 }`）。
+**根因**：ClickFix 家族（社工 trojan）确实常用 PowerShell + 启 listener + IEX 风格代码，Defender ML heuristic 误判。
+**应对**：本人写的合法诊断脚本可直接忽略此报警；如要避免误报，把 listener 启动改成 `[System.Net.Sockets.TcpListener]::new($endpoint)` 之外加点 noise（comment / 配置文件 driven）让特征不那么集中。
+
+### #16. Bash tool 子 shell `unset HTTPS_PROXY` 不持久
 
 **症状**：在 Claude Code 里 `unset HTTPS_PROXY && ssh ...` 第一次行，第二次 Bash tool 调用又不行。
 **根因**：Bash tool 每次启新 shell 从父 env 再注入 `HTTPS_PROXY`。
@@ -369,7 +386,8 @@ Restart-Service sshd
 
 ## 待办（推进顺序由用户拍）
 
-0. **【急】修 winhome sshd `Not allowed at this time`**（quirk #11）。RDP 进去诊断三条命令。在此之前所有 ssh 自动化不可用。
+0. ✅ **修 winhome sshd `Not allowed at this time`**（quirk #11 闭环）。真因 = 公网 brute force 把 MaxStartups 打满；修法 = MaxStartups 200:30:500 + 路由器换 20777 + AuthenticationMethods publickey + Firewall block 伊朗段。**全审查无入侵**（见 quirk #15）。
+1. **fail2ban-style 自动 ban brute force IP**（nice-to-have，未做）。当前只手动 ban 了 5.231.242.0/24。可写 PS scheduled task 每分钟扫 sshd Operational log 把 N 次失败的 IP 加到 Firewall block list。
 1. **fuxi 服务从老 home Linux 迁到 winhome native / Hyper-V Ubuntu VM**
    - 当前 fuxi-im.service 仍跑在老 Ubuntu Linux（参 [[reference_home_deploy]]），与 winhome Win11 native 是两个分支
    - 决策点：直接 winhome WSL Ubuntu 跑？还是 Hyper-V Ubuntu Server VM 跑？前者轻后者重，前者 systemd 限制后者完整
