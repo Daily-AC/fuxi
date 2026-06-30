@@ -1,0 +1,18 @@
+[package]
+name = "home-qm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "qm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_yaml = "0.9"
+anyhow = { workspace = true }
+chrono = { workspace = true }
