@@ -229,16 +229,25 @@ vmconnect localhost $vmName  # 弹出 console 装系统
 **解**：走静态 cert + WSL acme.sh sync 路径（已 ship）。Caddyfile `auto_https disable_certs` + 每 site 显式 `tls`。
 **不要再排**：撞过 1 次，绕了一晚。
 
-### #2. FlClash TUN 拦截公网 IP 检测端点（2026-06-30 发现）
+### #2. FlClash TUN 拦截公网 IP 检测端点（2026-06-30 发现 + 闭环）
 
 **症状**：winhome 上 ddns-go / cf-ddns 拿到的「公网 IP」是代理出口 IP（Azure 段，103.172.x / 4.193.x），不是真 ISP IP 124.126.5.223。
-**根因**：FlClash TUN 默认配置把所有 HTTPS 流量代理出去，包括 ipify.org / cloudflare.com/cdn-cgi/trace / icanhazip.com / ipinfo.io/ip。
-**解（待用户决策）**：
-- (a) **FlClash 加 DIRECT bypass rules** 让 ipify / cloudflare / api.cloudflare.com 走直连。用户之前 ddns-go 在 win 跑得顺正是因为旧 FlClash 配了这些 bypass，重装 winhome = 默认无 bypass。
-- (b) mac 跑 cf-ddns，mac 上 Clash 加同样 bypass。
-- (c) 手动维护，IP 变了登 CF 改一次（IP 多数几天/几个月不变可接受）。
+**根因**：FlClash TUN 把境外 IP 检测端点（ipify.org / cloudflare.com/cdn-cgi/trace / icanhazip.com / ipinfo.io/ip）都路由到代理出口。FlClash config.yaml 里 `cloudflare.com` 等 DOMAIN-SUFFIX rules 全部归入 `节点 Cloudflare` proxy group（不是 DIRECT），所以即便用户「记得之前能用」也是因为之前 FlClash 配置里有 ipify DIRECT bypass，重装 winhome 后丢了。
+**解（已 ship 2026-06-30 16:05）**：改 ddns-go config.yaml 用**国内 IP 检测端点**，绕开 FlClash 代理整个判断路径：
+```yaml
+URL: http://members.3322.org/dyndns/getip,https://myip.ipip.net
+```
+- `members.3322.org/dyndns/getip` 返**纯文本 IPv4**（最干净）
+- `myip.ipip.net` 返「当前 IP：x.x.x.x  来自于：xxx」（ddns-go 默认 regex `(?:\d{1,3}\.){3}\d{1,3}` 能提取）
+- 两个端点都验过走 FlClash TUN 仍返真 ISP IP `124.126.5.223` ✓
 
-**当前状态**：CF DNS 正确（mac PUT 回 124.126.5.223），ddns-go service 已卸。
+**不要再走的死路**：
+- ❌ FlClash 加 ipify DIRECT rule — 改动用户 VPN 配置，影响日常
+- ❌ 4.ipw.cn — winhome 实测 HTTP=000（cert fail / timeout）
+- ❌ cloudflare.com / speed.cloudflare.com — 被 FlClash group 全代理
+- ❌ ifconfig.co / api.ip.sb — 走代理出错 IP
+
+**ddns-go 部署位置**：`C:\Caddy\ddns-go\` (binary + config)，Windows Service `ddns-go` Auto-start，5 分钟轮询，web UI `127.0.0.1:9876`（`NotAllowWanAccess: true` 仅本机），CF API token 在 config.yaml `DnsConf[0].DNS.Secret`（属于 [[project_secrets_cli_plan_2026_06_29]] 整治范围，**仍是明文，需要统一 secrets CLI 后迁出**）。
 
 ### #3. Win32-OpenSSH sftp subsystem 有 garbage bug
 
