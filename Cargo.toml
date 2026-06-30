@@ -14,7 +14,7 @@ members = [
     "crates/fuxi-skills",
     "crates/fuxi-memory",
     "crates/fuxi-scheduler",
-    "crates/fuxi-wake-server",
+    "crates/fuxi-wake-server", "crates/home-qm",
 ]
 
 [workspace.package]

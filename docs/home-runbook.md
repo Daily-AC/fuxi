@@ -135,19 +135,46 @@ ssh winhome 'wsl -d Ubuntu-24.04 -- openssl x509 -in /etc/nginx/ssl/qmledmq.cn.c
 
 **CF API token 要求**：`Zone:DNS:Edit` for qmledmq.cn。acme.sh 用的 `CF_Token` 已配，env 变量在 WSL `~/.acme.sh/account.conf`。
 
-### 3. 加新子域名 CNAME 到 CF
+### 3. 加新子域名反代（推荐：用 qm CLI）
+
+`qm` 是 Rust 写的子域名管理 CLI，跑在 winhome（`C:\Caddy\qm.exe`，已加进 System PATH）。维护 `C:\ProgramData\qm\domains.yaml` 注册表 + 生成 `C:\Caddy\Caddyfile.qm` 片段（主 Caddyfile 已加 `import`） + 调 `caddy.exe reload`。
+
+```pwsh
+# agent ssh winhome 后直接调（System PATH 已配；ssh session 内可能要 $env:Path+';C:\Caddy' 立即生效，
+# 或者用绝对路径 C:\Caddy\qm.exe）
+qm list                                    # 列已注册
+qm add im --backend localhost:18080 --tier 1 --purpose "fuxi IM PWA"
+qm add mood --backend localhost:7777 --tier 2
+qm add foo --backend localhost:8888 --tier 3 --purpose "lab experiment"
+qm sync                                    # 生成 Caddyfile.qm + caddy reload
+qm retire foo                              # 摘除
+qm status                                  # 看 registry 状态
+```
+
+Tier 模型：
+- **tier1**：canonical 核心服务，路径 `<name>.qmledmq.cn`
+- **tier2**：项目子域名，路径同 tier1
+- **tier3**：实验/agent 临时，路径 `<name>.lab.qmledmq.cn`，默认 30 天 expire
+
+backend 可以是 `localhost:<port>`（Caddy 直接反代 Windows 上的服务）或 `localhost:<wsl_port>`（mirrored mode 下 WSL 服务 listen `0.0.0.0:<port>` 直接命中）或 LAN IP `192.168.1.x:<port>`。
+
+不需要加 CF CNAME — `*.qmledmq.cn` wildcard 已兜底，cert SAN 已覆盖。**直接 `qm add` 立即公网可达**（端到端 ≤ 1 秒 reload）。
+
+### 4. WSL ↔ Windows 网络（mirrored mode）
+
+`%USERPROFILE%\.wslconfig` 已配 `networkingMode=mirrored` + `firewall=true` + `hostAddressLoopback=true`。WSL 里 listen `0.0.0.0:<port>` 的服务，**Windows 上 `localhost:<port>` / `127.0.0.1:<port>` 直接命中**（绕过 Windows TCP stack，无需 portproxy）。Caddy `reverse_proxy localhost:<wsl_port>` 透明反到 WSL。验证：`curl localhost:<wsl_port>` from Windows → HTTP 200 from WSL。
+
+### 5. 加新子域名 CNAME 到 CF（特殊场景）
+
+只在需要走 **CF Tunnel** 或 CF Proxy（橙云）时才需要——常规子域名走 `*.qmledmq.cn` wildcard。
 
 ```bash
-# zone_id 见下面「子域名管理」
 ZONE_ID=791621b616f83a44a34e4796adbe0920
 TOKEN=<CF API token>
-
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
   --data '{"type":"CNAME","name":"newsub","content":"home.qmledmq.cn","ttl":1,"proxied":false}'
 ```
-
-但其实 `*.qmledmq.cn` wildcard 已覆盖任意新子域名 → **不加 CNAME 也能用**，除非需要走 CF proxy（橙云）或指向 cfargotunnel。
 
 ### 4. Hyper-V Ubuntu Server VM 配置（待做）
 
